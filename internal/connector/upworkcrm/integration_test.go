@@ -32,6 +32,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,11 +66,24 @@ func scanInt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, 
 func cleanupConnector(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	stmts := []string{
+		// foreign fixtures first: the triage suite's corpus (itest-triage-src)
+		// pollutes this test's global row-count assertions in the shared
+		// compose db — mirror of the neutralization triage does for ours.
+		`DELETE FROM ai_extractions WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='itest-triage-src'))`,
+		`DELETE FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='itest-triage-src'))`,
+		`DELETE FROM normalized_threads WHERE thread_key LIKE 'itest-triage:%'`,
+		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='itest-triage-src')`,
+		`DELETE FROM source_accounts WHERE provider='itest-triage-src'`,
+		`DELETE FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug='itest-triage-acme')`,
+		`DELETE FROM projects WHERE slug='itest-triage-acme'`,
 		`DELETE FROM normalized_messages WHERE thread_id IN (SELECT id FROM normalized_threads WHERE thread_key LIKE 'upwork_crm:%')`,
 		`DELETE FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='upwork_crm'))`,
 		`DELETE FROM normalized_threads WHERE thread_key LIKE 'upwork_crm:%'`,
 		`DELETE FROM person_identities WHERE person_id IN (SELECT DISTINCT person_id FROM person_identities WHERE provider='upwork_crm')`,
-		`DELETE FROM people WHERE id NOT IN (SELECT person_id FROM person_identities)`,
+		// orphan people — except those referenced by projects.client_person_id
+		// (migration 0004's triage mapping may point at identity-less people)
+		`DELETE FROM people WHERE id NOT IN (SELECT person_id FROM person_identities)
+		   AND id NOT IN (SELECT client_person_id FROM projects WHERE client_person_id IS NOT NULL)`,
 		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='upwork_crm')`,
 		`DELETE FROM sync_runs WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='upwork_crm')`,
 		`DELETE FROM source_accounts WHERE provider='upwork_crm'`,
@@ -142,6 +156,9 @@ func sourceDSN(t *testing.T) string {
 func TestUpworkCRM_Integration_EndToEnd(t *testing.T) {
 	if os.Getenv("DATABASE_URL") == "" {
 		t.Skip("DATABASE_URL not set; skipping Postgres integration test")
+	}
+	if strings.Contains(os.Getenv("DATABASE_URL"), "192.168.50.49") {
+		t.Fatal("integration tests must NEVER run against the real ops db (cleanup deletes corpus rows); use the compose db on :5433")
 	}
 	ctx := context.Background()
 

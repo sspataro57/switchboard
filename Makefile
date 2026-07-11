@@ -16,6 +16,8 @@ migrate:
 test:
 	go test ./...
 
+# -p 1 serializes test packages: integration suites share one Postgres and a
+# global triage filter — concurrent packages would cross-pollute.
 integration: db-up
 	DATABASE_URL=$(LOCAL_DB_URL) go run ./cmd/tools/migrate --dir migrations
-	DATABASE_URL=$(LOCAL_DB_URL) MQTT_BROKER=$(LOCAL_MQTT_BROKER) go test -tags integration ./...
+	DATABASE_URL=$(LOCAL_DB_URL) MQTT_BROKER=$(LOCAL_MQTT_BROKER) go test -tags integration -p 1 -count=1 ./...

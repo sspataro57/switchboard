@@ -148,6 +148,25 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - Morning brief: env `ORCH_BRIEF_PROJECT` (unset = disabled), `ORCH_BRIEF_HOUR`
   (default 7). Deterministic SQL + Go template; never an LLM.
 
+## Triage contract (shipped in SWT-6, SHADOW MODE)
+
+- `OPENAI_API_KEY` lives in `~/.bashrc` — same non-interactive early-exit
+  caveat as JIRA_TOKEN_PERSONAL: `eval "$(grep '^export OPENAI_API_KEY=' ~/.bashrc)"`.
+- `TRIAGE_MODEL` default `gpt-5-mini`; advisory-lock key `0x51570006`.
+- Client→project mapping recipe (manual, per client):
+  `UPDATE projects SET client_person_id = (SELECT person_id FROM
+  person_identities WHERE provider='upwork_crm' AND value='<client uuid>')
+  WHERE slug='<slug>';` — unmapped people show in the report's UNMAPPED lane.
+- Shadow is structural: `triage.Store` has no task-write method (reflection
+  test enforces); going live ADDS the executor create_task call.
+- Routine until live: connector sync → `triage run` → `triage report`; diff
+  for days; going-live is gated on the diff, not the ticket.
+- **Landmine (bit 2026-07-11): integration suites cross-pollute** — the
+  triage pending filter and the connector's global count assertions share one
+  compose db, so `make integration` runs `go test -p 1` (serialized) and the
+  two suites neutralize each other's fixtures in cleanup. New integration
+  suites with global-count assertions must join that mutual-cleanup pact.
+
 ## Task lifecycle contract (shipped in SWT-4)
 
 - task_events event-type vocabulary: `claimed`, `status_changed`, `log`,
