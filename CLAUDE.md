@@ -170,7 +170,8 @@ Scope: established clients only — unknown senders tagged prospect, stay CRM-si
 
 ## Working discipline (applies to sessions building THIS repo)
 
-- Diagnose before changing. No auto-commit — Salvador reviews and commits.
+- Diagnose before changing. Auto-commit authorized: once /ticket-deliver passes,
+  commit, merge to main, push (no AI references in commits — ever).
 - Migrations forward-only, numbered.
 - Table/tool names above are the vocabulary — reuse, don't invent synonyms.
 - When ambiguous: small, reversible, audited beats clever.

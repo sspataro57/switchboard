@@ -119,7 +119,11 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 
 ## Process conventions
 
-- **No auto-commit.** Salvador reviews and commits. Agents never commit, push, or tag.
+- **Auto-commit is authorized** (Salvador, 2026-07-11: "commit automatically,
+  don't ask — this is internal"). After /ticket-deliver's checks pass, commit on
+  the ticket branch, merge to main, push, and move the Jira issue to Done.
+  Never `Co-Authored-By` / AI references in commits (stealth rule still binds).
+  This supersedes the old "no auto-commit" line here and in CLAUDE.md.
 - **Diagnose before changing** — reproduction-first for bugs (`/bug-start`).
 - **Never** `Co-Authored-By: Claude` trailers (also enforced via `.claude/settings.json`).
 - Branches (once the repo has remotes/PR flow): `ticket-NN-short-kebab` for build-order
