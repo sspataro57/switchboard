@@ -57,6 +57,11 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 			return nil, err
 		}
 	}
+	if name == "create_task" {
+		if err := rejectParentID(args); err != nil {
+			return nil, err
+		}
+	}
 
 	injected, err := injectWorkerID(args, s.workerID)
 	if err != nil {
@@ -85,6 +90,22 @@ func rejectSessionKind(args json.RawMessage) error {
 	}
 	if a.Kind == "session" {
 		return fmt.Errorf(`kind "session" is reserved for the worker wrapper`)
+	}
+	return nil
+}
+
+// rejectParentID reserves create_task's parent_id for the spine (orchestrator
+// lifecycle tasks): agents link tasks via create_child_task, which inherits
+// the project from the parent instead of trusting an arbitrary pair.
+func rejectParentID(args json.RawMessage) error {
+	var a struct {
+		ParentID *int64 `json:"parent_id"`
+	}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &a)
+	}
+	if a.ParentID != nil {
+		return fmt.Errorf("parent_id is reserved for the spine; use create_child_task")
 	}
 	return nil
 }

@@ -1,7 +1,8 @@
 package tools_test
 
-// Unit tests for the ten SWT-4 lifecycle tools (SPEC 04-mcp-task-tools,
-// acceptance criteria 2 & 3). ZERO network, ZERO Postgres: tools are exercised
+// Unit tests for the SWT-4 lifecycle tools (SPEC 04-mcp-task-tools, acceptance
+// criteria 2 & 3) EXTENDED with the five SWT-5 spine-facing orchestrator tools
+// (SPEC 05-orchestrator-loop). ZERO network, ZERO Postgres: tools are exercised
 // through executor.Execute with a nil *pgxpool.Pool. Every assertion here stops
 // BEFORE any handler runs — a validation failure returns from Execute after the
 // Validate stage, and an unregistered name returns "unknown tool", neither of
@@ -9,16 +10,16 @@ package tools_test
 // the registration wiring and Validate contract through the real registry
 // (per the task: prefer testing through executor.Execute).
 //
-// GREENFIELD NOTE: the new tools (task_get_next, task_claim, task_context,
-// task_append_log, request_feedback, mark_done_local, create_child_task,
-// record_decision, task_release, answer_feedback) are not registered yet.
-// tools.Register only wires create_task today, so:
+// GREENFIELD NOTE: the five new spine tools (task_add_dependency, task_block,
+// task_unblock, task_close, record_orchestration) are not registered yet.
+// tools.Register wires only the SWT-4 eleven today, so:
 //   - TestRegister_AllToolsRegistered fails (missing names in reg.Names()).
 //   - TestValidate_RejectsMissingRequiredArgs fails: Execute returns
 //     "unknown tool" for the not-yet-registered names, and the assertion
 //     explicitly rejects that error text as "not a validation failure".
 // After implementation, each tool is registered with a Validate that rejects
-// missing required args, and both tests pass.
+// missing required args (every one has at least one required field), and both
+// tests pass.
 //
 // Surface exercised (all already shipped in step 1):
 //   func tools.Register(*executor.Registry, *pgxpool.Pool)
@@ -38,7 +39,11 @@ import (
 )
 
 // allToolNames is the full registry the SPEC pins: create_task (shipped) plus
-// the eight agent-facing and two spine-facing lifecycle tools = 11.
+// the eight agent-facing and two spine-facing SWT-4 lifecycle tools, plus the
+// five SWT-5 spine-facing orchestrator tools = 16. The five orchestrator tools
+// are registered on the executor but NOT MCP-listed (SPEC 05 §"API / MCP tool
+// changes": absent from mcpserver.agentTools — agents must not gate their own
+// dependencies or close tasks).
 var allToolNames = []string{
 	"create_task",
 	"task_get_next",
@@ -51,6 +56,12 @@ var allToolNames = []string{
 	"record_decision",
 	"task_release",    // spine-facing (registered, not MCP-listed)
 	"answer_feedback", // spine-facing
+	// SWT-5 spine-facing orchestrator tools (registered, not MCP-listed):
+	"task_add_dependency",
+	"task_block",
+	"task_unblock",
+	"task_close",
+	"record_orchestration",
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -72,14 +83,17 @@ func TestRegister_AllToolsRegistered(t *testing.T) {
 // empty args {}. The executor runs Validate before the handler, so a missing
 // required field must surface as a validation error — NOT "unknown tool"
 // (unregistered) and NOT a policy denial. Empty args are illegal for every
-// tool: each has at least one required field per the SPEC's tool contract.
+// tool: each has at least one required field per the SPEC's tool contract
+// (SWT-5's five: task_add_dependency needs task_id+depends_on_task_id;
+// task_block/task_unblock need task_id; task_close needs task_id+reason;
+// record_orchestration needs task_id+rule).
 func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 	reg := executor.NewRegistry()
 	tools.Register(reg, nil)
 	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewMemStore())
 	ctx := context.Background()
 
-	// create_task is already known to validate; the rest are the SWT-4 tools.
+	// create_task is already known to validate; the rest are the SWT-4 + SWT-5 tools.
 	toolsUnderTest := []string{
 		"create_task",
 		"task_get_next",
@@ -92,6 +106,12 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		"record_decision",
 		"task_release",
 		"answer_feedback",
+		// SWT-5:
+		"task_add_dependency",
+		"task_block",
+		"task_unblock",
+		"task_close",
+		"record_orchestration",
 	}
 
 	for _, name := range toolsUnderTest {

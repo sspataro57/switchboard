@@ -83,6 +83,16 @@ func NewMirrorClient(ctx context.Context, brokerURL string) (*Client, error) {
 	return newClient(ctx, brokerURL, "switchboard-fleetd", false, "")
 }
 
+// NewSpineClient connects a spine service (orchestratord etc.) as a command
+// publisher: no will, caller-chosen client id. Do NOT reuse NewMirrorClient —
+// its hardcoded id would kick fleetd off the broker (same-client-id takeover).
+func NewSpineClient(ctx context.Context, brokerURL, clientID string) (*Client, error) {
+	if clientID == "" {
+		return nil, fmt.Errorf("spine client requires a distinct client id")
+	}
+	return newClient(ctx, brokerURL, clientID, false, "")
+}
+
 // PublishStatus publishes this worker's heartbeat — retained, QoS 1, strict
 // vocabulary. Worker mode only.
 func (c *Client) PublishStatus(s Status) error {
