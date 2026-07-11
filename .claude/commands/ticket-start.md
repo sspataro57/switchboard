@@ -38,11 +38,14 @@ transition — commonly `searchJiraIssuesUsingJql`, `createJiraIssue`,
 
 1. Search SWT for an existing issue whose summary starts with `{ID}`
    (JQL: `project = SWT AND summary ~ "{ID}"`). Reuse it if found.
-2. Otherwise create one: summary `{ID}: <one-line goal>`, issue type Task,
-   description = the SPEC's Goal + acceptance criteria plus the repo path of the full
-   SPEC (keep the Jira body short; the local SPEC is the document).
-3. Transition the issue to In Progress.
-4. Record the key on the first line of the SPEC: `> Jira: SWT-N` — later commands
+2. Otherwise create one: summary `{ID}: <one-line goal>`, issue type Task.
+3. Set the issue DESCRIPTION to the FULL SPEC content (Salvador, 2026-07-11:
+   specs must not stay local-only — Jira carries the document). Convert
+   markdown to Jira wiki markup and PUT via /rest/api/2/issue/{key}
+   (v2 accepts wiki text; v3 needs ADF). Re-sync the description whenever the
+   SPEC changes (e.g. after open questions are answered).
+4. Transition the issue to In Progress.
+5. Record the key on the first line of the SPEC: `> Jira: SWT-N` — later commands
    find the issue through this line.
 
 If the Atlassian MCP is not connected/authenticated in this session, say so (the user
