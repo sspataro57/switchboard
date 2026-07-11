@@ -25,15 +25,38 @@ type createTaskArgs struct {
 	Subproject   string `json:"subproject,omitempty"`
 }
 
-// Register wires every internal tool into the registry.
+// Register wires every internal tool into the registry. The registry is the
+// ONLY route to any handler (invariant 3); ops-mcp additionally restricts which
+// of these are agent-visible (task_release and answer_feedback are
+// spine-facing).
 func Register(reg *executor.Registry, pool *pgxpool.Pool) {
-	reg.Register(executor.Tool{
-		Name:     "create_task",
-		Validate: validateCreateTask,
-		Handle: func(ctx context.Context, args []byte) ([]byte, error) {
-			return createTask(ctx, pool, args)
-		},
-	})
+	type tool struct {
+		name     string
+		validate func([]byte) error
+		handle   func(context.Context, *pgxpool.Pool, []byte) ([]byte, error)
+	}
+	for _, t := range []tool{
+		{"create_task", validateCreateTask, createTask},
+		{"task_get_next", validateGetNext, getNext},
+		{"task_claim", validateClaim, claimTask},
+		{"task_context", validateContext, taskContext},
+		{"task_append_log", validateAppendLog, appendLog},
+		{"request_feedback", validateRequestFeedback, requestFeedback},
+		{"mark_done_local", validateDoneLocal, markDoneLocal},
+		{"create_child_task", validateChildTask, createChildTask},
+		{"record_decision", validateDecision, recordDecision},
+		{"task_release", validateRelease, releaseTask},
+		{"answer_feedback", validateAnswerFeedback, answerFeedback},
+	} {
+		t := t
+		reg.Register(executor.Tool{
+			Name:     t.name,
+			Validate: t.validate,
+			Handle: func(ctx context.Context, args []byte) ([]byte, error) {
+				return t.handle(ctx, pool, args)
+			},
+		})
+	}
 }
 
 func parseCreateTask(args []byte) (createTaskArgs, error) {
