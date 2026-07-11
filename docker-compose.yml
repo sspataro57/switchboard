@@ -15,3 +15,17 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
+  # Broker for fleet integration tests — production Mosquitto (192.168.50.45)
+  # must never be touched by tests (retained messages are global state there).
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1884:1883"
+    volumes:
+      - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t healthcheck -m ok"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

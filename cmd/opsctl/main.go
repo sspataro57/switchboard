@@ -15,6 +15,7 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/fleet"
 	"github.com/sspataro57/switchboard/internal/policy"
 	"github.com/sspataro57/switchboard/internal/store"
 	"github.com/sspataro57/switchboard/internal/tools"
@@ -35,6 +36,12 @@ func main() {
 		toolName, args, err = parseCreateTask(os.Args[2:])
 	case "call":
 		toolName, args, err = parseCall(os.Args[2:])
+	case "fleet":
+		if err := runFleet(); err != nil {
+			fmt.Fprintln(os.Stderr, "opsctl:", err)
+			os.Exit(1)
+		}
+		return
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -124,4 +131,55 @@ func actor() string {
 		return "opsctl:" + u
 	}
 	return "opsctl"
+}
+
+// runFleet prints the fleet view: one line per worker_heartbeats row. It is a
+// read-only SELECT (a view, not an action — no executor involvement); rows
+// older than 3x the heartbeat interval and not already dead are marked stale.
+func runFleet() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	rows, err := pool.Query(ctx,
+		`SELECT worker_id, COALESCE(client,''), state, task_id, last_seen
+		 FROM worker_heartbeats ORDER BY worker_id`)
+	if err != nil {
+		return fmt.Errorf("select heartbeats: %w", err)
+	}
+	defer rows.Close()
+
+	staleAfter := 3 * fleet.HeartbeatInterval
+	n := 0
+	for rows.Next() {
+		var workerID, client, state string
+		var taskID *int64
+		var lastSeen time.Time
+		if err := rows.Scan(&workerID, &client, &state, &taskID, &lastSeen); err != nil {
+			return fmt.Errorf("scan heartbeat: %w", err)
+		}
+		n++
+		age := time.Since(lastSeen).Round(time.Second)
+		task := "-"
+		if taskID != nil {
+			task = fmt.Sprintf("#%d", *taskID)
+		}
+		flag := ""
+		if state != fleet.StateDead && age > staleAfter {
+			flag = "  STALE"
+		}
+		fmt.Printf("%-24s %-12s %-16s %-8s last_seen %s ago%s\n", workerID, client, state, task, age, flag)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate heartbeats: %w", err)
+	}
+	if n == 0 {
+		fmt.Println("no workers")
+	}
+	return nil
 }
