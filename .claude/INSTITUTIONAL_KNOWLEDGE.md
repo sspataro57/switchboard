@@ -148,6 +148,31 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - Morning brief: env `ORCH_BRIEF_PROJECT` (unset = disabled), `ORCH_BRIEF_HOUR`
   (default 7). Deterministic SQL + Go template; never an LLM.
 
+## Google connector (shipped in SWT-7 — code complete, OAuth PENDING)
+
+- **Operator runbook (Salvador, once — the only manual part):**
+  1. GCP console: create project `switchboard`, enable Gmail API + Google
+     Calendar API.
+  2. OAuth consent screen: External, app `switchboard`, the 5 account emails
+     as test users, scopes gmail.readonly + calendar.readonly, then PUBLISH TO
+     IN PRODUCTION (staying in Testing expires refresh tokens after 7 days).
+  3. Credentials → OAuth client ID → Desktop app → download JSON to
+     `~/.config/switchboard/google_client_secret.json` (chmod 600).
+  4. `openssl rand -base64 32` → `export OPS_TOKEN_KEY=...` in ~/.bashrc.
+  5. Per account ×5: `DATABASE_URL="$OPS_DATABASE_URL" go run ./cmd/google-auth
+     add <email>` (browser opens; identity verified via getProfile — a
+     mismatch aborts). `google-auth list` to confirm.
+  6. `DATABASE_URL="$OPS_DATABASE_URL" go run ./cmd/connectors/google` — then
+     cron it at 5-15 min. Re-run = incremental.
+- Cursors: `sync_cursor = {"gmail_internal_date_ms": N, "calendar_sync_token": "..."}`.
+- Cross-account Message-ID dedup: partial unique index (0005) — raw is NOT
+  deduped (per-account, invariant 1); normalize-time skip, losers stamped.
+- Direction rule: outbound iff From ∈ any provider='google' account email.
+- Availability: `propose_slots` executor tool (opsctl call), env
+  `AVAIL_TZ` (default Europe/Rome) / `AVAIL_WORK_START|END|DAYS`.
+- Step 8 re-consent: extend `google.ReadonlyScopes` with send/write scopes and
+  re-run google-auth add per account.
+
 ## Triage contract (shipped in SWT-6, SHADOW MODE)
 
 - `OPENAI_API_KEY` lives in `~/.bashrc` — same non-interactive early-exit
