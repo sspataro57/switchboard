@@ -91,8 +91,24 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `ops/workers/{client}/status` (retained), commands on `ops/workers/{client}/cmd`.
 - **Deploy:** `ops` namespace on the home k8s cluster; images pushed to
   `192.168.50.20:5000` (insecure local registry).
-- **Upwork CRM:** existing `upwork_crm` tables on pg-main + its MQTT topics — the
-  first connector source (build-order step 2).
+- **Upwork CRM (connector source, wired 2026-07-11):** db `upwork_crm` on pg-main.
+  The `ops` role has SELECT on exactly `clients` + `communications` (granted as
+  postgres: `GRANT CONNECT ON DATABASE upwork_crm TO ops; GRANT USAGE ON SCHEMA
+  public TO ops; GRANT SELECT ON clients, communications TO ops;`) — the
+  narrow grant also mechanically enforces "prospects stay CRM-side".
+  Connector source DSN: `UPWORK_CRM_DATABASE_URL` = ops role against
+  `/upwork_crm` with `options=-c default_transaction_read_only=on` (set it in
+  the shell when running `cmd/connectors/upworkcrm`; not stored in ~/.bashrc —
+  derive from the ops password in ~/.pgpass). GOTCHA: ~/.pgpass lines are
+  per-database — the `ops:ops` line does NOT cover `upwork_crm`; a separate
+  `192.168.50.49:5432:upwork_crm:ops:<pw>` line exists. A psql "hang" here is
+  usually an invisible password prompt, not a lock. Known topics: `crm/leads/triage`
+  (CRM → leadTriage, `{lead_id, reason, trace_id}`) and `crm/leads/approved`
+  (leadTriage → proposalWriter, `{lead_id, score, status, ai_notes, trace_id}`;
+  NOT fired on rejection). Lead status contract: 0=new, 1=rejected, 2=AI-approved
+  (score ≥ 7). Pipeline repos: crm (`~/WebstormProjects/crm`), upwork-scrap
+  (Mac mini; clone at `~/WebstormProjects/upwork-scrap`), leadTriage +
+  proposalWriter (`~/PycharmProjects/`).
 
 ---
 
@@ -150,6 +166,10 @@ Verified 2026-07-11. (The same site also has a `CRM` project — not ours.)
 - Every build ticket/bug gets a mirrored SWT issue (summary `{ID}: <goal>`); the
   local artifact records it as `> Jira: SWT-N` on its first line. `PENDING-SYNC`
   means the MCP wasn't available — the next command retries.
+- **Specs live in Jira too** (Salvador, 2026-07-11): the issue description carries
+  the FULL SPEC (markdown → Jira wiki markup; PUT via `/rest/api/2/issue/{key}` —
+  v2 takes wiki text, v3 needs ADF). Sync at /ticket-start, re-sync whenever the
+  SPEC changes, and at /ticket-deliver. Local files remain the working copies.
 - Sync points: `/ticket-start` & `/bug-start` create + move to In Progress;
   `/ticket-deliver` comments results and moves toward review — **Done only after
   Salvador actually commits**, never before.
