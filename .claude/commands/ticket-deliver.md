@@ -46,6 +46,8 @@ Salvador reviews and commits — never commit for him. Produce:
 
 Read the `> Jira:` line from the SPEC (an `SWT-N` key).
 - If it says `PENDING-SYNC`, do the sync now (see `/ticket-start` step 4), then continue.
+- Re-sync the issue description with the final SPEC content if it changed since
+  /ticket-start (specs live in Jira, not only in the repo).
 - Post a comment on the issue via the Atlassian MCP: test results, acceptance-criteria
   checklist, anything deferred. Terse register, no AI references.
 - Transition the issue to the review/done-side status (inspect available transitions;
