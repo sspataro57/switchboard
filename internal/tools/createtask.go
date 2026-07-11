@@ -23,6 +23,7 @@ type createTaskArgs struct {
 	AssigneeType string `json:"assignee_type,omitempty"` // human (default) | claude
 	Priority     *int   `json:"priority,omitempty"`
 	Subproject   string `json:"subproject,omitempty"`
+	ParentID     *int64 `json:"parent_id,omitempty"` // orchestrator lifecycle tasks link to their source
 }
 
 // Register wires every internal tool into the registry. The registry is the
@@ -47,6 +48,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"record_decision", validateDecision, recordDecision},
 		{"task_release", validateRelease, releaseTask},
 		{"answer_feedback", validateAnswerFeedback, answerFeedback},
+		{"task_add_dependency", validateAddDependency, addDependency},
+		{"task_block", validateBlockUnblock, blockTask},
+		{"task_unblock", validateBlockUnblock, unblockTask},
+		{"task_close", validateClose, closeTask},
+		{"record_orchestration", validateRecordOrchestration, recordOrchestration},
 	} {
 		t := t
 		reg.Register(executor.Tool{
@@ -112,9 +118,9 @@ func createTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, e
 
 	var taskID int64
 	err = pool.QueryRow(ctx,
-		`INSERT INTO tasks (project_id, subproject, title, body, assignee_type, status, priority)
-		 VALUES ($1, NULLIF($2, ''), $3, NULLIF($4, ''), $5, 'ready', $6) RETURNING id`,
-		projectID, a.Subproject, a.Title, a.Body, a.AssigneeType, priority).Scan(&taskID)
+		`INSERT INTO tasks (project_id, subproject, title, body, assignee_type, status, priority, parent_id)
+		 VALUES ($1, NULLIF($2, ''), $3, NULLIF($4, ''), $5, 'ready', $6, $7) RETURNING id`,
+		projectID, a.Subproject, a.Title, a.Body, a.AssigneeType, priority, a.ParentID).Scan(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("insert task: %w", err)
 	}

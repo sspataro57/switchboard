@@ -129,6 +129,25 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 
 ---
 
+## Orchestrator contract (shipped in SWT-5)
+
+- NOTIFY on `task_events` is a WAKE-UP only; the cursor drain
+  (`orchestrator_cursor`, seeded at max event id so first deploy never replays
+  history) is the sole delivery path. Missed/duplicate NOTIFYs are harmless.
+- Dedup idiom: `orchestrated` task_events (written via `record_orchestration`)
+  are the replay-dedup keys — rules check them in Facts before firing.
+- Claim-expiry sweep EXEMPTS `needs_feedback` (parked ≠ crashed; expiring
+  would orphan the resume).
+- Single instance via `pg_try_advisory_lock` key `0x51570005`.
+- Spine transition tools (`task_block`/`task_unblock`/`task_close` on
+  already-target statuses) are idempotent no-op successes so replays never
+  stall the drain; `task_close` refuses only active work.
+- **Landmine:** `fleet.NewMirrorClient` hardcodes client id `switchboard-fleetd`
+  — a second connection with that id kicks fleetd off the broker. Spine
+  services use `fleet.NewSpineClient(ctx, broker, distinctID)`.
+- Morning brief: env `ORCH_BRIEF_PROJECT` (unset = disabled), `ORCH_BRIEF_HOUR`
+  (default 7). Deterministic SQL + Go template; never an LLM.
+
 ## Task lifecycle contract (shipped in SWT-4)
 
 - task_events event-type vocabulary: `claimed`, `status_changed`, `log`,
