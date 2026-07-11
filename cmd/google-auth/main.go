@@ -97,7 +97,7 @@ func addCmd(argv []string) error {
 	}
 	defer pool.Close()
 
-	id, err := google.UpsertGoogleAccount(ctx, pool, email, tok.RefreshToken, key, google.ReadonlyScopes, !*noAvail)
+	id, err := google.UpsertGoogleAccount(ctx, pool, email, tok.RefreshToken, key, google.Scopes, !*noAvail)
 	if err != nil {
 		return err
 	}

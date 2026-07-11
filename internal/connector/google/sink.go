@@ -223,7 +223,40 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 		nm.BodyText, nm.Subject, nm.Sender, nm.Channel); err != nil {
 		return false, fmt.Errorf("upsert message for raw item %d: %w", rawItemID, err)
 	}
+
+	// Loop closure (invariant 5): our own send re-entering via ingestion
+	// confirms its delivery row by Message-ID — first match only, and it
+	// attaches to the task as a delivery_confirmed event, never re-triaged
+	// (it is outbound by the direction rule anyway).
+	if nm.Direction == "outbound" {
+		if err := s.confirmDelivery(ctx, nm.ExternalMessageID); err != nil {
+			return false, err
+		}
+	}
 	return false, nil
+}
+
+// confirmDelivery closes the loop for a sent delivery whose Message-ID just
+// re-entered via ingestion.
+func (s *PGSink) confirmDelivery(ctx context.Context, messageID string) error {
+	var deliveryID, taskID int64
+	err := s.pool.QueryRow(ctx,
+		`UPDATE deliveries SET confirmed_at=now(), updated_at=now()
+		 WHERE sent_external_id=$1 AND confirmed_at IS NULL
+		 RETURNING id, task_id`, messageID).Scan(&deliveryID, &taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // not one of ours, or already confirmed
+	}
+	if err != nil {
+		return fmt.Errorf("confirm delivery for %s: %w", messageID, err)
+	}
+	payload, _ := json.Marshal(map[string]any{"delivery_id": deliveryID, "matched_message_id": messageID})
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1, 'delivery_confirmed', $2)`,
+		taskID, payload); err != nil {
+		return fmt.Errorf("insert delivery_confirmed event: %w", err)
+	}
+	return nil
 }
 
 // upsertEvent writes one normalized_events row (upsert on raw_source_item_id).

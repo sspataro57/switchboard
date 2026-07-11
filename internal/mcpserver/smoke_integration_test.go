@@ -82,7 +82,7 @@ func TestMCP_Integration_ListAndCallRoundTrip(t *testing.T) {
 	for _, want := range []string{
 		"create_task", "task_get_next", "task_claim", "task_context",
 		"task_append_log", "request_feedback", "mark_done_local",
-		"create_child_task", "record_decision",
+		"create_child_task", "record_decision", "draft_delivery",
 	} {
 		if !names[want] {
 			t.Errorf("tools/list missing agent tool %q", want)

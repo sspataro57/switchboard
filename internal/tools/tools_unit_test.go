@@ -2,28 +2,27 @@ package tools_test
 
 // Unit tests for the SWT-4 lifecycle tools (SPEC 04-mcp-task-tools, acceptance
 // criteria 2 & 3) EXTENDED with the five SWT-5 spine-facing orchestrator tools
-// (SPEC 05-orchestrator-loop) and the SWT-7 propose_slots availability tool
-// (SPEC 07-google-oauth-pollers, criterion 12). ZERO network, ZERO Postgres:
-// tools are exercised through executor.Execute with a nil *pgxpool.Pool. Every
-// assertion here stops BEFORE any handler runs — a validation failure returns
-// from Execute after the Validate stage, and an unregistered name returns
-// "unknown tool", neither of which dereferences the pool. That keeps the file
-// offline while still proving the registration wiring and Validate contract
-// through the real registry (per the task: prefer testing through
-// executor.Execute).
+// (SPEC 05-orchestrator-loop), the SWT-7 propose_slots availability tool
+// (SPEC 07-google-oauth-pollers, criterion 12), and the SWT-8 delivery tools
+// (SPEC 08-draft-deliveries). ZERO network, ZERO Postgres: tools are exercised
+// through executor.Execute with a nil *pgxpool.Pool. Every assertion here stops
+// BEFORE any handler runs — a validation failure returns from Execute after the
+// Validate stage, and an unregistered name returns "unknown tool", neither of
+// which dereferences the pool. That keeps the file offline while still proving
+// the registration wiring and Validate contract through the real registry (per
+// the task: prefer testing through executor.Execute).
 //
-// GREENFIELD NOTE (SWT-7): propose_slots is not registered yet. tools.Register
-// wires only the SWT-4/SWT-5 sixteen today, so:
-//   - TestRegister_AllToolsRegistered fails (propose_slots missing from reg.Names()).
-//   - TestValidate_RejectsMissingRequiredArgs/propose_slots fails: Execute
+// GREENFIELD NOTE (SWT-8): the seven delivery tools are not registered yet.
+// tools.Register wires only the SWT-4/5/7 seventeen today, so:
+//   - TestRegister_AllToolsRegistered fails (the seven missing from reg.Names()).
+//   - TestValidate_RejectsMissingRequiredArgs/{delivery tools} fails: Execute
 //     returns "unknown tool", which the assertion explicitly rejects as "not a
 //     validation failure".
-// After implementation, propose_slots is registered via tools.Register with a
-// Validate that rejects empty args (duration_minutes <= 0 is illegal; empty {}
-// => duration_minutes 0 => validation error, before the handler / pool touch),
-// and both tests pass.
+// After implementation the seven are wired via tools.Register with Validate
+// funcs that reject empty args {} (each has a required field — see the
+// toolsUnderTest note), and both tests pass.
 //
-// Surface exercised (SWT-4/5 shipped; propose_slots is SWT-7):
+// Surface exercised (SWT-4/5/7 shipped; the seven delivery tools are SWT-8):
 //   func tools.Register(*executor.Registry, *pgxpool.Pool)
 //   executor.NewRegistry / (*Registry).Names / (*Registry).Register
 //   executor.New / (*Executor).Execute / executor.Call
@@ -42,10 +41,11 @@ import (
 
 // allToolNames is the full registry the SPEC pins: create_task (shipped) plus
 // the eight agent-facing and two spine-facing SWT-4 lifecycle tools, plus the
-// five SWT-5 spine-facing orchestrator tools, plus SWT-7's propose_slots = 17.
-// propose_slots is registered on the executor but NOT MCP-listed this step
-// (SPEC 07 §"API / MCP tool changes": reachable via opsctl call, no worker needs
-// it yet).
+// five SWT-5 spine-facing orchestrator tools, plus SWT-7's propose_slots (17),
+// plus SWT-8's seven delivery tools = 24. All seven are wired by
+// tools.Register(reg, pool) (SPEC 08 "wire names into ... Register"); only
+// draft_delivery is MCP-listed (agent-facing), the other six are spine-facing
+// (dashboard + opsctl call).
 var allToolNames = []string{
 	"create_task",
 	"task_get_next",
@@ -66,6 +66,14 @@ var allToolNames = []string{
 	"record_orchestration",
 	// SWT-7 availability tool (registered, reachable via opsctl call):
 	"propose_slots",
+	// SWT-8 delivery tools:
+	"draft_delivery",      // agent-facing (MCP-listed)
+	"update_delivery",     // spine-facing
+	"approve_delivery",    // spine-facing
+	"send_delivery",       // spine-facing
+	"mark_delivery_sent",  // spine-facing
+	"task_mark_delivered", // spine-facing
+	"set_sending_frozen",  // spine-facing
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -87,18 +95,19 @@ func TestRegister_AllToolsRegistered(t *testing.T) {
 // empty args {}. The executor runs Validate before the handler, so a missing
 // required field must surface as a validation error — NOT "unknown tool"
 // (unregistered) and NOT a policy denial. Empty args are illegal for every
-// tool: each has at least one required field per the SPEC's tool contract
-// (SWT-5's five: task_add_dependency needs task_id+depends_on_task_id;
-// task_block/task_unblock need task_id; task_close needs task_id+reason;
-// record_orchestration needs task_id+rule; SWT-7's propose_slots rejects
-// duration_minutes <= 0, so empty {} is invalid).
+// tool: each has at least one required field per the SPEC's tool contract. For
+// the SWT-8 delivery tools: draft_delivery needs task_id+channel+body;
+// update_delivery/approve_delivery/send_delivery/mark_delivery_sent need
+// delivery_id; task_mark_delivered needs task_id; set_sending_frozen requires
+// an explicit `frozen` bool (freeze/unfreeze must be deliberate — an empty {}
+// is rejected so the audited flag is never flipped by omission).
 func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 	reg := executor.NewRegistry()
 	tools.Register(reg, nil)
 	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewMemStore())
 	ctx := context.Background()
 
-	// create_task is already known to validate; the rest are the SWT-4/5/7 tools.
+	// create_task is already known to validate; the rest are the SWT-4/5/7/8 tools.
 	toolsUnderTest := []string{
 		"create_task",
 		"task_get_next",
@@ -119,6 +128,14 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		"record_orchestration",
 		// SWT-7:
 		"propose_slots",
+		// SWT-8:
+		"draft_delivery",
+		"update_delivery",
+		"approve_delivery",
+		"send_delivery",
+		"mark_delivery_sent",
+		"task_mark_delivered",
+		"set_sending_frozen",
 	}
 
 	for _, name := range toolsUnderTest {

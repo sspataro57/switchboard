@@ -50,6 +50,11 @@ var agentTools = []Tool{
 		InputSchema: schema(`{"type":"object","properties":{"parent_task_id":{"type":"integer"},"title":{"type":"string"},"body":{"type":"string"},"assignee_type":{"type":"string","enum":["human","claude"]},"priority":{"type":"integer"},"subproject":{"type":"string"},"worker_type":{"type":"string"}},"required":["parent_task_id","title"]}`),
 	},
 	{
+		Name:        "draft_delivery",
+		Description: "Draft an outbound client communication as a delivery row (drafted; goes through approval before any send). THE only route for client-visible words.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat: the thread_key"}},"required":["task_id","channel","body"]}`),
+	},
+	{
 		Name:        "record_decision",
 		Description: "Record a project-scoped decision; it is injected into every future task context for the project.",
 		InputSchema: schema(`{"type":"object","properties":{"project":{"type":"string","description":"project slug"},"title":{"type":"string"},"body":{"type":"string"}},"required":["project","title"]}`),

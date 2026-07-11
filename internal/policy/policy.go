@@ -4,13 +4,18 @@
 // verdict is the executor's job, via audit.Store.RecordPolicy.
 package policy
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
-// Request describes the call being gated.
+// Request describes the call being gated. Args carries the tool args so
+// delivery-gated policy can resolve the delivery's channel.
 type Request struct {
 	Tool   string
 	Actor  string
 	TaskID *int64
+	Args   json.RawMessage
 }
 
 // Decision is the verdict. Decision is one of allow | deny | needs_approval;

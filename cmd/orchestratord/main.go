@@ -77,7 +77,8 @@ func run(tick time.Duration, once bool) error {
 
 	reg := executor.NewRegistry()
 	tools.Register(reg, pool)
-	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewPGStore(pool))
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 
 	spine, err := fleet.NewSpineClient(ctx, broker, "switchboard-orchestratord")
 	if err != nil {

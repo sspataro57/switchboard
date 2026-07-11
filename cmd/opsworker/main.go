@@ -69,7 +69,8 @@ func run(client, subproject string, once bool) error {
 
 	reg := executor.NewRegistry()
 	tools.Register(reg, pool)
-	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewPGStore(pool))
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 
 	fl, err := fleet.NewWorkerClient(ctx, broker, client)
 	if err != nil {

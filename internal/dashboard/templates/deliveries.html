@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>switchboard — deliveries</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { font-size: 1.3rem; }
+    .flash { background: #fff8d0; border: 1px solid #d8c760; padding: .4rem .8rem; margin-bottom: 1rem; }
+    .frozen { background: #ffe0e0; border: 1px solid #c06060; padding: .4rem .8rem; margin-bottom: 1rem; font-weight: 600; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: .45rem .6rem; vertical-align: top; text-align: left; font-size: .9rem; }
+    th { background: #f5f5f5; }
+    .status-drafted  { color: #8a6d00; }
+    .status-approved { color: #0a5dab; }
+    .status-sent     { color: #1a7f37; }
+    .status-failed   { color: #b3261e; }
+    textarea { width: 100%; min-height: 5rem; font: inherit; }
+    input[type=text] { width: 100%; font: inherit; }
+    button { margin: .1rem .15rem .1rem 0; cursor: pointer; }
+    form.inline { display: inline; }
+    .filters a { margin-right: .8rem; }
+    .muted { color: #777; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <h1>Deliveries</h1>
+
+  {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+
+  {{if .Frozen}}
+  <div class="frozen">
+    SENDING FROZEN (kill switch is on)
+    <form class="inline" method="post" action="/flags/sending-frozen">
+      <input type="hidden" name="frozen" value="false"><button>Unfreeze</button>
+    </form>
+  </div>
+  {{else}}
+  <form class="inline" method="post" action="/flags/sending-frozen" style="float:right">
+    <input type="hidden" name="frozen" value="true"><button>Freeze all sending</button>
+  </form>
+  {{end}}
+
+  <p class="filters">
+    <a href="/deliveries">all</a>
+    <a href="/deliveries?status=drafted">drafted</a>
+    <a href="/deliveries?status=approved">approved</a>
+    <a href="/deliveries?status=sent">sent</a>
+    <a href="/deliveries?status=failed">failed</a>
+  </p>
+
+  <table>
+    <tr><th>#</th><th>Task</th><th>Channel</th><th>Status</th><th>Draft</th><th>Actions</th></tr>
+    {{range .Deliveries}}
+    <tr>
+      <td>{{.ID}}</td>
+      <td>#{{.TaskID}} {{.TaskTitle}}<div class="muted">by {{.CreatedBy}}</div></td>
+      <td>{{.Channel}}</td>
+      <td class="status-{{.Status}}">{{.Status}}
+        {{if .SentAt}}<div class="muted">sent {{.SentAt}}</div>{{end}}
+        {{if .ConfirmedAt}}<div class="muted">confirmed {{.ConfirmedAt}}</div>{{end}}
+        {{if .Error}}<div class="muted">err: {{.Error}}</div>{{end}}
+      </td>
+      <td>
+        {{if eq .Status "drafted"}}
+        <form method="post" action="/deliveries/{{.ID}}/edit">
+          <input type="text" name="subject" value="{{.Subject}}" placeholder="subject">
+          <textarea name="body">{{.Body}}</textarea>
+          <button>Save edit</button>
+        </form>
+        {{else}}
+        <strong>{{.Subject}}</strong>
+        <pre style="white-space:pre-wrap; font: inherit;">{{.Body}}</pre>
+        {{end}}
+      </td>
+      <td>
+        {{if eq .Status "drafted"}}
+        <form class="inline" method="post" action="/deliveries/{{.ID}}/approve"><button>Approve</button></form>
+        {{end}}
+        {{if eq .Status "approved"}}
+          {{if eq .Channel "gmail"}}
+          <form class="inline" method="post" action="/deliveries/{{.ID}}/send"><button>Send</button></form>
+          {{end}}
+          {{if eq .Channel "upwork_chat"}}
+          <button onclick="navigator.clipboard.writeText(this.closest('tr').querySelector('pre').innerText)">Copy for Upwork</button>
+          <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-sent"><button>Mark sent</button></form>
+          {{end}}
+        {{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{if not .Deliveries}}<p>No deliveries.</p>{{end}}
+</body>
+</html>

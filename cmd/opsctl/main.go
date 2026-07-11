@@ -122,7 +122,8 @@ func run(toolName string, args json.RawMessage) error {
 
 	reg := executor.NewRegistry()
 	tools.Register(reg, pool)
-	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewPGStore(pool))
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 
 	res, err := ex.Execute(ctx, executor.Call{Tool: toolName, Actor: actor(), Args: args})
 	if err != nil {
@@ -164,7 +165,8 @@ func runAnswerFeedback(argv []string) error {
 
 	reg := executor.NewRegistry()
 	tools.Register(reg, pool)
-	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewPGStore(pool))
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 
 	answerJSON, err := json.Marshal(*answer)
 	if err != nil {
