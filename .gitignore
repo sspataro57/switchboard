@@ -1,0 +1,12 @@
+# local-only Claude settings (personal allowlist, not portable)
+.claude/settings.local.json
+
+# binaries / build output
+/switchboard
+*.test
+
+# env / secrets
+.env
+.env.*
+*.pem
+*.key
