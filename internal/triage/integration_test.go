@@ -65,6 +65,9 @@ func insID(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, ar
 // any un-extracted inbound row anywhere would pollute this test's exact-count
 // assertions. Neutralize = delete the connector-test corpus (it recreates its
 // own state at its next start; compose-only — the real db never runs tests).
+// SWT-7 pact-join: the google connector's itest-google-% corpus (inbound Gmail
+// messages) is likewise visible to the global pending filter, so it is
+// neutralized here too.
 func cleanupTriage(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	stmts := []string{
@@ -73,6 +76,14 @@ func cleanupTriage(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		`DELETE FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='upwork_crm'))`,
 		`DELETE FROM normalized_threads WHERE thread_key LIKE 'upwork_crm:%'`,
 		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='upwork_crm')`,
+		// foreign corpus (SWT-7 google connector integration leftovers)
+		`DELETE FROM ai_extractions WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-%'))`,
+		`DELETE FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-%'))`,
+		`DELETE FROM normalized_events WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-%'))`,
+		`DELETE FROM normalized_threads WHERE thread_key LIKE 'gmail:itest-google-%'`,
+		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-%')`,
+		`DELETE FROM sync_runs WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-%')`,
+		`DELETE FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-%'`,
 		`DELETE FROM ai_extractions WHERE ai_run_id IN (SELECT id FROM ai_runs WHERE model = 'itest-triage-model')`,
 		`DELETE FROM ai_extractions WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='itest-triage-src'))`,
 		`DELETE FROM ai_runs WHERE model = 'itest-triage-model'`,

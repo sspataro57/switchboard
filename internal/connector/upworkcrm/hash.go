@@ -5,26 +5,15 @@
 package upworkcrm
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
+
+	"github.com/sspataro57/switchboard/internal/connector/chash"
 )
 
-// ContentHash returns the lowercase-hex sha256 of the row's canonical JSON.
-// Canonical = key-sorted re-encoding (encoding/json marshals maps with sorted
-// keys), so the hash is stable across key order and whitespace. It is the
-// value stored in raw_source_items.content_hash and the short-circuit key for
-// idempotent upserts.
+// ContentHash returns the lowercase-hex sha256 of the row's canonical JSON —
+// delegated to the shared internal/connector/chash (the google connector is
+// the second consumer). Kept as a package symbol so callers and tests are
+// unchanged.
 func ContentHash(raw json.RawMessage) (string, error) {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return "", fmt.Errorf("parse raw json: %w", err)
-	}
-	canon, err := json.Marshal(v)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize raw json: %w", err)
-	}
-	sum := sha256.Sum256(canon)
-	return hex.EncodeToString(sum[:]), nil
+	return chash.ContentHash(raw)
 }

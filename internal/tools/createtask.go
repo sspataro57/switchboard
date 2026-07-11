@@ -53,6 +53,7 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"task_unblock", validateBlockUnblock, unblockTask},
 		{"task_close", validateClose, closeTask},
 		{"record_orchestration", validateRecordOrchestration, recordOrchestration},
+		{"propose_slots", validateProposeSlots, proposeSlots},
 	} {
 		t := t
 		reg.Register(executor.Tool{
