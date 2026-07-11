@@ -88,7 +88,14 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   superuser `CREATE EXTENSION` (record it here when it happens).
 - **MQTT:** Mosquitto at `192.168.50.45:1883` (WebSocket `:9001`). Debug with
   `mosquitto_sub -h 192.168.50.45 -t 'ops/#' -v`. Heartbeats on
-  `ops/workers/{client}/status` (retained), commands on `ops/workers/{client}/cmd`.
+  `ops/workers/{worker_id}/status` (retained, QoS 1), commands on
+  `ops/workers/{worker_id}/cmd` (NOT retained). `worker_id` == client for
+  single-console; dotted `{client}.{subproject}` for multi-console (one topic
+  level; mirror derives client as prefix before first `.`). The contract lives
+  in `internal/fleet` — payload types, topic builders, 60s cadence constant.
+  Retained-message gotcha: tests/smokes MUST clear their retained messages
+  (`mosquitto_pub -r -n -t <topic>`) — retained state is global on the
+  production broker. fleetd (cmd/fleetd) mirrors status → worker_heartbeats.
 - **Deploy:** `ops` namespace on the home k8s cluster; images pushed to
   `192.168.50.20:5000` (insecure local registry).
 - **Upwork CRM (connector source, wired 2026-07-11):** db `upwork_crm` on pg-main.
@@ -122,6 +129,10 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `make integration` does db-up + migrate + `go test -tags integration ./...`.
   Integration tests are build-tagged `integration` AND skip when `DATABASE_URL`
   is unset. Local URL: `postgres://ops:ops@localhost:5433/ops?sslmode=disable`.
+  Compose also runs Mosquitto on host port **1884** (`docker/mosquitto.conf` —
+  2.x needs `allow_anonymous true`); fleet integration tests additionally gate
+  on `MQTT_BROKER` (local: `tcp://localhost:1884`). Never point tests at the
+  production broker.
 - **Provider adapters in tests:** never call live LLMs from tests. Adapters get a fake
   implementing the same interface.
 - **Integration tests must be rerunnable against a persistent db** (bit 2026-07-11:

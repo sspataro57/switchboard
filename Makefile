@@ -1,5 +1,6 @@
-# Local DATABASE_URL for the compose Postgres (see docker-compose.yml).
+# Local DATABASE_URL / MQTT_BROKER for the compose services (see docker-compose.yml).
 LOCAL_DB_URL ?= postgres://ops:ops@localhost:5433/ops?sslmode=disable
+LOCAL_MQTT_BROKER ?= tcp://localhost:1884
 
 .PHONY: db-up db-down migrate test integration
 
@@ -17,4 +18,4 @@ test:
 
 integration: db-up
 	DATABASE_URL=$(LOCAL_DB_URL) go run ./cmd/tools/migrate --dir migrations
-	DATABASE_URL=$(LOCAL_DB_URL) go test -tags integration ./...
+	DATABASE_URL=$(LOCAL_DB_URL) MQTT_BROKER=$(LOCAL_MQTT_BROKER) go test -tags integration ./...
