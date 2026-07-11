@@ -16,11 +16,19 @@ import (
 	googleoauth "golang.org/x/oauth2/google"
 )
 
-// ReadonlyScopes is exactly the step-7 scope set. Step 8's re-consent extends
-// this constant (gmail.send, calendar.events) and re-runs `google-auth add`.
+// ReadonlyScopes is the step-7 scope set (kept for reference/tests).
 var ReadonlyScopes = []string{
 	"https://www.googleapis.com/auth/gmail.readonly",
 	"https://www.googleapis.com/auth/calendar.readonly",
+}
+
+// Scopes is the live scope set (step-8 re-consent adds gmail.send).
+// google-auth and the connector use this; after re-consent, enable sending per
+// account with a manual `UPDATE source_accounts SET send_enabled=true`.
+var Scopes = []string{
+	"https://www.googleapis.com/auth/gmail.readonly",
+	"https://www.googleapis.com/auth/calendar.readonly",
+	"https://www.googleapis.com/auth/gmail.send",
 }
 
 // LoadOAuthConfig reads the Desktop-app client secret file ("installed" JSON

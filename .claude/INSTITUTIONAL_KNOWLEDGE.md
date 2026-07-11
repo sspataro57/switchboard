@@ -148,6 +148,34 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - Morning brief: env `ORCH_BRIEF_PROJECT` (unset = disabled), `ORCH_BRIEF_HOUR`
   (default 7). Deterministic SQL + Go template; never an LLM.
 
+## Delivery contract (shipped in SWT-8)
+
+- Lifecycle tools: `draft_delivery` (agent-facing, THE route for client-visible
+  words; gmail From resolved server-side from the thread — never caller-chosen),
+  spine-facing `update_delivery`/`approve_delivery`/`send_delivery`/
+  `mark_delivery_sent`/`task_mark_delivered`/`set_sending_frozen`.
+- Policy matrix (internal/policy Matrix wrapping the static list): rules
+  `kill_switch` (ops_flags row sending_frozen), `rate_limit` (10/channel/hour,
+  `OPS_SEND_HOURLY_LIMIT`), `channel_assisted` (upwork_chat send denied —
+  copy/prefill + mark_delivery_sent), `channel_not_live` (jira/calendar/github),
+  `human_only` (delivery mutations need dashboard:/opsctl:/manual: actors).
+- Invariant-4 idempotency: send_delivery commits `sending` + self-chosen
+  `<sb-{id}-...>` Message-ID BEFORE the network call; a present
+  sent_external_id refuses resend forever.
+- Loop closure (invariant 5): gmail — connector's upsertMessage confirms the
+  delivery by Message-ID (`confirmed_at` + `delivery_confirmed` event);
+  upwork assisted — post-hoc 120-char body-prefix match fills sent_external_id.
+- Orchestrator R8: `delivery_sent` → parent done_locally→delivered + Deliver
+  task closed (`delivery_lifecycle` dedup record).
+- task_events vocabulary additions: `delivery_sent`, `delivery_confirmed`.
+- Dashboard slice: `cmd/dashboard` (:8085, `/deliveries`), dev-login when
+  OIDC_ISSUER unset (`GET /dev/login`); actions all through the executor.
+- Draft worker: `cmd/drafts run` (DRAFTS_MODEL default gpt-5-mini) over R3
+  Deliver tasks; model contract strictly {subject, body}.
+- GO-LIVE PENDING: gmail sends need the SWT-7 OAuth runbook + re-consent with
+  `google.Scopes` (now includes gmail.send) + manual
+  `UPDATE source_accounts SET send_enabled=true` per allowed account.
+
 ## Google connector (shipped in SWT-7 — code complete, OAuth PENDING)
 
 - **Operator runbook (Salvador, once — the only manual part):**

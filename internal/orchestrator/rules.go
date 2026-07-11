@@ -107,6 +107,8 @@ func Evaluate(ev Event, f Facts, cfg Config) []Action {
 		return ruleFeedbackResume(ev, f)
 	case "done_local":
 		return append(ruleDeliveryTask(ev, f), ruleUnblockDependents(f)...)
+	case "delivery_sent":
+		return ruleDeliveryLifecycle(ev, f)
 	case "dependency_added", "released":
 		return ruleBlockOnUnmetDeps(f)
 	case "status_changed":
@@ -254,6 +256,35 @@ func ruleDeliveryTask(ev Event, f Facts) []Action {
 			"payload":          map[string]any{"delivery": f.Task.ProjectDelivery},
 		}},
 	}
+}
+
+// R8 — delivery lifecycle on delivery_sent (SWT-8): the delivered work task
+// flips done_locally -> delivered, R3's Deliver task is retired, and the
+// decision is recorded (the dedup key).
+func ruleDeliveryLifecycle(ev Event, f Facts) []Action {
+	if orchestrated(f, "delivery_lifecycle", func(o Orchestration) bool { return o.TaskID == ev.TaskID }) {
+		return nil
+	}
+	actions := []Action{{Kind: ActionExecute, Tool: "task_mark_delivered", Args: map[string]any{
+		"task_id": ev.TaskID,
+		"reason":  "delivery sent",
+	}}}
+	for _, o := range f.Orchestrations {
+		if o.Rule == "delivery_task" && o.TaskID == ev.TaskID && o.CreatedTaskID != 0 {
+			actions = append(actions, Action{Kind: ActionExecute, Tool: "task_close", Args: map[string]any{
+				"task_id": o.CreatedTaskID,
+				"reason":  "delivery sent",
+			}})
+			break
+		}
+	}
+	actions = append(actions, Action{Kind: ActionExecute, Tool: "record_orchestration", Args: map[string]any{
+		"task_id":          ev.TaskID,
+		"rule":             "delivery_lifecycle",
+		"trigger_event_id": ev.ID,
+		"payload":          map[string]any{"delivery_id": payloadInt(ev.Payload, "delivery_id")},
+	}})
+	return actions
 }
 
 // R4 — block on unmet deps: only ready -> blocked.

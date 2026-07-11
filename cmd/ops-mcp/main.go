@@ -48,7 +48,8 @@ func run() error {
 
 	reg := executor.NewRegistry()
 	tools.Register(reg, pool)
-	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewPGStore(pool))
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 	adapter := mcpserver.New(ex, workerID)
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "ops-mcp", Version: "0.1.0"}, nil)

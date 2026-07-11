@@ -54,6 +54,13 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"task_close", validateClose, closeTask},
 		{"record_orchestration", validateRecordOrchestration, recordOrchestration},
 		{"propose_slots", validateProposeSlots, proposeSlots},
+		{"draft_delivery", validateDraftDelivery, draftDelivery},
+		{"update_delivery", validateUpdateDelivery, updateDelivery},
+		{"approve_delivery", validateDeliveryIDOnly, approveDelivery},
+		{"send_delivery", validateDeliveryIDOnly, sendDelivery},
+		{"mark_delivery_sent", validateDeliveryIDOnly, markDeliverySent},
+		{"task_mark_delivered", validateMarkDelivered, taskMarkDelivered},
+		{"set_sending_frozen", validateSetFrozen, setSendingFrozen},
 	} {
 		t := t
 		reg.Register(executor.Tool{

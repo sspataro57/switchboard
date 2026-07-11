@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -264,7 +265,71 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 		nm.BodyText, nm.Subject, nm.Sender, nm.Channel); err != nil {
 		return fmt.Errorf("upsert message for raw item %d: %w", rawItemID, err)
 	}
+
+	// Loop closure, assisted tier (invariant 5 / SWT-8): a manually-sent
+	// upwork_chat delivery has no Message-ID, so the confirmation is a
+	// post-hoc match — an OUTBOUND communication for the same client whose
+	// body starts with the delivery body's prefix claims the delivery,
+	// filling sent_external_id (the partial unique index makes double-claims
+	// impossible) + confirmed_at + a delivery_confirmed event.
+	if nm.Direction == "outbound" {
+		if err := s.confirmUpworkDelivery(ctx, nm); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+const upworkMatchPrefixLen = 120
+
+// confirmUpworkDelivery runs the assisted-tier post-hoc matcher.
+func (s *PGSink) confirmUpworkDelivery(ctx context.Context, nm NormalizedMessage) error {
+	if nm.ExternalMessageID == "" || nm.BodyText == "" {
+		return nil
+	}
+	// The delivery's target_ref is the thread_key upwork_crm:{client}:{...};
+	// scope the match to the same client (any channel suffix).
+	clientPrefix := Provider + ":" + clientIDFromThreadKey(nm.ThreadKey) + ":%"
+
+	prefix := nm.BodyText
+	if len(prefix) > upworkMatchPrefixLen {
+		prefix = prefix[:upworkMatchPrefixLen]
+	}
+
+	var deliveryID, taskID int64
+	err := s.pool.QueryRow(ctx,
+		`UPDATE deliveries SET sent_external_id=$1, confirmed_at=now(), updated_at=now()
+		 WHERE id = (
+		   SELECT id FROM deliveries
+		   WHERE channel='upwork_chat' AND status='sent'
+		     AND sent_external_id IS NULL AND confirmed_at IS NULL
+		     AND target_ref LIKE $2
+		     AND left(body, $3) = left($4, $3)
+		   ORDER BY sent_at DESC LIMIT 1)
+		 RETURNING id, task_id`,
+		nm.ExternalMessageID, clientPrefix, upworkMatchPrefixLen, nm.BodyText).Scan(&deliveryID, &taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("confirm upwork delivery: %w", err)
+	}
+	payload, _ := json.Marshal(map[string]any{"delivery_id": deliveryID, "matched_external_id": nm.ExternalMessageID})
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1, 'delivery_confirmed', $2)`,
+		taskID, payload); err != nil {
+		return fmt.Errorf("insert delivery_confirmed event: %w", err)
+	}
+	return nil
+}
+
+// clientIDFromThreadKey extracts the client uuid from upwork_crm:{client}:{channel}.
+func clientIDFromThreadKey(key string) string {
+	parts := strings.SplitN(key, ":", 3)
+	if len(parts) >= 2 {
+		return parts[1]
+	}
+	return key
 }
 
 func (s *PGSink) markNormalized(ctx context.Context, rawItemID int64) error {

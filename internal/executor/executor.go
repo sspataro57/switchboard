@@ -58,7 +58,7 @@ func (e *Executor) Execute(ctx context.Context, call Call) (Result, error) {
 		}
 	}
 
-	decision, err := e.checker.Check(ctx, policy.Request{Tool: call.Tool, Actor: call.Actor, TaskID: call.TaskID})
+	decision, err := e.checker.Check(ctx, policy.Request{Tool: call.Tool, Actor: call.Actor, TaskID: call.TaskID, Args: call.Args})
 	if err != nil {
 		err = fmt.Errorf("policy check %s: %w", call.Tool, err)
 		e.auditFailure(ctx, ev, "error", err)
@@ -89,7 +89,7 @@ func (e *Executor) Execute(ctx context.Context, call Call) (Result, error) {
 		return Result{}, err
 	}
 
-	out, herr := tool.Handle(ctx, call.Args)
+	out, herr := tool.Handle(WithActor(ctx, call.Actor), call.Args)
 	if herr != nil {
 		werr := fmt.Errorf("tool %s: %w", call.Tool, herr)
 		if cerr := e.store.Complete(ctx, id, "error", werr.Error()); cerr != nil {
@@ -102,6 +102,23 @@ func (e *Executor) Execute(ctx context.Context, call Call) (Result, error) {
 		return Result{}, fmt.Errorf("audit complete %s: %w", call.Tool, err)
 	}
 	return Result{Output: out}, nil
+}
+
+type actorKey struct{}
+
+// WithActor threads the executor Call's actor into the handler context —
+// handlers that record who acted (created_by, decided_by) read it via
+// ActorFrom instead of trusting caller-supplied args.
+func WithActor(ctx context.Context, actor string) context.Context {
+	return context.WithValue(ctx, actorKey{}, actor)
+}
+
+// ActorFrom returns the acting identity, or "" outside an executor call.
+func ActorFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(actorKey{}).(string); ok {
+		return v
+	}
+	return ""
 }
 
 // auditFailure writes a start+terminal audit pair for calls that fail before

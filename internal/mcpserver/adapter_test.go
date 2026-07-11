@@ -73,6 +73,7 @@ var wantAgentTools = []string{
 	"mark_done_local",
 	"create_child_task",
 	"record_decision",
+	"draft_delivery", // agent-facing since SWT-8: THE route for client-visible words
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.
