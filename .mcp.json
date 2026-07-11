@@ -3,6 +3,14 @@
     "atlassian": {
       "type": "sse",
       "url": "https://mcp.atlassian.com/v1/sse"
+    },
+    "ops": {
+      "command": "go",
+      "args": ["run", "./cmd/ops-mcp"],
+      "env": {
+        "DATABASE_URL": "${OPS_DATABASE_URL}",
+        "OPS_WORKER_ID": "manual:salvo"
+      }
     }
   }
 }

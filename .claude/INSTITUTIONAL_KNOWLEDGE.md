@@ -13,12 +13,22 @@ a new item in an existing category).
 
 ## Known landmines (verified bites)
 
-_None yet — greenfield. Add entries here the first time something bites, in this shape:_
+### Inherited ANTHROPIC_API_KEY starves worker sessions
+**Location:** `internal/worker/loop.go` (CmdRunner env), bit 2026-07-11
+The claude subprocess inherits the wrapper's environment; a stray
+`ANTHROPIC_API_KEY` silently overrides the claude.ai subscription login and
+runs fail with exit 1 + `is_error: "Credit balance is too low"`. Run opsworker
+with `env -u ANTHROPIC_API_KEY` (or a deliberately configured key). Related:
+`claude -p` exits NON-ZERO on is_error runs but still emits a valid result
+envelope on stdout — the wrapper salvages it (session_id must be recorded even
+for failed runs, or resume breaks).
 
-### <short name>
-**Location:** `file.go:line`
-What goes wrong, the symptom you'd observe, and what any new code touching this area
-must do to avoid it.
+### needs_feedback flips mid-run
+**Location:** task lifecycle, bit 2026-07-11 (test race)
+`request_feedback` sets the task to needs_feedback DURING the claude run —
+polling status is not "the run ended". The session task_event lands only after
+the run's envelope is parsed; don't read "parked but no session event" as a
+loss until the wrapper logs park.
 
 ---
 
@@ -118,6 +128,22 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   proposalWriter (`~/PycharmProjects/`).
 
 ---
+
+## Task lifecycle contract (shipped in SWT-4)
+
+- task_events event-type vocabulary: `claimed`, `status_changed`, `log`,
+  `session` (payload carries session_id/is_error/num_turns/cost_usd — the
+  resume pointer; latest wins), `feedback_requested`, `feedback_answered`,
+  `done_local`, `child_created`, `released`. The NOTIFY trigger is step 5's.
+- Fleet `resume` cmd args schema (pinned): `{"task_id": N, "feedback_request_id": M}`.
+- `OPS_WORKER_ID` injection rule: ops-mcp force-overwrites any model-supplied
+  `worker_id` from its env — identity is never model-chosen. The wrapper sets
+  it when spawning claude; interactive sessions use `manual:salvo` (.mcp.json).
+- Spine-facing tools (`task_release`, `answer_feedback`) are registered on the
+  executor but NOT MCP-listed; reach them via `opsctl call` / `opsctl
+  answer-feedback [--resume]`.
+- Wrapper testing trick: `CLAUDE_BIN` env points the wrapper at a stub script
+  emitting a canned result envelope.
 
 ## Test infrastructure
 

@@ -42,6 +42,12 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case "answer-feedback":
+		if err := runAnswerFeedback(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "opsctl:", err)
+			os.Exit(1)
+		}
+		return
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -131,6 +137,77 @@ func actor() string {
 		return "opsctl:" + u
 	}
 	return "opsctl"
+}
+
+// runAnswerFeedback answers an open feedback request through the executor and
+// optionally publishes the fleet resume command to the task's worker.
+func runAnswerFeedback(argv []string) error {
+	fs := flag.NewFlagSet("answer-feedback", flag.ContinueOnError)
+	id := fs.Int64("id", 0, "feedback_request_id (required)")
+	answer := fs.String("answer", "", "answer text (required)")
+	resume := fs.Bool("resume", false, "publish the fleet resume cmd to the worker")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if *id == 0 || *answer == "" {
+		return fmt.Errorf("--id and --answer are required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	reg := executor.NewRegistry()
+	tools.Register(reg, pool)
+	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewPGStore(pool))
+
+	answerJSON, err := json.Marshal(*answer)
+	if err != nil {
+		return fmt.Errorf("marshal answer: %w", err)
+	}
+	res, err := ex.Execute(ctx, executor.Call{
+		Tool:  "answer_feedback",
+		Actor: actor(),
+		Args:  []byte(fmt.Sprintf(`{"feedback_request_id":%d,"answer":%s}`, *id, answerJSON)),
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(res.Output))
+
+	if !*resume {
+		return nil
+	}
+	var out struct {
+		TaskID int64  `json:"task_id"`
+		Client string `json:"client"`
+	}
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		return fmt.Errorf("parse answer_feedback output: %w", err)
+	}
+	broker := os.Getenv("MQTT_BROKER")
+	if broker == "" {
+		return fmt.Errorf("MQTT_BROKER is not set (required for --resume)")
+	}
+	fc, err := fleet.NewMirrorClient(ctx, broker)
+	if err != nil {
+		return fmt.Errorf("connect broker: %w", err)
+	}
+	defer fc.Disconnect()
+	args, err := json.Marshal(map[string]int64{"task_id": out.TaskID, "feedback_request_id": *id})
+	if err != nil {
+		return fmt.Errorf("marshal resume args: %w", err)
+	}
+	if err := fc.PublishCommand(out.Client, fleet.Cmd{Action: fleet.ActionResume, Args: args}); err != nil {
+		return err
+	}
+	fmt.Printf("resume cmd published to %s\n", out.Client)
+	return nil
 }
 
 // runFleet prints the fleet view: one line per worker_heartbeats row. It is a

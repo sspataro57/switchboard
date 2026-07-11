@@ -119,6 +119,34 @@ func (c *Client) PublishCommand(workerID string, cmd Cmd) error {
 	return nil
 }
 
+// SubscribeCmd subscribes this worker's own cmd topic (worker mode only).
+// Malformed payloads are logged and dropped — commands are lenient-consume
+// like status.
+func (c *Client) SubscribeCmd(handler func(Cmd)) error {
+	if c.workerID == "" {
+		return fmt.Errorf("SubscribeCmd requires a worker-mode client")
+	}
+	topic := CmdTopic(c.workerID)
+	h := func(_ mqtt.Client, msg mqtt.Message) {
+		cmd, err := ParseCmd(msg.Payload())
+		if err != nil {
+			slog.Warn("dropping malformed cmd", "topic", msg.Topic(), "err", err)
+			return
+		}
+		handler(cmd)
+	}
+	c.mu.Lock()
+	c.subs[topic] = h
+	c.mu.Unlock()
+
+	tok := c.c.Subscribe(topic, qos, h)
+	tok.Wait()
+	if err := tok.Error(); err != nil {
+		return fmt.Errorf("subscribe %s: %w", topic, err)
+	}
+	return nil
+}
+
 // SubscribeStatus subscribes ops/workers/+/status and registers the handler
 // for OnConnect re-subscription.
 func (c *Client) SubscribeStatus(handler func(topic string, payload []byte)) error {
