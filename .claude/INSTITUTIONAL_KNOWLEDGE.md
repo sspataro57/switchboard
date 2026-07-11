@@ -73,7 +73,19 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 ## Environment facts
 
 - **Postgres:** `ops` db on pg-main (CNPG), `pg-main-rw.cnpg.svc:5432` in-cluster.
-  Local access: TBD — record the port-forward / connection string here once established.
+  The CNPG image already ships **pgvector** (confirmed 2026-07-11; `vector` was
+  already in the template db) — local test Postgres must match
+  (`pgvector/pgvector` image, not stock `postgres`).
+  **Local access (established 2026-07-11):** no port-forward needed — the
+  `pg-main-rw-lb` LoadBalancer exposes it at `192.168.50.49:5432`
+  (namespace `cnpg`). Role `ops` owns database `ops`; its password lives in
+  `~/.pgpass` (psql just works: `psql -h 192.168.50.49 -U ops -d ops`) and as
+  `OPS_DATABASE_URL` in `~/.bashrc` (same non-interactive caveat as
+  JIRA_TOKEN_PERSONAL — grep/eval it, don't source). Superuser creds:
+  k8s secret `cnpg/pg-main-superuser`. The `ops` role can NOT
+  `CREATE EXTENSION` — pgcrypto/vector were pre-created by postgres on the
+  `ops` db; a future migration needing a new extension must be preceded by a
+  superuser `CREATE EXTENSION` (record it here when it happens).
 - **MQTT:** Mosquitto at `192.168.50.45:1883` (WebSocket `:9001`). Debug with
   `mosquitto_sub -h 192.168.50.45 -t 'ops/#' -v`. Heartbeats on
   `ops/workers/{client}/status` (retained), commands on `ops/workers/{client}/cmd`.
@@ -88,10 +100,19 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 
 - **Unit tests:** `go test ./...`. Orchestrator rules and the policy matrix must be
   testable with zero network (invariant 7 exists partly for this).
-- **Integration tests:** against a local Postgres (dockerized). Record the compose
-  file / make target here once it exists.
+- **Integration tests:** against a local Postgres (dockerized). `make db-up`
+  starts it (`docker-compose.yml`, image `pgvector/pgvector:pg17`, host port
+  **5433**, user/pass/db all `ops`); `make migrate` applies migrations to it;
+  `make integration` does db-up + migrate + `go test -tags integration ./...`.
+  Integration tests are build-tagged `integration` AND skip when `DATABASE_URL`
+  is unset. Local URL: `postgres://ops:ops@localhost:5433/ops?sslmode=disable`.
 - **Provider adapters in tests:** never call live LLMs from tests. Adapters get a fake
   implementing the same interface.
+- **Integration tests must be rerunnable against a persistent db** (bit 2026-07-11:
+  the executor integration test passed on a fresh db, failed on rerun — cleanup
+  `DELETE FROM projects` hit the tasks FK from its own prior run, and a
+  `count(*)==1` assertion drifted). Clean up your own leftovers first, in FK
+  order (children before parents), scoped by a test-owned actor/slug.
 - _Known infra issues: none yet — record flakes and races here the first time they bite._
 
 ---
@@ -116,8 +137,12 @@ Verified 2026-07-11. (The same site also has a `CRM` project — not ours.)
   with `/mcp`. Tool names vary by version — search/create/transition/comment on
   issues; discover with ToolSearch.
 - Fallback only: `JIRA_TOKEN_PERSONAL` env var exists (API token, basic auth as
-  `sspataro@gmail.com`) — exported in `~/.bashrc`, so non-interactive shells must
-  source it. Prefer the MCP; don't build curl wrappers.
+  `sspataro@gmail.com`) — exported in `~/.bashrc`, but `.bashrc` early-exits for
+  non-interactive shells, so `source ~/.bashrc` yields an EMPTY token there (and
+  Jira answers unauthenticated searches with 200 + zero issues — looks like an
+  empty board, isn't). Working pattern:
+  `eval "$(grep '^export JIRA_TOKEN_PERSONAL=' ~/.bashrc)"`.
+  Prefer the MCP; don't build curl wrappers.
 - Every build ticket/bug gets a mirrored SWT issue (summary `{ID}: <goal>`); the
   local artifact records it as `> Jira: SWT-N` on its first line. `PENDING-SYNC`
   means the MCP wasn't available — the next command retries.
