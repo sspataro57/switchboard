@@ -1,0 +1,17 @@
+# Local Postgres for integration tests and the smoke check.
+# pgvector/pgvector (not stock postgres) because 0001 creates the vector
+# extension — matching pg-main's CNPG image, which ships pgvector.
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ops
+      POSTGRES_PASSWORD: ops
+      POSTGRES_DB: ops
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops -d ops"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
