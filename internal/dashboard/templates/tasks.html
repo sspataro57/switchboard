@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>switchboard — board</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { font-size: 1.3rem; }
+    h2 { font-size: 1rem; margin: 1.4rem 0 .4rem; text-transform: uppercase; letter-spacing: .04em; color: #555; }
+    .flash { background: #fff8d0; border: 1px solid #d8c760; padding: .4rem .8rem; margin-bottom: 1rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: .4rem .6rem; text-align: left; font-size: .88rem; }
+    th { background: #f5f5f5; }
+    nav a { margin-right: .8rem; }
+    form.filters { margin: .8rem 0 1rem; }
+    form.filters input, form.filters select { font: inherit; margin-right: .5rem; }
+    .muted { color: #777; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <nav><a href="/tasks">Board</a> <a href="/plans">Plans</a> <a href="/briefs">Briefs</a> <a href="/deliveries">Deliveries</a>
+    <a href="/export/tasks.csv">CSV</a> <a href="/export/tasks.json">JSON</a></nav>
+  <h1>Board</h1>
+  {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+
+  <form class="filters" method="get" action="/tasks">
+    <select name="project">
+      <option value="">all projects</option>
+      {{$sel := index .Filters "project"}}
+      {{range .Projects}}<option value="{{.}}" {{if eq . $sel}}selected{{end}}>{{.}}</option>{{end}}
+    </select>
+    <input type="text" name="status" placeholder="status" value="{{index .Filters "status"}}">
+    <input type="text" name="assignee_type" placeholder="assignee_type" value="{{index .Filters "assignee_type"}}">
+    <input type="text" name="subproject" placeholder="subproject" value="{{index .Filters "subproject"}}">
+    <button>Filter</button>
+  </form>
+  <p class="muted">Queues are filters on the one tasks table. Closed tasks are hidden unless ?status=closed.</p>
+
+  {{range .Columns}}
+  <h2>{{.Status}} ({{len .Tasks}})</h2>
+  <table>
+    <tr><th>id</th><th>title</th><th>project</th><th>sub</th><th>assignee</th><th>prio</th><th>order</th><th>parent</th><th>updated</th></tr>
+    {{range .Tasks}}
+    <tr>
+      <td><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
+      <td><a href="/tasks/{{.ID}}">{{.Title}}</a></td>
+      <td>{{.Project}}</td>
+      <td>{{.Subproject}}</td>
+      <td>{{.AssigneeType}}{{if .WorkerType}} / {{.WorkerType}}{{end}}</td>
+      <td>{{.Priority}}</td>
+      <td>{{.PlanOrder}}</td>
+      <td>{{if .ParentID}}<a href="/tasks/{{.ParentID}}">{{.ParentID}}</a>{{end}}</td>
+      <td class="muted">{{.UpdatedAt}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}
+  <p class="muted">No tasks match the filters.</p>
+  {{end}}
+</body>
+</html>

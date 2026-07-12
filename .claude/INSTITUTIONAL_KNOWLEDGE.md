@@ -148,6 +148,37 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - Morning brief: env `ORCH_BRIEF_PROJECT` (unset = disabled), `ORCH_BRIEF_HOUR`
   (default 7). Deterministic SQL + Go template; never an LLM.
 
+## Plan import + full board (shipped in SWT-10)
+
+- One-way funnel: `planimport propose --project <slug> --file <path>` (raw-first
+  under synthetic `provider='plan'` account `plans@local`,
+  `external_id=plan:{slug}:{sha256}`; live gpt-5-mini parse, `PLAN_MODEL` env)
+  → dashboard `/plans/{id}` approve/reject → `planimport apply --id N`
+  (single-tx tree insert via `apply_plan_import`) → file replaced by a stub.
+- The stub marker is `<!-- switchboard:imported plan_import={id} ... -->` on
+  the FIRST line; propose refuses stubs. Hash-mismatched/missing files skip
+  the stub write with a warning (tasks stand; never clobber unreviewed edits).
+- ZERO tasks exist before approval — proposals live in ai_extractions
+  (`worker_type='plan_import'`, invisible to triage's pending filter) plus a
+  `plan_imports` gate row (0008; partial unique on (project_id, content_hash)
+  WHERE status <> 'rejected' — one live proposal per content; re-propose only
+  after reject).
+- `plan_order` = 1-based sibling array position, assigned by Go in
+  `planimport.Validate` — never model-chosen. Apply emits `child_created` /
+  `dependency_added` / `plan_imported` (roots) events; R4 blocks dependents on
+  the next drain — no orchestrator changes.
+- Policy: `approve/reject/apply_plan_import` are humanOnly
+  (dashboard:/opsctl:/manual:); `propose_plan_import` static fallthrough. None
+  is MCP-listed — agents' verb for discovered work stays create_child_task.
+- Dashboard: `/tasks` board (queues = query-param filters; closed hidden
+  unless `?status=closed`), `/tasks/{id}` detail, `/briefs` (title predicate
+  `Morning brief %` — R7's own dedup key), `/plans`, `/export/tasks.csv|json`
+  (pinned header, id ASC). `GET /` now redirects to `/tasks`.
+- Real smoke done 2026-07-11: plan_import 1 (switchboard follow-ups, 12 tasks
+  #9-#20 on the real board — the operator-pending backlog itself); roots
+  9/14/17 ready, 9 dependents R4-blocked; `~/plans/switchboard-followups.md`
+  is now a stub.
+
 ## Jira + GitHub connectors (shipped in SWT-9)
 
 - Jira accounts: `jira-auth add <email> --site URL --projects KEY1,KEY2`

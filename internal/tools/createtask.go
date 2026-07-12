@@ -65,6 +65,10 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"record_pr_event", validateRecordPREvent, recordPREvent},
 		{"record_ci_event", validateRecordCIEvent, recordCIEvent},
 		{"task_pr_transition", validatePRTransition, taskPRTransition},
+		{"propose_plan_import", validateProposePlanImport, proposePlanImport},
+		{"approve_plan_import", validatePlanImportID, approvePlanImport},
+		{"reject_plan_import", validatePlanImportID, rejectPlanImport},
+		{"apply_plan_import", validatePlanImportID, applyPlanImport},
 	} {
 		t := t
 		reg.Register(executor.Tool{

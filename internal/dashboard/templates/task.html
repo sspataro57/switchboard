@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>switchboard — task {{.ID}}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { font-size: 1.2rem; }
+    h2 { font-size: .95rem; margin: 1.3rem 0 .3rem; color: #555; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: .35rem .55rem; text-align: left; font-size: .87rem; }
+    th { background: #f5f5f5; }
+    pre { background: #f7f7f7; border: 1px solid #e2e2e2; padding: .6rem; white-space: pre-wrap; }
+    nav a { margin-right: .8rem; }
+    .muted { color: #777; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <nav><a href="/tasks">Board</a> <a href="/plans">Plans</a> <a href="/briefs">Briefs</a> <a href="/deliveries">Deliveries</a></nav>
+  <h1>#{{.ID}} {{.Title}}</h1>
+  <table>
+    <tr><th>status</th><td>{{.Status}}</td><th>project</th><td>{{.Project}}{{if .Subproject}} / {{.Subproject}}{{end}}</td></tr>
+    <tr><th>assignee</th><td>{{.AssigneeType}}{{if .WorkerType}} / {{.WorkerType}}{{end}}</td>
+        <th>autonomy</th><td>{{.Autonomy}}</td></tr>
+    <tr><th>priority</th><td>{{.Priority}}</td><th>plan order</th><td>{{.PlanOrder}}</td></tr>
+    <tr><th>parent</th><td>{{if .ParentLink}}<a href="/tasks/{{.ParentLink}}">#{{.ParentLink}}</a>{{else}}—{{end}}</td>
+        <th>updated</th><td class="muted">{{.UpdatedAt}}</td></tr>
+  </table>
+
+  {{if .Body}}<h2>Body</h2><pre>{{.Body}}</pre>{{end}}
+
+  {{if .Children}}
+  <h2>Children</h2>
+  <table><tr><th>id</th><th>title</th><th>status</th><th>assignee</th></tr>
+    {{range .Children}}<tr><td><a href="/tasks/{{.ID}}">{{.ID}}</a></td><td>{{.Title}}</td><td>{{.Status}}</td><td>{{.AssigneeType}}</td></tr>{{end}}
+  </table>
+  {{end}}
+
+  {{if .Parent}}
+  <h2>Parent</h2>
+  <table><tr><th>id</th><th>title</th><th>status</th><th>assignee</th></tr>
+    <tr><td><a href="/tasks/{{.Parent.ID}}">{{.Parent.ID}}</a></td><td>{{.Parent.Title}}</td><td>{{.Parent.Status}}</td><td>{{.Parent.AssigneeType}}</td></tr>
+  </table>
+  {{end}}
+
+  {{if .Deps}}
+  <h2>Dependencies</h2>
+  <table><tr><th>id</th><th>title</th><th>status</th><th>assignee</th></tr>
+    {{range .Deps}}<tr><td><a href="/tasks/{{.ID}}">{{.ID}}</a></td><td>{{.Title}}</td><td>{{.Status}}</td><td>{{.AssigneeType}}</td></tr>{{end}}
+  </table>
+  {{end}}
+
+  {{if .Refs}}
+  <h2>External refs</h2>
+  <table><tr><th>system</th><th>key</th><th>url</th></tr>
+    {{range .Refs}}<tr><td>{{.System}}</td><td>{{.Key}}</td><td>{{if .URL}}<a href="{{.URL}}">{{.URL}}</a>{{end}}</td></tr>{{end}}
+  </table>
+  {{end}}
+
+  {{if .Feedback}}
+  <h2>Feedback</h2>
+  <table><tr><th>id</th><th>question</th><th>answer</th><th>status</th></tr>
+    {{range .Feedback}}<tr><td>{{.ID}}</td><td>{{.Question}}</td><td>{{.Answer}}</td><td>{{.Status}}</td></tr>{{end}}
+  </table>
+  {{end}}
+
+  {{if .Deliveries}}
+  <h2>Deliveries</h2>
+  <table><tr><th>id</th><th>channel</th><th>status</th><th>subject</th><th>sent</th></tr>
+    {{range .Deliveries}}<tr><td>{{.ID}}</td><td>{{.Channel}}</td><td>{{.Status}}</td><td>{{.Subject}}</td><td class="muted">{{.SentAt}}</td></tr>{{end}}
+  </table>
+  {{end}}
+
+  {{if .Events}}
+  <h2>Events (last 50)</h2>
+  <table><tr><th>id</th><th>type</th><th>payload</th><th>at</th></tr>
+    {{range .Events}}<tr><td>{{.ID}}</td><td>{{.Type}}</td><td class="muted">{{.Payload}}</td><td class="muted">{{.At}}</td></tr>{{end}}
+  </table>
+  {{end}}
+</body>
+</html>
