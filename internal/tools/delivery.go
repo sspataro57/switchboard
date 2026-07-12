@@ -32,6 +32,19 @@ var gmailSender GmailSender
 // handler — invariant 4's single gate).
 func SetGmailSender(s GmailSender) { gmailSender = s }
 
+// JiraSender is the jira_comment send seam (SWT-9). Jira assigns the comment
+// id post-call, so the idempotency shape differs from gmail: `sending` commits
+// pre-network, the id lands post-call, and the connector's post-hoc prefix
+// matcher closes the ambiguous-failure window.
+type JiraSender interface {
+	Send(ctx context.Context, siteHost, issueKey, body string) (commentID string, err error)
+}
+
+var jiraSender JiraSender
+
+// SetJiraSender wires the jira comment adapter.
+func SetJiraSender(s JiraSender) { jiraSender = s }
+
 // ---- draft_delivery (agent-facing) ------------------------------------------
 
 type draftDeliveryArgs struct {
@@ -51,8 +64,10 @@ func validateDraftDelivery(args []byte) error {
 	if a.TaskID == 0 {
 		return errors.New("missing task_id")
 	}
-	if a.Channel != "gmail" && a.Channel != "upwork_chat" {
-		return fmt.Errorf("channel %q: must be gmail or upwork_chat", a.Channel)
+	switch a.Channel {
+	case "gmail", "upwork_chat", "jira_comment":
+	default:
+		return fmt.Errorf("channel %q: must be gmail, upwork_chat, or jira_comment", a.Channel)
 	}
 	if a.Body == "" {
 		return errors.New("missing body")
@@ -60,8 +75,8 @@ func validateDraftDelivery(args []byte) error {
 	if a.Channel == "gmail" && a.ThreadID == nil {
 		return errors.New("gmail drafts require thread_id (From is resolved from the thread)")
 	}
-	if a.Channel == "upwork_chat" && a.TargetRef == "" {
-		return errors.New("upwork_chat drafts require target_ref (the thread_key)")
+	if (a.Channel == "upwork_chat" || a.Channel == "jira_comment") && a.TargetRef == "" {
+		return errors.New("upwork_chat/jira_comment drafts require target_ref (the thread_key)")
 	}
 	return nil
 }
@@ -73,6 +88,25 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 	}
 
 	var fromAccountID *int64
+	if a.Channel == "jira_comment" {
+		// From is resolved server-side: the target_ref's site_host must match a
+		// provider='jira' account's domain_default — never caller-chosen.
+		siteHost, _, err := splitJiraTargetRef(a.TargetRef)
+		if err != nil {
+			return nil, err
+		}
+		var acctID int64
+		err = pool.QueryRow(ctx,
+			`SELECT id FROM source_accounts WHERE provider='jira'
+			 AND domain_default LIKE '%'||$1||'%' ORDER BY id LIMIT 1`, siteHost).Scan(&acctID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("no jira account for site %s", siteHost)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve jira account: %w", err)
+		}
+		fromAccountID = &acctID
+	}
 	if a.Channel == "gmail" {
 		// From is resolved server-side from the thread's mailbox segment
 		// (gmail:{account_email}:{threadId}) — the caller cannot choose it.
@@ -239,6 +273,17 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 	var a deliveryIDOnlyArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, fmt.Errorf("parse args: %w", err)
+	}
+	// Channel routing: jira_comment has its own send shape (id post-call).
+	var channel string
+	if err := pool.QueryRow(ctx, `SELECT channel FROM deliveries WHERE id=$1`, a.DeliveryID).Scan(&channel); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("delivery %d not found", a.DeliveryID)
+		}
+		return nil, fmt.Errorf("resolve delivery channel: %w", err)
+	}
+	if channel == "jira_comment" {
+		return sendJiraComment(ctx, pool, a.DeliveryID)
 	}
 	if gmailSender == nil {
 		return nil, fmt.Errorf("no gmail send adapter wired (SetGmailSender)")
@@ -529,4 +574,98 @@ func setSendingFrozen(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]b
 		return nil, fmt.Errorf("upsert sending_frozen: %w", err)
 	}
 	return marshalResult(map[string]any{"frozen": *a.Frozen})
+}
+
+// splitJiraTargetRef parses jira:{site_host}:{issueKey}.
+func splitJiraTargetRef(ref string) (siteHost, issueKey string, err error) {
+	parts := strings.SplitN(ref, ":", 3)
+	if len(parts) != 3 || parts[0] != "jira" || parts[1] == "" || parts[2] == "" {
+		return "", "", fmt.Errorf("target_ref %q is not jira:{site_host}:{issueKey}", ref)
+	}
+	return parts[1], parts[2], nil
+}
+
+// sendJiraComment is the jira branch of send_delivery: sending committed
+// pre-network; Jira assigns the id post-call; definite failures leave the row
+// failed with sent_external_id NULL (the poller's post-hoc matcher recovers
+// the ambiguous window).
+func sendJiraComment(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) ([]byte, error) {
+	if jiraSender == nil {
+		return nil, fmt.Errorf("no jira send adapter wired (SetJiraSender)")
+	}
+
+	var taskID int64
+	var body, targetRef string
+	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		var status string
+		var extID *string
+		var target *string
+		var fromAcct *int64
+		var sendEnabled *bool
+		var fromEmail string
+		err := tx.QueryRow(ctx,
+			`SELECT d.task_id, d.body, d.status, d.sent_external_id, d.target_ref,
+			        d.from_account_id, a.send_enabled, COALESCE(a.account_email,'')
+			 FROM deliveries d LEFT JOIN source_accounts a ON a.id = d.from_account_id
+			 WHERE d.id=$1 FOR UPDATE OF d`, deliveryID).
+			Scan(&taskID, &body, &status, &extID, &target, &fromAcct, &sendEnabled, &fromEmail)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("delivery %d not found", deliveryID)
+		}
+		if err != nil {
+			return fmt.Errorf("lock delivery %d: %w", deliveryID, err)
+		}
+		if extID != nil {
+			return fmt.Errorf("delivery %d already carries sent_external_id; never resend (invariant 4)", deliveryID)
+		}
+		if status != "approved" {
+			return fmt.Errorf("delivery %d is %s; only approved deliveries send", deliveryID, status)
+		}
+		if fromAcct == nil || fromEmail == "" {
+			return fmt.Errorf("delivery %d has no from account", deliveryID)
+		}
+		if sendEnabled == nil || !*sendEnabled {
+			return fmt.Errorf("account %s is not send-enabled", fromEmail)
+		}
+		if target == nil {
+			return fmt.Errorf("delivery %d has no target_ref", deliveryID)
+		}
+		targetRef = *target
+		if _, err := tx.Exec(ctx,
+			`UPDATE deliveries SET status='sending', updated_at=now() WHERE id=$1`, deliveryID); err != nil {
+			return fmt.Errorf("mark sending: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	siteHost, issueKey, err := splitJiraTargetRef(targetRef)
+	if err != nil {
+		_, _ = pool.Exec(ctx, `UPDATE deliveries SET status='failed', error=$2, updated_at=now() WHERE id=$1`,
+			deliveryID, err.Error())
+		return nil, err
+	}
+
+	commentID, sendErr := jiraSender.Send(ctx, siteHost, issueKey, google.ScrubAIAttribution(body))
+	if sendErr != nil {
+		// id unknown — leave sent_external_id NULL; the poller's post-hoc
+		// matcher recovers if the comment actually landed.
+		_, _ = pool.Exec(ctx, `UPDATE deliveries SET status='failed', error=$2, updated_at=now() WHERE id=$1`,
+			deliveryID, sendErr.Error())
+		return nil, fmt.Errorf("jira send: %w", sendErr)
+	}
+
+	extID := "jira:" + siteHost + ":comment:" + commentID
+	if _, err := pool.Exec(ctx,
+		`UPDATE deliveries SET status='sent', sent_external_id=$2, sent_at=now(), error=NULL, updated_at=now()
+		 WHERE id=$1`, deliveryID, extID); err != nil {
+		return nil, fmt.Errorf("finalize sent: %w", err)
+	}
+	if _, err := insertTaskEvent(ctx, pool, taskID, "delivery_sent",
+		map[string]any{"delivery_id": deliveryID, "channel": "jira_comment", "sent_external_id": extID}); err != nil {
+		return nil, err
+	}
+	return marshalResult(map[string]any{"delivery_id": deliveryID, "status": "sent", "sent_external_id": extID})
 }

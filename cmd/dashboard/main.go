@@ -18,6 +18,7 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/connector/google"
+	"github.com/sspataro57/switchboard/internal/connector/jira"
 	"github.com/sspataro57/switchboard/internal/dashboard"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/policy"
@@ -46,6 +47,9 @@ func run() error {
 	tools.Register(reg, pool)
 	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
 	ex := executor.New(reg, checker, audit.NewPGStore(pool))
+	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
+		tools.SetJiraSender(&jira.AccountSender{Pool: pool, TokenKey: key})
+	}
 
 	// Wire the real gmail send adapter when the credentials exist; without
 	// them send_delivery fails cleanly ("no gmail send adapter wired" never

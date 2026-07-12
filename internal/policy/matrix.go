@@ -69,6 +69,16 @@ func Decide(req Request, snap Snapshot) Decision {
 			return Decision{Decision: "allow", Rule: "matrix-send", Reason: "manual confirmation"}
 		}
 		return Decision{Decision: "allow", Rule: "matrix-send", Reason: "gmail send within limits"}
+	case "jira_comment":
+		limit := snap.HourlyLimit
+		if limit <= 0 {
+			limit = 10
+		}
+		if snap.SentLastHour[snap.Channel] >= limit {
+			return Decision{Decision: "deny", Rule: "rate_limit",
+				Reason: fmt.Sprintf("channel %s hit the hourly send limit (%d)", snap.Channel, limit)}
+		}
+		return Decision{Decision: "allow", Rule: "matrix-send", Reason: "jira comment within limits"}
 	case "upwork_chat":
 		if req.Tool == "mark_delivery_sent" {
 			return Decision{Decision: "allow", Rule: "matrix-assisted", Reason: "assisted-tier manual confirmation"}

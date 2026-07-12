@@ -54,6 +54,9 @@ type Facts struct {
 	ExpiredClaims       []ExpiredClaim
 	BriefExists         bool
 	BriefCounts         []ProjectCounts
+	// CIFailureStreak is the count of consecutive ci_failed events since the
+	// last passing CI signal (R11: red CI ×2 → back to ready, same task).
+	CIFailureStreak int
 }
 
 type TaskFacts struct {
@@ -71,6 +74,7 @@ type Orchestration struct {
 	FeedbackRequestID int64
 	CreatedTaskID     int64
 	TaskID            int64
+	TriggerEventID    int64 // the trigger_event_id recorded — per-event dedup for R9-R11
 }
 
 type DependentTask struct {
@@ -109,6 +113,12 @@ func Evaluate(ev Event, f Facts, cfg Config) []Action {
 		return append(ruleDeliveryTask(ev, f), ruleUnblockDependents(f)...)
 	case "delivery_sent":
 		return ruleDeliveryLifecycle(ev, f)
+	case "pr_opened", "pr_merged", "pr_closed":
+		return rulePRLifecycle(ev, f)
+	case "ci_started", "ci_passed":
+		return ruleCILifecycle(ev, f)
+	case "ci_failed":
+		return ruleCIFailure(ev, f)
 	case "dependency_added", "released":
 		return ruleBlockOnUnmetDeps(f)
 	case "status_changed":
@@ -353,4 +363,96 @@ func renderBrief(counts []ProjectCounts) string {
 			c.ProjectSlug, c.Ready, c.Blocked, c.NeedsFeedback, c.DoneLocally, c.OpenFeedback)
 	}
 	return b.String()
+}
+
+// dedupOnEvent reports a prior record of rule for exactly this trigger event.
+func dedupOnEvent(f Facts, rule string, eventID int64) bool {
+	return orchestrated(f, rule, func(o Orchestration) bool { return o.TriggerEventID == eventID })
+}
+
+// R9 — PR lifecycle (SWT-9): pr_opened → pr_open; pr_merged → done_locally
+// (the transition handler emits done_local so R3 chains); pr_closed unmerged →
+// back to ready with a log. Same task, never a new one.
+func rulePRLifecycle(ev Event, f Facts) []Action {
+	if dedupOnEvent(f, "pr_lifecycle", ev.ID) {
+		return nil
+	}
+	url := payloadStr(ev.Payload, "url")
+	pr := payloadInt(ev.Payload, "pr")
+
+	var actions []Action
+	switch ev.Type {
+	case "pr_opened":
+		actions = append(actions, Action{Kind: ActionExecute, Tool: "task_pr_transition", Args: map[string]any{
+			"task_id": ev.TaskID, "to": "pr_open",
+			"summary": fmt.Sprintf("PR #%d opened: %s", pr, url),
+		}})
+	case "pr_merged":
+		actions = append(actions, Action{Kind: ActionExecute, Tool: "task_pr_transition", Args: map[string]any{
+			"task_id": ev.TaskID, "to": "done_locally",
+			"summary": fmt.Sprintf("PR #%d merged: %s", pr, url),
+		}})
+	case "pr_closed":
+		actions = append(actions,
+			Action{Kind: ActionExecute, Tool: "task_pr_transition", Args: map[string]any{
+				"task_id": ev.TaskID, "to": "ready",
+				"summary": fmt.Sprintf("PR #%d closed unmerged: %s", pr, url),
+			}},
+			Action{Kind: ActionExecute, Tool: "task_append_log", Args: map[string]any{
+				"task_id": ev.TaskID, "kind": "pr",
+				"message": fmt.Sprintf("PR #%d was closed without merging (%s); task re-queued", pr, url),
+			}})
+	}
+	actions = append(actions, Action{Kind: ActionExecute, Tool: "record_orchestration", Args: map[string]any{
+		"task_id": ev.TaskID, "rule": "pr_lifecycle", "trigger_event_id": ev.ID,
+		"payload": map[string]any{"pr": pr, "event": ev.Type},
+	}})
+	return actions
+}
+
+// R10 — CI lifecycle: ci_started → awaiting_ci; ci_passed → awaiting_merge.
+func ruleCILifecycle(ev Event, f Facts) []Action {
+	if dedupOnEvent(f, "ci_lifecycle", ev.ID) {
+		return nil
+	}
+	to := "awaiting_ci"
+	if ev.Type == "ci_passed" {
+		to = "awaiting_merge"
+	}
+	return []Action{
+		{Kind: ActionExecute, Tool: "task_pr_transition", Args: map[string]any{
+			"task_id": ev.TaskID, "to": to,
+			"summary": fmt.Sprintf("CI %s: %s", strings.TrimPrefix(ev.Type, "ci_"), payloadStr(ev.Payload, "run_url")),
+		}},
+		{Kind: ActionExecute, Tool: "record_orchestration", Args: map[string]any{
+			"task_id": ev.TaskID, "rule": "ci_lifecycle", "trigger_event_id": ev.ID,
+			"payload": map[string]any{"run_id": payloadInt(ev.Payload, "run_id"), "event": ev.Type},
+		}},
+	}
+}
+
+// R11 — CI failure streak: first red is a log (retry in place); the second
+// consecutive red sends the SAME task back to ready with the logs appended
+// (CLAUDE.md status machine — never a new task).
+func ruleCIFailure(ev Event, f Facts) []Action {
+	if dedupOnEvent(f, "ci_failure", ev.ID) {
+		return nil
+	}
+	runURL := payloadStr(ev.Payload, "run_url")
+
+	actions := []Action{{Kind: ActionExecute, Tool: "task_append_log", Args: map[string]any{
+		"task_id": ev.TaskID, "kind": "ci",
+		"message": fmt.Sprintf("CI failed (streak %d): %s", f.CIFailureStreak, runURL),
+	}}}
+	if f.CIFailureStreak >= 2 {
+		actions = append(actions, Action{Kind: ActionExecute, Tool: "task_pr_transition", Args: map[string]any{
+			"task_id": ev.TaskID, "to": "ready",
+			"summary": fmt.Sprintf("red CI ×%d — task re-queued with logs: %s", f.CIFailureStreak, runURL),
+		}})
+	}
+	actions = append(actions, Action{Kind: ActionExecute, Tool: "record_orchestration", Args: map[string]any{
+		"task_id": ev.TaskID, "rule": "ci_failure", "trigger_event_id": ev.ID,
+		"payload": map[string]any{"run_id": payloadInt(ev.Payload, "run_id"), "streak": f.CIFailureStreak},
+	}})
+	return actions
 }

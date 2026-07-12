@@ -112,6 +112,7 @@ func cleanupOrch(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		{`DELETE FROM task_dependencies WHERE ` + inOurTasks + ` OR depends_on_task_id IN
 			(SELECT id FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug LIKE $1))`, []any{orchSlugLike}},
 		{`DELETE FROM feedback_requests WHERE ` + inOurTasks, []any{orchSlugLike}},
+		{`DELETE FROM external_refs WHERE ` + inOurTasks, []any{orchSlugLike}},
 		// children before parents (tasks.parent_id self-FK)
 		{`DELETE FROM tasks WHERE parent_id IS NOT NULL AND project_id IN
 			(SELECT id FROM projects WHERE slug LIKE $1)`, []any{orchSlugLike}},
