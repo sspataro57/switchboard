@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>switchboard — plans</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { font-size: 1.3rem; }
+    .flash { background: #fff8d0; border: 1px solid #d8c760; padding: .4rem .8rem; margin-bottom: 1rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: .4rem .6rem; text-align: left; font-size: .9rem; }
+    th { background: #f5f5f5; }
+    nav a { margin-right: .8rem; }
+    .muted { color: #777; font-size: .8rem; }
+    .status-proposed { color: #8a6d00; }
+    .status-approved { color: #0a5dab; }
+    .status-applied  { color: #1a7f37; }
+    .status-rejected { color: #b3261e; }
+  </style>
+</head>
+<body>
+  <nav><a href="/tasks">Board</a> <a href="/plans">Plans</a> <a href="/briefs">Briefs</a> <a href="/deliveries">Deliveries</a></nav>
+  <h1>Plan imports</h1>
+  {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+  <p class="muted">Filter: <a href="/plans">all</a> <a href="/plans?status=proposed">proposed</a>
+    <a href="/plans?status=approved">approved</a> <a href="/plans?status=applied">applied</a>
+    <a href="/plans?status=rejected">rejected</a></p>
+  <table>
+    <tr><th>id</th><th>project</th><th>source</th><th>status</th><th>decided by</th><th>created</th></tr>
+    {{range .Plans}}
+    <tr>
+      <td><a href="/plans/{{.ID}}">{{.ID}}</a></td>
+      <td>{{.Project}}</td>
+      <td><a href="/plans/{{.ID}}">{{.SourcePath}}</a></td>
+      <td class="status-{{.Status}}">{{.Status}}</td>
+      <td>{{.DecidedBy}}</td>
+      <td class="muted">{{.CreatedAt}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="6" class="muted">No plan imports (run planimport propose).</td></tr>
+    {{end}}
+  </table>
+</body>
+</html>

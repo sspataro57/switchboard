@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>switchboard — briefs</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { font-size: 1.3rem; }
+    h2 { font-size: 1rem; margin: 1.2rem 0 .3rem; }
+    pre { background: #f7f7f7; border: 1px solid #e2e2e2; padding: .6rem; white-space: pre-wrap; }
+    nav a { margin-right: .8rem; }
+    .muted { color: #777; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <nav><a href="/tasks">Board</a> <a href="/plans">Plans</a> <a href="/briefs">Briefs</a> <a href="/deliveries">Deliveries</a></nav>
+  <h1>Morning briefs</h1>
+  {{range .}}
+  <h2><a href="/tasks/{{.ID}}">{{.Title}}</a> <span class="muted">{{.At}}</span></h2>
+  <pre>{{.Body}}</pre>
+  {{else}}
+  <p class="muted">No briefs yet — the orchestrator's R7 creates one each morning.</p>
+  {{end}}
+</body>
+</html>

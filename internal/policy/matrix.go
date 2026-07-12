@@ -27,6 +27,7 @@ var sendShaped = map[string]bool{"send_delivery": true, "mark_delivery_sent": tr
 var humanOnly = map[string]bool{
 	"update_delivery": true, "approve_delivery": true, "send_delivery": true,
 	"mark_delivery_sent": true, "set_sending_frozen": true,
+	"approve_plan_import": true, "reject_plan_import": true, "apply_plan_import": true,
 }
 
 // snapshotGated tools need the loader (channel/rate/freeze state).

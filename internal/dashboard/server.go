@@ -49,8 +49,18 @@ func (s *Server) Handler() http.Handler {
 	s.auth.Routes(mux)
 
 	mux.Handle("GET /", s.auth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/deliveries", http.StatusFound)
+		http.Redirect(w, r, "/tasks", http.StatusFound)
 	})))
+	// SWT-10: full board, task detail, briefs, plan review, exports.
+	mux.Handle("GET /tasks", s.auth.Require(http.HandlerFunc(s.listTasks)))
+	mux.Handle("GET /tasks/{id}", s.auth.Require(http.HandlerFunc(s.showTask)))
+	mux.Handle("GET /briefs", s.auth.Require(http.HandlerFunc(s.listBriefs)))
+	mux.Handle("GET /plans", s.auth.Require(http.HandlerFunc(s.listPlans)))
+	mux.Handle("GET /plans/{id}", s.auth.Require(http.HandlerFunc(s.showPlan)))
+	mux.Handle("POST /plans/{id}/approve", s.auth.Require(s.planAction("approve_plan_import")))
+	mux.Handle("POST /plans/{id}/reject", s.auth.Require(s.planAction("reject_plan_import")))
+	mux.Handle("GET /export/tasks.csv", s.auth.Require(http.HandlerFunc(s.exportCSV)))
+	mux.Handle("GET /export/tasks.json", s.auth.Require(http.HandlerFunc(s.exportJSON)))
 	mux.Handle("GET /deliveries", s.auth.Require(http.HandlerFunc(s.listDeliveries)))
 	mux.Handle("POST /deliveries/{id}/edit", s.auth.Require(http.HandlerFunc(s.actionEdit)))
 	mux.Handle("POST /deliveries/{id}/approve", s.auth.Require(s.action("approve_delivery")))
@@ -157,6 +167,12 @@ func (s *Server) actionFreeze(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) execute(w http.ResponseWriter, r *http.Request, tool, args string) {
+	s.executeTo(w, r, tool, args, "/deliveries")
+}
+
+// executeTo runs a tool through the executor with the session actor and
+// redirects to the given page with a flash.
+func (s *Server) executeTo(w http.ResponseWriter, r *http.Request, tool, args, back string) {
 	actor := "dashboard:" + s.auth.User(r)
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
@@ -166,7 +182,7 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request, tool, args stri
 	if err != nil {
 		flash = err.Error()
 	}
-	http.Redirect(w, r, "/deliveries?flash="+template.URLQueryEscaper(flash), http.StatusSeeOther)
+	http.Redirect(w, r, back+"?flash="+template.URLQueryEscaper(flash), http.StatusSeeOther)
 }
 
 func jsonNum(s string) json.Number { return json.Number(s) }
