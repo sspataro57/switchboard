@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sspataro57/switchboard/internal/audit"
+	"github.com/sspataro57/switchboard/internal/connector/jira"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/fleet"
 	"github.com/sspataro57/switchboard/internal/policy"
@@ -124,6 +125,9 @@ func run(toolName string, args json.RawMessage) error {
 	tools.Register(reg, pool)
 	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
 	ex := executor.New(reg, checker, audit.NewPGStore(pool))
+	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
+		tools.SetJiraSender(&jira.AccountSender{Pool: pool, TokenKey: key})
+	}
 
 	res, err := ex.Execute(ctx, executor.Call{Tool: toolName, Actor: actor(), Args: args})
 	if err != nil {

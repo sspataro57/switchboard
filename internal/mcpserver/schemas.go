@@ -52,7 +52,12 @@ var agentTools = []Tool{
 	{
 		Name:        "draft_delivery",
 		Description: "Draft an outbound client communication as a delivery row (drafted; goes through approval before any send). THE only route for client-visible words.",
-		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat: the thread_key"}},"required":["task_id","channel","body"]}`),
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat","jira_comment"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat: the thread_key"}},"required":["task_id","channel","body"]}`),
+	},
+	{
+		Name:        "link_external_ref",
+		Description: "Link a task to an external system object (jira issue, github PR, upwork thread). Idempotent.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"system":{"type":"string","enum":["jira","github","upwork_crm"]},"external_key":{"type":"string"},"external_url":{"type":"string"}},"required":["task_id","system","external_key"]}`),
 	},
 	{
 		Name:        "record_decision",

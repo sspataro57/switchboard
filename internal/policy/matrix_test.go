@@ -67,6 +67,38 @@ func gmailSnap(sentThisHour int, frozen bool) policy.Snapshot {
 	}
 }
 
+// jiraSnap is the SWT-9 jira_comment snapshot (now a LIVE channel, gmail shape).
+func jiraSnap(sentThisHour int, frozen bool) policy.Snapshot {
+	return policy.Snapshot{
+		SendingFrozen: frozen,
+		SentLastHour:  map[string]int{"jira_comment": sentThisHour},
+		Channel:       "jira_comment",
+		HourlyLimit:   10,
+	}
+}
+
+// ---- SWT-9: jira_comment is live (criterion 6) --------------------------------
+
+// send_delivery on jira_comment is ALLOWED for a human under limit + not frozen
+// — the first channel_not_live graduation. Kill switch + the shared per-channel
+// hourly rate limit still apply (gmail shape).
+func TestDecide_JiraCommentSend_LiveLikeGmail(t *testing.T) {
+	req := policy.Request{Tool: "send_delivery", Actor: humanActor}
+
+	t.Run("under limit, not frozen -> allow", func(t *testing.T) {
+		d := policy.Decide(req, jiraSnap(2, false))
+		if d.Decision != "allow" {
+			t.Fatalf("jira_comment send (human, under limit) = %q/%q, want allow (channel is live now)", d.Decision, d.Rule)
+		}
+	})
+	t.Run("at limit -> rate_limit", func(t *testing.T) {
+		assertDeny(t, policy.Decide(req, jiraSnap(10, false)), "rate_limit")
+	})
+	t.Run("frozen -> kill_switch", func(t *testing.T) {
+		assertDeny(t, policy.Decide(req, jiraSnap(0, true)), "kill_switch")
+	})
+}
+
 func assertDeny(t *testing.T, d policy.Decision, wantRule string) {
 	t.Helper()
 	if d.Decision != "deny" {
@@ -137,8 +169,10 @@ func TestDecide_UpworkChatSend_DeniedAssisted(t *testing.T) {
 	assertDeny(t, d, "channel_assisted")
 }
 
+// SWT-9: jira_comment graduated OUT of channel_not_live (see
+// TestDecide_JiraCommentSend_LiveLikeGmail). Only calendar + github_review remain.
 func TestDecide_NotLiveChannels_DeniedNotLive(t *testing.T) {
-	for _, ch := range []string{"jira_comment", "calendar", "github_review"} {
+	for _, ch := range []string{"calendar", "github_review"} {
 		t.Run(ch, func(t *testing.T) {
 			snap := policy.Snapshot{SentLastHour: map[string]int{}, Channel: ch, HourlyLimit: 10}
 			d := policy.Decide(policy.Request{Tool: "send_delivery", Actor: humanActor}, snap)

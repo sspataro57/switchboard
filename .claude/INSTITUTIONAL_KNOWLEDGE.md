@@ -148,6 +148,34 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - Morning brief: env `ORCH_BRIEF_PROJECT` (unset = disabled), `ORCH_BRIEF_HOUR`
   (default 7). Deterministic SQL + Go template; never an LLM.
 
+## Jira + GitHub connectors (shipped in SWT-9)
+
+- Jira accounts: `jira-auth add <email> --site URL --projects KEY1,KEY2`
+  (JIRA_API_TOKEN + OPS_TOKEN_KEY env; project scoping MANDATORY — unscoped
+  polls are refused so the SWT build tracker never enters the product funnel).
+  Real account registered 2026-07-11: sspataro.atlassian.net scoped to CRM.
+- **Landmine (bit 2026-07-11): JQL naive datetimes are interpreted in the
+  USER'S profile timezone** — a UTC-formatted `updated >= "YYYY-MM-DD HH:MM"`
+  bound silently matched nothing. Use the relative form `updated >= "-Nm"`
+  (TZ-independent), as the connector now does.
+- Raw ids: `issue:{KEY}` (stored minus the comments array) + `comment:{KEY}:{id}`;
+  messages channel 'jira', thread_key `jira:{site_host}:{KEY}`; own comments
+  (author == polling accountId) are outbound → invisible to triage.
+- jira_comment channel is LIVE (matrix: rate-limited allow; all comments start
+  at approve — the auto tier for progress comments is the earned-promotion
+  path). sent_external_id = `jira:{site_host}:comment:{id}` (id assigned
+  post-call; ambiguous failures recovered by the poller's prefix matcher).
+- GitHub: `cmd/hooksd` (HMAC receiver, raw-first on delivery:{guid}; PUBLIC
+  EXPOSURE PENDING deploy) + `cmd/connectors/github --repos owner/repo`
+  (gh-token poller, same tools). PR↔task linking: external_refs
+  (`link_external_ref`, agent-facing) or the `task-{N}-*` branch fallback.
+- Orchestrator R9-R11: pr_opened→pr_open, ci started→awaiting_ci,
+  ci_passed→awaiting_merge, pr_merged→done_locally (emits done_local so R3
+  chains), pr_closed→ready+log, red CI ×2→ready with logs (same task).
+- New task_events vocabulary: pr_opened/pr_merged/pr_closed, ci_started/
+  ci_passed/ci_failed. New spine tools: record_pr_event, record_ci_event,
+  task_pr_transition; agent-facing: link_external_ref.
+
 ## Delivery contract (shipped in SWT-8)
 
 - Lifecycle tools: `draft_delivery` (agent-facing, THE route for client-visible

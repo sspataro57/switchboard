@@ -40,14 +40,15 @@ func (e *Engine) loadEventFacts(ctx context.Context, ev Event) (Facts, error) {
 	rows, err := e.pool.Query(ctx,
 		`SELECT COALESCE(payload->>'rule',''),
 		        COALESCE((payload->>'feedback_request_id')::bigint, 0),
-		        COALESCE((payload->>'created_task_id')::bigint, 0)
+		        COALESCE((payload->>'created_task_id')::bigint, 0),
+		        COALESCE((payload->>'trigger_event_id')::bigint, 0)
 		 FROM task_events WHERE task_id=$1 AND event_type='orchestrated' ORDER BY id`, ev.TaskID)
 	if err != nil {
 		return f, fmt.Errorf("load orchestrations: %w", err)
 	}
 	for rows.Next() {
 		o := Orchestration{TaskID: ev.TaskID}
-		if err := rows.Scan(&o.Rule, &o.FeedbackRequestID, &o.CreatedTaskID); err != nil {
+		if err := rows.Scan(&o.Rule, &o.FeedbackRequestID, &o.CreatedTaskID, &o.TriggerEventID); err != nil {
 			rows.Close()
 			return f, fmt.Errorf("scan orchestration: %w", err)
 		}
@@ -65,6 +66,19 @@ func (e *Engine) loadEventFacts(ctx context.Context, ev Event) (Facts, error) {
 		ev.TaskID).Scan(&f.ActiveClaimWorkerID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return f, fmt.Errorf("load active claim: %w", err)
+	}
+
+	// CI failure streak: consecutive ci_failed events since the last passing
+	// CI signal, up to and including the triggering event (R11).
+	if ev.Type == "ci_failed" {
+		if err := e.pool.QueryRow(ctx,
+			`SELECT count(*) FROM task_events
+			 WHERE task_id=$1 AND event_type='ci_failed' AND id <= $2
+			   AND id > COALESCE((SELECT max(id) FROM task_events
+			                      WHERE task_id=$1 AND event_type IN ('ci_passed','pr_opened') AND id <= $2), 0)`,
+			ev.TaskID, ev.ID).Scan(&f.CIFailureStreak); err != nil {
+			return f, fmt.Errorf("load CI failure streak: %w", err)
+		}
 	}
 
 	// Dependents of this task and whether their deps are now all satisfied.

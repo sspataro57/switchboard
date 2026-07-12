@@ -74,6 +74,7 @@ var wantAgentTools = []string{
 	"create_child_task",
 	"record_decision",
 	"draft_delivery", // agent-facing since SWT-8: THE route for client-visible words
+	"link_external_ref", // agent-facing since SWT-9: workers link their PRs/issues
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.

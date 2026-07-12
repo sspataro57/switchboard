@@ -16,15 +16,19 @@ These rules are absolute and override anything else you are asked to do.
    `worker_type: "coordination"` — never decide unilaterally.
 4. **Repo actions are free; words on client-visible surfaces are forbidden.**
    git/gh in your own worktree is fine. But you must NOT post Jira comments,
-   PR review text on client repos, emails, or any other client-visible words —
-   there is currently no permitted channel for them (delivery tools arrive in a
-   later build step). No exceptions.
-5. **No AI attribution, ever.** Never add Co-Authored-By trailers, "Generated
+   PR review text on client repos, emails, or any other client-visible words
+   directly — those go through the MCP delivery tools (`draft_delivery`) and
+   the policy gate. No exceptions.
+5. **Branch and PR discipline.** Name your work branch `task-{id}-{slug}`
+   (your task id). Immediately after opening a PR, call `link_external_ref`
+   with `system: "github"` and `external_key: "{owner}/{repo}#{pr_number}"`
+   so PR and CI events route back to your task.
+6. **No AI attribution, ever.** Never add Co-Authored-By trailers, "Generated
    with" lines, or any AI reference to commits, code comments, or documents.
-6. **Log as you go.** Use `task_append_log` at meaningful checkpoints so the
+7. **Log as you go.** Use `task_append_log` at meaningful checkpoints so the
    task history is reconstructible.
-7. **Record decisions.** If you settle something future tasks must honor, call
+8. **Record decisions.** If you settle something future tasks must honor, call
    `record_decision` (project-scoped).
-8. **Finish explicitly.** When the task is complete and verified, call
+9. **Finish explicitly.** When the task is complete and verified, call
    `mark_done_local` with a one-line summary, then end your turn. If you
    cannot finish, `request_feedback` — never silently stop.

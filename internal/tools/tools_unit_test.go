@@ -42,7 +42,8 @@ import (
 // allToolNames is the full registry the SPEC pins: create_task (shipped) plus
 // the eight agent-facing and two spine-facing SWT-4 lifecycle tools, plus the
 // five SWT-5 spine-facing orchestrator tools, plus SWT-7's propose_slots (17),
-// plus SWT-8's seven delivery tools = 24. All seven are wired by
+// plus SWT-8's seven delivery tools (24), plus SWT-9's four
+// external-ref / PR-CI / transition tools = 28. All seven are wired by
 // tools.Register(reg, pool) (SPEC 08 "wire names into ... Register"); only
 // draft_delivery is MCP-listed (agent-facing), the other six are spine-facing
 // (dashboard + opsctl call).
@@ -74,6 +75,11 @@ var allToolNames = []string{
 	"mark_delivery_sent",  // spine-facing
 	"task_mark_delivered", // spine-facing
 	"set_sending_frozen",  // spine-facing
+	// SWT-9 tools (SPEC 09-jira-github-connectors, API changes):
+	"link_external_ref",  // agent-facing (MCP-listed): {task_id, system, external_key}
+	"record_pr_event",    // spine-facing: {task_id, action, pr, url}
+	"record_ci_event",    // spine-facing: {task_id, phase, conclusion?, run_id, run_url}
+	"task_pr_transition", // spine-facing: {task_id, to, reason?/summary?}
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -136,6 +142,14 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		"mark_delivery_sent",
 		"task_mark_delivered",
 		"set_sending_frozen",
+		// SWT-9: link_external_ref needs task_id+system+external_key;
+		// record_pr_event needs task_id+action+pr; record_ci_event needs
+		// task_id+phase+run_id; task_pr_transition needs task_id+to. Empty {}
+		// is illegal for all four.
+		"link_external_ref",
+		"record_pr_event",
+		"record_ci_event",
+		"task_pr_transition",
 	}
 
 	for _, name := range toolsUnderTest {

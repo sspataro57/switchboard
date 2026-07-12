@@ -61,6 +61,10 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"mark_delivery_sent", validateDeliveryIDOnly, markDeliverySent},
 		{"task_mark_delivered", validateMarkDelivered, taskMarkDelivered},
 		{"set_sending_frozen", validateSetFrozen, setSendingFrozen},
+		{"link_external_ref", validateLinkExternalRef, linkExternalRef},
+		{"record_pr_event", validateRecordPREvent, recordPREvent},
+		{"record_ci_event", validateRecordCIEvent, recordCIEvent},
+		{"task_pr_transition", validatePRTransition, taskPRTransition},
 	} {
 		t := t
 		reg.Register(executor.Tool{
