@@ -202,6 +202,13 @@ func NormalizeCalendarEvent(raw json.RawMessage) (NormalizedEvent, error) {
 	if ne.Transparency == "" {
 		ne.Transparency = "opaque"
 	}
+	// Incremental Calendar sync includes deletion tombstones. Google may return
+	// only id + status=cancelled, so there is intentionally no interval to parse.
+	startMissing := e.Start.Date == "" && e.Start.DateTime == ""
+	endMissing := e.End.Date == "" && e.End.DateTime == ""
+	if ne.Status == "cancelled" && startMissing && endMissing {
+		return ne, nil
+	}
 
 	var err error
 	ne.StartsAt, ne.AllDay, err = parseCalTime(e.Start)

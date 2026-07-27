@@ -44,12 +44,22 @@ type Stats struct {
 	RawUnchanged   int `json:"raw_unchanged"`
 	Normalized     int `json:"normalized"`
 	DedupSkipped   int `json:"dedup_skipped"`
+	// CalendarResets counts sync-token resets applied as replacements, and
+	// CalendarSuperseded the observations the replacement no longer carried —
+	// both were previously invisible to the operator.
+	CalendarResets     int `json:"calendar_resets"`
+	CalendarSuperseded int `json:"calendar_superseded"`
+	// AccountsBusy counts accounts skipped because another pass held the lock.
+	AccountsBusy int `json:"accounts_busy"`
 }
 
 func (s *Stats) add(o Stats) {
 	s.GmailListed += o.GmailListed
 	s.GmailFetched += o.GmailFetched
 	s.CalendarListed += o.CalendarListed
+	s.CalendarResets += o.CalendarResets
+	s.CalendarSuperseded += o.CalendarSuperseded
+	s.AccountsBusy += o.AccountsBusy
 	s.RawInserted += o.RawInserted
 	s.RawUpdated += o.RawUpdated
 	s.RawUnchanged += o.RawUnchanged

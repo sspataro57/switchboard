@@ -19,6 +19,10 @@ func LoadEvents(ctx context.Context, pool *pgxpool.Pool, windowStart, windowEnd 
 		 JOIN raw_source_items r ON r.id = e.raw_source_item_id
 		 JOIN source_accounts a ON a.id = r.source_account_id
 		 WHERE a.provider='google'
+		   -- Defence in depth: a superseded observation is one a Calendar reset
+		   -- said no longer exists. Its event is marked cancelled too, but
+		   -- free/busy must never depend on that second write having landed.
+		   AND r.superseded_at IS NULL
 		   AND e.starts_at IS NOT NULL AND e.ends_at IS NOT NULL
 		   AND e.ends_at > $1 AND e.starts_at < $2`,
 		windowStart, windowEnd)

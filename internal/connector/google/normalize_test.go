@@ -399,6 +399,17 @@ func TestNormalizeCalendarEvent_CancelledStatusPreserved(t *testing.T) {
 	}
 }
 
+func TestNormalizeCalendarEvent_DeletedTombstoneNeedsNoTimes(t *testing.T) {
+	raw := json.RawMessage(`{"id":"evt-deleted","status":"cancelled"}`)
+	ne, err := google.NormalizeCalendarEvent(raw)
+	if err != nil {
+		t.Fatalf("NormalizeCalendarEvent tombstone: %v", err)
+	}
+	if ne.Status != "cancelled" || !ne.StartsAt.IsZero() || !ne.EndsAt.IsZero() {
+		t.Fatalf("tombstone = %+v, want cancelled with no interval", ne)
+	}
+}
+
 // Determinism for the calendar mapper too.
 func TestNormalizeCalendarEvent_Deterministic(t *testing.T) {
 	raw := json.RawMessage(`{
