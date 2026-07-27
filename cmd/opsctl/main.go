@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sspataro57/switchboard/internal/audit"
+	"github.com/sspataro57/switchboard/internal/connector/google"
 	"github.com/sspataro57/switchboard/internal/connector/jira"
 	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/executor"
@@ -128,6 +129,13 @@ func run(toolName string, args json.RawMessage) error {
 	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
 		tools.SetJiraSender(&jira.AccountSender{Pool: pool, TokenKey: key})
+	}
+	if binary := os.Getenv("GMAIL_CONNECTOR_BRIDGE"); binary != "" {
+		bridge, err := google.NewCommandBridge(binary)
+		if err != nil {
+			return fmt.Errorf("configure Gmail connector bridge: %w", err)
+		}
+		tools.SetGmailSender(&google.BridgeSender{Bridge: bridge})
 	}
 	if script := os.Getenv("SLACK_WEB_BRIDGE_SCRIPT"); script != "" {
 		bridge, err := slackweb.NewCommandBridge(os.Getenv("SLACK_WEB_NODE"), script)

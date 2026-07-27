@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,6 +21,39 @@ type PGSink struct {
 
 func NewPGSink(pool *pgxpool.Pool) *PGSink {
 	return &PGSink{pool: pool}
+}
+
+// EnsureBridgeAccount creates the token-free source account discovered from
+// the sibling local connector. It deliberately leaves any existing encrypted
+// refresh token, scopes, send flag, and calendar policy unchanged.
+func (s *PGSink) EnsureBridgeAccount(ctx context.Context, discovered BridgeAccount) (Account, error) {
+	email := strings.ToLower(strings.TrimSpace(discovered.Email))
+	if email == "" {
+		return Account{}, fmt.Errorf("Gmail bridge account %q has no email", discovered.Alias)
+	}
+	var account Account
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, account_email, calendar_in_availability
+		 FROM source_accounts
+		 WHERE provider='google' AND lower(account_email)=lower($1)
+		 ORDER BY id LIMIT 1`, email).
+		Scan(&account.ID, &account.Email, &account.CalendarInAvailability)
+	if err == nil {
+		return account, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Account{}, fmt.Errorf("find bridge source account %s: %w", email, err)
+	}
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO source_accounts (provider, account_email)
+		 VALUES ('google', $1)
+		 ON CONFLICT (provider, account_email) DO UPDATE SET account_email=EXCLUDED.account_email
+		 RETURNING id, account_email, calendar_in_availability`, email).
+		Scan(&account.ID, &account.Email, &account.CalendarInAvailability)
+	if err != nil {
+		return Account{}, fmt.Errorf("ensure bridge source account %s: %w", email, err)
+	}
+	return account, nil
 }
 
 // ListAccounts returns every provider='google' account.
@@ -92,10 +128,17 @@ func (s *PGSink) FinishRun(ctx context.Context, runID int64, status string, stat
 	return nil
 }
 
+// RawHash reports the stored hash for a LIVE row. A superseded row answers
+// "absent" on purpose: an event deleted and later re-created carries the same
+// id, and if we reported its old hash the observation would either be skipped
+// as unchanged or updated while still flagged superseded — either way the
+// revived event would never normalize again. Absent routes it to InsertRaw,
+// which upserts and clears the flag.
 func (s *PGSink) RawHash(ctx context.Context, accountID int64, externalID string) (string, bool, error) {
 	var h string
 	err := s.pool.QueryRow(ctx,
-		`SELECT content_hash FROM raw_source_items WHERE source_account_id=$1 AND external_id=$2`,
+		`SELECT content_hash FROM raw_source_items
+		  WHERE source_account_id=$1 AND external_id=$2 AND superseded_at IS NULL`,
 		accountID, externalID).Scan(&h)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
@@ -107,9 +150,15 @@ func (s *PGSink) RawHash(ctx context.Context, accountID int64, externalID string
 }
 
 func (s *PGSink) InsertRaw(ctx context.Context, accountID int64, externalID string, raw json.RawMessage, hash string) error {
+	// Upsert, not a bare insert: the row may exist but be superseded (see
+	// RawHash). Re-observing it revives it — new bytes, cleared flag, and
+	// normalized_at reset so the next pass rebuilds the canonical row.
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO raw_source_items (source_account_id, external_id, raw_json, content_hash)
-		 VALUES ($1,$2,$3,$4)`,
+		 VALUES ($1,$2,$3,$4)
+		 ON CONFLICT (source_account_id, external_id) DO UPDATE
+		   SET raw_json=EXCLUDED.raw_json, content_hash=EXCLUDED.content_hash,
+		       ingested_at=now(), normalized_at=NULL, superseded_at=NULL`,
 		accountID, externalID, raw, hash); err != nil {
 		return fmt.Errorf("insert raw item: %w", err)
 	}
@@ -119,7 +168,8 @@ func (s *PGSink) InsertRaw(ctx context.Context, accountID int64, externalID stri
 func (s *PGSink) UpdateRaw(ctx context.Context, accountID int64, externalID string, raw json.RawMessage, hash string) error {
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE raw_source_items
-		 SET raw_json=$3, content_hash=$4, ingested_at=now(), normalized_at=NULL
+		 SET raw_json=$3, content_hash=$4, ingested_at=now(), normalized_at=NULL,
+		     superseded_at=NULL
 		 WHERE source_account_id=$1 AND external_id=$2`,
 		accountID, externalID, raw, hash); err != nil {
 		return fmt.Errorf("update raw item: %w", err)
@@ -138,10 +188,13 @@ type rawItem struct {
 
 // pendingRaw lists this connector's raw rows to normalize (pending, or all).
 func (s *PGSink) pendingRaw(ctx context.Context, all bool) ([]rawItem, error) {
+	// superseded_at filters BOTH paths, --all included: a Calendar reset marks
+	// observations the replacement snapshot no longer carries, and replaying
+	// them would resurrect events that no longer exist (0010).
 	q := `SELECT r.id, r.external_id, a.account_email, r.raw_json
 	      FROM raw_source_items r
 	      JOIN source_accounts a ON a.id = r.source_account_id
-	      WHERE a.provider = 'google'`
+	      WHERE a.provider = 'google' AND r.superseded_at IS NULL`
 	if !all {
 		q += ` AND r.normalized_at IS NULL`
 	}
@@ -268,16 +321,30 @@ func (s *PGSink) upsertEvent(ctx context.Context, rawItemID int64, ne Normalized
 	if ne.Attendees == nil {
 		attendees = []byte(`[]`)
 	}
+	var startsAt, endsAt any = ne.StartsAt, ne.EndsAt
+	if ne.StartsAt.IsZero() {
+		startsAt = nil
+	}
+	if ne.EndsAt.IsZero() {
+		endsAt = nil
+	}
 	if _, err := s.pool.Exec(ctx,
+		// SELECT ... WHERE superseded_at IS NULL rather than VALUES: normalize
+		// snapshots live raw rows and upserts them later, so a reset running in
+		// between could be undone by the stale normalizer writing the event
+		// back to confirmed — while the raw row stays superseded, making it
+		// unreachable by any future pass. Re-checking here closes that window.
 		`INSERT INTO normalized_events
 		   (raw_source_item_id, starts_at, ends_at, attendees, title, status, transparency, all_day)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8
+		  WHERE EXISTS (SELECT 1 FROM raw_source_items r
+		                 WHERE r.id = $1 AND r.superseded_at IS NULL)
 		 ON CONFLICT (raw_source_item_id) DO UPDATE SET
 		   starts_at=EXCLUDED.starts_at, ends_at=EXCLUDED.ends_at,
 		   attendees=EXCLUDED.attendees, title=EXCLUDED.title,
 		   status=EXCLUDED.status, transparency=EXCLUDED.transparency,
 		   all_day=EXCLUDED.all_day`,
-		rawItemID, ne.StartsAt, ne.EndsAt, attendees, ne.Title, ne.Status,
+		rawItemID, startsAt, endsAt, attendees, ne.Title, ne.Status,
 		ne.Transparency, ne.AllDay); err != nil {
 		return fmt.Errorf("upsert event for raw item %d: %w", rawItemID, err)
 	}
@@ -290,4 +357,129 @@ func (s *PGSink) markNormalized(ctx context.Context, rawItemID int64) error {
 		return fmt.Errorf("mark normalized: %w", err)
 	}
 	return nil
+}
+
+// bridgeAccountLockNS namespaces the per-account advisory lock (siblings:
+// orchestrator 0x51570005, triage 0x51570006).
+const bridgeAccountLockNS = 0x51570007
+
+// LockAccount serializes one account's whole Gmail+Calendar pass. Without it
+// two runs interleave: each reads the cursor, spends a long time in the leaf,
+// and writes back — so an older export can overwrite newer raw JSON while the
+// newer run commits its later sync token, leaving stale observations paired
+// with a current cursor that no future delta will ever repair.
+//
+// Returns ok=false when another run holds the account; the caller skips it
+// rather than failing, since the holder is doing the same work.
+func (s *PGSink) LockAccount(ctx context.Context, accountID int64) (release func(), ok bool, err error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("acquire lock connection: %w", err)
+	}
+	// Session-scoped, not xact-scoped: the lock must outlive the many separate
+	// statements of a pass, and it is held on this one pinned connection.
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1, $2)`,
+		bridgeAccountLockNS, accountID).Scan(&ok); err != nil {
+		conn.Release()
+		return nil, false, fmt.Errorf("try account lock %d: %w", accountID, err)
+	}
+	if !ok {
+		conn.Release()
+		return nil, false, nil
+	}
+	return func() {
+		// Fresh bounded context: a cancelled ctx must still release, but an
+		// unbounded one can hang cleanup on a degraded server.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		var unlocked bool
+		err := conn.QueryRow(cleanupCtx,
+			`SELECT pg_advisory_unlock($1, $2)`, bridgeAccountLockNS, accountID).Scan(&unlocked)
+		if err != nil || !unlocked {
+			// Returning a still-locked session to the pool would make every
+			// later pass skip this account as busy, forever, exiting 0. Destroy
+			// the connection instead so the lock dies with it, and say so.
+			slog.Error("advisory unlock failed; destroying the connection",
+				"account_id", accountID, "unlocked", unlocked, "err", err)
+			hijacked := conn.Hijack()
+			_ = hijacked.Close(cleanupCtx)
+			return
+		}
+		conn.Release()
+	}, true, nil
+}
+
+// SaveCursorField writes ONE cursor key. SaveCursor replaces the whole JSON
+// blob, so a Gmail save could clobber a Calendar token written by a concurrent
+// writer (direct mode, a manual run) between its read and its write.
+func (s *PGSink) SaveCursorField(ctx context.Context, accountID int64, field string, value any) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("marshal cursor field %s: %w", field, err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE source_accounts
+		    SET sync_cursor = jsonb_set(COALESCE(sync_cursor, '{}'::jsonb), ARRAY[$2], $3::jsonb, true)
+		  WHERE id = $1`, accountID, field, encoded); err != nil {
+		return fmt.Errorf("save cursor field %s: %w", field, err)
+	}
+	return nil
+}
+
+// SupersedeAbsentCalendar applies a Calendar reset as a REPLACEMENT: every
+// calendar observation INSIDE the replacement window that the snapshot no
+// longer carries is stamped superseded and its normalized event cancelled, in
+// one transaction, BEFORE the new sync token is saved.
+//
+// windowFrom/windowTo bound it to what the export actually asked Google for.
+// Without that bound an event from last year — outside the queried window and
+// therefore absent for a reason that has nothing to do with deletion — would be
+// cancelled by every reset.
+func (s *PGSink) SupersedeAbsentCalendar(ctx context.Context, accountID int64, keep []string, windowFrom, windowTo time.Time) (int, error) {
+	if len(keep) == 0 {
+		// An empty replacement is indistinguishable from a broken leaf, and
+		// acting on it would cancel the whole window. Absence of evidence.
+		return 0, fmt.Errorf("refusing to apply an empty Calendar reset snapshot for account %d", accountID)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin calendar reset: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// startsAt reads the event's own start out of the exact provider JSON:
+	// dateTime for timed events, date for all-day ones. Rows with neither are
+	// tombstones already and are left alone.
+	const startsAt = `COALESCE(NULLIF(raw_json->'start'->>'dateTime',''), NULLIF(raw_json->'start'->>'date',''))`
+	tag, err := tx.Exec(ctx,
+		`UPDATE raw_source_items
+		    SET superseded_at = now()
+		  WHERE source_account_id = $1
+		    AND external_id LIKE 'calendar:%'
+		    AND superseded_at IS NULL
+		    AND NOT (external_id = ANY($2::text[]))
+		    AND `+startsAt+` IS NOT NULL
+		    AND (`+startsAt+`)::timestamptz >= $3
+		    AND (`+startsAt+`)::timestamptz < $4`, accountID, keep, windowFrom, windowTo)
+	if err != nil {
+		return 0, fmt.Errorf("supersede absent calendar raw: %w", err)
+	}
+	superseded := int(tag.RowsAffected())
+
+	// The event stays as a cancelled row rather than being deleted: the funnel
+	// keeps its history, and availability ignores cancelled spans.
+	if _, err := tx.Exec(ctx,
+		`UPDATE normalized_events e
+		    SET status = 'cancelled'
+		   FROM raw_source_items r
+		  WHERE e.raw_source_item_id = r.id
+		    AND r.source_account_id = $1
+		    AND r.superseded_at IS NOT NULL
+		    AND e.status IS DISTINCT FROM 'cancelled'`, accountID); err != nil {
+		return 0, fmt.Errorf("cancel superseded calendar events: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit calendar reset: %w", err)
+	}
+	return superseded, nil
 }

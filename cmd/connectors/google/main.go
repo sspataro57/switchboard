@@ -1,12 +1,12 @@
-// google is the one-shot Gmail + Calendar poller (SPEC 07-google-oauth-pollers):
-// per provider='google' account, gmail phase then calendar phase (raw-first),
-// then the normalize phase (dedup by Message-ID, direction rule). Scheduling
-// is external (cron, 5-15 min).
+// google is the one-shot Google poller. With GMAIL_CONNECTOR_BRIDGE set it
+// performs Gmail + Calendar ingestion through the sibling local connector.
+// Without it, the existing database-token Gmail + Calendar path is unchanged.
 //
 //	google [--full] [--normalize-only] [--all] [--overlap 1h] [--backfill 2160h] [--account email]
 //
 //	DATABASE_URL               ops db, required
-//	OPS_TOKEN_KEY              required unless --normalize-only
+//	GMAIL_CONNECTOR_BRIDGE     optional absolute local bridge binary
+//	OPS_TOKEN_KEY              required for direct mode unless --normalize-only
 //	GOOGLE_CLIENT_SECRET_FILE  default ~/.config/switchboard/google_client_secret.json
 package main
 
@@ -52,32 +52,44 @@ func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account
 	cfg := google.Config{Full: full, All: all, Overlap: overlap, Backfill: backfill, AccountEmail: account}
 
 	if !normalizeOnly {
-		key := os.Getenv("OPS_TOKEN_KEY")
-		if key == "" {
-			return fmt.Errorf("OPS_TOKEN_KEY is not set")
-		}
-		secretFile := os.Getenv("GOOGLE_CLIENT_SECRET_FILE")
-		if secretFile == "" {
-			home, _ := os.UserHomeDir()
-			secretFile = filepath.Join(home, ".config", "switchboard", "google_client_secret.json")
-		}
-		oauthCfg, err := google.LoadOAuthConfig(secretFile, "")
-		if err != nil {
-			return err
-		}
-
-		factory := func(ctx context.Context, acct google.Account) (google.Clients, error) {
-			hc, err := google.TokenClient(ctx, pool, oauthCfg, acct, key)
-			if err != nil {
-				return google.Clients{}, err
+		var stats google.Stats
+		if binary := os.Getenv("GMAIL_CONNECTOR_BRIDGE"); binary != "" {
+			// bridgeErr, not err: `bridge, err :=` would declare a block-scoped
+			// err, RunBridge's failure would die at the closing brace, and the
+			// check below would read the outer (nil) err — a failed ingest
+			// exiting 0. Same reason the direct branch uses loadErr/clientErr.
+			bridge, bridgeErr := google.NewCommandBridge(binary)
+			if bridgeErr != nil {
+				return fmt.Errorf("configure Gmail connector bridge: %w", bridgeErr)
 			}
-			return google.Clients{
-				Gmail:    google.NewGmailClient(hc, "", acct.Email),
-				Calendar: google.NewCalendarClient(hc, ""),
-			}, nil
-		}
+			stats, err = google.RunBridge(ctx, bridge, sink, cfg)
+		} else {
+			key := os.Getenv("OPS_TOKEN_KEY")
+			if key == "" {
+				return fmt.Errorf("OPS_TOKEN_KEY is not set")
+			}
+			secretFile := os.Getenv("GOOGLE_CLIENT_SECRET_FILE")
+			if secretFile == "" {
+				home, _ := os.UserHomeDir()
+				secretFile = filepath.Join(home, ".config", "switchboard", "google_client_secret.json")
+			}
+			oauthCfg, loadErr := google.LoadOAuthConfig(secretFile, "")
+			if loadErr != nil {
+				return loadErr
+			}
 
-		stats, err := google.Run(ctx, sink, factory, cfg)
+			factory := func(ctx context.Context, acct google.Account) (google.Clients, error) {
+				hc, clientErr := google.TokenClient(ctx, pool, oauthCfg, acct, key)
+				if clientErr != nil {
+					return google.Clients{}, clientErr
+				}
+				return google.Clients{
+					Gmail:    google.NewGmailClient(hc, "", acct.Email),
+					Calendar: google.NewCalendarClient(hc, ""),
+				}, nil
+			}
+			stats, err = google.Run(ctx, sink, factory, cfg)
+		}
 		printStats("ingest", stats)
 		if err != nil {
 			return fmt.Errorf("ingest: %w", err)

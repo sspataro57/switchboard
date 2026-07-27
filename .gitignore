@@ -1,8 +1,22 @@
 # local-only Claude settings (personal allowlist, not portable)
 .claude/settings.local.json
 
-# binaries / build output
+# binaries / build output — `go build ./cmd/<x>` drops the binary here, and a
+# 15 MB `google` binary was nearly committed once. Cover every cmd name.
 /switchboard
+/google
+/opsctl
+/dashboard
+/fleetd
+/hooksd
+/triage
+/drafts
+/planimport
+/opsworker
+/orchestratord
+/ops-mcp
+/google-auth
+/jira-auth
 *.test
 
 # env / secrets

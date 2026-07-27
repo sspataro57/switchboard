@@ -4,7 +4,7 @@
 //
 //	DASHBOARD_ADDR default :8085
 //	OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URL
-//	DATABASE_URL, OPS_TOKEN_KEY (for real sends), GOOGLE_CLIENT_SECRET_FILE
+//	DATABASE_URL; GMAIL_CONNECTOR_BRIDGE or OPS_TOKEN_KEY + GOOGLE_CLIENT_SECRET_FILE
 package main
 
 import (
@@ -51,10 +51,16 @@ func run() error {
 		tools.SetJiraSender(&jira.AccountSender{Pool: pool, TokenKey: key})
 	}
 
-	// Wire the real gmail send adapter when the credentials exist; without
-	// them send_delivery fails cleanly ("no gmail send adapter wired" never
-	// happens — the account resolution errors instead).
-	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
+	// Prefer the sibling local connector so OAuth tokens have one owner. The
+	// database-token adapter remains the direct-mode fallback.
+	if binary := os.Getenv("GMAIL_CONNECTOR_BRIDGE"); binary != "" {
+		bridge, err := google.NewCommandBridge(binary)
+		if err != nil {
+			return fmt.Errorf("configure Gmail connector bridge: %w", err)
+		}
+		tools.SetGmailSender(&google.BridgeSender{Bridge: bridge})
+		slog.Info("gmail bridge send adapter wired")
+	} else if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
 		secretFile := os.Getenv("GOOGLE_CLIENT_SECRET_FILE")
 		if secretFile == "" {
 			home, _ := os.UserHomeDir()

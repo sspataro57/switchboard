@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -94,6 +95,45 @@ type AccountSender struct {
 	OAuthCfg *oauth2.Config
 	TokenKey string
 	BaseURL  string
+}
+
+// BridgeSender delegates only the final Gmail API transport to the sibling
+// local connector. The caller remains tools.sendDelivery, which has already
+// resolved and reserved the delivery before this network boundary.
+type BridgeSender struct {
+	Bridge *CommandBridge
+}
+
+func (s *BridgeSender) Send(ctx context.Context, fromUserID string, rawMIME []byte, threadID string) (string, error) {
+	if s == nil || s.Bridge == nil {
+		// Misconfiguration: nothing was sent and nothing could have been, so
+		// this is a definite rejection rather than an ambiguous transport
+		// failure. Treating it as ambiguous wedged the delivery — reservation
+		// held, not re-approvable without manual SQL.
+		return "", &SendRejectedError{Body: "Gmail connector bridge is not configured"}
+	}
+	result, err := s.Bridge.SendRaw(ctx, BridgeSendRawRequest{
+		FromEmail: fromUserID,
+		Raw:       base64.RawURLEncoding.EncodeToString(rawMIME),
+		ThreadID:  threadID,
+	})
+	if err != nil {
+		// Already-typed rejections (the leaf ran and refused) pass through.
+		var rejected *SendRejectedError
+		if errors.As(err, &rejected) {
+			return "", rejected
+		}
+		// Provably pre-network failures are definite non-sends.
+		var notRun *BridgeNotRunError
+		if errors.As(err, &notRun) {
+			return "", &SendRejectedError{Body: notRun.Error()}
+		}
+		// Everything else — the process ran, then timed out, died, or answered
+		// unintelligibly. The message may be gone. Stay untyped so the
+		// reservation holds and invariant 4 never resends.
+		return "", fmt.Errorf("send through Gmail connector bridge: %w", err)
+	}
+	return result.MessageID, nil
 }
 
 func (a *AccountSender) Send(ctx context.Context, fromUserID string, rawMIME []byte, threadID string) (string, error) {
