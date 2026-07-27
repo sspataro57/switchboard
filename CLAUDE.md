@@ -195,12 +195,12 @@ items — `/ticket-start` below.)
 - `/ticket-review <ID>` — go-reviewer checks the diff against the seven invariants;
   optional codex adversarial pass for executor/policy/delivery code
 - `/ticket-deliver <ID>` — full tests + "usable alone" smoke check + commit-ready
-  summary (the commit itself is Salvador's) + Jira comment/transition
+  summary + auto-commit/merge/push + Jira comment/transition
 - `/bug-start <slug>` — reproduction-first bug flow (bug-reproducer → bug-diagnoser);
   no source reading until a reproduction fails as described
 
 Planning is local — specs in `docs/tickets/`, bug artifacts in `docs/bugs/` — but
 **tracking of record is the personal Jira** (sspataro.atlassian.net, project **SWT**,
-via the Atlassian MCP in `.mcp.json`; see INSTITUTIONAL_KNOWLEDGE.md "Jira build
+via the jira MCP in `.mcp.json`; see INSTITUTIONAL_KNOWLEDGE.md "Jira build
 tracker"). That board tracks the BUILD only; it is unrelated to the product's Jira
 connector for managed projects.
