@@ -40,6 +40,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/sspataro57/switchboard/internal/executor"
@@ -73,12 +74,25 @@ var wantAgentTools = []string{
 	"mark_done_local",
 	"create_child_task",
 	"record_decision",
-	"draft_delivery", // agent-facing since SWT-8: THE route for client-visible words
+	"draft_delivery",    // agent-facing since SWT-8: THE route for client-visible words
 	"link_external_ref", // agent-facing since SWT-9: workers link their PRs/issues
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.
-var spineTools = []string{"task_release", "answer_feedback"}
+var spineTools = []string{"task_release", "answer_feedback", "prefill_delivery"}
+
+func TestDraftDeliverySchema_IncludesSlackReply(t *testing.T) {
+	srv := mcpserver.New(&fakeExec{}, testWorkerID)
+	for _, tool := range srv.ListTools() {
+		if tool.Name == "draft_delivery" {
+			if !strings.Contains(string(tool.InputSchema), `"slack_reply"`) {
+				t.Fatalf("draft_delivery schema lacks slack_reply: %s", tool.InputSchema)
+			}
+			return
+		}
+	}
+	t.Fatal("draft_delivery not listed")
+}
 
 func TestListTools_ExactlyAgentAllowlist(t *testing.T) {
 	srv := mcpserver.New(&fakeExec{}, testWorkerID)

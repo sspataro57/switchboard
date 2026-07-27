@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sspataro57/switchboard/internal/connector/google"
+	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/executor"
 )
 
@@ -45,6 +46,17 @@ var jiraSender JiraSender
 // SetJiraSender wires the jira comment adapter.
 func SetJiraSender(s JiraSender) { jiraSender = s }
 
+// SlackDrafter is the assisted Slack delivery seam. Its implementation may
+// populate a browser composer, but it must never send the message.
+type SlackDrafter interface {
+	Draft(ctx context.Context, targetURL, text string) error
+}
+
+var slackDrafter SlackDrafter
+
+// SetSlackDrafter wires the local Slack Web bridge used by prefill_delivery.
+func SetSlackDrafter(d SlackDrafter) { slackDrafter = d }
+
 // ---- draft_delivery (agent-facing) ------------------------------------------
 
 type draftDeliveryArgs struct {
@@ -65,9 +77,9 @@ func validateDraftDelivery(args []byte) error {
 		return errors.New("missing task_id")
 	}
 	switch a.Channel {
-	case "gmail", "upwork_chat", "jira_comment":
+	case "gmail", "upwork_chat", "jira_comment", "slack_reply":
 	default:
-		return fmt.Errorf("channel %q: must be gmail, upwork_chat, or jira_comment", a.Channel)
+		return fmt.Errorf("channel %q: must be gmail, upwork_chat, jira_comment, or slack_reply", a.Channel)
 	}
 	if a.Body == "" {
 		return errors.New("missing body")
@@ -75,10 +87,62 @@ func validateDraftDelivery(args []byte) error {
 	if a.Channel == "gmail" && a.ThreadID == nil {
 		return errors.New("gmail drafts require thread_id (From is resolved from the thread)")
 	}
-	if (a.Channel == "upwork_chat" || a.Channel == "jira_comment") && a.TargetRef == "" {
-		return errors.New("upwork_chat/jira_comment drafts require target_ref (the thread_key)")
+	if (a.Channel == "upwork_chat" || a.Channel == "jira_comment" || a.Channel == "slack_reply") && a.TargetRef == "" {
+		return errors.New("upwork_chat/jira_comment/slack_reply drafts require target_ref")
+	}
+	if a.Channel == "slack_reply" {
+		if _, err := slackweb.ParseTargetURL(a.TargetRef); err != nil {
+			return fmt.Errorf("invalid slack_reply target_ref: %w", err)
+		}
 	}
 	return nil
+}
+
+// ---- prefill_delivery (assisted Slack tier) -----------------------------------
+
+func prefillDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, error) {
+	var a deliveryIDOnlyArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, fmt.Errorf("parse args: %w", err)
+	}
+	if slackDrafter == nil {
+		return nil, fmt.Errorf("no Slack draft adapter wired (SetSlackDrafter)")
+	}
+
+	if err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		var status, channel, targetRef, body string
+		if err := tx.QueryRow(ctx,
+			`SELECT status, channel, COALESCE(target_ref,''), body
+			 FROM deliveries WHERE id=$1 FOR UPDATE`, a.DeliveryID).
+			Scan(&status, &channel, &targetRef, &body); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("delivery %d not found", a.DeliveryID)
+			}
+			return fmt.Errorf("load Slack delivery %d: %w", a.DeliveryID, err)
+		}
+		if channel != "slack_reply" {
+			return fmt.Errorf("prefill_delivery only supports slack_reply; delivery %d is %s", a.DeliveryID, channel)
+		}
+		if status != "approved" {
+			return fmt.Errorf("delivery %d is %s; only approved Slack replies can be prefilled", a.DeliveryID, status)
+		}
+		if targetRef == "" || body == "" {
+			return fmt.Errorf("delivery %d is missing its Slack target or body", a.DeliveryID)
+		}
+		// Keep the row lock while the local composer operation runs so a
+		// concurrent mark_delivery_sent cannot race this approved-only check.
+		if err := slackDrafter.Draft(ctx, targetRef, body); err != nil {
+			return fmt.Errorf("prefill Slack delivery %d: %w", a.DeliveryID, err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return marshalResult(map[string]any{
+		"delivery_id": a.DeliveryID,
+		"drafted":     true,
+		"sent":        false,
+	})
 }
 
 func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, error) {
@@ -106,6 +170,16 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 			return nil, fmt.Errorf("resolve jira account: %w", err)
 		}
 		fromAccountID = &acctID
+	}
+	if a.Channel == "slack_reply" {
+		// Store the canonical spelling, not the caller's. Loop closure matches
+		// target_ref by exact string, so an accepted-but-noncanonical variant
+		// (trailing slash) would leave the delivery unconfirmable forever.
+		target, err := slackweb.ParseTargetURL(a.TargetRef)
+		if err != nil {
+			return nil, fmt.Errorf("invalid slack_reply target_ref: %w", err)
+		}
+		a.TargetRef = target.CanonicalURL()
 	}
 	if a.Channel == "gmail" {
 		// From is resolved server-side from the thread's mailbox segment
@@ -465,8 +539,8 @@ func markDeliverySent(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]b
 			}
 			return fmt.Errorf("lock delivery %d: %w", a.DeliveryID, err)
 		}
-		if channel != "upwork_chat" {
-			return fmt.Errorf("mark_delivery_sent is the assisted tier's verb (upwork_chat); delivery %d is %s", a.DeliveryID, channel)
+		if channel != "upwork_chat" && channel != "slack_reply" {
+			return fmt.Errorf("mark_delivery_sent is the assisted tier's verb (upwork_chat/slack_reply); delivery %d is %s", a.DeliveryID, channel)
 		}
 		if status != "approved" {
 			return fmt.Errorf("delivery %d is %s; only approved deliveries can be marked sent", a.DeliveryID, status)

@@ -169,6 +169,18 @@ func TestDecide_UpworkChatSend_DeniedAssisted(t *testing.T) {
 	assertDeny(t, d, "channel_assisted")
 }
 
+func TestDecide_SlackReplyAssistedTier(t *testing.T) {
+	snap := policy.Snapshot{
+		SentLastHour: map[string]int{"slack_reply": 0}, Channel: "slack_reply", HourlyLimit: 10,
+	}
+	assertDeny(t, policy.Decide(policy.Request{Tool: "send_delivery", Actor: humanActor}, snap), "channel_assisted")
+	if d := policy.Decide(policy.Request{Tool: "mark_delivery_sent", Actor: humanActor}, snap); d.Decision != "allow" {
+		t.Fatalf("slack_reply mark sent = %q/%q, want allow", d.Decision, d.Rule)
+	}
+	snap.SentLastHour["slack_reply"] = 10
+	assertDeny(t, policy.Decide(policy.Request{Tool: "mark_delivery_sent", Actor: humanActor}, snap), "rate_limit")
+}
+
 // SWT-9: jira_comment graduated OUT of channel_not_live (see
 // TestDecide_JiraCommentSend_LiveLikeGmail). Only calendar + github_review remain.
 func TestDecide_NotLiveChannels_DeniedNotLive(t *testing.T) {
@@ -190,7 +202,7 @@ func TestDecide_HumanOnly_DeniesBotActors(t *testing.T) {
 	snap := gmailSnap(0, false)
 	for _, tool := range []string{
 		"update_delivery", "approve_delivery", "send_delivery",
-		"mark_delivery_sent", "set_sending_frozen",
+		"mark_delivery_sent", "prefill_delivery", "set_sending_frozen",
 	} {
 		t.Run(tool+"/bot denied", func(t *testing.T) {
 			d := policy.Decide(policy.Request{Tool: tool, Actor: botActor}, snap)

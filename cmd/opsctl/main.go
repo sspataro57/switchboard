@@ -15,6 +15,7 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/connector/jira"
+	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/fleet"
 	"github.com/sspataro57/switchboard/internal/policy"
@@ -127,6 +128,13 @@ func run(toolName string, args json.RawMessage) error {
 	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
 		tools.SetJiraSender(&jira.AccountSender{Pool: pool, TokenKey: key})
+	}
+	if script := os.Getenv("SLACK_WEB_BRIDGE_SCRIPT"); script != "" {
+		bridge, err := slackweb.NewCommandBridge(os.Getenv("SLACK_WEB_NODE"), script)
+		if err != nil {
+			return fmt.Errorf("configure Slack draft bridge: %w", err)
+		}
+		tools.SetSlackDrafter(bridge)
 	}
 
 	res, err := ex.Execute(ctx, executor.Call{Tool: toolName, Actor: actor(), Args: args})

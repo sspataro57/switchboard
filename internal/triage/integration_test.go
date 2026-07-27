@@ -84,6 +84,13 @@ func cleanupTriage(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-%')`,
 		`DELETE FROM sync_runs WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-%')`,
 		`DELETE FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-%'`,
+		// foreign corpus (Slack Web connector integration leftovers)
+		`DELETE FROM ai_extractions WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='slack_web' AND account_email='titest@slack-web.local'))`,
+		`DELETE FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='slack_web' AND account_email='titest@slack-web.local'))`,
+		`DELETE FROM normalized_threads WHERE thread_key LIKE 'slack:TITEST:%'`,
+		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='slack_web' AND account_email='titest@slack-web.local')`,
+		`DELETE FROM sync_runs WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='slack_web' AND account_email='titest@slack-web.local')`,
+		`DELETE FROM source_accounts WHERE provider='slack_web' AND account_email='titest@slack-web.local'`,
 		`DELETE FROM ai_extractions WHERE ai_run_id IN (SELECT id FROM ai_runs WHERE model = 'itest-triage-model')`,
 		`DELETE FROM ai_extractions WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='itest-triage-src'))`,
 		`DELETE FROM ai_runs WHERE model = 'itest-triage-model'`,

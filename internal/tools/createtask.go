@@ -59,6 +59,7 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"approve_delivery", validateDeliveryIDOnly, approveDelivery},
 		{"send_delivery", validateDeliveryIDOnly, sendDelivery},
 		{"mark_delivery_sent", validateDeliveryIDOnly, markDeliverySent},
+		{"prefill_delivery", validateDeliveryIDOnly, prefillDelivery},
 		{"task_mark_delivered", validateMarkDelivered, taskMarkDelivered},
 		{"set_sending_frozen", validateSetFrozen, setSendingFrozen},
 		{"link_external_ref", validateLinkExternalRef, linkExternalRef},

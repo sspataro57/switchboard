@@ -73,6 +73,7 @@ var allToolNames = []string{
 	"approve_delivery",    // spine-facing
 	"send_delivery",       // spine-facing
 	"mark_delivery_sent",  // spine-facing
+	"prefill_delivery",    // spine-facing, Slack assisted composer draft
 	"task_mark_delivered", // spine-facing
 	"set_sending_frozen",  // spine-facing
 	// SWT-9 tools (SPEC 09-jira-github-connectors, API changes):
@@ -140,6 +141,7 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		"approve_delivery",
 		"send_delivery",
 		"mark_delivery_sent",
+		"prefill_delivery",
 		"task_mark_delivered",
 		"set_sending_frozen",
 		// SWT-9: link_external_ref needs task_id+system+external_key;
@@ -176,5 +178,31 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 				t.Errorf("Execute(%s, {}) error = %q, want a validate-stage error", name, msg)
 			}
 		})
+	}
+}
+
+func TestValidate_SlackReplyRequiresTargetRef(t *testing.T) {
+	reg := executor.NewRegistry()
+	tools.Register(reg, nil)
+	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewMemStore())
+	_, err := ex.Execute(context.Background(), executor.Call{
+		Tool: "draft_delivery", Actor: "unit",
+		Args: []byte(`{"task_id":1,"channel":"slack_reply","body":"draft only"}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "target_ref") {
+		t.Fatalf("slack_reply without target_ref error = %v, want target_ref validation", err)
+	}
+}
+
+func TestValidate_SlackReplyRejectsNonSlackTarget(t *testing.T) {
+	reg := executor.NewRegistry()
+	tools.Register(reg, nil)
+	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewMemStore())
+	_, err := ex.Execute(context.Background(), executor.Call{
+		Tool: "draft_delivery", Actor: "unit",
+		Args: []byte(`{"task_id":1,"channel":"slack_reply","body":"draft only","target_ref":"https://evil.example/client/T1/C1"}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid slack_reply target_ref") {
+		t.Fatalf("slack_reply with external target error = %v, want URL validation", err)
 	}
 }
