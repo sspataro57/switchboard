@@ -1,4 +1,4 @@
-> Jira: PENDING-SYNC
+> Jira: SWT-15
 
 # Calendar observations through the local Google connector bridge
 

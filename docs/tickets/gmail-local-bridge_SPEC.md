@@ -1,4 +1,4 @@
-> Jira: PENDING-SYNC
+> Jira: SWT-14
 
 > Follow-on: `gmail-calendar-local-bridge_SPEC.md` adds read-only Calendar observations without changing this Gmail milestone's original acceptance record.
 
