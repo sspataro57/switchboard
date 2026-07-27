@@ -29,7 +29,9 @@ actual observed output, not "should work".
 
 ## Step 4: Commit-ready summary
 
-Salvador reviews and commits — never commit for him. Produce:
+Auto-commit is authorized (see INSTITUTIONAL_KNOWLEDGE.md "Process conventions"):
+once the checks above pass, commit on the ticket branch, merge to main, push, and
+move the Jira issue to Done. Never `Co-Authored-By` / AI references. Still produce:
 
 1. `git status` + `git diff --stat` snapshot.
 2. A suggested commit message:
@@ -48,7 +50,7 @@ Read the `> Jira:` line from the SPEC (an `SWT-N` key).
 - If it says `PENDING-SYNC`, do the sync now (see `/ticket-start` step 4), then continue.
 - Re-sync the issue description with the final SPEC content if it changed since
   /ticket-start (specs live in Jira, not only in the repo).
-- Post a comment on the issue via the Atlassian MCP: test results, acceptance-criteria
+- Post a comment on the issue via the jira MCP: test results, acceptance-criteria
   checklist, anything deferred. Terse register, no AI references.
 - Transition the issue to the review/done-side status (inspect available transitions;
   prefer "In Review" if the board has one, else leave in progress and say so). Do NOT
