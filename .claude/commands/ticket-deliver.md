@@ -1,7 +1,7 @@
 ---
-description: Finalize a ticket — full test run, "usable alone" smoke check, commit-ready summary (Salvador commits), Jira comment + transition
+description: Finalize a ticket — full test run, "usable alone" smoke check, delivery summary, auto-commit/merge/push, Jira comment + transition
 argument-hint: [ticket ID, e.g. 04-mcp-task-tools]
-allowed-tools: Read, Write, Bash(go test:*, go build:*, go vet:*, git status:*, git diff:*, git log:*)
+allowed-tools: Read, Write, Bash(go test:*, go build:*, go vet:*, git status:*, git diff:*, git log:*, git add:*, git commit:*, git merge:*, git checkout:*, git push:*, git worktree:*)
 ---
 
 Finalize ticket $1 for delivery. Prerequisites: implementation done, `/ticket-review` passed.
