@@ -82,6 +82,19 @@ type fakeGmailSender struct {
 	preSendStatus string // deliveries.status observed at send time (want 'sending')
 }
 
+type fakeSlackDrafter struct {
+	calls  int
+	target string
+	text   string
+}
+
+func (f *fakeSlackDrafter) Draft(_ context.Context, targetURL, text string) error {
+	f.calls++
+	f.target = targetURL
+	f.text = text
+	return nil
+}
+
 func (f *fakeGmailSender) Send(ctx context.Context, fromUserID string, rawMIME []byte, threadID string) (string, error) {
 	f.calls++
 	f.lastRaw = rawMIME
@@ -257,6 +270,8 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 
 	fake := &fakeGmailSender{pool: pool}
 	tools.SetGmailSender(fake)
+	slackDraft := &fakeSlackDrafter{}
+	tools.SetSlackDrafter(slackDraft)
 	ex := deliveryExecutor(pool)
 
 	// 1. draft_delivery (gmail): drafted; from_account_id resolved server-side
@@ -401,7 +416,37 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 		t.Errorf("mark_delivery_sent did not emit a delivery_sent event")
 	}
 
-	// 8. kill switch: freeze -> send of a fresh approved gmail delivery is denied
+	// 8. Slack assisted tier: approved delivery is prefilled into the exact
+	//    destination without sending, send_delivery is denied, and only a human
+	//    mark transitions it to sent.
+	const slackTarget = "https://app.slack.com/client/TITEST/CITEST/p1750000000000000"
+	const slackBody = "reviewed the fix; this is ready for your retest"
+	outSlack := callOK(t, ctx, ex, delActor, "draft_delivery",
+		`{"task_id":`+itoa(fx.parentID)+`,"channel":"slack_reply","body":"`+slackBody+`","target_ref":"`+slackTarget+`"}`)
+	var slack struct {
+		DeliveryID int64 `json:"delivery_id"`
+	}
+	mustUnmarshal(t, outSlack, &slack)
+	approve(t, ctx, ex, slack.DeliveryID)
+	callDenied(t, ctx, ex, pool, "send_delivery", `{"delivery_id":`+itoa(slack.DeliveryID)+`}`, "channel_assisted")
+
+	prefill := callOK(t, ctx, ex, delActor, "prefill_delivery", `{"delivery_id":`+itoa(slack.DeliveryID)+`}`)
+	if !strings.Contains(string(prefill), `"drafted":true`) || !strings.Contains(string(prefill), `"sent":false`) {
+		t.Fatalf("prefill_delivery result = %s, want drafted=true/sent=false", prefill)
+	}
+	if slackDraft.calls != 1 || slackDraft.target != slackTarget || slackDraft.text != slackBody {
+		t.Fatalf("Slack draft calls=%d target=%q text=%q; exact approved destination/body were not preserved",
+			slackDraft.calls, slackDraft.target, slackDraft.text)
+	}
+	if s := deliveryStatus(t, ctx, pool, slack.DeliveryID); s != "approved" {
+		t.Fatalf("prefill changed Slack delivery status to %q, want approved", s)
+	}
+	callOK(t, ctx, ex, delActor, "mark_delivery_sent", `{"delivery_id":`+itoa(slack.DeliveryID)+`}`)
+	if s := deliveryStatus(t, ctx, pool, slack.DeliveryID); s != "sent" {
+		t.Fatalf("after Slack mark_delivery_sent status = %q, want sent", s)
+	}
+
+	// 9. kill switch: freeze -> send of a fresh approved gmail delivery is denied
 	//    kill_switch; then unfreeze.
 	callOK(t, ctx, ex, delActor, "set_sending_frozen", `{"frozen":true}`)
 	ks := draftGmail(t, ctx, ex, fx.parentID, fx.threadID)
@@ -409,7 +454,7 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 	callDenied(t, ctx, ex, pool, "send_delivery", `{"delivery_id":`+itoa(ks)+`}`, "kill_switch")
 	callOK(t, ctx, ex, delActor, "set_sending_frozen", `{"frozen":false}`)
 
-	// 9. task_mark_delivered: done_locally -> delivered; idempotent replay.
+	// 10. task_mark_delivered: done_locally -> delivered; idempotent replay.
 	callOK(t, ctx, ex, delActor, "task_mark_delivered", `{"task_id":`+itoa(fx.parentID)+`}`)
 	if s := taskStatus(t, ctx, pool, fx.parentID); s != "delivered" {
 		t.Fatalf("after task_mark_delivered status = %q, want delivered", s)
@@ -419,9 +464,9 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 		t.Fatalf("idempotent task_mark_delivered changed status to %q", s)
 	}
 
-	// 10. audit trail: every ok call and every denial produced an audit row
+	// 11. audit trail: every ok call and every denial produced an audit row
 	//     (invariant 3).
-	for _, tool := range []string{"draft_delivery", "update_delivery", "approve_delivery", "send_delivery", "mark_delivery_sent", "task_mark_delivered", "set_sending_frozen"} {
+	for _, tool := range []string{"draft_delivery", "update_delivery", "approve_delivery", "send_delivery", "mark_delivery_sent", "prefill_delivery", "task_mark_delivered", "set_sending_frozen"} {
 		var ok int
 		if err := pool.QueryRow(ctx,
 			`SELECT count(*) FROM audit_events WHERE actor=$1 AND tool=$2 AND status='ok'`, delActor, tool).Scan(&ok); err != nil {
@@ -436,8 +481,8 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 		`SELECT count(*) FROM audit_events WHERE actor=$1 AND tool='send_delivery' AND status='denied'`, delActor).Scan(&denied); err != nil {
 		t.Fatalf("count denied audit: %v", err)
 	}
-	if denied < 3 {
-		t.Errorf("denied send_delivery audit rows = %d, want >= 3 (rate_limit, channel_assisted, kill_switch)", denied)
+	if denied < 4 {
+		t.Errorf("denied send_delivery audit rows = %d, want >= 4 (rate_limit, two assisted channels, kill_switch)", denied)
 	}
 }
 

@@ -26,7 +26,7 @@ var sendShaped = map[string]bool{"send_delivery": true, "mark_delivery_sent": tr
 // humanOnly tools require a human actor prefix.
 var humanOnly = map[string]bool{
 	"update_delivery": true, "approve_delivery": true, "send_delivery": true,
-	"mark_delivery_sent": true, "set_sending_frozen": true,
+	"mark_delivery_sent": true, "prefill_delivery": true, "set_sending_frozen": true,
 	"approve_plan_import": true, "reject_plan_import": true, "apply_plan_import": true,
 }
 
@@ -86,6 +86,20 @@ func Decide(req Request, snap Snapshot) Decision {
 		}
 		return Decision{Decision: "deny", Rule: "channel_assisted",
 			Reason: "upwork_chat is assisted: copy/prefill, then mark_delivery_sent"}
+	case "slack_reply":
+		if req.Tool == "mark_delivery_sent" {
+			limit := snap.HourlyLimit
+			if limit <= 0 {
+				limit = 10
+			}
+			if snap.SentLastHour[snap.Channel] >= limit {
+				return Decision{Decision: "deny", Rule: "rate_limit",
+					Reason: fmt.Sprintf("channel %s hit the hourly send limit (%d)", snap.Channel, limit)}
+			}
+			return Decision{Decision: "allow", Rule: "matrix-assisted", Reason: "assisted-tier manual confirmation"}
+		}
+		return Decision{Decision: "deny", Rule: "channel_assisted",
+			Reason: "slack_reply is assisted: prefill, send manually, then mark_delivery_sent"}
 	default:
 		return Decision{Decision: "deny", Rule: "channel_not_live",
 			Reason: fmt.Sprintf("channel %q has no live send adapter yet", snap.Channel)}

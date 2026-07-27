@@ -106,8 +106,24 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   Retained-message gotcha: tests/smokes MUST clear their retained messages
   (`mosquitto_pub -r -n -t <topic>`) — retained state is global on the
   production broker. fleetd (cmd/fleetd) mirrors status → worker_heartbeats.
-- **Deploy:** `ops` namespace on the home k8s cluster; images pushed to
-  `192.168.50.20:5000` (insecure local registry).
+- **Deploy:** `ops` namespace on the home k8s cluster (created 2026-07-26);
+  images pushed to `192.168.50.20:5000` (insecure local registry).
+  Manifests live in the sibling **kube** repo (`~/projects/personal/kube/
+  switchboard/`), not here — that repo is the cluster's source of truth.
+  One image `switchboard:<tag>` carries every connector binary plus
+  `/migrations`; the CronJob picks the entrypoint (`command:
+  [/usr/local/bin/jira]`). Pin the tag — CronJobs have no rollout semantics,
+  so `:latest` makes "which code ran" unanswerable.
+  Live as of 2026-07-26: CronJobs `connector-upworkcrm` + `connector-jira`
+  (*/15); `connector-google` exists but is SUSPENDED pending OAuth. Secrets
+  `switchboard-db` / `-upwork-crm` / `-token-key` / `-google` are out-of-band.
+  **Landmine (bit 2026-07-26):** the upwork_crm DSN contains `&` (the
+  `options=-c default_transaction_read_only=on` param). Sourcing it from a
+  `KEY=value` file leaves the variable UNSET — bash reads `&` as a background
+  operator. Build such secrets with `--from-file`, never `--from-literal` via
+  a sourced env file.
+  Nothing else of switchboard is deployed: no orchestrator, dashboard, triage,
+  drafts, fleetd, or hooksd in-cluster yet.
 - **Upwork CRM (connector source, wired 2026-07-11):** db `upwork_crm` on pg-main.
   The `ops` role has SELECT on exactly `clients` + `communications` (granted as
   postgres: `GRANT CONNECT ON DATABASE upwork_crm TO ops; GRANT USAGE ON SCHEMA
@@ -206,6 +222,43 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - New task_events vocabulary: pr_opened/pr_merged/pr_closed, ci_started/
   ci_passed/ci_failed. New spine tools: record_pr_event, record_ci_event,
   task_pr_transition; agent-facing: link_external_ref.
+
+## Slack Web connector (shipped in SWT-13)
+
+- Leaf is the sibling TS repo (`~/projects/personal/slackconnector`), driven as a
+  one-shot subprocess: `node dist/cli/switchboard-bridge.js export|draft`.
+  `SLACK_WEB_BRIDGE_SCRIPT` must be an ABSOLUTE path to a regular file; no shell.
+  Runs where the logged-in Chromium is — the **Mac mini**, never the cluster.
+- Vocabulary: `provider='slack_web'`, synthetic account
+  `{workspace_id}@slack-web.local`; raw ids `conversation:{id}` and
+  `message:{conv}:{msg}`; `thread_key = slack:{ws}:{conv}[:{root_msg}]`;
+  normalized channel `slack`; delivery channel `slack_reply` (migration 0009
+  extends the CHECK — the drop/add is safe only because migrate runs each file
+  in one transaction).
+- Direction FAILS CLOSED: export requires `SLACK_CONNECTOR_OWN_USER_IDS` (member
+  id per workspace). Missing `author_id`/`own_user_id` errors rather than
+  guessing — no display-name matching, ever.
+- Assisted tier: `prefill_delivery` (human-only, spine-facing, deliberately NOT
+  MCP-listed) types an approved body into the composer; `send_delivery` stays
+  denied by `channel_assisted`; a human sends and `mark_delivery_sent` records
+  it. `CommandBridge.Draft` refuses any bridge result claiming `sent` — that's
+  the Go-side backstop, now covered by `bridge_test.go` (stub script via
+  `/bin/sh` as "node", no Node or browser needed).
+- **Landmine (found in review, fixed 2026-07-26): non-canonical `target_ref`
+  silently kills loop closure.** `ParseTargetURL` accepts a trailing slash;
+  `confirmDelivery` matches `target_ref` by EXACT string against a trimmed
+  value. `draft_delivery` now stores `Target.CanonicalURL()`, never the
+  caller's spelling. Any new code writing `target_ref` must canonicalize too —
+  the failure mode is a delivery that can never be confirmed, with no error.
+- Loop closure = exact destination + whitespace-normalized 120-char body prefix
+  (`slackMatchPrefixLen`), guarded by `WHERE sent_external_id IS NULL` plus a
+  RowsAffected check so `--all` replays never double-emit `delivery_confirmed`.
+- **Accepted risks (recorded, not bugs):** the global kill switch does NOT gate
+  `prefill_delivery` (it isn't `sendShaped`), so a freeze still permits typing
+  into a live composer — matches SPEC criterion 11; add it to `snapshotGated` if
+  that changes. And opsctl's 30s deadline covers the whole browser prefill; on
+  expiry node is killed mid-typing and a partial composer draft may remain,
+  which a retry refuses to overwrite (clear it by hand).
 
 ## Delivery contract (shipped in SWT-8)
 
@@ -339,10 +392,10 @@ Planning is local (SPECs in `docs/tickets/`); **tracking of record is Salvador's
 personal Jira**: https://sspataro.atlassian.net, project **SWT** ("switchboard").
 Verified 2026-07-11. (The same site also has a `CRM` project — not ours.)
 
-- Access: the **Atlassian MCP** (`atlassian` server in this repo's `.mcp.json`,
-  official remote connector, OAuth). If tools are missing in a session, authenticate
-  with `/mcp`. Tool names vary by version — search/create/transition/comment on
-  issues; discover with ToolSearch.
+- Access: the **jira MCP** (`jira` server in this repo's `.mcp.json` — `uvx
+  mcp-atlassian`, token auth as `sspataro@gmail.com` via `${JIRA_TOKEN_PERSONAL}`;
+  the env var must be set in the shell that launches the session). Tool names vary
+  by version — search/create/transition/comment on issues; discover with ToolSearch.
 - Fallback only: `JIRA_TOKEN_PERSONAL` env var exists (API token, basic auth as
   `sspataro@gmail.com`) — exported in `~/.bashrc`, but `.bashrc` early-exits for
   non-interactive shells, so `source ~/.bashrc` yields an EMPTY token there (and
