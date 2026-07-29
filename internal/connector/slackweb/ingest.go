@@ -6,11 +6,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 type Sink interface {
 	EnsureAccount(ctx context.Context, workspace Workspace) (accountID int64, err error)
-	StartRun(ctx context.Context, accountID int64) (runID int64, err error)
+	// StartRun takes the instant the export BEGAN, not the instant the row is
+	// written. The export runs before any run row exists (it is what discovers
+	// the workspaces), so defaulting started_at to now() would record the export's
+	// END time. ReconcileUnconfirmed counts passes that could have OBSERVED a
+	// message, which is a question about when the scrape began.
+	StartRun(ctx context.Context, accountID int64, startedAt time.Time) (runID int64, err error)
 	RawHash(ctx context.Context, accountID int64, externalID string) (hash string, exists bool, err error)
 	InsertRaw(ctx context.Context, accountID int64, externalID string, raw json.RawMessage, hash string) error
 	UpdateRaw(ctx context.Context, accountID int64, externalID string, raw json.RawMessage, hash string) error
@@ -19,6 +25,8 @@ type Sink interface {
 
 func Ingest(ctx context.Context, source Source, sink Sink) (Stats, error) {
 	var total Stats
+	// Before the export, so every run row records when the scrape actually began.
+	exportStartedAt := time.Now()
 	exported, err := source.Export(ctx)
 	if err != nil {
 		return total, fmt.Errorf("export Slack observations: %w", err)
@@ -35,7 +43,7 @@ func Ingest(ctx context.Context, source Source, sink Sink) (Stats, error) {
 		if err != nil {
 			return total, fmt.Errorf("ensure Slack workspace %s account: %w", workspace.ID, err)
 		}
-		runID, err := sink.StartRun(ctx, accountID)
+		runID, err := sink.StartRun(ctx, accountID, exportStartedAt)
 		if err != nil {
 			return total, fmt.Errorf("start Slack sync run for %s: %w", workspace.ID, err)
 		}

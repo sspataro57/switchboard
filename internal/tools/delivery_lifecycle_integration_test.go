@@ -416,9 +416,12 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 		t.Errorf("mark_delivery_sent did not emit a delivery_sent event")
 	}
 
-	// 8. Slack assisted tier: approved delivery is prefilled into the exact
-	//    destination without sending, send_delivery is denied, and only a human
-	//    mark transitions it to sent.
+	// 8. Slack: the assisted verbs SURVIVE the SWT-12 promotion. An approved
+	//    delivery is prefilled into the exact destination without sending, and a
+	//    human mark transitions it to sent. send_delivery no longer denies
+	//    channel_assisted here — its Slack branch (bridge click, two-phase send,
+	//    failure split) is covered in delivery_slack_integration_test.go, which
+	//    wires a fake SlackSender and a send-enabled workspace account.
 	const slackTarget = "https://app.slack.com/client/TITEST/CITEST/p1750000000000000"
 	const slackBody = "reviewed the fix; this is ready for your retest"
 	outSlack := callOK(t, ctx, ex, delActor, "draft_delivery",
@@ -428,7 +431,6 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 	}
 	mustUnmarshal(t, outSlack, &slack)
 	approve(t, ctx, ex, slack.DeliveryID)
-	callDenied(t, ctx, ex, pool, "send_delivery", `{"delivery_id":`+itoa(slack.DeliveryID)+`}`, "channel_assisted")
 
 	prefill := callOK(t, ctx, ex, delActor, "prefill_delivery", `{"delivery_id":`+itoa(slack.DeliveryID)+`}`)
 	if !strings.Contains(string(prefill), `"drafted":true`) || !strings.Contains(string(prefill), `"sent":false`) {
@@ -481,8 +483,9 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 		`SELECT count(*) FROM audit_events WHERE actor=$1 AND tool='send_delivery' AND status='denied'`, delActor).Scan(&denied); err != nil {
 		t.Fatalf("count denied audit: %v", err)
 	}
-	if denied < 4 {
-		t.Errorf("denied send_delivery audit rows = %d, want >= 4 (rate_limit, two assisted channels, kill_switch)", denied)
+	if denied < 3 {
+		t.Errorf("denied send_delivery audit rows = %d, want >= 3 (rate_limit, upwork_chat assisted, kill_switch; "+
+			"slack_reply is no longer assisted since SWT-12)", denied)
 	}
 }
 

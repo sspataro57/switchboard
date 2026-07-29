@@ -59,6 +59,16 @@ func run(normalizeOnly, all bool) error {
 	if err != nil {
 		return fmt.Errorf("normalize: %w", err)
 	}
+
+	// After normalize, so this pass's own confirmations are already stamped and
+	// a delivery confirmed moments ago is never flagged.
+	flagged, err := slackweb.ReconcileUnconfirmed(ctx, sink, slackweb.UnconfirmedFlagPasses())
+	if err != nil {
+		return fmt.Errorf("reconcile unconfirmed: %w", err)
+	}
+	if flagged > 0 {
+		fmt.Printf("reconcile: {\"flagged_unconfirmed\":%d}\n", flagged)
+	}
 	return nil
 }
 

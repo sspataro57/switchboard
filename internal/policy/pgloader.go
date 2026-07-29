@@ -37,10 +37,16 @@ func (l *pgSnapshotLoader) Load(ctx context.Context, req Request) (Snapshot, err
 		}
 	}
 
-	// per-channel sends in the last hour
+	// Per-channel sends in the last hour. 'sending' counts too, and the window
+	// falls back to send_attempted_at: a Slack click that landed but answered
+	// ambiguously stays 'sending' with sent_at NULL forever, so counting only
+	// 'sent' let every degraded send consume no allowance and real traffic exceed
+	// the limit indefinitely. Counting an attempt that turns out not to have sent
+	// is the safe direction for a rate limit.
 	rows, err := l.pool.Query(ctx,
 		`SELECT channel, count(*) FROM deliveries
-		 WHERE status='sent' AND sent_at >= now() - interval '1 hour'
+		 WHERE status IN ('sent','sending')
+		   AND COALESCE(sent_at, send_attempted_at) >= now() - interval '1 hour'
 		 GROUP BY channel`)
 	if err != nil {
 		return snap, fmt.Errorf("count recent sends: %w", err)

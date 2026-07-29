@@ -70,7 +70,12 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   adapters ONLY. Worker contract is prompt + JSON schema in, structured result out.
   A vendor import outside an adapter package is a flag.
 - **Migrations:** forward-only, numbered. No `down` migrations, no editing an
-  already-applied migration.
+  already-applied migration. The runner (`cmd/tools/migrate`) keys on
+  `schema_migrations.version` ONLY — there is no checksum — so an edited
+  already-applied file is skipped **silently** and the file diverges from the
+  schema with no error anywhere. That invisibility is the whole reason for the
+  rule. (Editing a migration that is still unmerged and applied only to a
+  throwaway local db is fine, provided you make the local schema match by hand.)
 - **Vocabulary:** table/tool names in CLAUDE.md's schema section are the vocabulary —
   reuse, don't invent synonyms (it's `deliveries`, not `outbound_messages`).
 - **Error handling:** wrap with context — `fmt.Errorf("doing X: %w", err)`. Flag bare
@@ -222,6 +227,59 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - New task_events vocabulary: pr_opened/pr_merged/pr_closed, ci_started/
   ci_passed/ci_failed. New spine tools: record_pr_event, record_ci_event,
   task_pr_transition; agent-facing: link_external_ref.
+
+## Slack send promotion (SWT-12) — contract + landmines
+
+`slack_reply` is an **approve**-tier channel: switchboard clicks Send through the
+connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard half).
+
+- **Nothing sends until the leaf ships.** The `/send` route and `send` CLI op do
+  not exist in `sspataro57/slackconnector` yet. A leaf 404 is a 4xx, which is a
+  DEFINITE rejection, so the row lands in `failed` and is re-approvable — safe, but
+  not exercisable end to end.
+- **`SLACK_CONNECTOR_UNATTENDED_SEND` is per-process.** Set it in the
+  bridge-server's launchd environment ONLY. Setting it in the leaf MCP server's
+  environment silently removes the manual path's human token gate. Two separate
+  launchd environments on the mini; they are not the same knob.
+- **Per-workspace go-live is `source_accounts.send_enabled`**, gmail's convention.
+  `EnsureAccount` inserts `false` and never updates it, so a newly ingested
+  workspace is safely off: `UPDATE source_accounts SET send_enabled=true` per
+  workspace, by hand.
+- **Confirmation only works where export works.** Export fails closed for any
+  allowed workspace with no `OWN_USER_IDS` entry; `T0HPR78RX`
+  (Collaboratory/LlamaSite) has none, so the bridge is narrowed to Avviato. A send
+  into an unexported workspace stays unconfirmed forever and always ends flagged.
+  `connector-slackweb` is also currently SUSPENDED.
+- **A browser click reserves no message id.** Hence the whole shape:
+  `send_attempted_at` commits before the click, `sent_external_id` stays NULL on
+  success, and the next export stamps it by matching a 120-char body prefix.
+  `'sending'` is TERMINAL until the matcher or a human moves it — nothing retries,
+  because a retry of a click that did land is a double-post into a client channel.
+- **`sending` means two different things and the columns tell them apart.**
+  `send_attempted_at IS NOT NULL AND send_settled_at IS NULL` is IN FLIGHT;
+  settled is ambiguous. `mark_delivery_failed` refuses an unsettled attempt younger
+  than 15 minutes (`sendAttemptLease`) — that refusal is what stops a human
+  reopening a live call for a second send.
+- **`approval_source` says which authority let a row out**: `'switchboard'`
+  (policy gated it) or `'leaf_token'` (the connector's own token did; switchboard
+  only recorded it). `send_delivery` requires `'switchboard'`.
+- **The kill switch is for switchboard.** `send_delivery` is freeze-gated;
+  `mark_delivery_sent` is not, because recording a send made elsewhere cannot be
+  prevented by freezing — only hidden. Freeze-time records emit
+  `delivery_recorded_during_freeze`.
+- **`sync_runs.started_at` for slackweb is the export's START**, passed into
+  `StartRun` explicitly. It used to default to `now()` at insert, which was the
+  export's END, because `Ingest` exports before creating the run row. The
+  reconciler counts passes that could have OBSERVED a message, so this matters.
+- **Over MCP, `mark_delivery_sent` permits exactly one transition**: resolving a
+  `slack_reply` row already in `'sending'`. Everything else (approved, or drafted
+  via `leaf_gated`) is dashboard/`opsctl` only, because `delivery_sent` drives R8
+  and an injected call could otherwise fabricate a completed delivery. The durable
+  fix is a leaf-produced receipt; it needs the `/send` route first.
+- **`policy.MCPTransportPrefix` is the one definition of `"mcp:"`** —
+  `humanActor` strips it, `executor.ViaMCP` tests it. Do not re-litter the literal.
+
+---
 
 ## Slack Web connector (shipped in SWT-13)
 
@@ -410,6 +468,13 @@ Verified 2026-07-11. (The same site also has a `CRM` project — not ours.)
   the FULL SPEC (markdown → Jira wiki markup; PUT via `/rest/api/2/issue/{key}` —
   v2 takes wiki text, v3 needs ADF). Sync at /ticket-start, re-sync whenever the
   SPEC changes, and at /ticket-deliver. Local files remain the working copies.
+- **A description caps at 32,767 characters.** Bit 2026-07-29: the
+  slack-send-promotion SPEC reached 37,778 after two review rounds and the v2 PUT
+  returned `400 {"errors":{"description":"The entered text is too long..."}}`. The
+  "full SPEC lives in the issue description" convention has a ceiling, so a long
+  SPEC syncs as a section-aligned prefix with a pointer line naming the repo file
+  as authoritative. Check `len(spec)` before the PUT rather than discovering it
+  from a 400.
 - **Comments mangle underscored identifiers — descriptions don't.** Verified
   2026-07-29. The jira MCP's `jira_add_comment`/`jira_edit_comment` convert
   Markdown to ADF, and *paired* underscores become emphasis: `sent_external_id`
@@ -418,11 +483,27 @@ Verified 2026-07-11. (The same site also has a `CRM` project — not ours.)
   intact). Backticks are worse — inline code spans become line breaks — and
   backslash escapes are worse still (the backslash is kept AND the underscore
   still converts). Fenced blocks don't help either. No known escape works.
-  Consequence: put anything identifier-dense in the **description** (which
-  round-trips raw wiki text through the v2 PUT, underscores and backticks
-  intact) or in the local SPEC, and keep comments to prose. Do NOT "fix" a
-  mangled comment by rewriting a good description through the same converter —
-  that risks corrupting correct content to tidy incorrect content.
+  Consequence: put anything identifier-dense in the **description** and keep
+  comments to prose. Do NOT "fix" a mangled comment by rewriting a good
+  description through the same converter — that risks corrupting correct
+  content to tidy incorrect content.
+- **The mangling is on the MCP's read side too — trust the REST GET, not the
+  MCP's echo.** Verified 2026-07-29 by syncing the 22,124-char
+  slack-send-promotion SPEC into SWT-12. `jira_transition_issue` echoed the
+  description back full of `sent*external*id` and `slack\_reply`, but a direct
+  v2 GET confirmed storage was byte-identical to the file on disk. So a session
+  that reads a SPEC through `jira_get_issue` sees corrupted identifiers that are
+  NOT corrupted in Jira — do not "repair" them. The MCP is fine for status,
+  transitions, search, and prose comments; for description read/write use the
+  v2 REST endpoint.
+- **Working description sync** (bypasses the converter entirely, exact):
+  `eval "$(grep '^export JIRA_TOKEN_PERSONAL=' ~/.bashrc)"`, then PUT
+  `{"fields":{"description": <file contents>}}` to
+  `https://sspataro.atlassian.net/rest/api/2/issue/{KEY}` with basic auth
+  (`sspataro@gmail.com` + token). Pipe the SPEC straight from the file rather
+  than retyping it — v2 stores the markdown raw, renders it imperfectly, and
+  keeps every underscore and backtick. Read it back and assert equality with
+  the file; that check is cheap and has already caught one silent difference.
 - Sync points: `/ticket-start` & `/bug-start` create + move to In Progress;
   `/ticket-deliver` comments results and moves toward review — **Done only after
   Salvador actually commits**, never before.

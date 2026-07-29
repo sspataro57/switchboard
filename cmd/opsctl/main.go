@@ -137,12 +137,14 @@ func run(toolName string, args json.RawMessage) error {
 		}
 		tools.SetGmailSender(&google.BridgeSender{Bridge: bridge})
 	}
-	if script := os.Getenv("SLACK_WEB_BRIDGE_SCRIPT"); script != "" {
-		bridge, err := slackweb.NewCommandBridge(os.Getenv("SLACK_WEB_NODE"), script)
-		if err != nil {
-			return fmt.Errorf("configure Slack draft bridge: %w", err)
-		}
+	// One bridge serves both seams: prefill_delivery drafts through it and
+	// send_delivery sends through it (SWT-12 criterion 15). HTTP is preferred so
+	// this works from anywhere the mini is reachable, not only on the mini.
+	if bridge, err := slackweb.NewDeliveryBridgeFromEnv(); err != nil {
+		return fmt.Errorf("configure Slack bridge: %w", err)
+	} else if bridge != nil {
 		tools.SetSlackDrafter(bridge)
+		tools.SetSlackSender(bridge)
 	}
 
 	res, err := ex.Execute(ctx, executor.Call{Tool: toolName, Actor: actor(), Args: args})

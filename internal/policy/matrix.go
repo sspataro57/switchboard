@@ -20,14 +20,42 @@ type Snapshot struct {
 	HourlyLimit   int
 }
 
-// sendShaped tools transition a delivery toward the outside world.
+// MCPTransportPrefix is the marker the MCP server puts in front of its worker
+// identity. Defined here, in the lowest layer that needs it, because two layers
+// do and they must not drift: humanActor strips it before the human check, and
+// executor.ViaMCP tests for it so a handler can narrow what it will do over that
+// transport. Any future transport wrapper belongs here too.
+const MCPTransportPrefix = "mcp:"
+
+// sendShaped tools transition a delivery toward the outside world, so they need
+// the channel/rate snapshot. Both belong here; they differ only in whether the
+// kill switch can stop them — see freezeGated.
 var sendShaped = map[string]bool{"send_delivery": true, "mark_delivery_sent": true}
+
+// freezeGated is the subset the kill switch can actually prevent: an actual
+// send. The switch is for switchboard — it governs what switchboard itself puts
+// in front of a client. mark_delivery_sent transmits nothing; it records a send
+// that already happened, either through the Slack Web connector's own token gate
+// or by hand. Freezing it would not un-send anything, it would only leave a
+// message that is provably in a client channel with no delivery row saying so,
+// and would block resolving a stuck 'sending' row a human verified.
+//
+// Keep the two maps distinct. Collapsing them by removing mark_delivery_sent
+// from sendShaped would ALSO drop its rate limit and its whole channel branch
+// (this function returns early for anything not sendShaped), widening the tool
+// while appearing to narrow it. matrix_test.go pins that corner.
+var freezeGated = map[string]bool{"send_delivery": true}
 
 // humanOnly tools require a human actor prefix.
 var humanOnly = map[string]bool{
 	"update_delivery": true, "approve_delivery": true, "send_delivery": true,
 	"mark_delivery_sent": true, "prefill_delivery": true, "set_sending_frozen": true,
 	"approve_plan_import": true, "reject_plan_import": true, "apply_plan_import": true,
+	// mark_delivery_failed asserts a human looked in Slack and the message is
+	// NOT there. It is human-only but deliberately not send-shaped: it moves a
+	// row AWAY from the world, so neither the kill switch nor the rate limit
+	// has any claim on it.
+	"mark_delivery_failed": true,
 }
 
 // snapshotGated tools need the loader (channel/rate/freeze state).
@@ -42,7 +70,7 @@ func humanActor(actor string) bool {
 	// Deliberately done here rather than by not prefixing in the adapter: the
 	// audit row keeps the full unmodified actor, so which surface triggered a
 	// send stays answerable. Any future transport wrapper must be added here.
-	actor = strings.TrimPrefix(actor, "mcp:")
+	actor = strings.TrimPrefix(actor, MCPTransportPrefix)
 	for _, p := range []string{"dashboard:", "opsctl:", "manual:"} {
 		if strings.HasPrefix(actor, p) {
 			return true
@@ -60,7 +88,7 @@ func Decide(req Request, snap Snapshot) Decision {
 	if !sendShaped[req.Tool] {
 		return Decision{Decision: "allow", Rule: "matrix-human", Reason: "human delivery action"}
 	}
-	if snap.SendingFrozen {
+	if freezeGated[req.Tool] && snap.SendingFrozen {
 		return Decision{Decision: "deny", Rule: "kill_switch",
 			Reason: "global kill switch is on: all sending transitions are frozen"}
 	}
@@ -96,19 +124,25 @@ func Decide(req Request, snap Snapshot) Decision {
 		return Decision{Decision: "deny", Rule: "channel_assisted",
 			Reason: "upwork_chat is assisted: copy/prefill, then mark_delivery_sent"}
 	case "slack_reply":
-		if req.Tool == "mark_delivery_sent" {
-			limit := snap.HourlyLimit
-			if limit <= 0 {
-				limit = 10
-			}
-			if snap.SentLastHour[snap.Channel] >= limit {
-				return Decision{Decision: "deny", Rule: "rate_limit",
-					Reason: fmt.Sprintf("channel %s hit the hourly send limit (%d)", snap.Channel, limit)}
-			}
-			return Decision{Decision: "allow", Rule: "matrix-assisted", Reason: "assisted-tier manual confirmation"}
+		// SWT-12: promoted from assisted to approve. The connector clicks Send
+		// through its bridge after switchboard approval, so send_delivery is no
+		// longer denied here — remote-desktopping into the Mac mini to press
+		// send is what made the assisted tier unusable. The assisted verbs
+		// survive: prefill_delivery as a fallback when the bridge-server is
+		// down, and mark_delivery_sent to record a send made through the leaf's
+		// own token gate.
+		limit := snap.HourlyLimit
+		if limit <= 0 {
+			limit = 10
 		}
-		return Decision{Decision: "deny", Rule: "channel_assisted",
-			Reason: "slack_reply is assisted: prefill, send manually, then mark_delivery_sent"}
+		if snap.SentLastHour[snap.Channel] >= limit {
+			return Decision{Decision: "deny", Rule: "rate_limit",
+				Reason: fmt.Sprintf("channel %s hit the hourly send limit (%d)", snap.Channel, limit)}
+		}
+		if req.Tool == "mark_delivery_sent" {
+			return Decision{Decision: "allow", Rule: "matrix-send", Reason: "manual confirmation"}
+		}
+		return Decision{Decision: "allow", Rule: "matrix-send", Reason: "slack reply within limits"}
 	default:
 		return Decision{Decision: "deny", Rule: "channel_not_live",
 			Reason: fmt.Sprintf("channel %q has no live send adapter yet", snap.Channel)}

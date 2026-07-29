@@ -82,9 +82,21 @@
           {{if eq .Channel "gmail"}}
           <form class="inline" method="post" action="/deliveries/{{.ID}}/send"><button>Send</button></form>
           {{end}}
+          {{if eq .Channel "slack_reply"}}
+          <form class="inline" method="post" action="/deliveries/{{.ID}}/send"><button>Send</button></form>
+          <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-sent"><button>Mark sent</button></form>
+          {{end}}
           {{if eq .Channel "upwork_chat"}}
           <button onclick="navigator.clipboard.writeText(this.closest('tr').querySelector('pre').innerText)">Copy for Upwork</button>
           <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-sent"><button>Mark sent</button></form>
+          {{end}}
+        {{end}}
+        {{if eq .Status "sending"}}
+          {{if eq .Channel "slack_reply"}}
+          {{/* The click may or may not have landed and nothing retries it: a
+               human looks in Slack and resolves it either way. */}}
+          <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-sent"><button>It's in Slack</button></form>
+          <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-failed"><button>Not in Slack</button></form>
           {{end}}
         {{end}}
       </td>
