@@ -463,6 +463,13 @@ Verified 2026-07-11. (The same site also has a `CRM` project — not ours.)
   the FULL SPEC (markdown → Jira wiki markup; PUT via `/rest/api/2/issue/{key}` —
   v2 takes wiki text, v3 needs ADF). Sync at /ticket-start, re-sync whenever the
   SPEC changes, and at /ticket-deliver. Local files remain the working copies.
+- **A description caps at 32,767 characters.** Bit 2026-07-29: the
+  slack-send-promotion SPEC reached 37,778 after two review rounds and the v2 PUT
+  returned `400 {"errors":{"description":"The entered text is too long..."}}`. The
+  "full SPEC lives in the issue description" convention has a ceiling, so a long
+  SPEC syncs as a section-aligned prefix with a pointer line naming the repo file
+  as authoritative. Check `len(spec)` before the PUT rather than discovering it
+  from a 400.
 - **Comments mangle underscored identifiers — descriptions don't.** Verified
   2026-07-29. The jira MCP's `jira_add_comment`/`jira_edit_comment` convert
   Markdown to ADF, and *paired* underscores become emphasis: `sent_external_id`
