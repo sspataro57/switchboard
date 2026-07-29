@@ -418,11 +418,27 @@ Verified 2026-07-11. (The same site also has a `CRM` project — not ours.)
   intact). Backticks are worse — inline code spans become line breaks — and
   backslash escapes are worse still (the backslash is kept AND the underscore
   still converts). Fenced blocks don't help either. No known escape works.
-  Consequence: put anything identifier-dense in the **description** (which
-  round-trips raw wiki text through the v2 PUT, underscores and backticks
-  intact) or in the local SPEC, and keep comments to prose. Do NOT "fix" a
-  mangled comment by rewriting a good description through the same converter —
-  that risks corrupting correct content to tidy incorrect content.
+  Consequence: put anything identifier-dense in the **description** and keep
+  comments to prose. Do NOT "fix" a mangled comment by rewriting a good
+  description through the same converter — that risks corrupting correct
+  content to tidy incorrect content.
+- **The mangling is on the MCP's read side too — trust the REST GET, not the
+  MCP's echo.** Verified 2026-07-29 by syncing the 22,124-char
+  slack-send-promotion SPEC into SWT-12. `jira_transition_issue` echoed the
+  description back full of `sent*external*id` and `slack\_reply`, but a direct
+  v2 GET confirmed storage was byte-identical to the file on disk. So a session
+  that reads a SPEC through `jira_get_issue` sees corrupted identifiers that are
+  NOT corrupted in Jira — do not "repair" them. The MCP is fine for status,
+  transitions, search, and prose comments; for description read/write use the
+  v2 REST endpoint.
+- **Working description sync** (bypasses the converter entirely, exact):
+  `eval "$(grep '^export JIRA_TOKEN_PERSONAL=' ~/.bashrc)"`, then PUT
+  `{"fields":{"description": <file contents>}}` to
+  `https://sspataro.atlassian.net/rest/api/2/issue/{KEY}` with basic auth
+  (`sspataro@gmail.com` + token). Pipe the SPEC straight from the file rather
+  than retyping it — v2 stores the markdown raw, renders it imperfectly, and
+  keeps every underscore and backtick. Read it back and assert equality with
+  the file; that check is cheap and has already caught one silent difference.
 - Sync points: `/ticket-start` & `/bug-start` create + move to In Progress;
   `/ticket-deliver` comments results and moves toward review — **Done only after
   Salvador actually commits**, never before.
