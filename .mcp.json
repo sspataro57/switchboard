@@ -1,8 +1,13 @@
 {
   "mcpServers": {
-    "atlassian": {
-      "type": "sse",
-      "url": "https://mcp.atlassian.com/v1/sse"
+    "jira": {
+      "command": "uvx",
+      "args": ["mcp-atlassian"],
+      "env": {
+        "JIRA_URL": "https://sspataro.atlassian.net",
+        "JIRA_USERNAME": "sspataro@gmail.com",
+        "JIRA_API_TOKEN": "${JIRA_TOKEN_PERSONAL}"
+      }
     },
     "ops": {
       "command": "go",

@@ -1,7 +1,7 @@
 ---
 name: spec-writer
 description: Use at the start of a build-order step or any ad-hoc feature work. Translates the step (from CLAUDE.md's build order) or the user's description into a technical SPEC. Produces docs/tickets/{ID}_SPEC.md plus OPEN_QUESTIONS when ambiguous. Reads .claude/INSTITUTIONAL_KNOWLEDGE.md for conventions and landmines. Does not write code.
-model: claude-fable-5
+model: opus
 tools: Read, Grep, Glob, Write
 ---
 

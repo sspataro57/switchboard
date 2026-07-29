@@ -31,7 +31,7 @@ Invoke `spec-writer` with the step text / description. It produces:
 ## Step 4: Sync to Jira (tracking of record)
 
 Planning stays local; tracking lives in the personal Jira build tracker — project
-**SWT** on sspataro.atlassian.net, via the Atlassian MCP (see INSTITUTIONAL_KNOWLEDGE.md
+**SWT** on sspataro.atlassian.net, via the jira MCP (see INSTITUTIONAL_KNOWLEDGE.md
 "Jira build tracker"). Use whichever tool names the MCP exposes (search, create issue,
 transition — commonly `searchJiraIssuesUsingJql`, `createJiraIssue`,
 `transitionJiraIssue`):
@@ -48,7 +48,7 @@ transition — commonly `searchJiraIssuesUsingJql`, `createJiraIssue`,
 5. Record the key on the first line of the SPEC: `> Jira: SWT-N` — later commands
    find the issue through this line.
 
-If the Atlassian MCP is not connected/authenticated in this session, say so (the user
+If the jira MCP is not connected/authenticated in this session, say so (the user
 authenticates with `/mcp`), write `> Jira: PENDING-SYNC` in the SPEC instead, and
 continue — the next command retries.
 
