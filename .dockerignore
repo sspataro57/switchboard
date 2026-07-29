@@ -1,0 +1,8 @@
+.git
+.claude
+docs
+prompts
+bin
+docker-compose.yml
+docker
+*_test.go
