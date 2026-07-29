@@ -410,6 +410,19 @@ Verified 2026-07-11. (The same site also has a `CRM` project — not ours.)
   the FULL SPEC (markdown → Jira wiki markup; PUT via `/rest/api/2/issue/{key}` —
   v2 takes wiki text, v3 needs ADF). Sync at /ticket-start, re-sync whenever the
   SPEC changes, and at /ticket-deliver. Local files remain the working copies.
+- **Comments mangle underscored identifiers — descriptions don't.** Verified
+  2026-07-29. The jira MCP's `jira_add_comment`/`jira_edit_comment` convert
+  Markdown to ADF, and *paired* underscores become emphasis: `sent_external_id`
+  stores as `sent*external_id`, `mark_delivery_sent` as `mark*delivery*sent`. A
+  lone underscore survives (`TestMatrix_MailToolsFallThroughForWorkers` is
+  intact). Backticks are worse — inline code spans become line breaks — and
+  backslash escapes are worse still (the backslash is kept AND the underscore
+  still converts). Fenced blocks don't help either. No known escape works.
+  Consequence: put anything identifier-dense in the **description** (which
+  round-trips raw wiki text through the v2 PUT, underscores and backticks
+  intact) or in the local SPEC, and keep comments to prose. Do NOT "fix" a
+  mangled comment by rewriting a good description through the same converter —
+  that risks corrupting correct content to tidy incorrect content.
 - Sync points: `/ticket-start` & `/bug-start` create + move to In Progress;
   `/ticket-deliver` comments results and moves toward review — **Done only after
   Salvador actually commits**, never before.
