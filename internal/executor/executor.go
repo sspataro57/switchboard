@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/policy"
@@ -119,6 +120,16 @@ func ActorFrom(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+// ViaMCP reports whether this call arrived over the MCP surface.
+//
+// Handlers use it for restrictions policy structurally cannot express: policy
+// decides on (tool, actor, snapshot) and never sees a row's state, so "this
+// transport may only make this state transition" has to live with the state
+// machine. The audit row keeps the full unmodified actor either way.
+func ViaMCP(ctx context.Context) bool {
+	return strings.HasPrefix(ActorFrom(ctx), policy.MCPTransportPrefix)
 }
 
 // auditFailure writes a start+terminal audit pair for calls that fail before

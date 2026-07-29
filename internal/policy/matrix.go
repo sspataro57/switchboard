@@ -20,6 +20,13 @@ type Snapshot struct {
 	HourlyLimit   int
 }
 
+// MCPTransportPrefix is the marker the MCP server puts in front of its worker
+// identity. Defined here, in the lowest layer that needs it, because two layers
+// do and they must not drift: humanActor strips it before the human check, and
+// executor.ViaMCP tests for it so a handler can narrow what it will do over that
+// transport. Any future transport wrapper belongs here too.
+const MCPTransportPrefix = "mcp:"
+
 // sendShaped tools transition a delivery toward the outside world, so they need
 // the channel/rate snapshot. Both belong here; they differ only in whether the
 // kill switch can stop them — see freezeGated.
@@ -63,7 +70,7 @@ func humanActor(actor string) bool {
 	// Deliberately done here rather than by not prefixing in the adapter: the
 	// audit row keeps the full unmodified actor, so which surface triggered a
 	// send stays answerable. Any future transport wrapper must be added here.
-	actor = strings.TrimPrefix(actor, "mcp:")
+	actor = strings.TrimPrefix(actor, MCPTransportPrefix)
 	for _, p := range []string{"dashboard:", "opsctl:", "manual:"} {
 		if strings.HasPrefix(actor, p) {
 			return true

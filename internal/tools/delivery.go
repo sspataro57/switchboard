@@ -585,9 +585,9 @@ func markDeliverySent(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]b
 		// opsctl, which an interactive session can still reach through Bash.
 		//
 		// Checked here rather than in policy because policy decides on
-		// (tool, actor, snapshot) and never sees a row's status.
-		viaMCP := strings.HasPrefix(executor.ActorFrom(ctx), "mcp:")
-		if viaMCP && !(channel == "slack_reply" && status == "sending") {
+		// (tool, actor, snapshot) and never sees a row's status; executor.ViaMCP
+		// keeps the transport-prefix knowledge in one place.
+		if executor.ViaMCP(ctx) && !(channel == "slack_reply" && status == "sending") {
 			return fmt.Errorf("over MCP, mark_delivery_sent only resolves a slack_reply delivery already "+
 				"in 'sending'; delivery %d is %s/%s — record it via the dashboard or `opsctl call`",
 				a.DeliveryID, channel, status)
@@ -862,6 +862,7 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 
 	var taskID int64
 	var body, targetRef string
+	var attemptedAt time.Time
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
 		var status string
 		var extID, target *string
@@ -925,10 +926,14 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		// NULL until the bridge call returns. Without that distinction 'sending'
 		// would mean both "executing now" and "returned ambiguously", and
 		// mark_delivery_failed could reopen a live call for a second send.
-		if _, err := tx.Exec(ctx,
+		//
+		// The timestamp is read back and every phase-2 write is fenced on it, so a
+		// late-returning attempt cannot overwrite the outcome of a newer one.
+		if err := tx.QueryRow(ctx,
 			`UPDATE deliveries
 			    SET status='sending', send_attempted_at=now(), send_settled_at=NULL, updated_at=now()
-			  WHERE id=$1`, deliveryID); err != nil {
+			  WHERE id=$1
+			 RETURNING send_attempted_at`, deliveryID).Scan(&attemptedAt); err != nil {
 			return fmt.Errorf("mark sending: %w", err)
 		}
 		return nil
@@ -937,20 +942,30 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		return nil, err
 	}
 
-	// State after the call must be written even when the caller's deadline just
-	// expired — that is exactly when an ambiguous row needs its diagnostic and
-	// its settled marker. WithoutCancel keeps the pool usable; the short timeout
-	// keeps a wedged database from hanging the handler.
+	sendErr := slackSender.Send(ctx, targetRef, google.ScrubAIAttribution(body))
+
+	// Constructed AFTER the call, never before: WithTimeout fixes an absolute
+	// deadline at creation, so a window opened up-front would already be spent by
+	// the time a real browser click returned — and the post-call write is exactly
+	// what a slow send needs. WithoutCancel because the caller's deadline blowing
+	// is the correlated event that most needs a marker and a diagnostic recorded.
 	settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancelSettle()
 
-	if sendErr := slackSender.Send(ctx, targetRef, google.ScrubAIAttribution(body)); sendErr != nil {
+	// Fence: only the attempt that wrote this timestamp may record its outcome,
+	// and only while the row is still the one it dispatched. An attempt that
+	// returns after a human resolved it — or after a newer attempt started —
+	// affects nothing.
+	const fenceArg3 = ` AND status='sending' AND send_attempted_at=$3`
+	const fenceArg2 = ` AND status='sending' AND send_attempted_at=$2`
+
+	if sendErr != nil {
 		var rejected *slackweb.SendRejectedError
 		if errors.As(sendErr, &rejected) {
 			// Definite: the click never happened, so reopen failed->approved.
 			if _, err := pool.Exec(settleCtx,
 				`UPDATE deliveries SET status='failed', send_settled_at=now(), error=$2, updated_at=now()
-				 WHERE id=$1`, deliveryID, sendErr.Error()); err != nil {
+				 WHERE id=$1`+fenceArg3, deliveryID, sendErr.Error(), attemptedAt); err != nil {
 				// Report both: the send is known-not-sent, but the row still says
 				// 'sending' and a human has to resolve it.
 				return nil, fmt.Errorf("slack send rejected (%v) AND recording the failure failed (%v); "+
@@ -963,18 +978,25 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		// or a human (mark_delivery_sent / mark_delivery_failed) resolves it.
 		// send_settled_at closes the in-flight window so a human MAY resolve it.
 		if _, err := pool.Exec(settleCtx,
-			`UPDATE deliveries SET send_settled_at=now(), error=$2, updated_at=now() WHERE id=$1`,
-			deliveryID, sendErr.Error()); err != nil {
+			`UPDATE deliveries SET send_settled_at=now(), error=$2, updated_at=now() WHERE id=$1`+fenceArg3,
+			deliveryID, sendErr.Error(), attemptedAt); err != nil {
 			return nil, fmt.Errorf("slack send outcome unknown (%v) AND recording it failed (%v); "+
 				"delivery %d is stuck in sending with no diagnostic", sendErr, err, deliveryID)
 		}
 		return nil, fmt.Errorf("slack send (outcome unknown, delivery %d left sending): %w", deliveryID, sendErr)
 	}
 
-	if _, err := pool.Exec(settleCtx,
+	tag, err := pool.Exec(settleCtx,
 		`UPDATE deliveries SET status='sent', sent_at=now(), send_settled_at=now(), error=NULL, updated_at=now()
-		 WHERE id=$1`, deliveryID); err != nil {
+		 WHERE id=$1`+fenceArg2, deliveryID, attemptedAt)
+	if err != nil {
 		return nil, fmt.Errorf("finalize sent: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// The click landed, but this attempt no longer owns the row: something
+		// else already resolved it. Say so rather than reporting a clean send.
+		return nil, fmt.Errorf("slack send landed but delivery %d was resolved by another actor first; "+
+			"verify the channel before acting on this row", deliveryID)
 	}
 	if _, err := insertTaskEvent(settleCtx, pool, taskID, "delivery_sent",
 		map[string]any{"delivery_id": deliveryID, "channel": "slack_reply"}); err != nil {

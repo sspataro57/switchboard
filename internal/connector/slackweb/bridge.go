@@ -155,3 +155,42 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 	}
 	return b.Buffer.Write(p)
 }
+
+// DeliveryBridge is both Slack delivery seams at once — tools.SlackDrafter and
+// tools.SlackSender. Both transports satisfy it, which is what lets one
+// constructed bridge serve drafting and sending in the same process.
+type DeliveryBridge interface {
+	Draft(ctx context.Context, targetURL, text string) error
+	Send(ctx context.Context, targetURL, text string) error
+}
+
+// NewDeliveryBridgeFromEnv picks the transport the same way the connector's own
+// poller does: SLACK_WEB_BRIDGE_URL selects HTTP, otherwise
+// SLACK_WEB_BRIDGE_SCRIPT selects the local subprocess. It returns (nil, nil)
+// when neither is set, so a caller can leave the seams unwired.
+//
+// Both trusted processes (opsctl, dashboard) go through here. Before SWT-12 they
+// built a CommandBridge unconditionally and stat()ed a script on their own host,
+// so a cluster-resident dashboard could neither draft nor send — the exact
+// configuration the promotion exists to escape.
+func NewDeliveryBridgeFromEnv() (DeliveryBridge, error) {
+	if rawURL := os.Getenv("SLACK_WEB_BRIDGE_URL"); rawURL != "" {
+		token, err := TokenFromEnv()
+		if err != nil {
+			return nil, err
+		}
+		bridge, err := NewHTTPBridge(rawURL, token, nil)
+		if err != nil {
+			return nil, err
+		}
+		return bridge, nil
+	}
+	if script := os.Getenv("SLACK_WEB_BRIDGE_SCRIPT"); script != "" {
+		bridge, err := NewCommandBridge(os.Getenv("SLACK_WEB_NODE"), script)
+		if err != nil {
+			return nil, err
+		}
+		return bridge, nil
+	}
+	return nil, nil
+}

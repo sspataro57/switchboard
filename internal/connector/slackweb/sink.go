@@ -216,12 +216,19 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	// behaviour, so the historical-collision risk remains for the assisted tier
 	// alone — bounded by the fact that nothing auto-promotes an assisted row's
 	// status.
+	//
+	// The skew allowance is not decoration: send_attempted_at is Postgres now() on
+	// pg-main, while message.SentAt comes from Slack's clock via the leaf. A
+	// database even a second fast would refuse a legitimate confirmation
+	// PERMANENTLY and flag the row instead — a silent failure with the same shape
+	// as SWT-13's non-canonical target_ref landmine. Two minutes still kills the
+	// months-old-replay collision this floor exists for.
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, task_id, body FROM deliveries
 		 WHERE channel='slack_reply' AND status IN ('sending','sent')
 		   AND sent_external_id IS NULL
 		   AND confirmed_at IS NULL AND target_ref=$1
-		   AND (send_attempted_at IS NULL OR send_attempted_at <= $2)
+		   AND (send_attempted_at IS NULL OR send_attempted_at - interval '2 minutes' <= $2)
 		 ORDER BY id DESC`, message.TargetRef, message.SentAt)
 	if err != nil {
 		return fmt.Errorf("select Slack deliveries to confirm: %w", err)

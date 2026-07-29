@@ -223,6 +223,59 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   ci_passed/ci_failed. New spine tools: record_pr_event, record_ci_event,
   task_pr_transition; agent-facing: link_external_ref.
 
+## Slack send promotion (SWT-12) — contract + landmines
+
+`slack_reply` is an **approve**-tier channel: switchboard clicks Send through the
+connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard half).
+
+- **Nothing sends until the leaf ships.** The `/send` route and `send` CLI op do
+  not exist in `sspataro57/slackconnector` yet. A leaf 404 is a 4xx, which is a
+  DEFINITE rejection, so the row lands in `failed` and is re-approvable — safe, but
+  not exercisable end to end.
+- **`SLACK_CONNECTOR_UNATTENDED_SEND` is per-process.** Set it in the
+  bridge-server's launchd environment ONLY. Setting it in the leaf MCP server's
+  environment silently removes the manual path's human token gate. Two separate
+  launchd environments on the mini; they are not the same knob.
+- **Per-workspace go-live is `source_accounts.send_enabled`**, gmail's convention.
+  `EnsureAccount` inserts `false` and never updates it, so a newly ingested
+  workspace is safely off: `UPDATE source_accounts SET send_enabled=true` per
+  workspace, by hand.
+- **Confirmation only works where export works.** Export fails closed for any
+  allowed workspace with no `OWN_USER_IDS` entry; `T0HPR78RX`
+  (Collaboratory/LlamaSite) has none, so the bridge is narrowed to Avviato. A send
+  into an unexported workspace stays unconfirmed forever and always ends flagged.
+  `connector-slackweb` is also currently SUSPENDED.
+- **A browser click reserves no message id.** Hence the whole shape:
+  `send_attempted_at` commits before the click, `sent_external_id` stays NULL on
+  success, and the next export stamps it by matching a 120-char body prefix.
+  `'sending'` is TERMINAL until the matcher or a human moves it — nothing retries,
+  because a retry of a click that did land is a double-post into a client channel.
+- **`sending` means two different things and the columns tell them apart.**
+  `send_attempted_at IS NOT NULL AND send_settled_at IS NULL` is IN FLIGHT;
+  settled is ambiguous. `mark_delivery_failed` refuses an unsettled attempt younger
+  than 15 minutes (`sendAttemptLease`) — that refusal is what stops a human
+  reopening a live call for a second send.
+- **`approval_source` says which authority let a row out**: `'switchboard'`
+  (policy gated it) or `'leaf_token'` (the connector's own token did; switchboard
+  only recorded it). `send_delivery` requires `'switchboard'`.
+- **The kill switch is for switchboard.** `send_delivery` is freeze-gated;
+  `mark_delivery_sent` is not, because recording a send made elsewhere cannot be
+  prevented by freezing — only hidden. Freeze-time records emit
+  `delivery_recorded_during_freeze`.
+- **`sync_runs.started_at` for slackweb is the export's START**, passed into
+  `StartRun` explicitly. It used to default to `now()` at insert, which was the
+  export's END, because `Ingest` exports before creating the run row. The
+  reconciler counts passes that could have OBSERVED a message, so this matters.
+- **Over MCP, `mark_delivery_sent` permits exactly one transition**: resolving a
+  `slack_reply` row already in `'sending'`. Everything else (approved, or drafted
+  via `leaf_gated`) is dashboard/`opsctl` only, because `delivery_sent` drives R8
+  and an injected call could otherwise fabricate a completed delivery. The durable
+  fix is a leaf-produced receipt; it needs the `/send` route first.
+- **`policy.MCPTransportPrefix` is the one definition of `"mcp:"`** —
+  `humanActor` strips it, `executor.ViaMCP` tests it. Do not re-litter the literal.
+
+---
+
 ## Slack Web connector (shipped in SWT-13)
 
 - Leaf is the sibling TS repo (`~/projects/personal/slackconnector`), driven as a

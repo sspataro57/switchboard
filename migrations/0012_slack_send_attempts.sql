@@ -56,8 +56,8 @@ UPDATE deliveries d
         AND a.status = 'approved'
    );
 
--- Counting sends per channel per hour now reads ('sent','sending') and needs the
--- attempt instant for rows with no sent_at.
-CREATE INDEX deliveries_send_window_idx
-  ON deliveries (channel, send_attempted_at)
-  WHERE send_attempted_at IS NOT NULL;
+-- No index. The rate-limit query filters on COALESCE(sent_at, send_attempted_at),
+-- which no index on either column alone can serve, and deliveries is small and
+-- already covered by deliveries_status_idx (0006) for the status predicate. An
+-- index that cannot be used is worse than none: it taxes every write and reads
+-- as though the query were covered.

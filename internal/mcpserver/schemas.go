@@ -52,8 +52,9 @@ var agentTools = []Tool{
 	{
 		Name:        "mark_delivery_sent",
 		Description: "Resolve a Slack reply that switchboard already tried to send and left in 'sending' (the click may or may not have landed): confirm the message IS in the channel. Records an outcome; it never sends anything. Over MCP this is the ONLY transition allowed — recording an approved or still-drafted delivery as sent must go through the dashboard or `opsctl call`, because it would assert a send that switchboard never made. Human-only: a worker identity is refused by policy even though this tool is listed.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"delivery_id":{"type":"integer"},"leaf_gated":{"type":"boolean"}},"required":["delivery_id"]}`),
-	}, {
+		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"}},"required":["delivery_id"]}`),
+	},
+	{
 		Name:        "draft_delivery",
 		Description: "Draft an outbound client communication as a delivery row (drafted; goes through approval before any send). THE only route for client-visible words.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat","jira_comment","slack_reply"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat, jira_comment, and slack_reply; Slack uses the exact conversation or thread URL"}},"required":["task_id","channel","body"]}`),

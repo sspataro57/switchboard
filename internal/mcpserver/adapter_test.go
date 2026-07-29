@@ -37,8 +37,13 @@ package mcpserver_test
 // a real db) rather than by hand-rolling the wire framing here.
 //
 // SWT-12 (slack-send-promotion) Q1: mark_delivery_sent joins the agent surface —
-// and NOTHING else does. See TestMarkDeliverySent_IsMCPListedAndCallable and
-// TestMCPListing_DoesNotMakeMarkDeliverySentWorkerCallable.
+// and NOTHING else does. NARROWED by criterion 24 after adversarial review: the
+// handler additionally permits only ONE transition over this transport (resolving
+// a slack_reply row already in 'sending'), because delivery_sent drives
+// orchestrator R8 and an injected call could otherwise fabricate a delivery that
+// never happened. That handler-level restriction is covered by
+// TestSlackReview_Integration_MCPMayOnlyResolveASendingRow in internal/tools;
+// what this file pins is the listing and the worker-denial.
 
 import (
 	"context"
@@ -81,7 +86,7 @@ var wantAgentTools = []string{
 	"record_decision",
 	"draft_delivery",     // agent-facing since SWT-8: THE route for client-visible words
 	"link_external_ref",  // agent-facing since SWT-9: workers link their PRs/issues
-	"mark_delivery_sent", // agent-facing since SWT-12 (Q1): RECORD a leaf-token send in one call
+	"mark_delivery_sent", // agent-facing since SWT-12 (Q1): resolve a 'sending' Slack row
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.
@@ -151,8 +156,9 @@ func TestListTools_ExactlyAgentAllowlist(t *testing.T) {
 }
 
 // SWT-12 criterion 20 / Q1: mark_delivery_sent is listed WITH a schema and is
-// callable, so an interactive session records a leaf-token send in one call
-// instead of shelling out to `opsctl call`.
+// callable, so an interactive session can resolve a stuck Slack send without
+// shelling out to `opsctl call`. Recording a leaf-gated draft is deliberately NOT
+// reachable this way (criterion 24) — the handler refuses it.
 func TestMarkDeliverySent_IsMCPListedAndCallable(t *testing.T) {
 	fx := &fakeExec{result: executor.Result{Output: json.RawMessage(`{"delivery_id":7,"status":"sent"}`)}}
 	srv := mcpserver.New(fx, testWorkerID)

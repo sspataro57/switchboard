@@ -335,6 +335,50 @@ the attempt that produced it.**
     new case covers a genuine post-dispatch break so the property they protected
     is still tested.
 
+### Second review round (Go review, 2026-07-29)
+
+The Go reviewer that could not run before the fixes ran after them and found one
+blocking defect plus fourteen non-blocking ones. Fixed:
+
+- **BLOCKING: the settle context was constructed BEFORE the bridge call.**
+  `context.WithTimeout` fixes an absolute deadline at creation, so the 10-second
+  window meant to survive a blown caller deadline was already spent by the time a
+  real browser click returned. Every post-call write used it, so on a slow-but-
+  successful send the message went out, the tool reported failure, no
+  `delivery_sent` fired (R8 never ran), and the row sat unresolvable for the whole
+  lease — precisely the wedge amendment 27 existed to remove. Now constructed
+  after `Send` returns.
+- **Phase-2 writes were unfenced.** They keyed on `id` alone, so a late-returning
+  attempt could overwrite a newer attempt's state or walk an already-`sent` row
+  back to `failed` after R8 closed the task. All three now carry
+  `AND status='sending' AND send_attempted_at=<the attempt's own instant>`, and a
+  send whose row was resolved by someone else says so instead of reporting a clean
+  send. This closes the last theoretical path to a second click without relying on
+  the undocumented invariant that every caller's deadline is shorter than the lease.
+- **The confirmation floor had no skew tolerance.** `send_attempted_at` is
+  Postgres time; `message.sent_at` comes from Slack's clock. A database a second
+  fast would have refused a legitimate confirmation permanently. Two minutes.
+- **The reconciler still read `COALESCE(sent_at, updated_at)`** though 0012 had
+  supplied the honest instant; `send_attempted_at` now sits between them.
+- **The `mcp:` prefix was known in two places.** `policy.MCPTransportPrefix` is
+  now the single definition, with `executor.ViaMCP` reading it.
+- Removed an index 0012 added that could not serve the query it was for; declared
+  `delivery_failed`; moved `DeliveryBridge` beside the bridges; de-duplicated the
+  dashboard error render; dropped `leaf_gated` from the MCP schema (that edge is
+  not reachable over MCP).
+- **Coverage.** All seven earlier fixes had been asserted by prose only. Added
+  `internal/tools/delivery_slack_review_integration_test.go` (lease refusal and
+  expiry, attempt window written, the MCP transition restriction in all four
+  corners, `approval_source` required and stamped) and
+  `internal/connector/slackweb/confirm_floor_integration_test.go` (floor accepts a
+  message postdating the click, refuses one predating it, tolerates skew). The
+  negative floor case failed on first run against a wrong fixture timestamp, which
+  is the point of writing it.
+
+Accepted rather than fixed: the assisted tier's confirmation still has no time
+floor (no attempt instant exists, and `created_at` is not a substitute — trying it
+broke SWT-13's loop-closure test, correctly).
+
 ## Data model changes
 
 - No new tables. Statuses, `sent_external_id`, `sent_at`, `confirmed_at`,
@@ -346,10 +390,13 @@ the attempt that produced it.**
   constraint — a third gate is plausible later (an auto tier), and the SWT-8
   convention is to validate delivery enums in the handler.
 - New `task_events` vocabulary: `delivery_unconfirmed` (payload
-  `{delivery_id, channel, passes}`) and `delivery_recorded_during_freeze`
-  (payload `{delivery_id, channel, approval_source}`). Orchestrator has no rule
-  for either — both are dashboard/human signals, and unknown event types are
-  ignored by the drain.
+  `{delivery_id, channel, passes}`), `delivery_recorded_during_freeze` (payload
+  `{delivery_id, channel, approval_source}`), and `delivery_failed` (payload
+  `{delivery_id, channel, manual}`, emitted by `mark_delivery_failed`).
+  Orchestrator has no rule for any of them — all three are dashboard/human
+  signals, and unknown event types are ignored by the drain.
+- Migration `0012_slack_send_attempts.sql` adds `send_attempted_at` and
+  `send_settled_at` (see amendments 22-27) and corrects 0011's backfill.
 
 ## API / MCP tool changes
 
