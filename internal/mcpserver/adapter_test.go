@@ -35,6 +35,10 @@ package mcpserver_test
 // The literal stdio initialize/tools-list/tools-call round-trip over the
 // official go-sdk is exercised by smoke_integration_test.go (in-process against
 // a real db) rather than by hand-rolling the wire framing here.
+//
+// SWT-12 (slack-send-promotion) Q1: mark_delivery_sent joins the agent surface —
+// and NOTHING else does. See TestMarkDeliverySent_IsMCPListedAndCallable and
+// TestMCPListing_DoesNotMakeMarkDeliverySentWorkerCallable.
 
 import (
 	"context"
@@ -45,6 +49,7 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/mcpserver"
+	"github.com/sspataro57/switchboard/internal/policy"
 )
 
 const testWorkerID = "manual:test"
@@ -74,12 +79,22 @@ var wantAgentTools = []string{
 	"mark_done_local",
 	"create_child_task",
 	"record_decision",
-	"draft_delivery",    // agent-facing since SWT-8: THE route for client-visible words
-	"link_external_ref", // agent-facing since SWT-9: workers link their PRs/issues
+	"draft_delivery",     // agent-facing since SWT-8: THE route for client-visible words
+	"link_external_ref",  // agent-facing since SWT-9: workers link their PRs/issues
+	"mark_delivery_sent", // agent-facing since SWT-12 (Q1): RECORD a leaf-token send in one call
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.
-var spineTools = []string{"task_release", "answer_feedback", "prefill_delivery"}
+//
+// SWT-12 Q1 grounds for the three delivery verbs here: this session ingests
+// Slack and email content, so the verbs that can put words in front of a client
+// must not be one prompt injection away. Recording an already-sent message is
+// the ONE delivery verb where an injected call can do no external damage —
+// approving, sending, and un-sending are not.
+var spineTools = []string{
+	"task_release", "answer_feedback", "prefill_delivery",
+	"approve_delivery", "send_delivery", "mark_delivery_failed",
+}
 
 func TestDraftDeliverySchema_IncludesSlackReply(t *testing.T) {
 	srv := mcpserver.New(&fakeExec{}, testWorkerID)
@@ -132,6 +147,75 @@ func TestListTools_ExactlyAgentAllowlist(t *testing.T) {
 		if present[n] {
 			t.Errorf("spine-facing tool %q leaked into tools/list", n)
 		}
+	}
+}
+
+// SWT-12 criterion 20 / Q1: mark_delivery_sent is listed WITH a schema and is
+// callable, so an interactive session records a leaf-token send in one call
+// instead of shelling out to `opsctl call`.
+func TestMarkDeliverySent_IsMCPListedAndCallable(t *testing.T) {
+	fx := &fakeExec{result: executor.Result{Output: json.RawMessage(`{"delivery_id":7,"status":"sent"}`)}}
+	srv := mcpserver.New(fx, testWorkerID)
+
+	var schema string
+	for _, tool := range srv.ListTools() {
+		if tool.Name == "mark_delivery_sent" {
+			schema = string(tool.InputSchema)
+		}
+	}
+	if schema == "" {
+		t.Fatalf("mark_delivery_sent is not in tools/list (SWT-12 criterion 20)")
+	}
+	if !strings.Contains(schema, `"delivery_id"`) {
+		t.Errorf("mark_delivery_sent schema does not declare delivery_id: %s", schema)
+	}
+
+	out, err := srv.CallTool(context.Background(), "mark_delivery_sent", json.RawMessage(`{"delivery_id":7}`))
+	if err != nil {
+		t.Fatalf("CallTool(mark_delivery_sent): %v", err)
+	}
+	if !fx.called {
+		t.Fatal("CallTool(mark_delivery_sent) did not forward to the executor")
+	}
+	if fx.lastCall.Tool != "mark_delivery_sent" {
+		t.Errorf("forwarded Tool = %q, want mark_delivery_sent", fx.lastCall.Tool)
+	}
+	if want := "mcp:" + testWorkerID; fx.lastCall.Actor != want {
+		t.Errorf("forwarded Actor = %q, want %q", fx.lastCall.Actor, want)
+	}
+	if !strings.Contains(string(out), `"status":"sent"`) {
+		t.Errorf("CallTool output = %s, want the executor result verbatim", out)
+	}
+}
+
+// The security property Q1 turns on: LISTING mark_delivery_sent does not widen
+// WHO may call it. The MCP adapter is a transport, not an authority — the
+// human-only gate in the policy matrix is what refuses an autonomous worker
+// identity, and it still does with the tool on the agent surface.
+func TestMCPListing_DoesNotMakeMarkDeliverySentWorkerCallable(t *testing.T) {
+	const workerID = "worker:avviato"
+
+	// The adapter WILL forward it (that is what listing means) with the worker's
+	// own MCP identity...
+	fx := &fakeExec{result: executor.Result{Output: json.RawMessage(`{}`)}}
+	srv := mcpserver.New(fx, workerID)
+	if _, err := srv.CallTool(context.Background(), "mark_delivery_sent", json.RawMessage(`{"delivery_id":7}`)); err != nil {
+		t.Fatalf("CallTool(mark_delivery_sent) as a worker: %v", err)
+	}
+	if fx.lastCall.Actor != "mcp:"+workerID {
+		t.Fatalf("forwarded Actor = %q, want %q (identity is never model-chosen)", fx.lastCall.Actor, "mcp:"+workerID)
+	}
+
+	// ...and the policy matrix denies it, human_only, before any handler runs.
+	// slack_reply / under limit / not frozen: the ONLY thing standing between an
+	// autonomous console and this verb is the actor gate.
+	d := policy.Decide(
+		policy.Request{Tool: "mark_delivery_sent", Actor: fx.lastCall.Actor},
+		policy.Snapshot{SentLastHour: map[string]int{"slack_reply": 0}, Channel: "slack_reply", HourlyLimit: 10},
+	)
+	if d.Decision != "deny" || d.Rule != "human_only" {
+		t.Fatalf("policy on the MCP-listed mark_delivery_sent by %q = %q/%q, want deny/human_only — "+
+			"MCP-listing must not make a spine verb worker-callable (SWT-12 Q1)", fx.lastCall.Actor, d.Decision, d.Rule)
 	}
 }
 

@@ -50,6 +50,10 @@ var agentTools = []Tool{
 		InputSchema: schema(`{"type":"object","properties":{"parent_task_id":{"type":"integer"},"title":{"type":"string"},"body":{"type":"string"},"assignee_type":{"type":"string","enum":["human","claude"]},"priority":{"type":"integer"},"subproject":{"type":"string"},"worker_type":{"type":"string"}},"required":["parent_task_id","title"]}`),
 	},
 	{
+		Name:        "mark_delivery_sent",
+		Description: "Record that a Slack reply is now in the channel. Records a send that already happened; it never sends anything itself. Set leaf_gated when the message went out through the Slack connector's own approval token rather than switchboard approval — that is the only way a still-drafted row may be recorded. Human-only: a worker identity is refused by policy even though this tool is listed.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"delivery_id":{"type":"integer"},"leaf_gated":{"type":"boolean"}},"required":["delivery_id"]}`),
+	}, {
 		Name:        "draft_delivery",
 		Description: "Draft an outbound client communication as a delivery row (drafted; goes through approval before any send). THE only route for client-visible words.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat","jira_comment","slack_reply"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat, jira_comment, and slack_reply; Slack uses the exact conversation or thread URL"}},"required":["task_id","channel","body"]}`),

@@ -182,9 +182,14 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	if message.ExternalMessageID == "" || message.BodyText == "" || message.TargetRef == "" {
 		return nil
 	}
+	// 'sending' as well as 'sent' (SWT-12): a crash between the click and the
+	// 'sent' write leaves a row switchboard cannot classify, and nothing is
+	// allowed to retry it. Matching it here is what makes that window
+	// self-healing — the message is in Slack, so the row becomes 'sent'.
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, task_id, body FROM deliveries
-		 WHERE channel='slack_reply' AND status='sent' AND sent_external_id IS NULL
+		 WHERE channel='slack_reply' AND status IN ('sending','sent')
+		   AND sent_external_id IS NULL
 		   AND confirmed_at IS NULL AND target_ref=$1
 		 ORDER BY id DESC`, message.TargetRef)
 	if err != nil {
@@ -210,8 +215,16 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	if deliveryID == 0 {
 		return nil
 	}
+	// Promote a crashed 'sending' row to 'sent' and backfill sent_at, while
+	// leaving an already-'sent' row's timestamp alone. The guards are unchanged:
+	// sent_external_id IS NULL means this never overwrites an id, so re-running
+	// (including --all) is idempotent and emits no duplicate event.
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE deliveries SET sent_external_id=$2, confirmed_at=now(), updated_at=now()
+		`UPDATE deliveries
+		    SET sent_external_id=$2, confirmed_at=now(),
+		        status='sent',
+		        sent_at=COALESCE(sent_at, now()),
+		        updated_at=now()
 		 WHERE id=$1 AND sent_external_id IS NULL AND confirmed_at IS NULL`,
 		deliveryID, message.ExternalMessageID)
 	if err != nil {

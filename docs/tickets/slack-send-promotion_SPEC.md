@@ -222,8 +222,25 @@ From the answered open questions:
     `approval_source='leaf_token'`, transitioning `drafted → sent` directly and
     writing NO `approvals` row. The automated path's `status='approved'`
     requirement in `sendSlackReply` is unchanged. Tests pin that a `drafted`
-    row with `approval_source='switchboard'` (or NULL) is still refused — the
-    new edge must not become a general bypass of approval.
+    row with `approval_source='switchboard'` is still refused — the new edge
+    must not become a general bypass of approval.
+
+    **AMENDED during implementation, 2026-07-29 — the manual path was
+    unreachable as written.** This criterion gated the edge on the column
+    ALREADY saying `leaf_token`, but nothing could put it there: `draft_delivery`
+    is explicitly unchanged, so a row starts with `approval_source` NULL, and no
+    other tool in this ticket writes the column except `approve_delivery` (which
+    writes `'switchboard'`). Specced literally, the manual path could never be
+    recorded — the whole point of the ticket's second half.
+
+    Resolution: `mark_delivery_sent` takes an optional `leaf_gated` boolean. On a
+    `drafted` `slack_reply` row it stamps `approval_source='leaf_token'` in the
+    same tx as the transition. Deliberately on THIS tool rather than
+    `draft_delivery`: draft_delivery is agent-facing, so stamping there would let
+    a worker pre-mark a row that later skips approval entirely. `mark_delivery_sent`
+    is human-only, and "I sent this through the connector" is the same class of
+    assertion it already exists to record. A row that already carries a gate is
+    read from the row, so the caller cannot relabel a `'switchboard'` row.
 20. **Q1 — `mark_delivery_sent` becomes MCP-listed; nothing else does.** Added to
     `agentTools`/`agentToolNames` (`internal/mcpserver/schemas.go`,
     `adapter.go`) so an interactive session can record a manual send in one

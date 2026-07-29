@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,9 +17,14 @@ import (
 //
 // The authenticated Slack browser is irreducibly host-bound to the Mac mini,
 // while Switchboard runs in the cluster, so there is no local process to exec.
-// The mini exposes export/draft over HTTP and this is the client for it. There
-// is deliberately no send route on either side: sending stays a human action in
-// Slack, recorded afterwards via mark_delivery_sent.
+// The mini exposes export, draft, and send over HTTP and this is the client.
+//
+// SWT-12 deliberately reversed the guarantee this comment used to make — that no
+// send route exists on either side. The assisted tier required remote-desktopping
+// into the mini to press Send, which made it unusable, so switchboard now clicks
+// Send itself after approve_delivery. What did NOT change: Send is its own method
+// and route. Draft still refuses any result claiming sent:true, and that guard is
+// not a thing this file relaxes.
 type HTTPBridge struct {
 	baseURL string
 	token   string
@@ -104,7 +110,7 @@ func (b *HTTPBridge) post(ctx context.Context, path string, body []byte) ([]byte
 		if len(snippet) > 200 {
 			snippet = snippet[:200]
 		}
-		return nil, fmt.Errorf("Slack bridge %s returned %d: %s", path, response.StatusCode, snippet)
+		return nil, &bridgeStatusError{status: response.StatusCode, path: path, snippet: snippet}
 	}
 	if int64(len(out)) > b.maxBytes {
 		return nil, fmt.Errorf("Slack bridge %s output exceeded %d bytes", path, b.maxBytes)
@@ -150,6 +156,85 @@ func (b *HTTPBridge) Draft(ctx context.Context, targetURL, text string) error {
 	// rejected outright rather than trusted.
 	if !result.Drafted || result.Sent {
 		return fmt.Errorf("Slack bridge returned an unsafe draft result")
+	}
+	return nil
+}
+
+// SendRejectedError is a DEFINITE bridge refusal: the send did not happen, so
+// the failed->approved retry path is safe to reopen.
+//
+// Only failures that provably preceded the click carry this type — a 4xx (no
+// token, writes disabled, unattended disabled, validation) or a leaf answering
+// sent:false. A 5xx, a transport error, or a context timeout stays UNTYPED,
+// because the click may have landed after the failure and invariant 4 errs
+// toward never-resend.
+type SendRejectedError struct {
+	Status int
+	Body   string
+}
+
+func (e *SendRejectedError) Error() string {
+	if e.Status == 0 {
+		return "Slack send rejected: " + e.Body
+	}
+	return fmt.Sprintf("Slack send rejected (%d): %s", e.Status, e.Body)
+}
+
+// bridgeStatusError carries the HTTP status out of post so Send can tell a
+// definite refusal from an ambiguous one. Its message is unchanged from the
+// untyped error it replaced, so Export/Draft callers see the same text.
+type bridgeStatusError struct {
+	status  int
+	path    string
+	snippet string
+}
+
+func (e *bridgeStatusError) Error() string {
+	return fmt.Sprintf("Slack bridge %s returned %d: %s", e.path, e.status, e.snippet)
+}
+
+// Send clicks Send in the connector's browser. It returns nothing on success
+// because a browser click reserves no message id — the delivery's
+// sent_external_id stays NULL and the next export stamps it by body prefix.
+func (b *HTTPBridge) Send(ctx context.Context, targetURL, text string) error {
+	if targetURL == "" || text == "" {
+		return &SendRejectedError{Body: "Slack send requires target URL and text"}
+	}
+	in, err := json.Marshal(map[string]string{"target_url": targetURL, "text": text})
+	if err != nil {
+		return &SendRejectedError{Body: fmt.Sprintf("marshal Slack send request: %v", err)}
+	}
+	out, err := b.post(ctx, "/send", in)
+	if err != nil {
+		var status *bridgeStatusError
+		if errors.As(err, &status) && status.status >= 400 && status.status < 500 {
+			return &SendRejectedError{Status: status.status, Body: status.snippet}
+		}
+		return err
+	}
+	return checkSendResult(out)
+}
+
+// checkSendResult enforces that only an exact {drafted:false, sent:true} counts
+// as a send. A "drafted" answer on the send path means the composer was filled
+// and the click never happened; recording that as sent would leave a delivery in
+// 'sent' with no message in Slack.
+func checkSendResult(out []byte) error {
+	var result struct {
+		Drafted bool `json:"drafted"`
+		Sent    bool `json:"sent"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		// Unintelligible: the leaf ran and may have clicked. Stay ambiguous.
+		return fmt.Errorf("parse Slack send result: %w", err)
+	}
+	if !result.Sent {
+		// The leaf states it did not send. Definite, so the row can retry.
+		return &SendRejectedError{Body: "Slack bridge reported the message was not sent"}
+	}
+	if result.Drafted {
+		// Claims both drafted and sent. Something happened; do not risk it.
+		return fmt.Errorf("Slack bridge returned an unsafe send result: drafted and sent")
 	}
 	return nil
 }

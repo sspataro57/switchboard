@@ -77,6 +77,29 @@ func (b *CommandBridge) Draft(ctx context.Context, targetURL, text string) error
 	return nil
 }
 
+// Send clicks Send through the local connector process. Like the HTTP bridge it
+// returns nothing on success: a browser click reserves no message id, so the
+// export's body-prefix matcher stamps sent_external_id later.
+//
+// The subprocess transport cannot distinguish a pre-click refusal from a
+// post-click crash the way an HTTP status can, so only two things are DEFINITE
+// here: input this method rejected itself, and a leaf that answered sent:false.
+// A non-zero exit stays untyped and therefore ambiguous.
+func (b *CommandBridge) Send(ctx context.Context, targetURL, text string) error {
+	if targetURL == "" || text == "" {
+		return &SendRejectedError{Body: "Slack send requires target URL and text"}
+	}
+	in, err := json.Marshal(map[string]string{"target_url": targetURL, "text": text})
+	if err != nil {
+		return &SendRejectedError{Body: fmt.Sprintf("marshal Slack send request: %v", err)}
+	}
+	out, err := b.run(ctx, "send", in)
+	if err != nil {
+		return err
+	}
+	return checkSendResult(out)
+}
+
 func (b *CommandBridge) run(ctx context.Context, operation string, stdin []byte) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, b.node, b.script, operation)
 	cmd.Env = os.Environ()
