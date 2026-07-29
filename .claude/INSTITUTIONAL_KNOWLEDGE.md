@@ -70,7 +70,12 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   adapters ONLY. Worker contract is prompt + JSON schema in, structured result out.
   A vendor import outside an adapter package is a flag.
 - **Migrations:** forward-only, numbered. No `down` migrations, no editing an
-  already-applied migration.
+  already-applied migration. The runner (`cmd/tools/migrate`) keys on
+  `schema_migrations.version` ONLY — there is no checksum — so an edited
+  already-applied file is skipped **silently** and the file diverges from the
+  schema with no error anywhere. That invisibility is the whole reason for the
+  rule. (Editing a migration that is still unmerged and applied only to a
+  throwaway local db is fine, provided you make the local schema match by hand.)
 - **Vocabulary:** table/tool names in CLAUDE.md's schema section are the vocabulary —
   reuse, don't invent synonyms (it's `deliveries`, not `outbound_messages`).
 - **Error handling:** wrap with context — `fmt.Errorf("doing X: %w", err)`. Flag bare

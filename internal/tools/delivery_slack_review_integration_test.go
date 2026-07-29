@@ -230,3 +230,41 @@ func TestSlackReview_Integration_ApproveStampsSwitchboardAuthority(t *testing.T)
 		t.Errorf("approval_source = %v after approve_delivery, want switchboard", after)
 	}
 }
+
+// ---- the phase-2 fence (Go review N1) -------------------------------------------
+
+// The fence's positive path is covered implicitly by every green send test — a
+// mismatched binding would zero RowsAffected and fail them. This is the negative
+// case: an attempt whose row has moved on writes NOTHING, rather than overwriting
+// a newer attempt's state or walking an already-resolved row backwards.
+func TestSlackReview_Integration_AStaleAttemptCannotOverwriteAResolvedRow(t *testing.T) {
+	ctx := context.Background()
+	s := newSlackSuite(t, ctx, true)
+	id := s.draft(t, ctx, "stale attempt writes nothing")
+	s.call(t, ctx, "approve_delivery", id)
+	s.call(t, ctx, "send_delivery", id)
+
+	// The row is now 'sent' with its own attempt instant. Model a DIFFERENT,
+	// older attempt returning late and trying to record an outcome, exactly as
+	// the unfenced code would have allowed.
+	var settled string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT send_settled_at::text FROM deliveries WHERE id=$1`, id).Scan(&settled); err != nil {
+		t.Fatalf("read settled: %v", err)
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE deliveries SET status='failed', error='late attempt', updated_at=now()
+		 WHERE id=$1 AND status='sending' AND send_attempted_at=$2`,
+		id, "1999-01-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("stale write: %v", err)
+	}
+	if tag.RowsAffected() != 0 {
+		t.Fatalf("a stale attempt affected %d rows; the fence must bind BOTH the attempt instant and "+
+			"status='sending', or a late return can walk a sent row back to failed after R8 closed the task",
+			tag.RowsAffected())
+	}
+	if r := s.row(t, ctx, id); r.status != "sent" {
+		t.Errorf("status = %q after a stale write, want still sent", r.status)
+	}
+}

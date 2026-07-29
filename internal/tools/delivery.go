@@ -996,7 +996,8 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		// The click landed, but this attempt no longer owns the row: something
 		// else already resolved it. Say so rather than reporting a clean send.
 		return nil, fmt.Errorf("slack send landed but delivery %d was resolved by another actor first; "+
-			"verify the channel before acting on this row", deliveryID)
+			"the message IS in Slack — check the channel and do NOT re-approve, because approve_delivery "+
+			"accepts a failed row and a resend would double-post", deliveryID)
 	}
 	if _, err := insertTaskEvent(settleCtx, pool, taskID, "delivery_sent",
 		map[string]any{"delivery_id": deliveryID, "channel": "slack_reply"}); err != nil {
