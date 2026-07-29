@@ -43,7 +43,7 @@ func run(normalizeOnly, all bool) error {
 	sink := slackweb.NewSink(pool)
 
 	if !normalizeOnly {
-		bridge, err := slackweb.NewCommandBridge(os.Getenv("SLACK_WEB_NODE"), os.Getenv("SLACK_WEB_BRIDGE_SCRIPT"))
+		bridge, err := newSource()
 		if err != nil {
 			return err
 		}
@@ -60,6 +60,23 @@ func run(normalizeOnly, all bool) error {
 		return fmt.Errorf("normalize: %w", err)
 	}
 	return nil
+}
+
+// newSource picks the transport to the Slack connector.
+//
+// The connector needs an authenticated browser, which is host-bound to the Mac
+// mini, so a cluster-resident poller cannot exec it locally: SLACK_WEB_BRIDGE_URL
+// selects the HTTP bridge on that host. The local command bridge remains for
+// running the poller on the same machine as the browser.
+func newSource() (slackweb.Source, error) {
+	if rawURL := os.Getenv("SLACK_WEB_BRIDGE_URL"); rawURL != "" {
+		token, err := slackweb.TokenFromEnv()
+		if err != nil {
+			return nil, err
+		}
+		return slackweb.NewHTTPBridge(rawURL, token, nil)
+	}
+	return slackweb.NewCommandBridge(os.Getenv("SLACK_WEB_NODE"), os.Getenv("SLACK_WEB_BRIDGE_SCRIPT"))
 }
 
 func printStats(phase string, stats slackweb.Stats) {
