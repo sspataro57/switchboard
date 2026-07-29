@@ -10,6 +10,53 @@ import (
 
 const testToken = "0123456789abcdef0123456789abcdef0123"
 
+// A response that is a complete document padded to exactly the cap, with more
+// bytes behind it, is the one truncation that stays valid JSON: cutting an
+// object mid-structure fails to parse on its own, but this does not. It must be
+// refused on the length, not on the parse.
+func TestHTTPBridgeExportRejectsTruncatedBodyThatStaysValidJSON(t *testing.T) {
+	const cap = 128
+	doc := `{"schema_version":1,"workspaces":[{"id":"T1","name":"n","url":"u","own_user_id":"U1","conversations":[]}`
+	padded := doc + strings.Repeat(" ", cap-len(doc))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(padded + `,{"id":"T2"}]}`))
+	}))
+	defer server.Close()
+
+	bridge, err := NewHTTPBridge(server.URL, testToken, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.maxBytes = cap
+
+	_, err = bridge.Export(context.Background())
+	if err == nil {
+		t.Fatal("expected a truncated export to be refused, not ingested as complete")
+	}
+	if !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("expected an overflow error naming the cap, got %v", err)
+	}
+}
+
+func TestHTTPBridgeExportAcceptsBodyExactlyAtCap(t *testing.T) {
+	doc := `{"schema_version":1,"workspaces":[]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(doc))
+	}))
+	defer server.Close()
+
+	bridge, err := NewHTTPBridge(server.URL, testToken, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly the cap must still pass: the guard rejects overflow, not fullness.
+	bridge.maxBytes = int64(len(doc))
+
+	if _, err := bridge.Export(context.Background()); err != nil {
+		t.Fatalf("a body exactly at the cap must be accepted, got %v", err)
+	}
+}
+
 func TestNewHTTPBridgeRejectsBadConfig(t *testing.T) {
 	cases := map[string]struct{ url, token string }{
 		"empty url":   {"", testToken},

@@ -23,6 +23,10 @@ type HTTPBridge struct {
 	baseURL string
 	token   string
 	client  *http.Client
+	// maxBytes caps a bridge response. Held per-bridge rather than read from the
+	// package constant so the overflow boundary is testable without allocating
+	// the real 64 MiB.
+	maxBytes int64
 }
 
 // NewHTTPBridge validates the endpoint and credential up front so a
@@ -50,9 +54,10 @@ func NewHTTPBridge(rawURL, token string, client *http.Client) (*HTTPBridge, erro
 		client = &http.Client{}
 	}
 	return &HTTPBridge{
-		baseURL: strings.TrimRight(rawURL, "/"),
-		token:   token,
-		client:  client,
+		baseURL:  strings.TrimRight(rawURL, "/"),
+		token:    token,
+		client:   client,
+		maxBytes: maxBridgeOutputBytes,
 	}, nil
 }
 
@@ -83,7 +88,12 @@ func (b *HTTPBridge) post(ctx context.Context, path string, body []byte) ([]byte
 	}
 	defer response.Body.Close()
 
-	out, err := io.ReadAll(io.LimitReader(response.Body, maxBridgeOutputBytes))
+	// One byte past the cap, so hitting it is distinguishable from a body that
+	// merely ends there. The command bridge reports overflow explicitly; without
+	// this, a truncated response that happens to remain valid JSON — a complete
+	// document padded to exactly the cap, with more bytes behind it — would be
+	// ingested as a complete export.
+	out, err := io.ReadAll(io.LimitReader(response.Body, b.maxBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read Slack bridge %s: %w", path, err)
 	}
@@ -95,6 +105,9 @@ func (b *HTTPBridge) post(ctx context.Context, path string, body []byte) ([]byte
 			snippet = snippet[:200]
 		}
 		return nil, fmt.Errorf("Slack bridge %s returned %d: %s", path, response.StatusCode, snippet)
+	}
+	if int64(len(out)) > b.maxBytes {
+		return nil, fmt.Errorf("Slack bridge %s output exceeded %d bytes", path, b.maxBytes)
 	}
 	return out, nil
 }
