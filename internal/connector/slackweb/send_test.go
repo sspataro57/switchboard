@@ -228,22 +228,55 @@ func TestHTTPBridgeSendLeaves5xxAndTransportErrorsAmbiguous(t *testing.T) {
 		}
 	})
 
-	t.Run("transport failure", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	// Post-dispatch failure: the request WAS written and the response then broke.
+	// By that point the browser may already have clicked, so this is the case that
+	// must stay ambiguous however tempting a retry looks.
+	t.Run("response breaks after dispatch", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			_ = conn.Close() // request received, no response written
+		}))
+		defer server.Close()
 		bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
-		server.Close() // nothing listening: a transport error, not a status
 
 		err := bridge.Send(context.Background(), sendTarget, "hi")
 		if err == nil {
-			t.Fatal("Send against a closed bridge = nil error")
+			t.Fatal("Send against a broken response = nil error")
 		}
 		var rejected *SendRejectedError
 		if errors.As(err, &rejected) {
-			t.Fatalf("transport error = *SendRejectedError, want untyped/ambiguous: %v", err)
+			t.Fatalf("a failure AFTER dispatch = *SendRejectedError, want untyped/ambiguous: %v", err)
+		}
+	})
+}
+
+// AMENDED after adversarial review (2026-07-29). These two cases originally
+// asserted ambiguity, which was wrong on the facts: both are provably
+// PRE-dispatch, so no click can have happened, and leaving them ambiguous wedged
+// every delivery in 'sending' whenever the bridge was simply down or the deadline
+// had already passed — each one then needing a manual mark_delivery_failed. The
+// sibling Gmail bridge already classifies "a binary that never started" as
+// definite; this brings Slack in line. The line between the two is dispatch, not
+// error category: see the post-dispatch case above, which stays ambiguous.
+func TestHTTPBridgeSendClassifiesPreDispatchFailuresAsDefinite(t *testing.T) {
+	t.Run("nothing listening", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
+		server.Close() // no TCP session is possible, so the request never left
+
+		err := bridge.Send(context.Background(), sendTarget, "hi")
+		var rejected *SendRejectedError
+		if !errors.As(err, &rejected) {
+			t.Fatalf("dial failure = %v (%T), want *SendRejectedError: without a TCP session the request "+
+				"never reached the bridge, so the browser cannot have clicked", err, err)
 		}
 	})
 
-	t.Run("context timeout", func(t *testing.T) {
+	t.Run("context already cancelled", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = w.Write([]byte(`{"drafted":false,"sent":true}`))
 		}))
@@ -253,12 +286,9 @@ func TestHTTPBridgeSendLeaves5xxAndTransportErrorsAmbiguous(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		err := bridge.Send(ctx, sendTarget, "hi")
-		if err == nil {
-			t.Fatal("Send with a cancelled context = nil error")
-		}
 		var rejected *SendRejectedError
-		if errors.As(err, &rejected) {
-			t.Fatalf("cancelled context = *SendRejectedError, want untyped/ambiguous: %v", err)
+		if !errors.As(err, &rejected) {
+			t.Fatalf("pre-cancelled context = %v (%T), want *SendRejectedError: nothing was dispatched", err, err)
 		}
 	})
 }

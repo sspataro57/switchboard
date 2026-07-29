@@ -573,6 +573,25 @@ func markDeliverySent(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]b
 		if channel != "upwork_chat" && channel != "slack_reply" {
 			return fmt.Errorf("mark_delivery_sent is the assisted tier's verb (upwork_chat/slack_reply); delivery %d is %s", a.DeliveryID, channel)
 		}
+		// The MCP surface can only RESOLVE an attempt switchboard itself made.
+		//
+		// Recording is safe from a prompt-injectable session only insofar as it
+		// cannot invent a delivery from nothing. Resolving a 'sending' slack_reply
+		// row qualifies: switchboard dispatched that click, so the worst an
+		// injected call can do is claim it landed when it did not. Every other
+		// transition does invent one — an 'approved' row, or a 'drafted' one via
+		// leaf_gated, becomes 'sent' with no send having occurred, and R8 then
+		// closes the work task as delivered. Those stay on the dashboard and
+		// opsctl, which an interactive session can still reach through Bash.
+		//
+		// Checked here rather than in policy because policy decides on
+		// (tool, actor, snapshot) and never sees a row's status.
+		viaMCP := strings.HasPrefix(executor.ActorFrom(ctx), "mcp:")
+		if viaMCP && !(channel == "slack_reply" && status == "sending") {
+			return fmt.Errorf("over MCP, mark_delivery_sent only resolves a slack_reply delivery already "+
+				"in 'sending'; delivery %d is %s/%s — record it via the dashboard or `opsctl call`",
+				a.DeliveryID, channel, status)
+		}
 		switch {
 		case status == "approved":
 		case status == "sending" && channel == "slack_reply":
@@ -863,6 +882,18 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		if status != "approved" {
 			return fmt.Errorf("delivery %d is %s; only approved deliveries send", deliveryID, status)
 		}
+		// The automated path REQUIRES switchboard to be the authority of record.
+		// A NULL here would mean the row reached 'approved' without
+		// approve_delivery, which no code path does — migration 0012 backfills
+		// historical rows from the approvals table.
+		if approvalSource == nil || *approvalSource != "switchboard" {
+			got := "NULL"
+			if approvalSource != nil {
+				got = *approvalSource
+			}
+			return fmt.Errorf("delivery %d has approval_source=%s; send_delivery requires 'switchboard' "+
+				"(a leaf-gated row is recorded with mark_delivery_sent, never sent again from here)", deliveryID, got)
+		}
 		if target == nil || *target == "" {
 			return fmt.Errorf("delivery %d has no target_ref", deliveryID)
 		}
@@ -890,8 +921,14 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 			return fmt.Errorf("Slack workspace %s is not send-enabled", parsed.WorkspaceID)
 		}
 
+		// send_attempted_at marks this attempt as IN FLIGHT: send_settled_at stays
+		// NULL until the bridge call returns. Without that distinction 'sending'
+		// would mean both "executing now" and "returned ambiguously", and
+		// mark_delivery_failed could reopen a live call for a second send.
 		if _, err := tx.Exec(ctx,
-			`UPDATE deliveries SET status='sending', updated_at=now() WHERE id=$1`, deliveryID); err != nil {
+			`UPDATE deliveries
+			    SET status='sending', send_attempted_at=now(), send_settled_at=NULL, updated_at=now()
+			  WHERE id=$1`, deliveryID); err != nil {
 			return fmt.Errorf("mark sending: %w", err)
 		}
 		return nil
@@ -900,30 +937,46 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		return nil, err
 	}
 
+	// State after the call must be written even when the caller's deadline just
+	// expired — that is exactly when an ambiguous row needs its diagnostic and
+	// its settled marker. WithoutCancel keeps the pool usable; the short timeout
+	// keeps a wedged database from hanging the handler.
+	settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancelSettle()
+
 	if sendErr := slackSender.Send(ctx, targetRef, google.ScrubAIAttribution(body)); sendErr != nil {
 		var rejected *slackweb.SendRejectedError
 		if errors.As(sendErr, &rejected) {
 			// Definite: the click never happened, so reopen failed->approved.
-			_, _ = pool.Exec(ctx,
-				`UPDATE deliveries SET status='failed', error=$2, updated_at=now() WHERE id=$1`,
-				deliveryID, sendErr.Error())
+			if _, err := pool.Exec(settleCtx,
+				`UPDATE deliveries SET status='failed', send_settled_at=now(), error=$2, updated_at=now()
+				 WHERE id=$1`, deliveryID, sendErr.Error()); err != nil {
+				// Report both: the send is known-not-sent, but the row still says
+				// 'sending' and a human has to resolve it.
+				return nil, fmt.Errorf("slack send rejected (%v) AND recording the failure failed (%v); "+
+					"delivery %d is stuck in sending", sendErr, err, deliveryID)
+			}
 			return nil, fmt.Errorf("slack send: %w", sendErr)
 		}
 		// Ambiguous: the click MAY have landed. Leave the row in 'sending' — it
 		// is not re-approvable and nothing retries it. Only the export matcher
 		// or a human (mark_delivery_sent / mark_delivery_failed) resolves it.
-		_, _ = pool.Exec(ctx,
-			`UPDATE deliveries SET error=$2, updated_at=now() WHERE id=$1`,
-			deliveryID, sendErr.Error())
+		// send_settled_at closes the in-flight window so a human MAY resolve it.
+		if _, err := pool.Exec(settleCtx,
+			`UPDATE deliveries SET send_settled_at=now(), error=$2, updated_at=now() WHERE id=$1`,
+			deliveryID, sendErr.Error()); err != nil {
+			return nil, fmt.Errorf("slack send outcome unknown (%v) AND recording it failed (%v); "+
+				"delivery %d is stuck in sending with no diagnostic", sendErr, err, deliveryID)
+		}
 		return nil, fmt.Errorf("slack send (outcome unknown, delivery %d left sending): %w", deliveryID, sendErr)
 	}
 
-	if _, err := pool.Exec(ctx,
-		`UPDATE deliveries SET status='sent', sent_at=now(), error=NULL, updated_at=now() WHERE id=$1`,
-		deliveryID); err != nil {
+	if _, err := pool.Exec(settleCtx,
+		`UPDATE deliveries SET status='sent', sent_at=now(), send_settled_at=now(), error=NULL, updated_at=now()
+		 WHERE id=$1`, deliveryID); err != nil {
 		return nil, fmt.Errorf("finalize sent: %w", err)
 	}
-	if _, err := insertTaskEvent(ctx, pool, taskID, "delivery_sent",
+	if _, err := insertTaskEvent(settleCtx, pool, taskID, "delivery_sent",
 		map[string]any{"delivery_id": deliveryID, "channel": "slack_reply"}); err != nil {
 		return nil, err
 	}
@@ -932,6 +985,12 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 }
 
 // ---- mark_delivery_failed (SWT-12) -----------------------------------------------
+
+// sendAttemptLease bounds how long an unsettled send attempt blocks manual
+// resolution. Longer than any sender context in the repo (opsctl 30s, the
+// connector 15m) so a live attempt is never overridden, but finite so a sender
+// that crashed mid-click does not wedge the row forever.
+const sendAttemptLease = 15 * time.Minute
 
 // markDeliveryFailed resolves the other side of the click-may-have-landed
 // window: a human looked in Slack and the message is verifiably NOT there.
@@ -950,11 +1009,13 @@ func markDeliveryFailed(ctx context.Context, pool *pgxpool.Pool, args []byte) ([
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
 		var status, channel string
 		var extID *string
-		var confirmedAt *time.Time
+		var confirmedAt, attemptedAt, settledAt *time.Time
 		if err := tx.QueryRow(ctx,
-			`SELECT status, channel, task_id, sent_external_id, confirmed_at
+			`SELECT status, channel, task_id, sent_external_id, confirmed_at,
+			        send_attempted_at, send_settled_at
 			 FROM deliveries WHERE id=$1 FOR UPDATE`,
-			a.DeliveryID).Scan(&status, &channel, &taskID, &extID, &confirmedAt); err != nil {
+			a.DeliveryID).Scan(&status, &channel, &taskID, &extID, &confirmedAt,
+			&attemptedAt, &settledAt); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("delivery %d not found", a.DeliveryID)
 			}
@@ -973,6 +1034,17 @@ func markDeliveryFailed(ctx context.Context, pool *pgxpool.Pool, args []byte) ([
 		}
 		if confirmedAt != nil {
 			return fmt.Errorf("delivery %d is confirmed; it was sent", a.DeliveryID)
+		}
+		// A send attempt that has NOT settled is still executing. Marking it
+		// failed here would let the row be re-approved and sent a second time
+		// while the first click is in progress — two client-visible posts. The
+		// lease bounds that refusal: a crashed sender never writes
+		// send_settled_at, so after sendAttemptLease the attempt is treated as
+		// abandoned and a human may resolve it.
+		if attemptedAt != nil && settledAt == nil && time.Since(*attemptedAt) < sendAttemptLease {
+			return fmt.Errorf("delivery %d has a send attempt in flight since %s; wait for it to settle "+
+				"(or %s from then) before resolving it by hand",
+				a.DeliveryID, attemptedAt.Format(time.RFC3339), sendAttemptLease)
 		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE deliveries SET status='failed', error=COALESCE(error,'') ||

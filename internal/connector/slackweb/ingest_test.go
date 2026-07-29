@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 )
@@ -36,7 +37,7 @@ func (s *fakeSink) EnsureAccount(_ context.Context, workspace slackweb.Workspace
 	}
 	return 7, nil
 }
-func (s *fakeSink) StartRun(_ context.Context, _ int64) (int64, error) { return 9, nil }
+func (s *fakeSink) StartRun(_ context.Context, _ int64, _ time.Time) (int64, error) { return 9, nil }
 func (s *fakeSink) RawHash(_ context.Context, _ int64, externalID string) (string, bool, error) {
 	h, ok := s.stored[externalID]
 	return h, ok, nil

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,8 +95,21 @@ func (b *CommandBridge) Send(ctx context.Context, targetURL, text string) error 
 	if err != nil {
 		return &SendRejectedError{Body: fmt.Sprintf("marshal Slack send request: %v", err)}
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return &SendRejectedError{Body: "context already done before dispatch: " + ctxErr.Error()}
+	}
 	out, err := b.run(ctx, "send", in)
 	if err != nil {
+		// A process that never started cannot have clicked — same reasoning as the
+		// HTTP bridge's dial failure, and the same classification the sibling Gmail
+		// bridge already makes. exec wraps start failures (missing binary, not
+		// executable) in *exec.Error; a non-zero EXIT is a different thing and stays
+		// ambiguous, because the leaf may have clicked before dying.
+		var startErr *exec.Error
+		var pathErr *fs.PathError
+		if errors.As(err, &startErr) || errors.As(err, &pathErr) {
+			return &SendRejectedError{Body: "bridge never started (never dispatched): " + err.Error()}
+		}
 		return err
 	}
 	return checkSendResult(out)

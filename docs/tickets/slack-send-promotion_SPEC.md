@@ -256,6 +256,85 @@ From the answered open questions:
     a reconstruction from timestamps. The orchestrator has no rule for this
     event; it is a human/dashboard signal.
 
+## Amendments from adversarial review (2026-07-29)
+
+`go-reviewer` could not run (repeated API 529s), so a Codex adversarial pass was
+the only independent review. It returned `needs-attention` with three high and
+four medium findings; all seven are fixed, and migration
+`0012_slack_send_attempts.sql` carries the schema half.
+
+Three of them shared one root cause: **`status='sending'` recorded no fact about
+the attempt that produced it.**
+
+22. **`send_attempted_at` / `send_settled_at` on `deliveries`.** In-flight is now
+    `attempted IS NOT NULL AND settled IS NULL`, a fact rather than an inference.
+    - **Double-send race (high).** `mark_delivery_failed` previously accepted a row
+      whose bridge call was *still executing*, so a human could mark it failed,
+      re-approve, and start a second click — two client-visible posts. It now
+      refuses an unsettled attempt younger than `sendAttemptLease` (15m, longer
+      than any sender context in the repo). The lease is finite because a crashed
+      sender never writes `send_settled_at`, and a wedged row must stay resolvable.
+    - **Rate limit bypass (medium).** The loader counted only `status='sent'`, and
+      an ambiguous send stays `'sending'` with `sent_at` NULL forever — so every
+      degraded send consumed no allowance and real traffic could exceed the limit
+      indefinitely. It now counts `('sent','sending')` over
+      `COALESCE(sent_at, send_attempted_at)`. Counting an attempt that turns out
+      not to have sent is the safe direction for a rate limit.
+23. **False confirmation (high).** The prefix matcher had no lower time bound, so a
+    replay (`--all`) could bind a months-old or hand-typed message to a newly stuck
+    row. Confirmation now requires `send_attempted_at <= message.sent_at`, refuses
+    an external id another delivery already claims (which the unique index would
+    otherwise turn into a failed normalization run), and refuses to guess when more
+    than one pending delivery matches the same prefix.
+
+    Scope limit, stated rather than hidden: the floor applies only where the click
+    instant is known. An assisted row has none, and `created_at` is not a
+    substitute — it says nothing about when a human typed the message — so the
+    assisted tier keeps its SWT-13 behaviour and its residual collision risk.
+24. **Forgeable `leaf_gated` on a prompt-injectable surface (high).** Criterion 20
+    listed the generic `mark_delivery_sent` over MCP on the reasoning that
+    recording can do no external damage. That was too narrow: `delivery_sent`
+    drives orchestrator R8, which closes the work task as delivered — so an
+    injected call could fabricate completion, and the generic tool also reached
+    approved `upwork_chat` rows.
+
+    Over MCP the tool now permits exactly one transition: resolving a
+    `slack_reply` row already in `'sending'`. Switchboard dispatched that click, so
+    the worst an injected call can do is claim it landed when it did not; it cannot
+    invent a delivery from nothing. Recording an `approved` row, or a `drafted` one
+    via `leaf_gated`, stays on the dashboard and `opsctl` — which an interactive
+    session still reaches through Bash. **This narrows Q1's answer** on evidence
+    Q1 did not have. The durable fix is a leaf-produced, target-and-body-bound
+    receipt that the tool validates; that needs the leaf's `/send` route, which
+    does not exist yet.
+25. **Reconciler counted exports that began before the send (medium).**
+    `sync_runs.started_at` defaulted to `now()` at insert, but `Ingest` calls
+    `Source.Export` FIRST and creates the run row only after it returns — so
+    `started_at` was the export's END time. A pass that scraped the channel before
+    the send therefore looked like it had observed the message, defeating the exact
+    in-flight exclusion Q2 specified and flagging early. `StartRun` now takes the
+    instant the export began.
+26. **Migration backfill (medium).** 0011 backfilled `approval_source` only for
+    `('sending','sent')`, leaving pre-existing `approved` and `failed` rows NULL —
+    yet those demonstrably passed `approve_delivery`, the only writer of an
+    approvals row. 0012 backfills from that evidence instead of from current
+    status, and `sendSlackReply` now REQUIRES `approval_source='switchboard'`, so
+    the automated path cannot send a row whose authority is unrecorded.
+27. **Pre-dispatch failures and lost diagnostics (medium).** Provably pre-click
+    failures — a dial that never connected, a process that never started, a
+    context already done — are now `SendRejectedError` (definite), matching what
+    the sibling Gmail bridge already does; leaving them ambiguous wedged a row on
+    every bridge-down send. The line is dispatch, not error category: a failure
+    after the request was written stays ambiguous. Post-call state also writes
+    through `context.WithoutCancel`, because a blown deadline is precisely when an
+    ambiguous row needs its marker and its diagnostic, and those database errors
+    are no longer discarded.
+
+    Two test pins were corrected as part of this: they asserted ambiguity for a
+    closed listener and a pre-cancelled context, both of which are pre-dispatch. A
+    new case covers a genuine post-dispatch break so the property they protected
+    is still tested.
+
 ## Data model changes
 
 - No new tables. Statuses, `sent_external_id`, `sent_at`, `confirmed_at`,

@@ -51,7 +51,7 @@ var agentTools = []Tool{
 	},
 	{
 		Name:        "mark_delivery_sent",
-		Description: "Record that a Slack reply is now in the channel. Records a send that already happened; it never sends anything itself. Set leaf_gated when the message went out through the Slack connector's own approval token rather than switchboard approval — that is the only way a still-drafted row may be recorded. Human-only: a worker identity is refused by policy even though this tool is listed.",
+		Description: "Resolve a Slack reply that switchboard already tried to send and left in 'sending' (the click may or may not have landed): confirm the message IS in the channel. Records an outcome; it never sends anything. Over MCP this is the ONLY transition allowed — recording an approved or still-drafted delivery as sent must go through the dashboard or `opsctl call`, because it would assert a send that switchboard never made. Human-only: a worker identity is refused by policy even though this tool is listed.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"delivery_id":{"type":"integer"},"leaf_gated":{"type":"boolean"}},"required":["delivery_id"]}`),
 	}, {
 		Name:        "draft_delivery",

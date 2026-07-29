@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -204,11 +205,23 @@ func (b *HTTPBridge) Send(ctx context.Context, targetURL, text string) error {
 	if err != nil {
 		return &SendRejectedError{Body: fmt.Sprintf("marshal Slack send request: %v", err)}
 	}
+	// A deadline already blown before dispatch means nothing was sent.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return &SendRejectedError{Body: "context already done before dispatch: " + ctxErr.Error()}
+	}
 	out, err := b.post(ctx, "/send", in)
 	if err != nil {
 		var status *bridgeStatusError
 		if errors.As(err, &status) && status.status >= 400 && status.status < 500 {
 			return &SendRejectedError{Status: status.status, Body: status.snippet}
+		}
+		// A failure to establish the connection at all is provably pre-click: no
+		// TCP session means the request never reached the bridge, so the browser
+		// never clicked. Anything after dial — a read failure, an EOF mid-response,
+		// a timeout — stays ambiguous, because by then the click may have landed.
+		var opErr *net.OpError
+		if errors.As(err, &opErr) && opErr.Op == "dial" {
+			return &SendRejectedError{Body: "bridge unreachable (never dispatched): " + err.Error()}
 		}
 		return err
 	}
