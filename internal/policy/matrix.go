@@ -34,6 +34,15 @@ var humanOnly = map[string]bool{
 var snapshotGated = sendShaped
 
 func humanActor(actor string) bool {
+	// The MCP adapter prefixes every call with its transport ("mcp:" + worker
+	// id), so an interactive session arrives as "mcp:manual:salvo" and would
+	// otherwise be refused alongside the workers this gate exists to stop.
+	// Strip exactly one such prefix — "mcp:mcp:..." is not a human.
+	//
+	// Deliberately done here rather than by not prefixing in the adapter: the
+	// audit row keeps the full unmodified actor, so which surface triggered a
+	// send stays answerable. Any future transport wrapper must be added here.
+	actor = strings.TrimPrefix(actor, "mcp:")
 	for _, p := range []string{"dashboard:", "opsctl:", "manual:"} {
 		if strings.HasPrefix(actor, p) {
 			return true
