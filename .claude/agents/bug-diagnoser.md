@@ -1,7 +1,7 @@
 ---
 name: bug-diagnoser
 description: Use after bug-reproducer has confirmed a failing reproduction. Traces from the reproduction through the codebase to identify root cause. Produces DIAGNOSIS.md with cause and proposed fix scope. Does NOT implement the fix.
-model: claude-fable-5
+model: opus
 tools: Read, Grep, Glob, Write, Bash(git log:*, git blame:*, git show:*, grep:*, rg:*, psql:*)
 ---
 

@@ -15,7 +15,7 @@ missing and stop.
 
 ## Step 2: Sync to Jira
 
-Same pattern as `/ticket-start` step 4, but issue type **Bug**: via the Atlassian
+Same pattern as `/ticket-start` step 4, but issue type **Bug**: via the jira
 MCP, reuse-or-create an SWT issue with summary `$1: <one-line symptom>`, transition
 to In Progress, and record `> Jira: SWT-N` at the top of `docs/bugs/$1.md`. If the
 MCP is not connected in this session, write `> Jira: PENDING-SYNC` and continue.

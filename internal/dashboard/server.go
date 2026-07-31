@@ -55,6 +55,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /tasks", s.auth.Require(http.HandlerFunc(s.listTasks)))
 	mux.Handle("GET /tasks/{id}", s.auth.Require(http.HandlerFunc(s.showTask)))
 	mux.Handle("GET /briefs", s.auth.Require(http.HandlerFunc(s.listBriefs)))
+	// Ingestion health. The only page that reads the raw/normalized tables, and
+	// therefore the only one that can distinguish a quiet board from a dead
+	// connector while triage is still in shadow mode.
+	mux.Handle("GET /sources", s.auth.Require(http.HandlerFunc(s.listSources)))
 	mux.Handle("GET /plans", s.auth.Require(http.HandlerFunc(s.listPlans)))
 	mux.Handle("GET /plans/{id}", s.auth.Require(http.HandlerFunc(s.showPlan)))
 	mux.Handle("POST /plans/{id}/approve", s.auth.Require(s.planAction("approve_plan_import")))

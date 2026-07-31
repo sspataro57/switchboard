@@ -101,3 +101,28 @@ func TestMatrix_MCPWorkerIdentityDeniedBeforeTheLoaderRuns(t *testing.T) {
 		})
 	}
 }
+
+// The read-only mail tools fall through the static allow-list: they are NOT
+// humanOnly and NOT snapshotGated (criterion 16), so an ordinary worker can
+// call them.
+func TestMatrix_MailToolsFallThroughForWorkers(t *testing.T) {
+	ctx := context.Background()
+	fallback := policy.NewStatic("mail_search", "mail_read_thread")
+	for _, tool := range []string{"mail_search", "mail_read_thread"} {
+		tool := tool
+		t.Run(tool, func(t *testing.T) {
+			l := &recordingLoader{snap: gmailSnap(0, false)}
+			m := policy.NewMatrix(l, fallback)
+			d, err := m.Check(ctx, policy.Request{Tool: tool, Actor: "mcp:worker:acme", Args: json.RawMessage(`{"query":"invoice"}`)})
+			if err != nil {
+				t.Fatalf("Check(%s): %v", tool, err)
+			}
+			if d.Decision != "allow" {
+				t.Fatalf("%s by a worker = %q/%q, want allow (read-only, static fallthrough)", tool, d.Decision, d.Rule)
+			}
+			if l.called {
+				t.Errorf("%s must not consult the send-snapshot loader", tool)
+			}
+		})
+	}
+}

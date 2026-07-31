@@ -271,6 +271,23 @@ func Normalize(ctx context.Context, sink *PGSink, cfg Config) (Stats, error) {
 			if deduped {
 				stats.DedupSkipped++
 			}
+		case strings.HasPrefix(it.externalID, "imap:"):
+			// Same downstream path as the Gmail-API branch on purpose (SWT-11
+			// criterion 10): identical NormalizedMessage, identical upsert, so
+			// cross-account Message-ID dedup, the direction rule and delivery
+			// loop closure are reused rather than reimplemented. Only the
+			// mapping from raw bytes differs.
+			nm, err := NormalizeRFC822(it.raw, it.accountEmail, ownEmails)
+			if err != nil {
+				return stats, fmt.Errorf("normalize %s: %w", it.externalID, err)
+			}
+			deduped, err := sink.upsertMessage(ctx, it.id, nm)
+			if err != nil {
+				return stats, fmt.Errorf("apply %s: %w", it.externalID, err)
+			}
+			if deduped {
+				stats.DedupSkipped++
+			}
 		case strings.HasPrefix(it.externalID, "calendar:"):
 			ne, err := NormalizeCalendarEvent(it.raw)
 			if err != nil {

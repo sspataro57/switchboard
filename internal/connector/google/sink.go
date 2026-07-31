@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/textmatch"
 )
 
 // PGSink is the ops-db side of the google connector: the ingest Sink plus the
@@ -56,24 +58,15 @@ func (s *PGSink) EnsureBridgeAccount(ctx context.Context, discovered BridgeAccou
 	return account, nil
 }
 
-// ListAccounts returns every provider='google' account.
+// ListAccounts returns every provider='google' account, including its auth type
+// and per-account endpoints (SWT-11) — callers choosing between the Gmail API
+// and IMAP/SMTP read those off the row rather than inferring them.
 func (s *PGSink) ListAccounts(ctx context.Context) ([]Account, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, account_email, calendar_in_availability
-		 FROM source_accounts WHERE provider='google' ORDER BY id`)
+	rows, err := s.pool.Query(ctx, accountSelect+` ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("select google accounts: %w", err)
 	}
-	defer rows.Close()
-	var out []Account
-	for rows.Next() {
-		var a Account
-		if err := rows.Scan(&a.ID, &a.Email, &a.CalendarInAvailability); err != nil {
-			return nil, fmt.Errorf("scan account: %w", err)
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
+	return scanAccounts(rows)
 }
 
 func (s *PGSink) Cursor(ctx context.Context, accountID int64) (Cursor, error) {
@@ -282,8 +275,23 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 	// attaches to the task as a delivery_confirmed event, never re-triaged
 	// (it is outbound by the direction rule anyway).
 	if nm.Direction == "outbound" {
-		if err := s.confirmDelivery(ctx, nm.ExternalMessageID); err != nil {
+		matched, err := s.confirmDelivery(ctx, nm.ExternalMessageID)
+		if err != nil {
 			return false, err
+		}
+		// Belt (SWT-11 criterion 15): a submission service may rewrite the
+		// Message-ID we reserved. When that happens the exact match above finds
+		// nothing and the delivery stays unconfirmed forever — which since SWT-16
+		// also makes capture report our own send as sent by hand.
+		//
+		// ONLY when the primary matcher missed. Running it regardless would let
+		// one real send confirm two rows: the exact match claims delivery A, A
+		// then drops out of the candidate set, and the belt goes on to claim a
+		// different delivery B that happens to share A's opening 120 characters.
+		if !matched {
+			if err := s.confirmDeliveryByBodyPrefix(ctx, rawItemID, nm); err != nil {
+				return false, err
+			}
 		}
 	}
 	return false, nil
@@ -291,25 +299,35 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 
 // confirmDelivery closes the loop for a sent delivery whose Message-ID just
 // re-entered via ingestion.
-func (s *PGSink) confirmDelivery(ctx context.Context, messageID string) error {
+// confirmDelivery reports whether this Message-ID claimed a delivery, so the
+// caller can tell "already closed by the exact match" from "still open".
+func (s *PGSink) confirmDelivery(ctx context.Context, messageID string) (bool, error) {
 	var deliveryID, taskID int64
 	err := s.pool.QueryRow(ctx,
 		`UPDATE deliveries SET confirmed_at=now(), updated_at=now()
 		 WHERE sent_external_id=$1 AND confirmed_at IS NULL
 		 RETURNING id, task_id`, messageID).Scan(&deliveryID, &taskID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil // not one of ours, or already confirmed
+		// Either not ours, or ours and already confirmed. Both mean the belt has
+		// nothing to add: a replay must not re-open a closed loop.
+		var claimed bool
+		if e := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM deliveries WHERE sent_external_id=$1)`,
+			messageID).Scan(&claimed); e != nil {
+			return false, fmt.Errorf("check delivery claim for %s: %w", messageID, e)
+		}
+		return claimed, nil
 	}
 	if err != nil {
-		return fmt.Errorf("confirm delivery for %s: %w", messageID, err)
+		return false, fmt.Errorf("confirm delivery for %s: %w", messageID, err)
 	}
 	payload, _ := json.Marshal(map[string]any{"delivery_id": deliveryID, "matched_message_id": messageID})
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1, 'delivery_confirmed', $2)`,
 		taskID, payload); err != nil {
-		return fmt.Errorf("insert delivery_confirmed event: %w", err)
+		return true, fmt.Errorf("insert delivery_confirmed event: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // upsertEvent writes one normalized_events row (upsert on raw_source_item_id).
@@ -482,4 +500,123 @@ func (s *PGSink) SupersedeAbsentCalendar(ctx context.Context, accountID int64, k
 		return 0, fmt.Errorf("commit calendar reset: %w", err)
 	}
 	return superseded, nil
+}
+
+// mailMatchPrefixLen is the comparison width, matching the slack and jira
+// matchers so one idiom governs every post-hoc confirmation.
+const mailMatchPrefixLen = 120
+
+// confirmDeliveryByBodyPrefix claims an unconfirmed gmail delivery whose body
+// opens the way this outbound message does.
+//
+// Runs only after the exact Message-ID match failed. It exists because SMTP
+// submission is ALLOWED to replace the Message-ID we reserved: that id is our
+// idempotency token, not a promise the relay keeps. Whether Gmail's submission
+// service actually rewrites it is exactly what the SPEC's live smoke is meant to
+// determine — this belt is insurance, not a statement that it does.
+//
+// Note the asymmetry with the slack and jira matchers. Those look for rows with
+// sent_external_id IS NULL, because a browser click and a REST post learn the id
+// only afterwards. Gmail RESERVES its Message-ID before sending, so a belt
+// candidate here already HAS one — what is missing is confirmation that it
+// landed. Filtering on a NULL id would therefore match nothing, ever.
+//
+// Three guards, each load-bearing:
+//
+//   - sent_external_id is NEVER overwritten. It is what stops a resend, and
+//     replacing it with an observed id would break the one thing invariant 4
+//     rests on. The observed id goes into the event payload instead, as evidence.
+//   - Scoped to the same from_account_id: another mailbox's pending reply is not
+//     a candidate for this mailbox's send, however similar the text.
+//   - An attempt-time floor. INSTITUTIONAL_KNOWLEDGE makes this unconditional
+//     after SWT-16: any post-hoc matcher identifying our own message by CONTENT
+//     needs a lower time bound, because content alone cannot tell two identical
+//     sends apart. Without it a --full re-run or a UIDVALIDITY resync replays 90
+//     days of Sent mail, and a historical message whose opening matches a
+//     currently-pending delivery would confirm it. The two-minute allowance
+//     absorbs clock skew between Postgres and the provider.
+//   - Multi-match refuses rather than guesses. Two pending replies sharing 120
+//     characters is realistic for short mail, and stamping the wrong row would
+//     record a real send against the wrong task and leave the other
+//     unconfirmable forever.
+func (s *PGSink) confirmDeliveryByBodyPrefix(ctx context.Context, rawItemID int64, nm NormalizedMessage) error {
+	want := textmatch.NormalizedPrefix(nm.BodyText, mailMatchPrefixLen)
+	if want == "" {
+		// An empty body would match any candidate that also normalizes to empty,
+		// claiming a delivery on no evidence at all.
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin gmail delivery match: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx,
+		`SELECT d.id, d.task_id, COALESCE(d.body,'')
+		   FROM deliveries d
+		  WHERE d.channel='gmail' AND d.status IN ('sending','sent','failed')
+		    AND d.confirmed_at IS NULL
+		    AND d.from_account_id = (SELECT source_account_id FROM raw_source_items WHERE id=$1)
+		    AND (COALESCE(d.send_attempted_at, d.sent_at) IS NULL
+		         OR COALESCE(d.send_attempted_at, d.sent_at) - interval '2 minutes' <= $2)
+		  ORDER BY d.id DESC
+		  FOR UPDATE OF d`, rawItemID, nm.SentAt)
+	if err != nil {
+		return fmt.Errorf("select gmail deliveries to confirm: %w", err)
+	}
+	var deliveryID, taskID int64
+	matches := 0
+	for rows.Next() {
+		var id, task int64
+		var body string
+		if err := rows.Scan(&id, &task, &body); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan gmail delivery candidate: %w", err)
+		}
+		if textmatch.NormalizedPrefix(body, mailMatchPrefixLen) == want {
+			matches++
+			if deliveryID == 0 {
+				deliveryID, taskID = id, task
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate gmail delivery candidates: %w", err)
+	}
+	if deliveryID == 0 || matches > 1 {
+		return nil
+	}
+
+	// confirmed_at IS NULL is the idempotence guard: a --all replay re-runs this
+	// match, finds the row already confirmed, and emits no second event.
+	// confirmed_at ONLY — deliberately not a status promotion. Flipping
+	// 'sending' to 'sent' here would emit no delivery_sent event, so the
+	// orchestrator's R8 never fires and the parent task sits at done_locally
+	// forever. Confirmation is evidence the message landed; the lifecycle
+	// transition belongs to the path that owns it.
+	tag, err := tx.Exec(ctx,
+		`UPDATE deliveries SET confirmed_at=now(), updated_at=now()
+		  WHERE id=$1 AND confirmed_at IS NULL`, deliveryID)
+	if err != nil {
+		return fmt.Errorf("confirm gmail delivery %d: %w", deliveryID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
+	}
+	// The OBSERVED id is recorded here and nowhere else: evidence of what actually
+	// landed, never a replacement for the token we reserved.
+	payload, _ := json.Marshal(map[string]any{
+		"delivery_id":        deliveryID,
+		"matched_message_id": nm.ExternalMessageID,
+		"matched_by":         "body_prefix",
+	})
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1,'delivery_confirmed',$2)`,
+		taskID, payload); err != nil {
+		return fmt.Errorf("insert delivery_confirmed event: %w", err)
+	}
+	return tx.Commit(ctx)
 }

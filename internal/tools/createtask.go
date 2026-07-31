@@ -64,6 +64,10 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"task_mark_delivered", validateMarkDelivered, taskMarkDelivered},
 		{"set_sending_frozen", validateSetFrozen, setSendingFrozen},
 		{"link_external_ref", validateLinkExternalRef, linkExternalRef},
+		// Read-only mail surface (SWT-11). Served from normalized_messages, never
+		// from live IMAP — see internal/tools/mail.go.
+		{"mail_search", validateMailSearch, mailSearch},
+		{"mail_read_thread", validateMailReadThread, mailReadThread},
 		{"record_pr_event", validateRecordPREvent, recordPREvent},
 		{"record_ci_event", validateRecordCIEvent, recordCIEvent},
 		{"task_pr_transition", validatePRTransition, taskPRTransition},

@@ -31,12 +31,36 @@ func main() {
 	overlap := flag.Duration("overlap", google.DefaultOverlap, "gmail cursor re-read window")
 	backfill := flag.Duration("backfill", google.DefaultBackfill, "gmail initial backfill window")
 	account := flag.String("account", "", "limit to one account email")
+	watch := flag.Bool("watch", false, "stay resident: IMAP IDLE plus a periodic reconcile sweep")
 	flag.Parse()
 
+	if *watch {
+		if err := watchMain(*backfill, *account); err != nil {
+			fmt.Fprintln(os.Stderr, "google:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(*full, *normalizeOnly, *all, *overlap, *backfill, *account); err != nil {
 		fmt.Fprintln(os.Stderr, "google:", err)
 		os.Exit(1)
 	}
+}
+
+// watchMain owns its own pool and context: the one-shot path bounds itself to
+// ten minutes, which must never bound a resident process.
+func watchMain(backfill time.Duration, account string) error {
+	pool, err := newWatchPool(context.Background())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+	return runWatch(pool, google.Config{
+		Backfill:        backfill,
+		AccountEmail:    account,
+		MaxMessageBytes: google.MaxMessageBytes(),
+		Folders:         google.FoldersFromEnv(),
+	})
 }
 
 func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account string) error {
@@ -50,11 +74,23 @@ func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account
 	defer pool.Close()
 	sink := google.NewPGSink(pool)
 
-	cfg := google.Config{Full: full, All: all, Overlap: overlap, Backfill: backfill, AccountEmail: account}
+	cfg := google.Config{
+		Full: full, All: all, Overlap: overlap, Backfill: backfill, AccountEmail: account,
+		MaxMessageBytes: google.MaxMessageBytes(),
+		Folders:         google.FoldersFromEnv(),
+	}
 
 	if !normalizeOnly {
 		var stats google.Stats
-		if binary := os.Getenv("GMAIL_CONNECTOR_BRIDGE"); binary != "" {
+		binary := os.Getenv("GMAIL_CONNECTOR_BRIDGE")
+		source, srcErr := selectMailSource(os.Getenv("MAIL_SOURCE"), binary)
+		if srcErr != nil {
+			return srcErr
+		}
+		switch {
+		case source == mailSourceIMAP:
+			stats, err = runIMAPIngest(ctx, pool, sink, cfg)
+		case source == mailSourceBridge:
 			// bridgeErr, not err: `bridge, err :=` would declare a block-scoped
 			// err, RunBridge's failure would die at the closing brace, and the
 			// check below would read the outer (nil) err — a failed ingest
@@ -64,7 +100,7 @@ func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account
 				return fmt.Errorf("configure Gmail connector bridge: %w", bridgeErr)
 			}
 			stats, err = google.RunBridge(ctx, bridge, sink, cfg)
-		} else {
+		default:
 			key := os.Getenv("OPS_TOKEN_KEY")
 			if key == "" {
 				return fmt.Errorf("OPS_TOKEN_KEY is not set")

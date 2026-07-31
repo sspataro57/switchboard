@@ -26,12 +26,34 @@ type Account struct {
 	ID                     int64
 	Email                  string
 	CalendarInAvailability bool
+	// AuthType decides which ingest and send path this account uses:
+	// 'oauth' (Gmail API) or 'app_password' (IMAP/SMTP). Defaults to oauth so a
+	// row written before migration 0014 keeps its behaviour.
+	AuthType string
+	// Per-account endpoints; empty means the Gmail defaults.
+	IMAPHost string
+	IMAPPort int
+	SMTPHost string
+	SMTPPort int
+}
+
+// Hosts renders the account's endpoints with the Gmail defaults filled in.
+func (a Account) Hosts() MailHosts {
+	return MailHosts{
+		IMAPHost: a.IMAPHost, IMAPPort: a.IMAPPort,
+		SMTPHost: a.SMTPHost, SMTPPort: a.SMTPPort,
+	}.WithDefaults()
 }
 
 // Cursor holds both incremental positions side by side in sync_cursor.
 type Cursor struct {
 	GmailInternalDateMS int64  `json:"gmail_internal_date_ms"`
 	CalendarSyncToken   string `json:"calendar_sync_token"`
+	// IMAPFolders is the per-folder UID position for the IMAP source (SWT-11).
+	// It sits alongside the two keys above rather than replacing them: an account
+	// may be ingested by the Gmail API today and IMAP tomorrow, and a save from
+	// either path must not erase the other's position (criterion 8).
+	IMAPFolders map[string]FolderCursor `json:"imap_folders,omitempty"`
 }
 
 // Stats is per-run bookkeeping (sync_runs.stats).
@@ -51,6 +73,11 @@ type Stats struct {
 	CalendarSuperseded int `json:"calendar_superseded"`
 	// AccountsBusy counts accounts skipped because another pass held the lock.
 	AccountsBusy int `json:"accounts_busy"`
+	// IMAPFetched counts messages pulled from IMAP; IMAPTruncated how many of
+	// those exceeded the size cap and were captured with headers and text only, attachments skipped. Truncation is
+	// lossy, so it is counted rather than left silent.
+	IMAPFetched   int `json:"imap_fetched"`
+	IMAPTruncated int `json:"imap_truncated"`
 }
 
 func (s *Stats) add(o Stats) {
@@ -71,6 +98,10 @@ func (s *Stats) add(o Stats) {
 // AccountEmail, when set, limits the ingest to that one account (debugging);
 // the normalize phase stays global regardless.
 type Config struct {
+	// MaxMessageBytes caps a single IMAP fetch; 0 means DefaultMaxMessageBytes.
+	MaxMessageBytes int
+	// Folders overrides IMAP folder discovery (MAIL_FOLDERS); nil means discover.
+	Folders      []string
 	Full         bool
 	All          bool
 	Overlap      time.Duration

@@ -65,6 +65,26 @@ var agentTools = []Tool{
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"system":{"type":"string","enum":["jira","github","upwork_crm"]},"external_key":{"type":"string"},"external_url":{"type":"string"}},"required":["task_id","system","external_key"]}`),
 	},
 	{
+		Name:        "mail_search",
+		Description: "Search ingested mail (subject, sender, body) served from switchboard's normalized store, NOT from a live mailbox — you see only what ingestion has captured, so a result set is bounded by the backfill window rather than by the mailbox. At least one of query/from/thread_key is required.",
+		InputSchema: schema(`{"type":"object","properties":{"query":{"type":"string","description":"case-insensitive substring over subject, sender and body"},"from":{"type":"string"},"thread_key":{"type":"string"},"since":{"type":"string","description":"RFC3339 or a Postgres timestamp"},"until":{"type":"string"},"direction":{"type":"string","enum":["inbound","outbound"]},"limit":{"type":"integer","description":"default 20, max 50"}}}`),
+	},
+	{
+		Name:        "mail_read_thread",
+		Description: "Read one ingested mail thread in order, oldest first. Served from the normalized store, not a live mailbox. Bodies are capped; give thread_id or thread_key.",
+		InputSchema: schema(`{"type":"object","properties":{"thread_id":{"type":"integer"},"thread_key":{"type":"string"},"limit":{"type":"integer","description":"max 50 messages"}}}`),
+	},
+	{
+		Name:        "approve_delivery",
+		Description: "Approve a drafted delivery so it becomes sendable. HUMAN IDENTITIES ONLY — an autonomous worker identity is denied by policy. Approving does not send; send_delivery is a separate call.",
+		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"}},"required":["delivery_id"]}`),
+	},
+	{
+		Name:        "send_delivery",
+		Description: "Send an APPROVED delivery to the client-visible surface. HUMAN IDENTITIES ONLY — an autonomous worker identity is denied by policy. There is no compose-and-send: draft, approve and send are three separate calls.",
+		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"}},"required":["delivery_id"]}`),
+	},
+	{
 		Name:        "record_decision",
 		Description: "Record a project-scoped decision; it is injected into every future task context for the project.",
 		InputSchema: schema(`{"type":"object","properties":{"project":{"type":"string","description":"project slug"},"title":{"type":"string"},"body":{"type":"string"}},"required":["project","title"]}`),
