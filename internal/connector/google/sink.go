@@ -275,15 +275,23 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 	// attaches to the task as a delivery_confirmed event, never re-triaged
 	// (it is outbound by the direction rule anyway).
 	if nm.Direction == "outbound" {
-		if err := s.confirmDelivery(ctx, nm.ExternalMessageID); err != nil {
+		matched, err := s.confirmDelivery(ctx, nm.ExternalMessageID)
+		if err != nil {
 			return false, err
 		}
-		// Belt (SWT-11 criterion 15): a submission service MAY rewrite
-		// Message-ID, and Gmail's SMTP does. When it does, the exact match above
-		// finds nothing and the delivery stays unconfirmed FOREVER — which since
-		// SWT-16 also makes capture report our own send as sent by hand.
-		if err := s.confirmDeliveryByBodyPrefix(ctx, rawItemID, nm); err != nil {
-			return false, err
+		// Belt (SWT-11 criterion 15): a submission service may rewrite the
+		// Message-ID we reserved. When that happens the exact match above finds
+		// nothing and the delivery stays unconfirmed forever — which since SWT-16
+		// also makes capture report our own send as sent by hand.
+		//
+		// ONLY when the primary matcher missed. Running it regardless would let
+		// one real send confirm two rows: the exact match claims delivery A, A
+		// then drops out of the candidate set, and the belt goes on to claim a
+		// different delivery B that happens to share A's opening 120 characters.
+		if !matched {
+			if err := s.confirmDeliveryByBodyPrefix(ctx, rawItemID, nm); err != nil {
+				return false, err
+			}
 		}
 	}
 	return false, nil
@@ -291,25 +299,35 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 
 // confirmDelivery closes the loop for a sent delivery whose Message-ID just
 // re-entered via ingestion.
-func (s *PGSink) confirmDelivery(ctx context.Context, messageID string) error {
+// confirmDelivery reports whether this Message-ID claimed a delivery, so the
+// caller can tell "already closed by the exact match" from "still open".
+func (s *PGSink) confirmDelivery(ctx context.Context, messageID string) (bool, error) {
 	var deliveryID, taskID int64
 	err := s.pool.QueryRow(ctx,
 		`UPDATE deliveries SET confirmed_at=now(), updated_at=now()
 		 WHERE sent_external_id=$1 AND confirmed_at IS NULL
 		 RETURNING id, task_id`, messageID).Scan(&deliveryID, &taskID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil // not one of ours, or already confirmed
+		// Either not ours, or ours and already confirmed. Both mean the belt has
+		// nothing to add: a replay must not re-open a closed loop.
+		var claimed bool
+		if e := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM deliveries WHERE sent_external_id=$1)`,
+			messageID).Scan(&claimed); e != nil {
+			return false, fmt.Errorf("check delivery claim for %s: %w", messageID, e)
+		}
+		return claimed, nil
 	}
 	if err != nil {
-		return fmt.Errorf("confirm delivery for %s: %w", messageID, err)
+		return false, fmt.Errorf("confirm delivery for %s: %w", messageID, err)
 	}
 	payload, _ := json.Marshal(map[string]any{"delivery_id": deliveryID, "matched_message_id": messageID})
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1, 'delivery_confirmed', $2)`,
 		taskID, payload); err != nil {
-		return fmt.Errorf("insert delivery_confirmed event: %w", err)
+		return true, fmt.Errorf("insert delivery_confirmed event: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // upsertEvent writes one normalized_events row (upsert on raw_source_item_id).
@@ -492,8 +510,10 @@ const mailMatchPrefixLen = 120
 // opens the way this outbound message does.
 //
 // Runs only after the exact Message-ID match failed. It exists because SMTP
-// submission is allowed to replace the Message-ID we reserved: that id is our
-// idempotency token, not a promise the relay keeps.
+// submission is ALLOWED to replace the Message-ID we reserved: that id is our
+// idempotency token, not a promise the relay keeps. Whether Gmail's submission
+// service actually rewrites it is exactly what the SPEC's live smoke is meant to
+// determine — this belt is insurance, not a statement that it does.
 //
 // Note the asymmetry with the slack and jira matchers. Those look for rows with
 // sent_external_id IS NULL, because a browser click and a REST post learn the id
@@ -508,6 +528,13 @@ const mailMatchPrefixLen = 120
 //     rests on. The observed id goes into the event payload instead, as evidence.
 //   - Scoped to the same from_account_id: another mailbox's pending reply is not
 //     a candidate for this mailbox's send, however similar the text.
+//   - An attempt-time floor. INSTITUTIONAL_KNOWLEDGE makes this unconditional
+//     after SWT-16: any post-hoc matcher identifying our own message by CONTENT
+//     needs a lower time bound, because content alone cannot tell two identical
+//     sends apart. Without it a --full re-run or a UIDVALIDITY resync replays 90
+//     days of Sent mail, and a historical message whose opening matches a
+//     currently-pending delivery would confirm it. The two-minute allowance
+//     absorbs clock skew between Postgres and the provider.
 //   - Multi-match refuses rather than guesses. Two pending replies sharing 120
 //     characters is realistic for short mail, and stamping the wrong row would
 //     record a real send against the wrong task and leave the other
@@ -532,8 +559,10 @@ func (s *PGSink) confirmDeliveryByBodyPrefix(ctx context.Context, rawItemID int6
 		  WHERE d.channel='gmail' AND d.status IN ('sending','sent','failed')
 		    AND d.confirmed_at IS NULL
 		    AND d.from_account_id = (SELECT source_account_id FROM raw_source_items WHERE id=$1)
+		    AND (COALESCE(d.send_attempted_at, d.sent_at) IS NULL
+		         OR COALESCE(d.send_attempted_at, d.sent_at) - interval '2 minutes' <= $2)
 		  ORDER BY d.id DESC
-		  FOR UPDATE OF d`, rawItemID)
+		  FOR UPDATE OF d`, rawItemID, nm.SentAt)
 	if err != nil {
 		return fmt.Errorf("select gmail deliveries to confirm: %w", err)
 	}

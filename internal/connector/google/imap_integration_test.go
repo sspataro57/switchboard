@@ -11,7 +11,7 @@ package google_test
 //   DATABASE_URL=postgres://ops:ops@localhost:5433/ops?sslmode=disable \
 //     go test -tags integration -run IMAP ./internal/connector/google/
 //
-// GREENFIELD NOTE: migration 0010, imap.go, imap_ingest.go, rfc822.go, the
+// GREENFIELD NOTE: migration 0014, imap.go, imap_ingest.go, rfc822.go, the
 // `imap:` branch of Normalize, UpsertAppPasswordAccount/DecryptAppPassword and
 // the body-prefix loop-closure belt do not exist yet, so this compile-FAILs /
 // fails at the first assertion until they do — the expected failure mode.
@@ -84,9 +84,9 @@ func cleanupIMAP(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
-// ---- criterion 3 + 4: migration 0010 and the app-password credential path -----
+// ---- criterion 3 + 4: migration 0014 and the app-password credential path -----
 
-func TestIMAP_Integration_Migration0010AndAppPassword(t *testing.T) {
+func TestIMAP_Integration_Migration0014AndAppPassword(t *testing.T) {
 	requireCompose(t)
 	ctx := context.Background()
 	pool, err := store.NewPool(ctx)
@@ -95,16 +95,16 @@ func TestIMAP_Integration_Migration0010AndAppPassword(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// Criterion 3: the columns migration 0010 adds to source_accounts.
+	// Criterion 3: the columns migration 0014 adds to source_accounts.
 	for _, col := range []string{"auth_type", "app_password_encrypted", "imap_host", "imap_port", "smtp_host", "smtp_port"} {
 		if got := scanInt(t, ctx, pool,
 			`SELECT count(*) FROM information_schema.columns WHERE table_name='source_accounts' AND column_name=$1`, col); got != 1 {
-			t.Fatalf("source_accounts.%s missing — apply migration 0010 (make migrate)", col)
+			t.Fatalf("source_accounts.%s missing — apply migration 0014 (make migrate)", col)
 		}
 	}
 	if got := scanInt(t, ctx, pool,
 		`SELECT count(*) FROM pg_constraint WHERE conname='source_accounts_auth_type_check'`); got != 1 {
-		t.Fatalf("CHECK constraint source_accounts_auth_type_check missing — apply migration 0010")
+		t.Fatalf("CHECK constraint source_accounts_auth_type_check missing — apply migration 0014")
 	}
 
 	cleanupIMAP(t, ctx, pool)
@@ -225,17 +225,25 @@ func TestIMAP_Integration_RawFirstNormalizeDedupLoopClosure(t *testing.T) {
 		 VALUES ($1,'itest-imap work','claude','delivered') RETURNING id`, projID).Scan(&taskID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
+	// The deliveries are dated just BEFORE the Sent-folder copies they produced.
+	// Those copies carry no Date header, so their SentAt falls back to the fake
+	// INTERNALDATE `seen` (now-24h, 2026-07-25 12:00). Seeding a delivery at
+	// now() — or at any instant after `seen` — would describe a send that
+	// happened after its own copy arrived, and the belt's attempt-time floor
+	// (the SWT-16 rule: a content matcher needs a lower time bound) correctly
+	// refuses to bind those.
+	deliverySentAt := time.Date(2026, 7, 25, 11, 0, 0, 0, time.UTC)
 	var deliveryPrimary, deliveryBelt int64
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO deliveries (task_id, channel, status, body, from_account_id, sent_external_id, sent_at)
-		 VALUES ($1,'gmail','sent','our reply body',$2,$3,now()) RETURNING id`,
-		taskID, aID, imapOwnMsgID).Scan(&deliveryPrimary); err != nil {
+		 VALUES ($1,'gmail','sent','our reply body',$2,$3,$4) RETURNING id`,
+		taskID, aID, imapOwnMsgID, deliverySentAt).Scan(&deliveryPrimary); err != nil {
 		t.Fatalf("seed primary delivery: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO deliveries (task_id, channel, status, body, from_account_id, sent_external_id, sent_at)
-		 VALUES ($1,'gmail','sent',$2,$3,$4,now()) RETURNING id`,
-		taskID, imapBeltBody, aID, imapReservedMsgID).Scan(&deliveryBelt); err != nil {
+		 VALUES ($1,'gmail','sent',$2,$3,$4,$5) RETURNING id`,
+		taskID, imapBeltBody, aID, imapReservedMsgID, deliverySentAt).Scan(&deliveryBelt); err != nil {
 		t.Fatalf("seed belt delivery: %v", err)
 	}
 

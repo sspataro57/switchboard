@@ -84,8 +84,27 @@ func runIMAPIngest(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink,
 	var firstErr error
 	succeeded := 0
 	for _, acct := range accounts {
+		// Same per-account advisory lock the bridge path takes. Without it a
+		// stray CronJob overlapping the watch Deployment interleaves with it:
+		// both read the cursor, both spend a long time in IMAP, and the slower
+		// one writes back last — committing a cursor position for messages the
+		// other stored, so the gap between them is never re-fetched.
+		release, ok, err := sink.LockAccount(ctx, acct.ID)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if !ok {
+			// Held by another pass doing the same work; skipping is correct.
+			total.AccountsBusy++
+			continue
+		}
+
 		password, err := google.DecryptAppPassword(ctx, pool, acct.ID, key)
 		if err != nil {
+			release()
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -94,6 +113,7 @@ func runIMAPIngest(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink,
 		src := google.NewIMAPClientSource(acct.Hosts(), acct.Email, password)
 		stats, err := google.IngestIMAP(ctx, src, sink, acct, cfg)
 		_ = src.Close()
+		release()
 
 		total = addStats(total, stats)
 		if err != nil {
@@ -120,5 +140,6 @@ func addStats(a, b google.Stats) google.Stats {
 	a.RawUnchanged += b.RawUnchanged
 	a.IMAPFetched += b.IMAPFetched
 	a.IMAPTruncated += b.IMAPTruncated
+	a.AccountsBusy += b.AccountsBusy
 	return a
 }

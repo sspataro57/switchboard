@@ -11,6 +11,7 @@ import (
 	"net/textproto"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SMTP submission for the app-password path (criteria 12-14).
@@ -19,6 +20,11 @@ import (
 // reachable exclusively from send_delivery, which refuses anything that is not
 // an approved delivery row and reserves sent_external_id before the network call
 // (invariant 4). Nothing here decides whether to send; it only carries bytes.
+
+// smtpDefaultTimeout bounds a submission when the caller supplied no deadline.
+// Generous enough for a large attachment on a slow link, short enough that a
+// stalled server cannot wedge a long-running process.
+const smtpDefaultTimeout = 2 * time.Minute
 
 // SMTPConfig is one submission endpoint plus its credentials.
 type SMTPConfig struct {
@@ -77,6 +83,14 @@ func SubmitSMTP(ctx context.Context, cfg SMTPConfig, from string, rawMIME []byte
 	if err != nil {
 		return fmt.Errorf("smtp dial %s: %w", cfg.addr(), err)
 	}
+	// A deadline on the connection itself: ctx bounded only the dial, so without
+	// this a server that accepts the socket and then stalls would hang the caller
+	// indefinitely — in watch mode, the whole loop.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(smtpDefaultTimeout))
+	}
 	if cfg.ImplicitTLS {
 		conn = tls.Client(conn, cfg.tlsConfig())
 	}
@@ -100,7 +114,10 @@ func SubmitSMTP(ctx context.Context, cfg SMTPConfig, from string, rawMIME []byte
 	// endpoint would take the app password in the clear.
 	if cfg.Password != "" {
 		if _, isTLS := client.TLSConnectionState(); !isTLS {
-			return fmt.Errorf("smtp refusing to authenticate to %s without TLS", cfg.addr())
+			// A definite non-send: we refused before authenticating, so nothing
+			// was submitted and the reservation should be released for retry
+			// once the endpoint is fixed.
+			return &SendRejectedError{Body: fmt.Sprintf("smtp refusing to authenticate to %s without TLS", cfg.addr())}
 		}
 		auth := smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
 		if err := client.Auth(auth); err != nil {

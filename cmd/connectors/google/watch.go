@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -86,7 +87,7 @@ func runWatch(pool *pgxpool.Pool, cfg google.Config) error {
 	}
 	wake := make(chan string, len(accounts)+1)
 	for _, acct := range accounts {
-		go watchAccount(ctx, pool, key, acct, idleRefresh, wake)
+		go watchAccount(ctx, pool, sink, key, acct, idleRefresh, wake)
 	}
 
 	ticker := time.NewTicker(reconcile)
@@ -116,7 +117,7 @@ func runWatch(pool *pgxpool.Pool, cfg google.Config) error {
 // INBOX only. Sent gets the reconcile sweep instead: it halves the connection
 // count and the failure surface, and Sent-folder latency only delays delivery
 // confirmation, which no rule waits on.
-func watchAccount(ctx context.Context, pool *pgxpool.Pool, key string,
+func watchAccount(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, key string,
 	acct google.Account, idleRefresh time.Duration, wake chan<- string) {
 
 	backoff := backoffMin
@@ -129,16 +130,23 @@ func watchAccount(ctx context.Context, pool *pgxpool.Pool, key string,
 			return
 		}
 		if err != nil {
-			fmt.Printf("watch: idle for %s failed: %v (retry in %s)\n", acct.Email, err, backoff)
+			// Real jitter, not just exponential growth. Every account starts at
+			// the same floor and doubles identically, and the goroutines are
+			// started in one loop — so a network blip would reconnect all of them
+			// in lockstep and hammer the server at each step. The random spread
+			// is up to a full extra interval, which is what breaks the alignment.
+			wait := backoff + time.Duration(rand.Int63n(int64(backoff)+1))
+			fmt.Printf("watch: idle for %s failed: %v (retry in %s)\n", acct.Email, err, wait.Round(time.Second))
+			// A failure an operator can see: without this the only evidence of a
+			// mailbox that stopped listening is stdout, which nothing queries.
+			if runID, e := sink.StartRun(ctx, acct.ID, "imap_idle"); e == nil {
+				_ = sink.FinishRun(ctx, runID, "error", google.Stats{}, err.Error())
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-time.After(wait):
 			}
-			// Exponential with a ceiling. The jitter is the account's own
-			// position in the backoff walk rather than a random draw — several
-			// mailboxes failing at once (a network blip) must not reconnect in
-			// lockstep and hammer the server.
 			backoff *= 2
 			if backoff > backoffMax {
 				backoff = backoffMax

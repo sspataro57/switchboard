@@ -45,15 +45,19 @@ func (s *SMTPSender) Send(ctx context.Context, fromUserID string, rawMIME []byte
 	if err != nil {
 		return "", err
 	}
+	// These are DEFINITE non-sends: nothing reached the network, so they are
+	// rejections rather than ambiguous outcomes. Returning them untyped would make
+	// send_delivery keep the reserved Message-ID, leaving a misconfigured account's
+	// delivery stuck at 'failed' and unretriable without hand-written SQL.
 	if acct.AuthType != AuthTypeAppPassword {
-		return "", fmt.Errorf("account %s is %s, not app_password", fromUserID, acct.AuthType)
+		return "", &SendRejectedError{Body: fmt.Sprintf("account %s is %s, not app_password", fromUserID, acct.AuthType)}
 	}
 	password, err := DecryptAppPassword(ctx, s.Pool, acct.ID, s.TokenKey)
 	if err != nil {
-		return "", err
+		return "", &SendRejectedError{Body: err.Error()}
 	}
 	if password == "" {
-		return "", fmt.Errorf("account %s has no app password stored", fromUserID)
+		return "", &SendRejectedError{Body: fmt.Sprintf("account %s has no app password stored", fromUserID)}
 	}
 
 	hosts := acct.Hosts.WithDefaults()
@@ -93,17 +97,19 @@ type MailSender struct {
 func (m *MailSender) Send(ctx context.Context, fromUserID string, rawMIME []byte, threadID string) (string, error) {
 	acct, err := loadMailAccount(ctx, m.Pool, fromUserID)
 	if err != nil {
-		return "", err
+		// Unresolvable sending account: nothing was submitted, so the reservation
+		// must be released rather than stranded.
+		return "", &SendRejectedError{Body: err.Error()}
 	}
 	switch acct.AuthType {
 	case AuthTypeAppPassword:
 		if m.SMTP == nil {
-			return "", fmt.Errorf("account %s is app_password but no SMTP sender is configured", fromUserID)
+			return "", &SendRejectedError{Body: fmt.Sprintf("account %s is app_password but no SMTP sender is configured", fromUserID)}
 		}
 		return m.SMTP.Send(ctx, fromUserID, rawMIME, threadID)
 	default:
 		if m.OAuth == nil {
-			return "", fmt.Errorf("account %s is %s but no OAuth sender is configured", fromUserID, acct.AuthType)
+			return "", &SendRejectedError{Body: fmt.Sprintf("account %s is %s but no OAuth sender is configured", fromUserID, acct.AuthType)}
 		}
 		return m.OAuth.Send(ctx, fromUserID, rawMIME, threadID)
 	}

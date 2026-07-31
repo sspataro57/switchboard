@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/sspataro57/switchboard/internal/audit"
+	"github.com/sspataro57/switchboard/internal/connector/google"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/mcpserver"
 	"github.com/sspataro57/switchboard/internal/policy"
@@ -50,6 +51,14 @@ func run() error {
 	tools.Register(reg, pool)
 	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
 	ex := executor.New(reg, checker, audit.NewPGStore(pool))
+
+	// SWT-11 criterion 17 MCP-lists send_delivery, so this binary must be able to
+	// actually send — otherwise the newly reachable tool fails with "no gmail send
+	// adapter wired" the first time Salvador uses it. The human-actor gate is
+	// unchanged and is what keeps a worker identity out.
+	if sender, _ := google.WireMailSender(pool); sender != nil {
+		tools.SetGmailSender(sender)
+	}
 	adapter := mcpserver.New(ex, workerID)
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "ops-mcp", Version: "0.1.0"}, nil)

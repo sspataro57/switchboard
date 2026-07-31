@@ -99,53 +99,32 @@ func IngestIMAP(ctx context.Context, src MailSource, sink Sink, acct Account, cf
 			continue
 		}
 
-		msgs, err := src.Fetch(ctx, folder.Name, uids, maxBytes)
-		if err != nil {
-			return fail(fmt.Errorf("fetch %s/%s: %w", acct.Email, folder.Name, err))
-		}
-
 		maxUID := stored.UIDNext
 		if resync {
 			maxUID = 0
 		}
-		for _, m := range msgs {
-			stats.IMAPFetched++
-			if m.Truncated {
-				stats.IMAPTruncated++
+		// Fetched in batches, not all at once. A first pass over a 90-day window
+		// of a six-figure mailbox can match thousands of UIDs, and holding every
+		// body (up to MaxMessageBytes each) in memory before writing a single row
+		// would OOM a memory-limited pod on its very first run. Batching also
+		// means a mid-pass failure has already durably written the earlier
+		// batches — the cursor still only advances at the end, so those are
+		// re-fetched rather than skipped, which is the safe direction.
+		for start := 0; start < len(uids); start += imapFetchBatch {
+			end := start + imapFetchBatch
+			if end > len(uids) {
+				end = len(uids)
 			}
-			externalID := imapExternalID(folder.Name, folder.UIDValidity, m.UID)
-			raw, err := buildIMAPEnvelope(folder.Name, folder.UIDValidity, m)
+			msgs, err := src.Fetch(ctx, folder.Name, uids[start:end], maxBytes)
 			if err != nil {
-				return fail(fmt.Errorf("build envelope for %s: %w", externalID, err))
+				return fail(fmt.Errorf("fetch %s/%s: %w", acct.Email, folder.Name, err))
 			}
-			hash, err := chash.ContentHash(raw)
+			batchMax, err := writeBatch(ctx, sink, acct, folder, msgs, &stats)
 			if err != nil {
-				return fail(fmt.Errorf("hash %s: %w", externalID, err))
+				return fail(err)
 			}
-
-			prev, exists, err := sink.RawHash(ctx, acct.ID, externalID)
-			if err != nil {
-				return fail(fmt.Errorf("read raw hash for %s: %w", externalID, err))
-			}
-			switch {
-			case !exists:
-				if err := sink.InsertRaw(ctx, acct.ID, externalID, raw, hash); err != nil {
-					return fail(fmt.Errorf("insert raw %s: %w", externalID, err))
-				}
-				stats.RawInserted++
-			case prev != hash:
-				// A stored message's bytes should not change under a stable UID;
-				// if the server says otherwise, the newest wins and it is counted.
-				if err := sink.UpdateRaw(ctx, acct.ID, externalID, raw, hash); err != nil {
-					return fail(fmt.Errorf("update raw %s: %w", externalID, err))
-				}
-				stats.RawUpdated++
-			default:
-				stats.RawUnchanged++
-			}
-
-			if m.UID+1 > maxUID {
-				maxUID = m.UID + 1
+			if batchMax > maxUID {
+				maxUID = batchMax
 			}
 		}
 
@@ -162,6 +141,56 @@ func IngestIMAP(ctx context.Context, src MailSource, sink Sink, acct Account, cf
 		return stats, fmt.Errorf("finish imap run for %s: %w", acct.Email, err)
 	}
 	return stats, nil
+}
+
+// imapFetchBatch bounds how many messages are held in memory at once.
+const imapFetchBatch = 50
+
+// writeBatch stores one batch raw-first and returns the highest UID+1 it saw.
+func writeBatch(ctx context.Context, sink Sink, acct Account, folder Folder,
+	msgs []FetchedMessage, stats *Stats) (uint32, error) {
+	var maxUID uint32
+	for _, m := range msgs {
+		stats.IMAPFetched++
+		if m.Truncated {
+			stats.IMAPTruncated++
+		}
+		externalID := imapExternalID(folder.Name, folder.UIDValidity, m.UID)
+		raw, err := buildIMAPEnvelope(folder.Name, folder.UIDValidity, m)
+		if err != nil {
+			return 0, fmt.Errorf("build envelope for %s: %w", externalID, err)
+		}
+		hash, err := chash.ContentHash(raw)
+		if err != nil {
+			return 0, fmt.Errorf("hash %s: %w", externalID, err)
+		}
+
+		prev, exists, err := sink.RawHash(ctx, acct.ID, externalID)
+		if err != nil {
+			return 0, fmt.Errorf("read raw hash for %s: %w", externalID, err)
+		}
+		switch {
+		case !exists:
+			if err := sink.InsertRaw(ctx, acct.ID, externalID, raw, hash); err != nil {
+				return 0, fmt.Errorf("insert raw %s: %w", externalID, err)
+			}
+			stats.RawInserted++
+		case prev != hash:
+			// A stored message's bytes should not change under a stable UID;
+			// if the server says otherwise, the newest wins and it is counted.
+			if err := sink.UpdateRaw(ctx, acct.ID, externalID, raw, hash); err != nil {
+				return 0, fmt.Errorf("update raw %s: %w", externalID, err)
+			}
+			stats.RawUpdated++
+		default:
+			stats.RawUnchanged++
+		}
+
+		if m.UID+1 > maxUID {
+			maxUID = m.UID + 1
+		}
+	}
+	return maxUID, nil
 }
 
 // buildIMAPEnvelope renders the raw_json for one message (criterion 5).

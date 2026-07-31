@@ -2,7 +2,9 @@
   "mcpServers": {
     "jira": {
       "command": "uvx",
-      "args": ["mcp-atlassian"],
+      "args": [
+        "mcp-atlassian"
+      ],
       "env": {
         "JIRA_URL": "https://sspataro.atlassian.net",
         "JIRA_USERNAME": "sspataro@gmail.com",
@@ -11,10 +13,14 @@
     },
     "ops": {
       "command": "go",
-      "args": ["run", "./cmd/ops-mcp"],
+      "args": [
+        "run",
+        "./cmd/ops-mcp"
+      ],
       "env": {
         "DATABASE_URL": "${OPS_DATABASE_URL}",
-        "OPS_WORKER_ID": "manual:salvo"
+        "OPS_WORKER_ID": "manual:salvo",
+        "OPS_TOKEN_KEY": "${OPS_TOKEN_KEY}"
       }
     }
   }

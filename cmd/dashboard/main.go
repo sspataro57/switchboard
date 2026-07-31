@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/sspataro57/switchboard/internal/audit"
@@ -52,27 +51,15 @@ func run() error {
 		tools.SetJiraSender(&jira.AccountSender{Pool: pool, TokenKey: key})
 	}
 
-	// Prefer the sibling local connector so OAuth tokens have one owner. The
-	// database-token adapter remains the direct-mode fallback.
-	if binary := os.Getenv("GMAIL_CONNECTOR_BRIDGE"); binary != "" {
-		bridge, err := google.NewCommandBridge(binary)
-		if err != nil {
-			return fmt.Errorf("configure Gmail connector bridge: %w", err)
-		}
-		tools.SetGmailSender(&google.BridgeSender{Bridge: bridge})
-		slog.Info("gmail bridge send adapter wired")
-	} else if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
-		secretFile := os.Getenv("GOOGLE_CLIENT_SECRET_FILE")
-		if secretFile == "" {
-			home, _ := os.UserHomeDir()
-			secretFile = filepath.Join(home, ".config", "switchboard", "google_client_secret.json")
-		}
-		if oauthCfg, err := google.LoadOAuthConfig(secretFile, ""); err == nil {
-			tools.SetGmailSender(&google.AccountSender{Pool: pool, OAuthCfg: oauthCfg, TokenKey: key})
-			slog.Info("gmail send adapter wired")
-		} else {
-			slog.Warn("gmail send adapter not wired", "err", err)
-		}
+	// One adapter that routes per account auth_type (SWT-11 criterion 13): an
+	// app-password mailbox sends over SMTP, an OAuth one keeps the bridge/direct
+	// path unchanged. Without this the dashboard could not send from any mailbox
+	// onboarded with an app password.
+	if sender, how := google.WireMailSender(pool); sender != nil {
+		tools.SetGmailSender(sender)
+		slog.Info("mail send adapter wired", "transports", how)
+	} else {
+		slog.Warn("no mail send adapter wired: gmail sends will be refused")
 	}
 
 	// Slack: one bridge serves both seams — prefill_delivery drafts through it,

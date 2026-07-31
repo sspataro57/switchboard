@@ -130,12 +130,10 @@ func run(toolName string, args json.RawMessage) error {
 	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
 		tools.SetJiraSender(&jira.AccountSender{Pool: pool, TokenKey: key})
 	}
-	if binary := os.Getenv("GMAIL_CONNECTOR_BRIDGE"); binary != "" {
-		bridge, err := google.NewCommandBridge(binary)
-		if err != nil {
-			return fmt.Errorf("configure Gmail connector bridge: %w", err)
-		}
-		tools.SetGmailSender(&google.BridgeSender{Bridge: bridge})
+	// Routes per account auth_type (SWT-11 criterion 13): app-password mailboxes
+	// over SMTP, OAuth mailboxes over the bridge/direct path as before.
+	if sender, _ := google.WireMailSender(pool); sender != nil {
+		tools.SetGmailSender(sender)
 	}
 	// One bridge serves both seams: prefill_delivery drafts through it and
 	// send_delivery sends through it (SWT-12 criterion 15). HTTP is preferred so
