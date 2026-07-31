@@ -32,6 +32,11 @@ type Account struct {
 type Cursor struct {
 	GmailInternalDateMS int64  `json:"gmail_internal_date_ms"`
 	CalendarSyncToken   string `json:"calendar_sync_token"`
+	// IMAPFolders is the per-folder UID position for the IMAP source (SWT-11).
+	// It sits alongside the two keys above rather than replacing them: an account
+	// may be ingested by the Gmail API today and IMAP tomorrow, and a save from
+	// either path must not erase the other's position (criterion 8).
+	IMAPFolders map[string]FolderCursor `json:"imap_folders,omitempty"`
 }
 
 // Stats is per-run bookkeeping (sync_runs.stats).
@@ -51,6 +56,11 @@ type Stats struct {
 	CalendarSuperseded int `json:"calendar_superseded"`
 	// AccountsBusy counts accounts skipped because another pass held the lock.
 	AccountsBusy int `json:"accounts_busy"`
+	// IMAPFetched counts messages pulled from IMAP; IMAPTruncated how many of
+	// those exceeded the size cap and were captured headers-only. Truncation is
+	// lossy, so it is counted rather than left silent.
+	IMAPFetched   int `json:"imap_fetched"`
+	IMAPTruncated int `json:"imap_truncated"`
 }
 
 func (s *Stats) add(o Stats) {
@@ -71,6 +81,10 @@ func (s *Stats) add(o Stats) {
 // AccountEmail, when set, limits the ingest to that one account (debugging);
 // the normalize phase stays global regardless.
 type Config struct {
+	// MaxMessageBytes caps a single IMAP fetch; 0 means DefaultMaxMessageBytes.
+	MaxMessageBytes int
+	// Folders overrides IMAP folder discovery (MAIL_FOLDERS); nil means discover.
+	Folders      []string
 	Full         bool
 	All          bool
 	Overlap      time.Duration
