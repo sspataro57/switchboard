@@ -500,6 +500,17 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
   This supersedes the old "no auto-commit" line here and in CLAUDE.md.
 - **Diagnose before changing** — reproduction-first for bugs (`/bug-start`).
 - **Never** `Co-Authored-By: Claude` trailers (also enforced via `.claude/settings.json`).
+- **Three historical commits DO carry the trailer, and stay that way by decision**
+  (Salvador, 2026-07-31): `f0ab2cd` on `main` (the squash of PR #1, twice in one
+  message), `7c4a5e7` on the dead `slackweb-http-bridge` branch, and `c2a5cde` on
+  `runbook-cluster-split` (open PR #2). Do NOT "fix" these and do not propose it
+  again. Reasons: `f0ab2cd` is 16 commits back, so a rewrite re-SHAs it and every
+  commit after it and needs a force-push to eight remote refs including an open
+  PR — and it still would not remove the trailer, because GitHub keeps PR #1's
+  page showing the original merge commit and message regardless of what `main`
+  says. Only deleting the PR removes that, at the cost of its review history.
+  A partial clean for that price is not worth it. The forward rule is unchanged:
+  never write a new one.
 - Branches (once the repo has remotes/PR flow): `ticket-NN-short-kebab` for build-order
   steps, `bug-short-kebab` for bugs.
 - Specs live in `docs/tickets/`, bug artifacts in `docs/bugs/`.
