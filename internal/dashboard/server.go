@@ -66,6 +66,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /deliveries/{id}/approve", s.auth.Require(s.action("approve_delivery")))
 	mux.Handle("POST /deliveries/{id}/send", s.auth.Require(s.action("send_delivery")))
 	mux.Handle("POST /deliveries/{id}/mark-sent", s.auth.Require(s.action("mark_delivery_sent")))
+	// Resolves a stuck slack_reply 'sending' row the other way: a human looked in
+	// Slack and the message is NOT there (SWT-12 criterion 12).
+	mux.Handle("POST /deliveries/{id}/mark-failed", s.auth.Require(s.action("mark_delivery_failed")))
 	mux.Handle("POST /flags/sending-frozen", s.auth.Require(http.HandlerFunc(s.actionFreeze)))
 	return mux
 }

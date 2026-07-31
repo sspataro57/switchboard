@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/textmatch"
 )
 
 type PGSink struct {
@@ -38,11 +41,11 @@ func (s *PGSink) EnsureAccount(ctx context.Context, workspace Workspace) (int64,
 	return id, nil
 }
 
-func (s *PGSink) StartRun(ctx context.Context, accountID int64) (int64, error) {
+func (s *PGSink) StartRun(ctx context.Context, accountID int64, startedAt time.Time) (int64, error) {
 	var id int64
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sync_runs (source_account_id, status, stats)
-		 VALUES ($1, 'running', '{"phase":"slack_web"}') RETURNING id`, accountID).Scan(&id)
+		`INSERT INTO sync_runs (source_account_id, started_at, status, stats)
+		 VALUES ($1, $2, 'running', '{"phase":"slack_web"}') RETURNING id`, accountID, startedAt).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert Slack sync run: %w", err)
 	}
@@ -182,16 +185,61 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	if message.ExternalMessageID == "" || message.BodyText == "" || message.TargetRef == "" {
 		return nil
 	}
+	// Refuse to claim a message another delivery already owns. The unique index
+	// on (channel, sent_external_id) would otherwise turn a prefix collision into
+	// a failed normalization run rather than a skipped confirmation.
+	var claimed bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM deliveries
+		   WHERE channel='slack_reply' AND sent_external_id=$1)`,
+		message.ExternalMessageID).Scan(&claimed); err != nil {
+		return fmt.Errorf("check Slack external id claim: %w", err)
+	}
+	if claimed {
+		return nil
+	}
+
+	// 'sending' as well as 'sent' (SWT-12): a crash between the click and the
+	// 'sent' write leaves a row switchboard cannot classify, and nothing is
+	// allowed to retry it. Matching it here is what makes that window
+	// self-healing — the message is in Slack, so the row becomes 'sent'.
+	//
+	// The time floor matters as much as the prefix. On target plus a 120-char
+	// prefix alone, a replay (--all) would happily bind a months-old message — or
+	// one a human typed by hand — to a newly stuck row and promote a send that
+	// never happened. A message that predates the click cannot be that click's
+	// message.
+	//
+	// The floor applies only where the instant is actually known. A switchboard
+	// dispatch records send_attempted_at, so the comparison is sound. An assisted
+	// row has no attempt instant, and created_at is NOT a safe substitute: the
+	// row's creation says nothing about when a human typed the message, and using
+	// it would refuse legitimate confirmations. Those rows keep the SWT-13
+	// behaviour, so the historical-collision risk remains for the assisted tier
+	// alone — bounded by the fact that nothing auto-promotes an assisted row's
+	// status.
+	//
+	// The skew allowance is not decoration: send_attempted_at is Postgres now() on
+	// pg-main, while message.SentAt comes from Slack's clock via the leaf. A
+	// database even a second fast would refuse a legitimate confirmation
+	// PERMANENTLY and flag the row instead — a silent failure with the same shape
+	// as SWT-13's non-canonical target_ref landmine. Two minutes still kills the
+	// months-old-replay collision this floor exists for.
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, task_id, body FROM deliveries
-		 WHERE channel='slack_reply' AND status='sent' AND sent_external_id IS NULL
+		// COALESCE because body is nullable (0001) and scanning NULL into a string
+		// errors, which would fail the export rather than just this match (SWT-16).
+		`SELECT id, task_id, COALESCE(body,'') FROM deliveries
+		 WHERE channel='slack_reply' AND status IN ('sending','sent')
+		   AND sent_external_id IS NULL
 		   AND confirmed_at IS NULL AND target_ref=$1
-		 ORDER BY id DESC`, message.TargetRef)
+		   AND (send_attempted_at IS NULL OR send_attempted_at - interval '2 minutes' <= $2)
+		 ORDER BY id DESC`, message.TargetRef, message.SentAt)
 	if err != nil {
 		return fmt.Errorf("select Slack deliveries to confirm: %w", err)
 	}
 	defer rows.Close()
 	var deliveryID, taskID int64
+	matches := 0
 	messagePrefix := normalizedPrefix(message.BodyText, slackMatchPrefixLen)
 	for rows.Next() {
 		var id, task int64
@@ -200,8 +248,10 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 			return fmt.Errorf("scan Slack delivery candidate: %w", err)
 		}
 		if normalizedPrefix(body, slackMatchPrefixLen) == messagePrefix {
-			deliveryID, taskID = id, task
-			break
+			matches++
+			if deliveryID == 0 {
+				deliveryID, taskID = id, task
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -210,8 +260,23 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	if deliveryID == 0 {
 		return nil
 	}
+	if matches > 1 {
+		// Two pending deliveries to the same conversation share a 120-char
+		// prefix, which short repeated replies make realistic. Guessing would
+		// stamp a real message onto the wrong row and mark the other unsent
+		// forever; the reconciler flags both for a human instead.
+		return nil
+	}
+	// Promote a crashed 'sending' row to 'sent' and backfill sent_at, while
+	// leaving an already-'sent' row's timestamp alone. The guards are unchanged:
+	// sent_external_id IS NULL means this never overwrites an id, so re-running
+	// (including --all) is idempotent and emits no duplicate event.
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE deliveries SET sent_external_id=$2, confirmed_at=now(), updated_at=now()
+		`UPDATE deliveries
+		    SET sent_external_id=$2, confirmed_at=now(),
+		        status='sent',
+		        sent_at=COALESCE(sent_at, now()),
+		        updated_at=now()
 		 WHERE id=$1 AND sent_external_id IS NULL AND confirmed_at IS NULL`,
 		deliveryID, message.ExternalMessageID)
 	if err != nil {
@@ -231,13 +296,12 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	return nil
 }
 
+// normalizedPrefix delegates to the shared spelling (SWT-16). Kept as a local
+// alias so the call sites above read unchanged; the rule itself now lives in one
+// place, because three copies of a comparison that must agree exactly is how a
+// matcher silently stops matching.
 func normalizedPrefix(value string, limit int) string {
-	normalized := strings.Join(strings.Fields(value), " ")
-	runes := []rune(normalized)
-	if len(runes) > limit {
-		runes = runes[:limit]
-	}
-	return string(runes)
+	return textmatch.NormalizedPrefix(value, limit)
 }
 
 func (s *PGSink) markNormalized(ctx context.Context, rawItemID int64) error {

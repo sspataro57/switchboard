@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +79,42 @@ func (b *CommandBridge) Draft(ctx context.Context, targetURL, text string) error
 	return nil
 }
 
+// Send clicks Send through the local connector process. Like the HTTP bridge it
+// returns nothing on success: a browser click reserves no message id, so the
+// export's body-prefix matcher stamps sent_external_id later.
+//
+// The subprocess transport cannot distinguish a pre-click refusal from a
+// post-click crash the way an HTTP status can, so only two things are DEFINITE
+// here: input this method rejected itself, and a leaf that answered sent:false.
+// A non-zero exit stays untyped and therefore ambiguous.
+func (b *CommandBridge) Send(ctx context.Context, targetURL, text string) error {
+	if targetURL == "" || text == "" {
+		return &SendRejectedError{Body: "Slack send requires target URL and text"}
+	}
+	in, err := json.Marshal(map[string]string{"target_url": targetURL, "text": text})
+	if err != nil {
+		return &SendRejectedError{Body: fmt.Sprintf("marshal Slack send request: %v", err)}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return &SendRejectedError{Body: "context already done before dispatch: " + ctxErr.Error()}
+	}
+	out, err := b.run(ctx, "send", in)
+	if err != nil {
+		// A process that never started cannot have clicked — same reasoning as the
+		// HTTP bridge's dial failure, and the same classification the sibling Gmail
+		// bridge already makes. exec wraps start failures (missing binary, not
+		// executable) in *exec.Error; a non-zero EXIT is a different thing and stays
+		// ambiguous, because the leaf may have clicked before dying.
+		var startErr *exec.Error
+		var pathErr *fs.PathError
+		if errors.As(err, &startErr) || errors.As(err, &pathErr) {
+			return &SendRejectedError{Body: "bridge never started (never dispatched): " + err.Error()}
+		}
+		return err
+	}
+	return checkSendResult(out)
+}
+
 func (b *CommandBridge) run(ctx context.Context, operation string, stdin []byte) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, b.node, b.script, operation)
 	cmd.Env = os.Environ()
@@ -116,4 +154,43 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	return b.Buffer.Write(p)
+}
+
+// DeliveryBridge is both Slack delivery seams at once — tools.SlackDrafter and
+// tools.SlackSender. Both transports satisfy it, which is what lets one
+// constructed bridge serve drafting and sending in the same process.
+type DeliveryBridge interface {
+	Draft(ctx context.Context, targetURL, text string) error
+	Send(ctx context.Context, targetURL, text string) error
+}
+
+// NewDeliveryBridgeFromEnv picks the transport the same way the connector's own
+// poller does: SLACK_WEB_BRIDGE_URL selects HTTP, otherwise
+// SLACK_WEB_BRIDGE_SCRIPT selects the local subprocess. It returns (nil, nil)
+// when neither is set, so a caller can leave the seams unwired.
+//
+// Both trusted processes (opsctl, dashboard) go through here. Before SWT-12 they
+// built a CommandBridge unconditionally and stat()ed a script on their own host,
+// so a cluster-resident dashboard could neither draft nor send — the exact
+// configuration the promotion exists to escape.
+func NewDeliveryBridgeFromEnv() (DeliveryBridge, error) {
+	if rawURL := os.Getenv("SLACK_WEB_BRIDGE_URL"); rawURL != "" {
+		token, err := TokenFromEnv()
+		if err != nil {
+			return nil, err
+		}
+		bridge, err := NewHTTPBridge(rawURL, token, nil)
+		if err != nil {
+			return nil, err
+		}
+		return bridge, nil
+	}
+	if script := os.Getenv("SLACK_WEB_BRIDGE_SCRIPT"); script != "" {
+		bridge, err := NewCommandBridge(os.Getenv("SLACK_WEB_NODE"), script)
+		if err != nil {
+			return nil, err
+		}
+		return bridge, nil
+	}
+	return nil, nil
 }

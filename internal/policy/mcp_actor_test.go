@@ -1,25 +1,23 @@
 package policy_test
 
-// Unit tests for the MCP transport-prefix rule on the human-only gate (SPEC
-// imap-mail-connector, acceptance criterion 17; OQ1 ANSWERED = option A,
-// 2026-07-26). ZERO I/O — the matrix core is a pure function of
-// (Request, Snapshot), invariant 7.
+// Unit tests for the MCP transport-prefix rule on the human-only gate.
+// ZERO I/O — the matrix core is a pure function of (Request, Snapshot),
+// invariant 7.
 //
 // The rule: policy.humanActor() strips ONE optional leading "mcp:" transport
-// prefix before checking the dashboard:/opsctl:/manual: set. So an interactive
+// prefix before checking the dashboard:/opsctl:/manual: set. An interactive
 // session (ops-mcp sets Actor = "mcp:" + OPS_WORKER_ID, and .mcp.json's worker
-// id is manual:salvo) passes, while an autonomous worker identity
-// ("mcp:worker:acme") is DENIED with rule human_only. The audit row keeps the
-// FULL unmodified actor string — that is the reason option A was chosen over
-// fixing it in the MCP adapter, so "which surface triggered this send" survives.
+// id is manual:salvo) therefore passes, while an autonomous worker identity
+// ("mcp:worker:acme") is DENIED with rule human_only.
 //
-// GREENFIELD NOTE: humanActor() does not strip the prefix yet, so the
-// mcp:manual / mcp:dashboard / mcp:opsctl cases fail today — the expected
-// failure mode. No new exported surface is imposed: the change is one
-// unexported function in matrix.go.
+// Why the prefix is stripped in policy rather than never applied by the MCP
+// adapter: the audit row keeps the FULL unmodified actor string, so "which
+// surface triggered this send" stays answerable forever. Normalising in the
+// adapter would make an MCP manual:salvo indistinguishable from an opsctl one.
+// Recorded as OQ1 option A on the imap-mail-connector SPEC, 2026-07-26.
 //
 // Existing helpers reused from matrix_test.go (same package): assertDeny,
-// gmailSnap, humanActor (the const), botActor, recordingLoader.
+// gmailSnap, recordingLoader.
 
 import (
 	"context"
@@ -29,9 +27,9 @@ import (
 	"github.com/sspataro57/switchboard/internal/policy"
 )
 
-// mcpHumanOnlyTools are the two tools this ticket newly MCP-lists. They stay in
-// policy.humanOnly; the actor gate is the ONLY thing standing between an
-// autonomous worker and a send.
+// mcpHumanOnlyTools are the send-shaped tools an interactive session reaches
+// over MCP. They stay in policy.humanOnly; the actor gate is the ONLY thing
+// standing between an autonomous worker and a send.
 var mcpHumanOnlyTools = []string{"approve_delivery", "send_delivery"}
 
 func TestHumanActor_StripsOneMCPTransportPrefix(t *testing.T) {
@@ -41,7 +39,7 @@ func TestHumanActor_StripsOneMCPTransportPrefix(t *testing.T) {
 		why       string
 	}{
 		{"manual:salvo", true, "interactive session, direct"},
-		{"mcp:manual:salvo", true, "interactive session over MCP (OQ1 = A)"},
+		{"mcp:manual:salvo", true, "interactive session over MCP"},
 		{"mcp:dashboard:salvo@example.com", true, "dashboard identity over MCP"},
 		{"mcp:opsctl:salvo", true, "opsctl identity over MCP"},
 		{"dashboard:salvo@example.com", true, "dashboard, direct"},
@@ -81,7 +79,7 @@ func TestHumanActor_StripsOneMCPTransportPrefix(t *testing.T) {
 // db work happens.
 func TestMatrix_MCPWorkerIdentityDeniedBeforeTheLoaderRuns(t *testing.T) {
 	ctx := context.Background()
-	fallback := policy.NewStatic("send_delivery", "approve_delivery", "mail_search", "mail_read_thread")
+	fallback := policy.NewStatic("send_delivery", "approve_delivery")
 
 	for _, tool := range mcpHumanOnlyTools {
 		tool := tool

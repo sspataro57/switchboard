@@ -19,6 +19,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/connector/google"
 	"github.com/sspataro57/switchboard/internal/connector/jira"
+	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/dashboard"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/policy"
@@ -72,6 +73,17 @@ func run() error {
 		} else {
 			slog.Warn("gmail send adapter not wired", "err", err)
 		}
+	}
+
+	// Slack: one bridge serves both seams — prefill_delivery drafts through it,
+	// send_delivery sends through it (SWT-12 criterion 15). The dashboard had no
+	// Slack wiring at all before this, so the Send button could not have worked.
+	if bridge, err := slackweb.NewDeliveryBridgeFromEnv(); err != nil {
+		return fmt.Errorf("configure Slack bridge: %w", err)
+	} else if bridge != nil {
+		tools.SetSlackDrafter(bridge)
+		tools.SetSlackSender(bridge)
+		slog.Info("slack bridge draft+send adapters wired")
 	}
 
 	auth, err := dashboard.NewAuth(ctx,
