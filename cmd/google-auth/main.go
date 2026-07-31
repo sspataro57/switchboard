@@ -31,7 +31,10 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: google-auth <add|list> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: google-auth <add|add-app-password|list> [flags]")
+		fmt.Fprintln(os.Stderr, "  add <email>                 OAuth loopback consent")
+		fmt.Fprintln(os.Stderr, "  add-app-password <email>    IMAP/SMTP app password, read from stdin")
+		fmt.Fprintln(os.Stderr, "  list                        show accounts and their auth_type")
 		os.Exit(2)
 	}
 	var err error

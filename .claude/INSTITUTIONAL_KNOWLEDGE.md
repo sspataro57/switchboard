@@ -167,8 +167,29 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `KEY=value` file leaves the variable UNSET — bash reads `&` as a background
   operator. Build such secrets with `--from-file`, never `--from-literal` via
   a sourced env file.
-  Nothing else of switchboard is deployed: no orchestrator, dashboard, triage,
-  drafts, fleetd, or hooksd in-cluster yet.
+  **The dashboard IS deployed since 2026-07-31** (`deployment/dashboard` +
+  `service/dashboard`, ops namespace, image tag `0.2.0`, manifest
+  `kube/switchboard/dashboard.yaml`) — switchboard's first long-running
+  workload; everything else is still one-shot CronJobs. It is deliberately
+  NOT exposed by an Ingress: with `OIDC_ISSUER` unset the dashboard falls back
+  to a dev-login stub that hands a session to anyone who reaches `/dev/login`,
+  and the dashboard performs approvals and sends. Reach it with
+  `kubectl -n ops port-forward svc/dashboard 8085:80`; the Ingress block in the
+  manifest is commented out until OIDC is configured.
+  Still not deployed: orchestrator, triage, drafts, fleetd, hooksd.
+- **The production db drifted five migrations behind main (bit 2026-07-31).**
+  `schema_migrations` was at 0009 while main was at 0014: 0010 (calendar reset),
+  0011/0012 (slack send promotion + attempts) and 0013 (task_events indexes) had
+  all shipped in code and merged, but nothing had ever applied them to pg-main.
+  Nothing broke only because the CronJobs run a pinned older image. **Deploying a
+  new image without migrating first would have failed at runtime**, on columns
+  the new code assumes. Applied 0010-0014 on 2026-07-31.
+  Lesson: merging a migration is not applying it. There is no automatic migrate
+  step in the deploy path — check
+  `psql -h 192.168.50.49 -U ops -d ops -tAc "SELECT max(version) FROM schema_migrations"`
+  against `ls migrations/` before pushing an image, or add a migrate Job to the
+  rollout (the image already ships `/migrations` and the migrate binary for
+  exactly this).
 - **Upwork CRM (connector source, wired 2026-07-11):** db `upwork_crm` on pg-main.
   The `ops` role has SELECT on exactly `clients` + `communications` (granted as
   postgres: `GRANT CONNECT ON DATABASE upwork_crm TO ops; GRANT USAGE ON SCHEMA
