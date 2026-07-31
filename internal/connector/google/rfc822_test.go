@@ -37,6 +37,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sspataro57/switchboard/internal/connector/google"
 )
@@ -433,5 +434,40 @@ func TestNormalizeRFC822_Deterministic(t *testing.T) {
 	}
 	if !reflect.DeepEqual(first, second) {
 		t.Errorf("NormalizeRFC822 is not deterministic:\n%+v\n%+v", first, second)
+	}
+}
+
+// Regression, found by the first live ingest against a real mailbox: a latin-1
+// (c) at byte 0xa9 in a body with no usable charset aborted the whole normalize
+// pass with `invalid byte sequence for encoding "UTF8"` when Postgres refused the
+// INSERT. The unit tests all used a fake sink, so nothing had ever written one of
+// these strings to a real TEXT column.
+//
+// Returning raw bytes on an unknown charset is still right for a mail parser —
+// the repair belongs at the boundary, and it interprets stray bytes as latin-1
+// rather than substituting U+FFFD, which would corrupt every accented word.
+func TestNormalizeRFC822_RepairsInvalidUTF8ForPostgres(t *testing.T) {
+	// 0xa9 is © in latin-1 and is not valid UTF-8 on its own.
+	msg := rfc822([]string{
+		`Message-ID: <latin1@acme.example>`,
+		`From: client@acme.example`,
+		`Subject: copyright \xa9 2026`,
+		`Content-Type: text/plain; charset="x-unknown-9000"`,
+	}, "Terms \xa9 2026 Acme, all rights reserved.")
+
+	nm, err := google.NormalizeRFC822(inboundRaw(msg), acctA, ownSet())
+	if err != nil {
+		t.Fatalf("NormalizeRFC822: %v", err)
+	}
+	for name, field := range map[string]string{
+		"BodyText": nm.BodyText, "Subject": nm.Subject, "Sender": nm.Sender,
+	} {
+		if !utf8.ValidString(field) {
+			t.Errorf("%s is not valid UTF-8 (%q); Postgres rejects it and the whole "+
+				"normalize pass aborts on the INSERT", name, field)
+		}
+	}
+	if !strings.Contains(nm.BodyText, "©") {
+		t.Errorf("BodyText = %q, want the 0xa9 byte read as latin-1 © rather than replaced", nm.BodyText)
 	}
 }

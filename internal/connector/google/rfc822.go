@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // NormalizeRFC822 turns one raw IMAP envelope into a NormalizedMessage.
@@ -118,14 +119,20 @@ func NormalizeRFC822(raw json.RawMessage, accountEmail string, ownEmails map[str
 		body += manifest
 	}
 
+	// Every text field is forced to valid UTF-8 before it leaves this function.
+	// normalized_messages columns are TEXT, and Postgres REJECTS a byte sequence
+	// that is not valid UTF-8 — so "return the raw bytes on an unknown charset"
+	// (which is the right call for a mail parser) becomes a failed INSERT that
+	// aborts the whole normalize pass unless the bytes are repaired here. Found by
+	// the first live ingest: a latin-1 (c) at 0xa9 killed the run.
 	return NormalizedMessage{
 		ThreadKey:         "gmail:" + accountEmail + ":" + threadRoot(hdr, messageID, externalID),
 		ExternalMessageID: messageID,
 		Direction:         direction,
 		SentAt:            sentAt,
-		Subject:           decodeWord(hdr.Get("Subject")),
-		Sender:            sender,
-		BodyText:          body,
+		Subject:           toValidUTF8(decodeWord(hdr.Get("Subject"))),
+		Sender:            toValidUTF8(sender),
+		BodyText:          toValidUTF8(body),
 		Channel:           Channel,
 		// No Gmail ids exist over IMAP. Leaving these empty is deliberate: the
 		// gmail-msgid dedup index keys on external_message_id, not on these.
@@ -324,26 +331,17 @@ func stripHTML(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// capBody truncates on a rune boundary so the stored text is always valid UTF-8.
+// capBody truncates on a rune boundary so the stored text stays valid UTF-8.
 func capBody(s string) string {
 	if len(s) <= maxBodyTextBytes {
 		return s
 	}
 	cut := s[:maxBodyTextBytes]
-	for len(cut) > 0 && !utf8Valid(cut) {
+	// Drop a trailing partial sequence rather than storing half a rune.
+	for len(cut) > 0 && !utf8.ValidString(cut) {
 		cut = cut[:len(cut)-1]
 	}
 	return cut
-}
-
-func utf8Valid(s string) bool {
-	for _, r := range s {
-		if r == '�' && len(s) > 0 {
-			// RuneError from an incomplete trailing sequence; keep trimming.
-			return false
-		}
-	}
-	return true
 }
 
 // attachmentLine renders the dropped parts as one readable trailing line.
@@ -379,4 +377,34 @@ func humanBytes(n int) string {
 	default:
 		return fmt.Sprintf("%d B", n)
 	}
+}
+
+// toValidUTF8 repairs text that is not valid UTF-8.
+//
+// Invalid bytes are almost always latin-1: a sender declared no charset, or
+// declared one Go cannot decode, and the bytes are ISO-8859-1 or windows-1252.
+// Interpreting each stray byte AS a latin-1 code point is lossless for that case
+// (0xa9 becomes ©) and is strictly better than substituting U+FFFD, which would
+// silently corrupt every accented word in the message.
+//
+// Valid UTF-8 is returned untouched, so correctly-encoded mail never goes through
+// the transcode.
+func toValidUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + len(s)/4)
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			// A byte that is not part of a valid sequence: read it as latin-1.
+			b.WriteRune(rune(s[i]))
+			i++
+			continue
+		}
+		b.WriteString(s[i : i+size])
+		i += size
+	}
+	return b.String()
 }
