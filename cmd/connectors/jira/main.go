@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/connector/jira"
 	"github.com/sspataro57/switchboard/internal/store"
 )
@@ -71,6 +72,17 @@ func run(full, normalizeOnly, all bool) error {
 	if err != nil {
 		return fmt.Errorf("normalize: %w", err)
 	}
+	// Externally-sent messages: log them on the tasks they correspond to, so a
+	// reply sent by hand does not leave the task looking untouched (SWT-16).
+	// After Normalize, so this pass's own delivery confirmations are already
+	// stamped and a message switchboard sent is never mislabeled as external.
+	observed, err := capture.ObserveOutbound(ctx, pool, capture.Jira)
+	if err != nil {
+		return fmt.Errorf("observe outbound: %w", err)
+	}
+	// Printed unconditionally: a silent pass and a pass that did not run look
+	// identical in the logs, and this one is expected to find nothing most times.
+	fmt.Printf("capture: {\"outbound_observed\":%d}\n", observed)
 	return nil
 }
 

@@ -23,6 +23,46 @@ with `env -u ANTHROPIC_API_KEY` (or a deliberately configured key). Related:
 envelope on stdout — the wrapper salvages it (session_id must be recorded even
 for failed runs, or resume breaks).
 
+### Exact text comparison across a provider round trip
+**Location:** `internal/connector/jira/sink.go` `matchByBodyPrefix`, found SWT-16
+Post-hoc delivery matchers recognize our own message by its opening text. Jira's
+compared `left(body,120)` RAW: the text we stored against the text Jira handed
+back after re-serializing it. A provider may change line endings, trailing
+spaces, or blank-line runs without changing the message, and any such change made
+the match fail — **permanently**, because nothing retries a comparison that is
+already exact, and the row then stays unclaimable with `sent_external_id` NULL
+forever. Since SWT-16 that has a second cost: capture sees an outbound message no
+delivery claims and logs `outbound_observed` — a false claim that switchboard's
+own comment was sent by hand.
+Fix: compare `textmatch.NormalizedPrefix` (whitespace-collapsed, rune-truncated).
+**One spelling only** — the rule now lives in `internal/textmatch` and is used by
+slackweb's matcher, jira's matcher, and capture's preview. Do NOT re-spell it in
+SQL: Postgres's POSIX `\s` does not cover the unicode spaces Go's
+`strings.Fields` does, so an NBSP alone makes the two disagree, silently. This is
+the SWT-13 canonicalization landmine in a second costume.
+Note the review's hypothesis was WRONG in a useful way: it guessed the mismatch
+came from `ScrubAIAttribution` running at send but not at store. It doesn't —
+`draft_delivery` and `update_delivery` both store scrubbed bodies and the scrub is
+idempotent, so stored body == sent body. Verify a claimed data path at every
+write site before acting on it.
+
+### A post-hoc matcher without an attempt-time floor binds the wrong send
+**Location:** `internal/connector/jira/sink.go` `matchByBodyPrefix`, found SWT-16
+slackweb got this floor in SWT-12 (see 0012's third defect); **jira never did**,
+and the gap survived until an adversarial pass went looking. Without
+`send_attempted_at - interval '2 minutes' <= message.SentAt`, a delivery
+re-approved and re-sent AFTER a comment exists is still a match candidate — and
+because the matcher takes the newest candidate, the fresh retry WINS over the row
+that actually produced the comment. Result: `sent_external_id` records a real send
+against the wrong external object, the retry's own comment id is lost forever, and
+the correct row stays unclaimable. Verified by mutation: removing the floor makes
+the in-flight retry get stamped with the older comment's id.
+The two-minute allowance is not decoration — `send_attempted_at` is Postgres
+`now()` while the message instant comes from the provider's clock, and a strict
+comparison would turn a second of skew into a PERMANENT refusal.
+**Rule: any post-hoc matcher that identifies our own message by CONTENT needs a
+lower time bound.** Content matching alone cannot tell two identical sends apart.
+
 ### needs_feedback flips mid-run
 **Location:** task lifecycle, bit 2026-07-11 (test race)
 `request_feedback` sets the task to needs_feedback DURING the claude run —
@@ -395,7 +435,27 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
 - task_events event-type vocabulary: `claimed`, `status_changed`, `log`,
   `session` (payload carries session_id/is_error/num_turns/cost_usd — the
   resume pointer; latest wins), `feedback_requested`, `feedback_answered`,
-  `done_local`, `child_created`, `released`. The NOTIFY trigger is step 5's.
+  `done_local`, `child_created`, `released`, `delivery_confirmed`,
+  `outbound_observed`. The NOTIFY trigger is step 5's.
+- `outbound_observed` (SWT-16) is informational ONLY: a message sent outside
+  switchboard (Gmail app, Jira web UI, Slack on a phone) logged on every task
+  that has a `deliveries` row on the same thread. Payload: `{message_id,
+  external_message_id, channel, thread_key, sent_at, sender, body_preview}`;
+  the dedup key is `payload->>'message_id'` (= `normalized_messages.id`, stable
+  across re-normalization — `external_message_id` can be absent). That dedup is
+  **structurally enforced**, not advisory: `task_events_outbound_observed_uniq`
+  (0013) is a PARTIAL unique index on
+  `(task_id, (payload->>'message_id')) WHERE event_type='outbound_observed'`.
+  Any future writer of this event MUST repeat that predicate in its
+  `ON CONFLICT (task_id, (payload->>'message_id')) WHERE
+  event_type='outbound_observed' DO NOTHING` — arbiter inference matches a
+  partial index only when the predicate is restated, and omitting it raises
+  "no unique or exclusion constraint matching the ON CONFLICT specification" at
+  runtime. Corollary: one observation per (task, message) FOREVER; a
+  re-observe-after-edit feature would need a new key or a new event type.
+  No status change, no delivery row, no orchestrator rule. Coverage equals correspondence:
+  a task with no delivery on the thread has no stored thread↔task link and gets
+  nothing — widening that is triage-live attach, not a heuristic.
 - Fleet `resume` cmd args schema (pinned): `{"task_id": N, "feedback_request_id": M}`.
 - `OPS_WORKER_ID` injection rule: ops-mcp force-overwrites any model-supplied
   `worker_id` from its env — identity is never model-chosen. The wrapper sets

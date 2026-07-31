@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/textmatch"
 )
 
 type PGSink struct {
@@ -224,7 +226,9 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	// as SWT-13's non-canonical target_ref landmine. Two minutes still kills the
 	// months-old-replay collision this floor exists for.
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, task_id, body FROM deliveries
+		// COALESCE because body is nullable (0001) and scanning NULL into a string
+		// errors, which would fail the export rather than just this match (SWT-16).
+		`SELECT id, task_id, COALESCE(body,'') FROM deliveries
 		 WHERE channel='slack_reply' AND status IN ('sending','sent')
 		   AND sent_external_id IS NULL
 		   AND confirmed_at IS NULL AND target_ref=$1
@@ -292,13 +296,12 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	return nil
 }
 
+// normalizedPrefix delegates to the shared spelling (SWT-16). Kept as a local
+// alias so the call sites above read unchanged; the rule itself now lives in one
+// place, because three copies of a comparison that must agree exactly is how a
+// matcher silently stops matching.
 func normalizedPrefix(value string, limit int) string {
-	normalized := strings.Join(strings.Fields(value), " ")
-	runes := []rune(normalized)
-	if len(runes) > limit {
-		runes = runes[:limit]
-	}
-	return string(runes)
+	return textmatch.NormalizedPrefix(value, limit)
 }
 
 func (s *PGSink) markNormalized(ctx context.Context, rawItemID int64) error {
