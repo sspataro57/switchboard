@@ -185,6 +185,7 @@ func buildIMAPEnvelope(folder string, uidValidity uint32, m FetchedMessage) (jso
 		Size:         m.Size,
 		Truncated:    m.Truncated,
 		RFC822B64:    base64.StdEncoding.EncodeToString(m.RFC822),
+		Parts:        m.Parts,
 	}
 	raw, err := json.Marshal(env)
 	if err != nil {

@@ -41,6 +41,8 @@ type imapRawEnvelope struct {
 	Size         int      `json:"size"`
 	Truncated    bool     `json:"truncated"`
 	RFC822B64    string   `json:"rfc822_b64"`
+	// Parts lists the non-text parts a truncated capture left behind.
+	Parts []MessagePart `json:"parts,omitempty"`
 }
 
 // imapExternalID is the raw_source_items key and the last-resort identifier.
@@ -104,9 +106,16 @@ func NormalizeRFC822(raw json.RawMessage, accountEmail string, ownEmails map[str
 		direction = "outbound"
 	}
 
-	body := ""
-	if !env.Truncated {
-		body = extractBodyText(rfc822Bytes)
+	// Extract unconditionally. A truncated capture is headers PLUS the text
+	// parts — only attachments were left behind — so skipping extraction here
+	// would throw away the body of every large message, which is exactly the ask
+	// a client writes above a 3 MB PDF.
+	body := extractBodyText(rfc822Bytes)
+	if manifest := attachmentLine(env.Parts); manifest != "" {
+		if body != "" {
+			body += "\n\n"
+		}
+		body += manifest
 	}
 
 	return NormalizedMessage{
@@ -335,4 +344,39 @@ func utf8Valid(s string) bool {
 		}
 	}
 	return true
+}
+
+// attachmentLine renders the dropped parts as one readable trailing line.
+//
+// It goes into body_text rather than staying in raw_json because
+// normalized_messages has no attachment column, and everything downstream —
+// triage, the draft worker, mail_search — reads body_text. A manifest nothing
+// can see is not context.
+func attachmentLine(parts []MessagePart) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(parts))
+	for _, p := range parts {
+		name := p.Filename
+		if name == "" {
+			name = p.ContentType
+		}
+		if p.Size > 0 {
+			name = fmt.Sprintf("%s (%s)", name, humanBytes(p.Size))
+		}
+		names = append(names, name)
+	}
+	return "[Attachments not stored: " + strings.Join(names, ", ") + "]"
+}
+
+func humanBytes(n int) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }

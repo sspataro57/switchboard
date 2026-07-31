@@ -78,6 +78,43 @@ delivery row. No Google Cloud project, no OAuth consent screen, no verification.
    moves the app passwords into `source_accounts` encrypted with `OPS_TOKEN_KEY`.
    The runbook's last step is deleting the files.
 
+## Amendments after implementation (2026-07-31, Salvador's calls)
+
+Recorded rather than left to drift, in the SWT-16 style.
+
+1. **Migration renumbered 0011 -> 0014.** 0011 went to slack-send-promotion and
+   main is at 0013 by the time this ticket resumed. No test pinned the number.
+
+2. **Oversize messages keep their text, and list what was dropped.** Criterion 7
+   said "captured as headers-only". That threw away the BODY of every large
+   message, not just its attachments — so a client mail reading "see the attached
+   spec, confirm by Friday" with a 3 MB PDF reached triage as a subject and
+   nothing else. The ask itself was the thing being discarded.
+
+   IMAP fetches parts individually, so the size cap no longer has to be judged
+   against the whole message: `IMAPClientSource.Fetch` pulls BODYSTRUCTURE first,
+   then fetches the headers and the text parts in full (a text body is a few KB
+   even in a 12 MB message) and skips only the binary parts. The dropped parts
+   are recorded as a `parts` manifest in the raw envelope — part id, filename,
+   content type, size — and rendered into `body_text` as a trailing
+   `[Attachments not stored: ...]` line, because `normalized_messages` has no
+   attachment column and a manifest nothing downstream can read is not context.
+
+   `truncated` now means "attachments omitted", not "everything but headers".
+   Attachment BYTES remain out of scope, as originally specced; this is metadata
+   plus text preservation. The existing tests hold unchanged: a genuinely
+   bodyless capture still normalizes to an empty body.
+
+3. **The real IMAP client is `emersion/go-imap` v1.2.1, in-repo.** Considered
+   splitting ingestion into a sibling service (as slackconnector/gmailconnector
+   are) and rejected for now: `MailSource` is already the frontier, only the
+   fetch is new, and the same library is proven against Gmail in this cluster by
+   job-agent. If it later needs to be a service, the migration is to implement
+   `MailSource` as a client of it and touch nothing else. Recorded so the
+   2026-07-26 "not the sibling repo" decision is not silently re-litigated.
+   Note the Slack leaf's wedging is a Playwright/browser-automation artifact, not
+   evidence about service boundaries.
+
 ## Acceptance criteria
 
 1. `go build ./...` and `go test ./...` pass offline. The RFC822 normalizer, the
