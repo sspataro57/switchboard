@@ -212,3 +212,99 @@ func messageIDFromMIME(rawMIME []byte) string {
 	}
 	return ""
 }
+
+// AppPasswordAccount is an account row plus the endpoints and identity the IMAP
+// source needs.
+type AppPasswordAccount struct {
+	Account
+	Hosts MailHosts
+}
+
+// ListAppPasswordAccounts returns every provider='google' account authenticating
+// with an app password, optionally narrowed to one email.
+//
+// Scoped to auth_type='app_password' on purpose: an OAuth row has no password to
+// decrypt, and handing it to the IMAP source would produce a login failure that
+// looks like a credential problem rather than a configuration one.
+func ListAppPasswordAccounts(ctx context.Context, pool *pgxpool.Pool, onlyEmail string) ([]AppPasswordAccount, error) {
+	query := `SELECT id, account_email, COALESCE(calendar_in_availability,false),
+	                 imap_host, imap_port, smtp_host, smtp_port
+	            FROM source_accounts
+	           WHERE provider='google' AND auth_type='app_password'`
+	var args []any
+	if strings.TrimSpace(onlyEmail) != "" {
+		query += ` AND lower(account_email)=lower($1)`
+		args = append(args, onlyEmail)
+	}
+	query += ` ORDER BY account_email`
+
+	rows, err := pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list app-password accounts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []AppPasswordAccount
+	for rows.Next() {
+		var a AppPasswordAccount
+		var imapHost, smtpHost *string
+		var imapPort, smtpPort *int
+		if err := rows.Scan(&a.ID, &a.Email, &a.CalendarInAvailability,
+			&imapHost, &imapPort, &smtpHost, &smtpPort); err != nil {
+			return nil, fmt.Errorf("scan app-password account: %w", err)
+		}
+		if imapHost != nil {
+			a.Hosts.IMAPHost = *imapHost
+		}
+		if imapPort != nil {
+			a.Hosts.IMAPPort = *imapPort
+		}
+		if smtpHost != nil {
+			a.Hosts.SMTPHost = *smtpHost
+		}
+		if smtpPort != nil {
+			a.Hosts.SMTPPort = *smtpPort
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate app-password accounts: %w", err)
+	}
+	return out, nil
+}
+
+// UpsertAppPasswordAccount stores (or re-keys) an app-password mailbox.
+//
+// The password is encrypted SQL-side with pgcrypto so the plaintext never leaves
+// this process and the key never reaches the database — the same idiom as the
+// OAuth refresh token. refresh_token_encrypted is deliberately untouched: an
+// account may hold both while a deployment migrates from OAuth to IMAP, and
+// clearing it here would make the change one-way for no reason.
+//
+// send_enabled is set false on INSERT only. A freshly onboarded mailbox must not
+// be able to send until someone says so, but re-running this command to rotate a
+// password must not silently revoke a mailbox that was already sending.
+func UpsertAppPasswordAccount(ctx context.Context, pool *pgxpool.Pool, email, password, tokenKey string, hosts MailHosts, calendarInAvailability bool) (int64, error) {
+	h := hosts.WithDefaults()
+	var id int64
+	err := pool.QueryRow(ctx,
+		`INSERT INTO source_accounts
+		   (provider, account_email, auth_type, app_password_encrypted, scopes,
+		    send_enabled, calendar_in_availability, imap_host, imap_port, smtp_host, smtp_port)
+		 VALUES ('google', $1, 'app_password', pgp_sym_encrypt($2, $3), '{}',
+		         false, $4, $5, $6, $7, $8)
+		 ON CONFLICT (provider, account_email) DO UPDATE SET
+		   auth_type              = 'app_password',
+		   app_password_encrypted = pgp_sym_encrypt($2, $3),
+		   calendar_in_availability = EXCLUDED.calendar_in_availability,
+		   imap_host = EXCLUDED.imap_host, imap_port = EXCLUDED.imap_port,
+		   smtp_host = EXCLUDED.smtp_host, smtp_port = EXCLUDED.smtp_port
+		 RETURNING id`,
+		email, password, tokenKey, calendarInAvailability,
+		h.IMAPHost, h.IMAPPort, h.SMTPHost, h.SMTPPort).Scan(&id)
+	if err != nil {
+		// The password is never interpolated into this message.
+		return 0, fmt.Errorf("store app-password account %s: %w", email, err)
+	}
+	return id, nil
+}

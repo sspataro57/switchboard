@@ -5,6 +5,9 @@
 // subcommand, which stays a pure executor client.
 //
 //	google-auth add <email> [--no-availability]
+//	google-auth add-app-password <email> [--imap-host H] [--imap-port P]
+//	                                     [--smtp-host H] [--smtp-port P]
+//	                                     [--no-availability]   (password on stdin)
 //	google-auth list
 //
 //	DATABASE_URL               ops db, required
@@ -35,6 +38,8 @@ func main() {
 	switch os.Args[1] {
 	case "add":
 		err = addCmd(os.Args[2:])
+	case "add-app-password":
+		err = addAppPasswordCmd(os.Args[2:])
 	case "list":
 		err = listCmd()
 	default:
@@ -123,7 +128,7 @@ func listCmd() error {
 
 	rows, err := pool.Query(ctx,
 		`SELECT id, account_email, scopes, send_enabled, calendar_in_availability,
-		        COALESCE(sync_cursor::text,'{}')
+		        COALESCE(sync_cursor::text,'{}'), COALESCE(auth_type,'oauth')
 		 FROM source_accounts WHERE provider='google' ORDER BY id`)
 	if err != nil {
 		return fmt.Errorf("select accounts: %w", err)
@@ -132,18 +137,20 @@ func listCmd() error {
 	n := 0
 	for rows.Next() {
 		var id int64
-		var email, cursor string
+		var email, cursor, authType string
 		var scopes []string
 		var sendEnabled, avail bool
-		if err := rows.Scan(&id, &email, &scopes, &sendEnabled, &avail, &cursor); err != nil {
+		if err := rows.Scan(&id, &email, &scopes, &sendEnabled, &avail, &cursor, &authType); err != nil {
 			return fmt.Errorf("scan account: %w", err)
 		}
 		n++
-		fmt.Printf("%-4d %-40s send=%v availability=%v scopes=%d cursor=%s\n",
-			id, email, sendEnabled, avail, len(scopes), cursor)
+		// auth_type first: it decides which ingest and send path this row uses,
+		// so it is the field an operator most often needs to check.
+		fmt.Printf("%-4d %-40s auth=%-12s send=%v availability=%v scopes=%d cursor=%s\n",
+			id, email, authType, sendEnabled, avail, len(scopes), cursor)
 	}
 	if n == 0 {
-		fmt.Println("no google accounts (run google-auth add <email>)")
+		fmt.Println("no google accounts (run google-auth add <email> or add-app-password <email>)")
 	}
 	return rows.Err()
 }
