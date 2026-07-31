@@ -186,9 +186,62 @@ in the orchestrator as a function of (event, task, policy); not this ticket.
     integration tests join the serialized cleanup pact (clean own fixtures in
     FK order, test-owned slugs).
 
+## Amendments after review (2026-07-31, Salvador's calls)
+
+The go-reviewer pass produced two decisions that change what is written below.
+Recorded here rather than silently, because both contradict the SPEC as drafted.
+
+1. **Migration 0013 IS added** (contradicting "Data model changes: none").
+   `task_events` has carried no index on `task_id` since 0001, so the dedup
+   guard was a full sequential scan per (task, message) on every pass, on a
+   table that only grows; and the `INSERT ... WHERE NOT EXISTS` guard was not
+   atomic, so two concurrent passes could double-log. 0013 adds
+   `task_events_task_id_idx` plus a PARTIAL unique index
+   `task_events_outbound_observed_uniq` on
+   `(task_id, (payload->>'message_id')) WHERE event_type='outbound_observed'`,
+   and the insert became `ON CONFLICT ... DO NOTHING` — structural where the
+   guard was advisory, matching `confirmDelivery`'s RowsAffected discipline.
+
+2. **The jira matcher's body comparison is whitespace-normalized**
+   (contradicting "Out of scope" only in spirit — the SPEC named no connector
+   changes). It compared `left(body,120)` raw, so any whitespace Jira changed on
+   the round trip orphaned the delivery forever and made THIS pass log our own
+   comment as externally sent. The rule now has one spelling,
+   `internal/textmatch.NormalizedPrefix`, shared by slackweb's matcher, jira's
+   matcher, and this package's preview.
+
+   The review's stated cause for that mismatch — an unscrubbed stored body vs a
+   scrubbed sent body — was verified FALSE before acting: `draft_delivery` and
+   `update_delivery` both store `ScrubAIAttribution(body)` and the scrub is
+   idempotent. The exposure is the provider round trip, not our own rewriting.
+
+   Deliberately NOT done: widening the deferral guard to settled `'failed'`
+   rows. With the matcher fixed at the root, deferring on `failed` would blind
+   capture on an issue for a full horizon after a genuinely failed send.
+
+   **Kept in this ticket rather than split into a bug ticket**, because the
+   defect only becomes harmful *because of* this ticket: an unclaimable jira
+   delivery used to be a silent orphan, and capture turns it into an active
+   false statement on a task log. Shipping capture without the fix would ship a
+   known wrong-log path. Its regression evidence lives in
+   `internal/connector/jira/integration_test.go`:
+   `itPrefixBodyReturned` (the fake returns a CRLF/trailing-space variant of the
+   stored body, so `TestJira_Integration_PollNormalizeLoopClosure` fails if the
+   comparison goes back to raw), plus the `staleDelivery` assertion pinning
+   "newest candidate wins" now that the ordering lives in a Go loop. Both were
+   verified by mutating the matcher and watching them fail.
+
+Also closed from the review: the gmail branch of the deferral guard had no test
+(the one criterion-3 path whose failure mode is an invariant-5 mislabel), the
+channel-scoping of the unclaimed test had none, and `sent_at`'s RFC3339/UTC shape
+and the zero-`Channel` error were unasserted. All four now have tests, each
+verified to fail under a deliberate mutation of the code it covers.
+
 ## Data model changes
 
-None. No migration (next free number would be 0013; it stays free).
+~~None. No migration (next free number would be 0013; it stays free).~~
+Superseded by amendment 1 above: migration 0013 adds two indexes on
+`task_events`. No column or table changes.
 `task_events.event_type` is unconstrained TEXT; new vocabulary entry:
 `outbound_observed` (payload above). Record it in
 INSTITUTIONAL_KNOWLEDGE.md's vocabulary notes at deliver time.
@@ -287,6 +340,32 @@ alone" via the jira channel and the local-db smoke below.
 4. **First deploy logs nothing older than the horizon.** Historical direct
    sends stay context-only; backfilling months of observations onto closed
    tasks would be noise, not context.
+5. **A deferred message can age out of the horizon and be lost for good.**
+   Deferral is bounded by the CLAIMANT's instant, eligibility by the MESSAGE's.
+   A claimant attempted at T stops deferring at T+720h, but a message sent just
+   after it leaves the scan window at almost exactly the same moment — so a
+   message suppressed by a permanently wedged claimant gets only a sliver of
+   eligibility and, in practice, is never captured. Accepted: the alternative is
+   claiming "sent outside switchboard" about a message that may be switchboard's
+   own send, which invariant 5 exists to prevent. Raising
+   `OUTBOUND_OBSERVE_HORIZON` widens the sliver; resolving the wedged delivery
+   removes the deferral outright, which is the real fix.
+6. **A channel-level Slack delivery corresponds on every thread in that
+   channel.** `SlackTargetRefs` returns both the thread and the conversation
+   spelling, so a task that once had a channel-targeted delivery is linked to
+   every outbound message in every thread there, for as long as the row exists.
+   With several tasks on one channel, all of them receive the observation. This
+   is the join the SPEC specifies (see the table above) and the deliberate
+   consequence of "all distinct linked tasks get the event" — mild, visible
+   noise preferred over a wrong single attribution. The real narrowing is a
+   stored task↔thread association, which is triage-live attach's job.
+7. **A message with no usable `sent_at` is never captured.** The scan is
+   `m.sent_at >= $since`, and `normalized_messages.sent_at` is nullable (0001);
+   a NULL fails that predicate, and so does the zero time a normalizer produces
+   when a provider timestamp will not parse (jira's `NormalizeComment` discards
+   the parse error). All three normalizers populate it in practice, so this is
+   a silent skip on malformed provider data, not a live gap — recorded because
+   the failure mode is invisible: no error, no event, nothing to notice.
 
 ## Invariants that apply
 

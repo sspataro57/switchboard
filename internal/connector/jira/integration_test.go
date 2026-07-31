@@ -49,22 +49,39 @@ import (
 )
 
 const (
-	itSite       = "itest-jira.atlassian.net"
-	itBaseURL    = "https://itest-jira.atlassian.net"
-	itAcct       = "itest-jira@example.com"
-	itSlug       = "itest-jira-proj"
-	itIssueKey   = "IJ-1"
-	itOwnAcc     = "acc-itest-own"
-	itOtherAcc   = "acc-itest-client"
-	itExactComm  = "700701" // own comment, matched by exact id equality
-	itPrefixCom  = "700702" // own comment, matched by body-prefix (post-hoc)
-	itPrefixBody = "shipped the itest-jira fix to staging tonight"
+	itSite      = "itest-jira.atlassian.net"
+	itBaseURL   = "https://itest-jira.atlassian.net"
+	itAcct      = "itest-jira@example.com"
+	itSlug      = "itest-jira-proj"
+	itIssueKey  = "IJ-1"
+	itOwnAcc    = "acc-itest-own"
+	itOtherAcc  = "acc-itest-client"
+	itExactComm = "700701" // own comment, matched by exact id equality
+	itPrefixCom = "700702" // own comment, matched by body-prefix (post-hoc)
+
+	// The body as switchboard stored it in the delivery row...
+	itPrefixBody = "shipped the itest-jira fix to staging tonight\n\nwill confirm once CI is green"
+	// ...and the body Jira hands back, re-serialized: CRLF line endings and a
+	// trailing space. A provider is entitled to reformat whitespace without
+	// changing the message, and before SWT-16 the matcher compared these raw, so
+	// this round trip made the delivery unclaimable FOREVER — which since SWT-16
+	// also makes capture log our own comment as "sent outside switchboard".
+	itPrefixBodyReturned = "shipped the itest-jira fix to staging tonight\r\n\r\nwill confirm once CI is green  "
 )
 
 func itThreadKey() string   { return "jira:" + itSite + ":" + itIssueKey }
 func itTargetRef() string   { return "jira:" + itSite + ":" + itIssueKey }
 func itExactExtID() string  { return "jira:" + itSite + ":comment:" + itExactComm }
 func itPrefixExtID() string { return "jira:" + itSite + ":comment:" + itPrefixCom }
+
+// derefJ renders a nullable text column for an assertion message; %v on a *string
+// prints the pointer, which turns a real failure into a hex address.
+func derefJ(v *string) string {
+	if v == nil {
+		return "NULL"
+	}
+	return *v
+}
 
 func scanIntJ(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) int {
 	t.Helper()
@@ -148,11 +165,48 @@ func TestJira_Integration_PollNormalizeLoopClosure(t *testing.T) {
 		taskID, itTargetRef(), itExactExtID()).Scan(&sentDelivery); err != nil {
 		t.Fatalf("seed sent delivery: %v", err)
 	}
+	// An OLDER unconfirmed candidate on the same issue sharing the prefix — a
+	// repeated update, which short status comments make realistic. Seeded FIRST so
+	// it holds the lower id. The matcher takes the newest match (ORDER BY id DESC,
+	// first match wins); since SWT-16 that ordering lives in a Go loop rather than
+	// in SQL, so it needs an assertion or the refactor could have silently
+	// inverted it and stamped the real comment onto the stale row.
+	//
+	// Its whitespace differs again from both the stored and the returned body: the
+	// three collide only AFTER normalization, so this also pins that the candidate
+	// set is compared normalized, not raw.
+	var staleDelivery int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_external_id)
+		 VALUES ($1,'jira_comment',$2,$3,'failed', NULL) RETURNING id`,
+		taskID, itTargetRef(), "shipped   the itest-jira fix to staging tonight\twill confirm once CI is green").Scan(&staleDelivery); err != nil {
+		t.Fatalf("seed stale prefix-sharing delivery: %v", err)
+	}
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_external_id)
 		 VALUES ($1,'jira_comment',$2,$3,'failed', NULL) RETURNING id`,
 		taskID, itTargetRef(), itPrefixBody).Scan(&failedDelivery); err != nil {
 		t.Fatalf("seed failed delivery: %v", err)
+	}
+	if staleDelivery >= failedDelivery {
+		t.Fatalf("fixture ordering broken: stale delivery id %d must be lower than the newer candidate %d",
+			staleDelivery, failedDelivery)
+	}
+	// A retry attempted NOW, sharing the prefix, and NEWER than both — so plain
+	// "newest candidate wins" would pick it. It must not be picked: the comment
+	// below was created 2026-07-10, long before this attempt, so this send cannot
+	// be what produced it. Stamping it would record a send that did happen against
+	// the wrong external object AND discard the retry's real comment id.
+	// The floor is SWT-12's, ported from slackweb (migration 0012's rationale).
+	var retryDelivery int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_external_id, send_attempted_at)
+		 VALUES ($1,'jira_comment',$2,$3,'sending', NULL, now()) RETURNING id`,
+		taskID, itTargetRef(), itPrefixBody).Scan(&retryDelivery); err != nil {
+		t.Fatalf("seed in-flight retry delivery: %v", err)
+	}
+	if retryDelivery <= failedDelivery {
+		t.Fatalf("fixture ordering broken: retry delivery id %d must be the highest", retryDelivery)
 	}
 
 	// Fake site corpus: one issue with an inbound comment + our two own comments.
@@ -165,7 +219,7 @@ func TestJira_Integration_PollNormalizeLoopClosure(t *testing.T) {
 		comments: []fakeComment{
 			{id: "500", author: itOtherAcc, body: "still broken on my side", created: "2026-07-10T08:30:00.000+0000"},
 			{id: itExactComm, author: itOwnAcc, body: "looking into it", created: "2026-07-10T08:40:00.000+0000"},
-			{id: itPrefixCom, author: itOwnAcc, body: itPrefixBody, created: "2026-07-10T08:50:00.000+0000"},
+			{id: itPrefixCom, author: itOwnAcc, body: itPrefixBodyReturned, created: "2026-07-10T08:50:00.000+0000"},
 		},
 	})
 
@@ -232,10 +286,45 @@ func TestJira_Integration_PollNormalizeLoopClosure(t *testing.T) {
 		t.Fatalf("read failed delivery: %v", err)
 	}
 	if prefixExtID == nil || *prefixExtID != itPrefixExtID() {
-		t.Errorf("failed delivery sent_external_id = %v, want %q filled by the body-prefix matcher (blocks a duplicate re-send)", prefixExtID, itPrefixExtID())
+		t.Errorf("failed delivery sent_external_id = %v, want %q filled by the body-prefix matcher (blocks a duplicate re-send). "+
+			"The stored body and the body Jira returned differ ONLY in whitespace (CRLF, trailing space); the matcher "+
+			"compares whitespace-normalized prefixes since SWT-16, so a provider reformatting must not orphan the row",
+			prefixExtID, itPrefixExtID())
 	}
 	if prefixConfirmed == nil {
 		t.Errorf("failed delivery confirmed_at is NULL; the prefix match must confirm it")
+	}
+	// ...and the older candidate sharing that prefix stays untouched. One comment
+	// closes exactly one delivery: stamping the stale row instead would both mark a
+	// send that never happened and leave the real one unclaimable forever.
+	var staleExtID, staleConfirmed *string
+	if err := pool.QueryRow(ctx,
+		`SELECT sent_external_id, confirmed_at::text FROM deliveries WHERE id=$1`, staleDelivery).Scan(&staleExtID, &staleConfirmed); err != nil {
+		t.Fatalf("read stale delivery: %v", err)
+	}
+	if staleExtID != nil || staleConfirmed != nil {
+		t.Errorf("the OLDER prefix-sharing delivery was stamped (sent_external_id=%s, confirmed_at=%s), want both NULL — "+
+			"the matcher takes the NEWEST candidate (ORDER BY id DESC, first match wins), and that ordering moved from "+
+			"SQL into a Go loop in SWT-16", derefJ(staleExtID), derefJ(staleConfirmed))
+	}
+	// ...and the newest candidate of all — the retry attempted now — is excluded by
+	// the attempt-time floor, NOT stamped despite winning the ordering.
+	var retryExtID, retryConfirmed, retryStatus *string
+	if err := pool.QueryRow(ctx,
+		`SELECT sent_external_id, confirmed_at::text, status FROM deliveries WHERE id=$1`, retryDelivery).
+		Scan(&retryExtID, &retryConfirmed, &retryStatus); err != nil {
+		t.Fatalf("read retry delivery: %v", err)
+	}
+	if retryExtID != nil || retryConfirmed != nil {
+		t.Errorf("the in-flight RETRY was stamped (sent_external_id=%s, confirmed_at=%s), want both NULL — its send was "+
+			"attempted long AFTER this comment existed, so it cannot be what produced it. Binding them records a real "+
+			"send against the wrong comment id and loses the retry's own id (invariant 4). The floor is "+
+			"send_attempted_at - 2min <= message.sent_at, per SWT-12/0012",
+			derefJ(retryExtID), derefJ(retryConfirmed))
+	}
+	if retryStatus != nil && *retryStatus != "sending" {
+		t.Errorf("the in-flight retry's status = %q, want it left at \"sending\" — the matcher must not settle a send "+
+			"whose outcome it cannot know", *retryStatus)
 	}
 	if got := scanIntJ(t, ctx, pool,
 		`SELECT count(*) FROM task_events WHERE task_id=$1 AND event_type='delivery_confirmed'`, taskID); got < 2 {
