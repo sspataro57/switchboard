@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>switchboard — sources</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { font-size: 1.3rem; }
+    h2 { font-size: 1rem; margin: 1.6rem 0 .4rem; }
+    nav a { margin-right: .8rem; }
+    table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+    th, td { border: 1px solid #e2e2e2; padding: .35rem .5rem; text-align: left; vertical-align: top; }
+    th { background: #f7f7f7; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { color: #777; font-size: .8rem; }
+    .ok { color: #146c2b; }
+    .bad { color: #b00020; font-weight: 600; }
+    .warn { color: #8a6100; font-weight: 600; }
+    .headline { display: flex; gap: 2rem; margin: .8rem 0 1.2rem; }
+    .headline div { background: #f7f7f7; border: 1px solid #e2e2e2; padding: .5rem .9rem; }
+    .headline strong { display: block; font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+    code { background: #f7f7f7; padding: 0 .2rem; }
+  </style>
+</head>
+<body>
+  <nav><a href="/tasks">Board</a> <a href="/plans">Plans</a> <a href="/briefs">Briefs</a>
+    <a href="/deliveries">Deliveries</a> <a href="/sources">Sources</a></nav>
+
+  <h1>Ingestion</h1>
+
+  <div class="headline">
+    <div><strong>{{.TotalRaw}}</strong> raw items</div>
+    <div><strong>{{.TotalMessages}}</strong> messages</div>
+    <div><strong{{if gt .TotalPending 0}} class="warn"{{end}}>{{.TotalPending}}</strong> awaiting normalize</div>
+  </div>
+
+  <h2>Accounts</h2>
+  <table>
+    <tr>
+      <th>Provider</th><th>Account</th><th>Auth</th><th>Send</th>
+      <th>Last run</th><th>Status</th>
+      <th class="num">Raw</th><th class="num">Pending</th>
+      <th class="num">Msgs</th><th class="num">In</th><th class="num">Out</th>
+      <th>Newest</th><th class="num">Trunc</th>
+    </tr>
+    {{range .Sources}}
+    <tr>
+      <td>{{.Provider}}</td>
+      <td>{{.Email}}</td>
+      <td>{{.AuthType}}</td>
+      <td>{{if .Enabled}}yes{{else}}<span class="muted">no</span>{{end}}</td>
+      <td>{{if .LastRunAt}}{{.LastRunAt}}<br><span class="muted">{{with .LastRunPhase}}{{.}} · {{end}}{{.RunsTotal}} runs</span>
+          {{else}}<span class="muted">never</span>{{end}}</td>
+      <td>
+        {{if eq .LastRunStatus "ok"}}<span class="ok">ok</span>
+        {{else if .LastRunStatus}}<span class="bad">{{.LastRunStatus}}</span>
+          {{if .LastRunError}}<br><span class="muted">{{.LastRunError}}</span>{{end}}
+        {{else}}<span class="muted">—</span>{{end}}
+      </td>
+      <td class="num">{{.RawItems}}</td>
+      <td class="num">{{if gt .RawPending 0}}<span class="warn">{{.RawPending}}</span>{{else}}0{{end}}</td>
+      <td class="num">{{.Messages}}</td>
+      <td class="num">{{.Inbound}}</td>
+      <td class="num">{{.Outbound}}</td>
+      <td>{{if .NewestMsg}}{{.NewestMsg}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td class="num">{{if gt .Truncated 0}}<span class="warn">{{.Truncated}}</span>{{else}}0{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="13" class="muted">No source accounts. Add one with
+      <code>google-auth add-app-password &lt;email&gt;</code>.</td></tr>
+    {{end}}
+  </table>
+  <p class="muted">
+    Pending counts raw rows with no <code>normalized_at</code> — a number that keeps
+    climbing means ingestion is succeeding while normalization fails, which no other
+    page would show. Trunc counts messages over
+    <code>MAIL_MAX_MESSAGE_BYTES</code>: their headers and text are stored, their
+    attachments are not.
+  </p>
+
+  <h2>Channels</h2>
+  <table>
+    <tr><th>Channel</th><th class="num">Messages</th><th class="num">Inbound</th>
+      <th class="num">Outbound</th><th>Oldest</th><th>Newest</th></tr>
+    {{range .Channels}}
+    <tr>
+      <td>{{.Channel}}</td>
+      <td class="num">{{.Messages}}</td>
+      <td class="num">{{.Inbound}}</td>
+      <td class="num">{{.Outbound}}</td>
+      <td>{{.OldestMsg}}</td>
+      <td>{{.NewestMsg}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="6" class="muted">Nothing normalized yet.</td></tr>
+    {{end}}
+  </table>
+  <p class="muted">
+    Outbound messages are our own sends re-entering through ingestion — they close
+    delivery loops and are never re-triaged.
+  </p>
+</body>
+</html>
