@@ -55,7 +55,11 @@ func run() error {
 	// app-password mailbox sends over SMTP, an OAuth one keeps the bridge/direct
 	// path unchanged. Without this the dashboard could not send from any mailbox
 	// onboarded with an app password.
-	if sender, how := google.WireMailSender(pool); sender != nil {
+	sender, how, err := google.WireMailSender(pool)
+	if err != nil {
+		return err
+	}
+	if sender != nil {
 		tools.SetGmailSender(sender)
 		slog.Info("mail send adapter wired", "transports", how)
 	} else {

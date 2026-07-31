@@ -39,6 +39,7 @@ package google_test
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -227,7 +228,8 @@ func TestIMAP_Integration_RawFirstNormalizeDedupLoopClosure(t *testing.T) {
 	}
 	// The deliveries are dated just BEFORE the Sent-folder copies they produced.
 	// Those copies carry no Date header, so their SentAt falls back to the fake
-	// INTERNALDATE `seen` (now-24h, 2026-07-25 12:00). Seeding a delivery at
+	// INTERNALDATE `seen` (now-24h; `now` here is the fixture clock, not the wall
+	// clock). Seeding a delivery at
 	// now() — or at any instant after `seen` — would describe a send that
 	// happened after its own copy arrived, and the belt's attempt-time floor
 	// (the SWT-16 rule: a content matcher needs a lower time bound) correctly
@@ -462,5 +464,88 @@ func TestIMAP_Integration_RawFirstNormalizeDedupLoopClosure(t *testing.T) {
 	}
 	if got := scanInt(t, ctx, pool, `SELECT count(*) FROM tasks`); got != tasksBefore {
 		t.Errorf("tasks changed after the replay: before=%d after=%d", tasksBefore, got)
+	}
+}
+
+// The belt must REFUSE a delivery whose send was attempted after the message it
+// would be bound to. Without this the fixture only proves the floor is
+// satisfiable, never that it bites — and the floor is the SWT-16 rule that any
+// content matcher needs a lower time bound.
+func TestIMAP_Integration_BeltRefusesADeliveryAttemptedAfterTheMessage(t *testing.T) {
+	if os.Getenv("DATABASE_URL") == "" {
+		t.Skip("DATABASE_URL not set; skipping Postgres integration test")
+	}
+	ctx := context.Background()
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		t.Fatalf("store.NewPool: %v", err)
+	}
+	defer pool.Close()
+	cleanupIMAP(t, ctx, pool)
+	defer cleanupIMAP(t, ctx, pool)
+
+	var acctID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO source_accounts (provider, account_email, auth_type, app_password_encrypted, scopes, send_enabled)
+		 VALUES ('google',$1,'app_password', pgp_sym_encrypt('pw','k'), '{}', true) RETURNING id`,
+		imapAcctA).Scan(&acctID); err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+	var projID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
+		 VALUES ($1,$1,'itest-imap-client','manual','dashboard','/tmp/itest') RETURNING id`,
+		imapSlug).Scan(&projID); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	var taskID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO tasks (project_id, title, assignee_type, status)
+		 VALUES ($1,'itest-imap floor','claude','delivered') RETURNING id`, projID).Scan(&taskID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	const body = "Floor check: this body is shared by the delivery and the message."
+	msgSentAt := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+
+	// Attempted a full day AFTER the message it would otherwise match.
+	var deliveryID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO deliveries (task_id, channel, status, body, from_account_id, send_attempted_at)
+		 VALUES ($1,'gmail','sending',$2,$3,$4) RETURNING id`,
+		taskID, body, acctID, msgSentAt.Add(24*time.Hour)).Scan(&deliveryID); err != nil {
+		t.Fatalf("seed delivery: %v", err)
+	}
+
+	src := newFakeIMAP()
+	src.folders = []google.Folder{{Name: imapSent, Sent: true, UIDValidity: 77}}
+	src.add(imapSent, imapMsg(1, msgSentAt, []string{"\\Seen"}, rfc822([]string{
+		`Message-ID: <floor-check@mail.example>`,
+		`From: ` + imapAcctA,
+		`To: client@acme.example`,
+	}, body)))
+
+	sink := google.NewPGSink(pool)
+	acct := google.Account{ID: acctID, Email: imapAcctA}
+	cfg := google.Config{Now: time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC), Backfill: google.DefaultBackfill}
+	if _, err := google.IngestIMAP(ctx, src, sink, acct, cfg); err != nil {
+		t.Fatalf("IngestIMAP: %v", err)
+	}
+	if _, err := google.Normalize(ctx, sink, cfg); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+
+	var confirmed *string
+	if err := pool.QueryRow(ctx, `SELECT confirmed_at::text FROM deliveries WHERE id=$1`, deliveryID).Scan(&confirmed); err != nil {
+		t.Fatalf("read delivery: %v", err)
+	}
+	if confirmed != nil {
+		t.Errorf("the belt confirmed a delivery attempted a day AFTER the message it matched (confirmed_at=%s). "+
+			"A send cannot have produced a message that already existed; without this floor a --full replay of 90 "+
+			"days of Sent mail can confirm any pending delivery whose opening 120 characters happen to match", *confirmed)
+	}
+	if got := scanInt(t, ctx, pool,
+		`SELECT count(*) FROM task_events WHERE task_id=$1 AND event_type='delivery_confirmed'`, taskID); got != 0 {
+		t.Errorf("delivery_confirmed events = %d, want 0", got)
 	}
 }

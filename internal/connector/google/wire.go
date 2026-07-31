@@ -2,6 +2,7 @@ package google
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -22,7 +23,7 @@ import (
 // the existing Gmail-API path byte for byte, and both coexist during a
 // migration. The OAuth branch preserves today's precedence exactly — bridge
 // first so OAuth tokens have one owner, then the database-token adapter.
-func WireMailSender(pool *pgxpool.Pool) (*MailSender, string) {
+func WireMailSender(pool *pgxpool.Pool) (*MailSender, string, error) {
 	key := os.Getenv("OPS_TOKEN_KEY")
 
 	var oauth interface {
@@ -31,10 +32,16 @@ func WireMailSender(pool *pgxpool.Pool) (*MailSender, string) {
 	how := ""
 
 	if binary := os.Getenv("GMAIL_CONNECTOR_BRIDGE"); binary != "" {
-		if bridge, err := NewCommandBridge(binary); err == nil {
-			oauth = &BridgeSender{Bridge: bridge}
-			how = "bridge"
+		// A configured-but-unusable bridge is an error, never a fallback. Falling
+		// through would send through a DIFFERENT transport than the operator
+		// asked for, silently — and NewCommandBridge fails on exactly the
+		// plausible typos (relative path, missing file, not a regular file).
+		bridge, err := NewCommandBridge(binary)
+		if err != nil {
+			return nil, "", fmt.Errorf("configure Gmail connector bridge: %w", err)
 		}
+		oauth = &BridgeSender{Bridge: bridge}
+		how = "bridge"
 	}
 	if oauth == nil && key != "" {
 		secretFile := os.Getenv("GOOGLE_CLIENT_SECRET_FILE")
@@ -59,7 +66,7 @@ func WireMailSender(pool *pgxpool.Pool) (*MailSender, string) {
 	}
 
 	if oauth == nil && smtp == nil {
-		return nil, ""
+		return nil, "", nil
 	}
-	return &MailSender{Pool: pool, TokenKey: key, SMTP: smtp, OAuth: oauth}, how
+	return &MailSender{Pool: pool, TokenKey: key, SMTP: smtp, OAuth: oauth}, how, nil
 }

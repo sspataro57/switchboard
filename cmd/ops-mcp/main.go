@@ -56,8 +56,12 @@ func run() error {
 	// actually send — otherwise the newly reachable tool fails with "no gmail send
 	// adapter wired" the first time Salvador uses it. The human-actor gate is
 	// unchanged and is what keeps a worker identity out.
-	if sender, _ := google.WireMailSender(pool); sender != nil {
-		tools.SetGmailSender(sender)
+	mailSender, _, err := google.WireMailSender(pool)
+	if err != nil {
+		return err
+	}
+	if mailSender != nil {
+		tools.SetGmailSender(mailSender)
 	}
 	adapter := mcpserver.New(ex, workerID)
 

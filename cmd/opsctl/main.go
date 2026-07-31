@@ -132,7 +132,11 @@ func run(toolName string, args json.RawMessage) error {
 	}
 	// Routes per account auth_type (SWT-11 criterion 13): app-password mailboxes
 	// over SMTP, OAuth mailboxes over the bridge/direct path as before.
-	if sender, _ := google.WireMailSender(pool); sender != nil {
+	sender, _, err := google.WireMailSender(pool)
+	if err != nil {
+		return err
+	}
+	if sender != nil {
 		tools.SetGmailSender(sender)
 	}
 	// One bridge serves both seams: prefill_delivery drafts through it and

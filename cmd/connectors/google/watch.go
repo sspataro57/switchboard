@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/connector/google"
 	"github.com/sspataro57/switchboard/internal/store"
 )
@@ -77,9 +78,7 @@ func runWatch(pool *pgxpool.Pool, cfg google.Config) error {
 	// One pass immediately: a process that has just started should not wait a
 	// full interval before doing anything, and this is also the fastest way to
 	// surface a credential or connectivity problem at deploy time.
-	if _, err := runIMAPIngest(ctx, pool, sink, cfg); err != nil {
-		fmt.Printf("watch: initial pass failed: %v\n", err)
-	}
+	watchPass(ctx, pool, sink, cfg, "initial")
 
 	accounts, err := google.ListAppPasswordAccounts(ctx, pool, cfg.AccountEmail)
 	if err != nil {
@@ -101,14 +100,48 @@ func runWatch(pool *pgxpool.Pool, cfg google.Config) error {
 			// Scoped to the account that woke us; the sweep below covers the rest.
 			passCfg := cfg
 			passCfg.AccountEmail = email
-			if _, err := runIMAPIngest(ctx, pool, sink, passCfg); err != nil {
-				fmt.Printf("watch: pass for %s failed: %v\n", email, err)
-			}
+			watchPass(ctx, pool, sink, passCfg, "wake "+email)
 		case <-ticker.C:
-			if _, err := runIMAPIngest(ctx, pool, sink, cfg); err != nil {
-				fmt.Printf("watch: reconcile failed: %v\n", err)
-			}
+			watchPass(ctx, pool, sink, cfg, "reconcile")
 		}
+	}
+}
+
+// watchPass is one complete cycle: ingest, normalize, then capture.
+//
+// Normalize is NOT optional here, which is the whole reason this helper exists.
+// Ingest writes raw_source_items and nothing else; every consequence that makes
+// this connector useful happens in normalize — normalized_messages is what
+// mail_search and the draft worker read, and delivery loop closure (invariant 5)
+// runs inside upsertMessage. A watch loop that only ingested would fill the raw
+// table while confirming zero deliveries and leaving every mail tool empty, and
+// would look healthy the entire time.
+//
+// Errors are logged and the loop continues: a resident process must not exit on
+// a transient failure, and each phase already records its own sync_runs row.
+func watchPass(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, cfg google.Config, why string) {
+	if _, err := runIMAPIngest(ctx, pool, sink, cfg); err != nil {
+		fmt.Printf("watch: ingest (%s) failed: %v\n", why, err)
+		// Normalize anyway: a partial ingest still wrote raw rows, and leaving
+		// them unnormalized would hide messages that did land.
+	}
+	stats, err := google.Normalize(ctx, sink, cfg)
+	if err != nil {
+		fmt.Printf("watch: normalize (%s) failed: %v\n", why, err)
+		return
+	}
+	fmt.Printf("watch: %s normalized=%d dedup_skipped=%d\n", why, stats.Normalized, stats.DedupSkipped)
+
+	// Same ordering as the one-shot path: after Normalize, so this pass's own
+	// delivery confirmations are already stamped and a message switchboard sent
+	// is never mislabelled as sent by hand (SWT-16).
+	observed, err := capture.ObserveOutbound(ctx, pool, capture.Gmail)
+	if err != nil {
+		fmt.Printf("watch: observe outbound (%s) failed: %v\n", why, err)
+		return
+	}
+	if observed > 0 {
+		fmt.Printf("watch: outbound_observed=%d\n", observed)
 	}
 }
 

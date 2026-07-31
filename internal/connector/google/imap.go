@@ -33,11 +33,13 @@ import (
 
 // DefaultMaxMessageBytes caps how much of one message the source fetches.
 //
-// Above it the source returns headers only with Truncated set, which still
-// carries Message-ID, From, Subject and the threading headers — everything
-// normalization needs except the body. The point is that one 40 MiB attachment
-// cannot stall a pass or bloat raw_source_items; the mailboxes in scope hold
-// ~117k messages between them.
+// Above it the source fetches the headers AND the text parts, and skips only the
+// binary attachments, marking the capture Truncated and listing what it left
+// behind. The body survives because a text part is a few KB even in a 12 MB
+// message — an earlier design took headers only and threw away the ask along
+// with the attachment. The point of the cap is that one 40 MiB attachment cannot
+// stall a pass or bloat raw_source_items; the mailboxes in scope hold ~117k
+// messages between them.
 const DefaultMaxMessageBytes = 1 << 20 // 1 MiB
 
 // MaxMessageBytes reads the MAIL_MAX_MESSAGE_BYTES override.
@@ -290,8 +292,10 @@ type IMAPClientSource struct {
 
 	mu   sync.Mutex
 	conn *client.Client
-	// selected is the currently SELECTed mailbox, so a fetch of many UIDs in one
-	// folder does not re-SELECT per call.
+	// selected records the last mailbox opened, for diagnostics. It is NOT a
+	// re-SELECT cache: selectFolder always issues SELECT, because UIDVALIDITY is
+	// read from its response and a stale value is how a cursor silently points at
+	// the wrong generation of a folder.
 	selected string
 }
 
@@ -400,13 +404,18 @@ func (s *IMAPClientSource) Folders(ctx context.Context) ([]Folder, error) {
 		if f.Name == "" {
 			continue
 		}
-		// UIDVALIDITY comes from SELECT, not LIST. Only the folders we are about
-		// to ingest are worth a round trip, so this is filled lazily below.
+		// UIDVALIDITY comes from SELECT, not LIST, so it is filled by the loop
+		// below.
 		out = append(out, f)
 	}
 
-	// Fill UIDVALIDITY for the folders that survive selection, which is what the
-	// cursor keys on.
+	// Fill UIDVALIDITY, which is what the cursor keys on.
+	//
+	// This SELECTs every listed mailbox, not just the two we ingest — roughly 29
+	// round trips on the personal account, repeated every reconcile in watch
+	// mode. SelectFolders cannot filter first because the Sent folder is
+	// discovered from LIST attributes and the fallbacks need names that only LIST
+	// provides. Worth narrowing if the reconcile interval ever drops.
 	for i := range out {
 		status, err := s.selectFolder(ctx, out[i].Name)
 		if err != nil {

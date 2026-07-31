@@ -502,8 +502,15 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 			MessageID: msgID, InReplyTo: inReplyTo, References: refs, Date: time.Now(),
 		}
 
+		// send_attempted_at is the dispatch instant, recorded for the same reason
+		// the slack path records it: it is the lower time bound a post-hoc content
+		// matcher needs (SWT-16's rule). Without it the gmail belt's floor is inert
+		// for exactly the 'sending' and ambiguous 'failed' rows the belt exists to
+		// resolve, since sent_at is also NULL there. It also makes this attempt
+		// visible to the rate-limit window rather than invisible until it settles.
 		if _, err := tx.Exec(ctx,
-			`UPDATE deliveries SET status='sending', sent_external_id=$2, updated_at=now()
+			`UPDATE deliveries SET status='sending', sent_external_id=$2,
+			        send_attempted_at=now(), updated_at=now()
 			 WHERE id=$1`, a.DeliveryID, msgID); err != nil {
 			return fmt.Errorf("mark sending: %w", err)
 		}

@@ -592,10 +592,13 @@ func (s *PGSink) confirmDeliveryByBodyPrefix(ctx context.Context, rawItemID int6
 
 	// confirmed_at IS NULL is the idempotence guard: a --all replay re-runs this
 	// match, finds the row already confirmed, and emits no second event.
+	// confirmed_at ONLY — deliberately not a status promotion. Flipping
+	// 'sending' to 'sent' here would emit no delivery_sent event, so the
+	// orchestrator's R8 never fires and the parent task sits at done_locally
+	// forever. Confirmation is evidence the message landed; the lifecycle
+	// transition belongs to the path that owns it.
 	tag, err := tx.Exec(ctx,
-		`UPDATE deliveries
-		    SET confirmed_at=now(), status='sent',
-		        sent_at=COALESCE(sent_at, now()), updated_at=now()
+		`UPDATE deliveries SET confirmed_at=now(), updated_at=now()
 		  WHERE id=$1 AND confirmed_at IS NULL`, deliveryID)
 	if err != nil {
 		return fmt.Errorf("confirm gmail delivery %d: %w", deliveryID, err)

@@ -74,7 +74,7 @@ type Stats struct {
 	// AccountsBusy counts accounts skipped because another pass held the lock.
 	AccountsBusy int `json:"accounts_busy"`
 	// IMAPFetched counts messages pulled from IMAP; IMAPTruncated how many of
-	// those exceeded the size cap and were captured headers-only. Truncation is
+	// those exceeded the size cap and were captured with headers and text only, attachments skipped. Truncation is
 	// lossy, so it is counted rather than left silent.
 	IMAPFetched   int `json:"imap_fetched"`
 	IMAPTruncated int `json:"imap_truncated"`
