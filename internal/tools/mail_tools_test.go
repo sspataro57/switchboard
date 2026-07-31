@@ -14,7 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/policy"
 	"github.com/sspataro57/switchboard/internal/tools"
 )
 
@@ -22,10 +24,13 @@ import (
 // the whole surface onto a bare executor.
 func registeredMailTools(t *testing.T) map[string]bool {
 	t.Helper()
-	ex := executor.New(nil, nil, nil)
-	tools.Register(ex, nil)
+	// Register takes a *Registry and enumerates through Names(); the earlier
+	// draft of this helper used an executor.New(...).ToolNames() pair that does
+	// not exist. Matches tools_unit_test.go's TestRegister_AllToolsRegistered.
+	reg := executor.NewRegistry()
+	tools.Register(reg, nil) // nil pool: Register only builds closures, never derefs.
 	names := map[string]bool{}
-	for _, name := range ex.ToolNames() {
+	for _, name := range reg.Names() {
 		names[name] = true
 	}
 	return names
@@ -40,11 +45,20 @@ func TestRegister_MailToolsRegistered(t *testing.T) {
 	}
 }
 
+// mailValidateExecutor builds the executor the validation tests drive. Same shape as
+// tools_unit_test.go: Register onto a Registry, then wrap it with a static
+// allow-list so a validation error is never masked by a policy denial.
+func mailValidateExecutor(t *testing.T) *executor.Executor {
+	t.Helper()
+	reg := executor.NewRegistry()
+	tools.Register(reg, nil) // nil pool: Register only builds closures, never derefs.
+	return executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewMemStore())
+}
+
 func TestValidate_MailSearch_RequiresASelector(t *testing.T) {
 	// An unselective search over a 106k-message corpus is not a query, it is a
 	// dump: at least one of query/from/thread_key must be present.
-	ex := executor.New(nil, nil, nil)
-	tools.Register(ex, nil)
+	ex := mailValidateExecutor(t)
 
 	_, err := ex.Execute(context.Background(), executor.Call{
 		Tool: "mail_search", Actor: "manual:test", Args: []byte(`{}`),
@@ -59,8 +73,7 @@ func TestValidate_MailSearch_RequiresASelector(t *testing.T) {
 }
 
 func TestValidate_MailSearch_RejectsBlankSelectors(t *testing.T) {
-	ex := executor.New(nil, nil, nil)
-	tools.Register(ex, nil)
+	ex := mailValidateExecutor(t)
 
 	for _, args := range []string{
 		`{"query":""}`,
@@ -76,8 +89,7 @@ func TestValidate_MailSearch_RejectsBlankSelectors(t *testing.T) {
 }
 
 func TestValidate_MailSearch_RejectsUnknownDirection(t *testing.T) {
-	ex := executor.New(nil, nil, nil)
-	tools.Register(ex, nil)
+	ex := mailValidateExecutor(t)
 
 	if _, err := ex.Execute(context.Background(), executor.Call{
 		Tool: "mail_search", Actor: "manual:test",
@@ -88,8 +100,7 @@ func TestValidate_MailSearch_RejectsUnknownDirection(t *testing.T) {
 }
 
 func TestValidate_MailReadThread_RequiresAnIdentifier(t *testing.T) {
-	ex := executor.New(nil, nil, nil)
-	tools.Register(ex, nil)
+	ex := mailValidateExecutor(t)
 
 	if _, err := ex.Execute(context.Background(), executor.Call{
 		Tool: "mail_read_thread", Actor: "manual:test", Args: []byte(`{}`),

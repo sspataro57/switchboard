@@ -87,6 +87,15 @@ var wantAgentTools = []string{
 	"draft_delivery",     // agent-facing since SWT-8: THE route for client-visible words
 	"link_external_ref",  // agent-facing since SWT-9: workers link their PRs/issues
 	"mark_delivery_sent", // agent-facing since SWT-12 (Q1): resolve a 'sending' Slack row
+	// SWT-11 (criterion 16): read-only, served from normalized_messages rather
+	// than a live mailbox, so no provider connection sits behind an agent call.
+	"mail_search",
+	"mail_read_thread",
+	// SWT-11 (criterion 17): MCP-listed so an interactive session can finish what
+	// it drafted. Still policy.humanOnly — the actor gate, not the tool list, is
+	// what stands between an autonomous worker and a send.
+	"approve_delivery",
+	"send_delivery",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.
@@ -96,9 +105,21 @@ var wantAgentTools = []string{
 // must not be one prompt injection away. Recording an already-sent message is
 // the ONE delivery verb where an injected call can do no external damage —
 // approving, sending, and un-sending are not.
+// Spine-facing: registered on the executor but deliberately NOT MCP-listed, so
+// the adapter rejects them by name before the executor is reached.
+//
+// approve_delivery and send_delivery were on this list until SWT-11 (criterion
+// 17). They are now MCP-listed on purpose: the surface was draft-only and
+// therefore unusable in practice — Salvador could ask an interactive session to
+// draft a reply but had to leave the session to approve and send it. They are
+// NOT less protected as a result. They stay in policy.humanOnly, and
+// policy.humanActor() strips one leading "mcp:" transport prefix so
+// mcp:manual:salvo passes while mcp:worker:X is denied with rule human_only.
+// The audit row keeps the full unmodified actor, so an MCP-triggered send is
+// still distinguishable from an opsctl one.
 var spineTools = []string{
 	"task_release", "answer_feedback", "prefill_delivery",
-	"approve_delivery", "send_delivery", "mark_delivery_failed",
+	"mark_delivery_failed",
 }
 
 func TestDraftDeliverySchema_IncludesSlackReply(t *testing.T) {

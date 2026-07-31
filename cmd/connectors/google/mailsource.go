@@ -91,8 +91,8 @@ func runIMAPIngest(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink,
 			}
 			continue
 		}
-		src := google.NewIMAPClientSource(acct.Hosts, acct.Email, password)
-		stats, err := google.IngestIMAP(ctx, src, sink, acct.Account, cfg)
+		src := google.NewIMAPClientSource(acct.Hosts(), acct.Email, password)
+		stats, err := google.IngestIMAP(ctx, src, sink, acct, cfg)
 		_ = src.Close()
 
 		total = addStats(total, stats)

@@ -213,64 +213,48 @@ func messageIDFromMIME(rawMIME []byte) string {
 	return ""
 }
 
-// AppPasswordAccount is an account row plus the endpoints and identity the IMAP
-// source needs.
-type AppPasswordAccount struct {
-	Account
-	Hosts MailHosts
+// accountSelect is the column list every account read shares, so a new field is
+// added in one place rather than drifting between callers.
+const accountSelect = `SELECT id, account_email, COALESCE(calendar_in_availability,false),
+       COALESCE(auth_type,'oauth'), COALESCE(imap_host,''), COALESCE(imap_port,0),
+       COALESCE(smtp_host,''), COALESCE(smtp_port,0)
+  FROM source_accounts WHERE provider='google'`
+
+func scanAccounts(rows pgx.Rows) ([]Account, error) {
+	defer rows.Close()
+	var out []Account
+	for rows.Next() {
+		var a Account
+		if err := rows.Scan(&a.ID, &a.Email, &a.CalendarInAvailability,
+			&a.AuthType, &a.IMAPHost, &a.IMAPPort, &a.SMTPHost, &a.SMTPPort); err != nil {
+			return nil, fmt.Errorf("scan google account: %w", err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate google accounts: %w", err)
+	}
+	return out, nil
 }
 
-// ListAppPasswordAccounts returns every provider='google' account authenticating
-// with an app password, optionally narrowed to one email.
+// ListAppPasswordAccounts returns the accounts authenticating with an app
+// password, optionally narrowed to one email.
 //
 // Scoped to auth_type='app_password' on purpose: an OAuth row has no password to
 // decrypt, and handing it to the IMAP source would produce a login failure that
-// looks like a credential problem rather than a configuration one.
-func ListAppPasswordAccounts(ctx context.Context, pool *pgxpool.Pool, onlyEmail string) ([]AppPasswordAccount, error) {
-	query := `SELECT id, account_email, COALESCE(calendar_in_availability,false),
-	                 imap_host, imap_port, smtp_host, smtp_port
-	            FROM source_accounts
-	           WHERE provider='google' AND auth_type='app_password'`
+// reads as a credential problem rather than a configuration one.
+func ListAppPasswordAccounts(ctx context.Context, pool *pgxpool.Pool, onlyEmail string) ([]Account, error) {
+	query := accountSelect + ` AND auth_type='app_password'`
 	var args []any
 	if strings.TrimSpace(onlyEmail) != "" {
 		query += ` AND lower(account_email)=lower($1)`
 		args = append(args, onlyEmail)
 	}
-	query += ` ORDER BY account_email`
-
-	rows, err := pool.Query(ctx, query, args...)
+	rows, err := pool.Query(ctx, query+` ORDER BY account_email`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list app-password accounts: %w", err)
 	}
-	defer rows.Close()
-
-	var out []AppPasswordAccount
-	for rows.Next() {
-		var a AppPasswordAccount
-		var imapHost, smtpHost *string
-		var imapPort, smtpPort *int
-		if err := rows.Scan(&a.ID, &a.Email, &a.CalendarInAvailability,
-			&imapHost, &imapPort, &smtpHost, &smtpPort); err != nil {
-			return nil, fmt.Errorf("scan app-password account: %w", err)
-		}
-		if imapHost != nil {
-			a.Hosts.IMAPHost = *imapHost
-		}
-		if imapPort != nil {
-			a.Hosts.IMAPPort = *imapPort
-		}
-		if smtpHost != nil {
-			a.Hosts.SMTPHost = *smtpHost
-		}
-		if smtpPort != nil {
-			a.Hosts.SMTPPort = *smtpPort
-		}
-		out = append(out, a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate app-password accounts: %w", err)
-	}
-	return out, nil
+	return scanAccounts(rows)
 }
 
 // UpsertAppPasswordAccount stores (or re-keys) an app-password mailbox.

@@ -31,12 +31,36 @@ func main() {
 	overlap := flag.Duration("overlap", google.DefaultOverlap, "gmail cursor re-read window")
 	backfill := flag.Duration("backfill", google.DefaultBackfill, "gmail initial backfill window")
 	account := flag.String("account", "", "limit to one account email")
+	watch := flag.Bool("watch", false, "stay resident: IMAP IDLE plus a periodic reconcile sweep")
 	flag.Parse()
 
+	if *watch {
+		if err := watchMain(*backfill, *account); err != nil {
+			fmt.Fprintln(os.Stderr, "google:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(*full, *normalizeOnly, *all, *overlap, *backfill, *account); err != nil {
 		fmt.Fprintln(os.Stderr, "google:", err)
 		os.Exit(1)
 	}
+}
+
+// watchMain owns its own pool and context: the one-shot path bounds itself to
+// ten minutes, which must never bound a resident process.
+func watchMain(backfill time.Duration, account string) error {
+	pool, err := newWatchPool(context.Background())
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+	return runWatch(pool, google.Config{
+		Backfill:        backfill,
+		AccountEmail:    account,
+		MaxMessageBytes: google.MaxMessageBytes(),
+		Folders:         google.FoldersFromEnv(),
+	})
 }
 
 func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account string) error {

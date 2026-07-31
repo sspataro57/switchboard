@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/textmatch"
 )
 
 // PGSink is the ops-db side of the google connector: the ingest Sink plus the
@@ -56,24 +58,15 @@ func (s *PGSink) EnsureBridgeAccount(ctx context.Context, discovered BridgeAccou
 	return account, nil
 }
 
-// ListAccounts returns every provider='google' account.
+// ListAccounts returns every provider='google' account, including its auth type
+// and per-account endpoints (SWT-11) — callers choosing between the Gmail API
+// and IMAP/SMTP read those off the row rather than inferring them.
 func (s *PGSink) ListAccounts(ctx context.Context) ([]Account, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, account_email, calendar_in_availability
-		 FROM source_accounts WHERE provider='google' ORDER BY id`)
+	rows, err := s.pool.Query(ctx, accountSelect+` ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("select google accounts: %w", err)
 	}
-	defer rows.Close()
-	var out []Account
-	for rows.Next() {
-		var a Account
-		if err := rows.Scan(&a.ID, &a.Email, &a.CalendarInAvailability); err != nil {
-			return nil, fmt.Errorf("scan account: %w", err)
-		}
-		out = append(out, a)
-	}
-	return out, rows.Err()
+	return scanAccounts(rows)
 }
 
 func (s *PGSink) Cursor(ctx context.Context, accountID int64) (Cursor, error) {
@@ -285,6 +278,13 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 		if err := s.confirmDelivery(ctx, nm.ExternalMessageID); err != nil {
 			return false, err
 		}
+		// Belt (SWT-11 criterion 15): a submission service MAY rewrite
+		// Message-ID, and Gmail's SMTP does. When it does, the exact match above
+		// finds nothing and the delivery stays unconfirmed FOREVER — which since
+		// SWT-16 also makes capture report our own send as sent by hand.
+		if err := s.confirmDeliveryByBodyPrefix(ctx, rawItemID, nm); err != nil {
+			return false, err
+		}
 	}
 	return false, nil
 }
@@ -482,4 +482,109 @@ func (s *PGSink) SupersedeAbsentCalendar(ctx context.Context, accountID int64, k
 		return 0, fmt.Errorf("commit calendar reset: %w", err)
 	}
 	return superseded, nil
+}
+
+// mailMatchPrefixLen is the comparison width, matching the slack and jira
+// matchers so one idiom governs every post-hoc confirmation.
+const mailMatchPrefixLen = 120
+
+// confirmDeliveryByBodyPrefix claims an unconfirmed gmail delivery whose body
+// opens the way this outbound message does.
+//
+// Runs only after the exact Message-ID match failed. It exists because SMTP
+// submission is allowed to replace the Message-ID we reserved: that id is our
+// idempotency token, not a promise the relay keeps.
+//
+// Note the asymmetry with the slack and jira matchers. Those look for rows with
+// sent_external_id IS NULL, because a browser click and a REST post learn the id
+// only afterwards. Gmail RESERVES its Message-ID before sending, so a belt
+// candidate here already HAS one — what is missing is confirmation that it
+// landed. Filtering on a NULL id would therefore match nothing, ever.
+//
+// Three guards, each load-bearing:
+//
+//   - sent_external_id is NEVER overwritten. It is what stops a resend, and
+//     replacing it with an observed id would break the one thing invariant 4
+//     rests on. The observed id goes into the event payload instead, as evidence.
+//   - Scoped to the same from_account_id: another mailbox's pending reply is not
+//     a candidate for this mailbox's send, however similar the text.
+//   - Multi-match refuses rather than guesses. Two pending replies sharing 120
+//     characters is realistic for short mail, and stamping the wrong row would
+//     record a real send against the wrong task and leave the other
+//     unconfirmable forever.
+func (s *PGSink) confirmDeliveryByBodyPrefix(ctx context.Context, rawItemID int64, nm NormalizedMessage) error {
+	want := textmatch.NormalizedPrefix(nm.BodyText, mailMatchPrefixLen)
+	if want == "" {
+		// An empty body would match any candidate that also normalizes to empty,
+		// claiming a delivery on no evidence at all.
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin gmail delivery match: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx,
+		`SELECT d.id, d.task_id, COALESCE(d.body,'')
+		   FROM deliveries d
+		  WHERE d.channel='gmail' AND d.status IN ('sending','sent','failed')
+		    AND d.confirmed_at IS NULL
+		    AND d.from_account_id = (SELECT source_account_id FROM raw_source_items WHERE id=$1)
+		  ORDER BY d.id DESC
+		  FOR UPDATE OF d`, rawItemID)
+	if err != nil {
+		return fmt.Errorf("select gmail deliveries to confirm: %w", err)
+	}
+	var deliveryID, taskID int64
+	matches := 0
+	for rows.Next() {
+		var id, task int64
+		var body string
+		if err := rows.Scan(&id, &task, &body); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan gmail delivery candidate: %w", err)
+		}
+		if textmatch.NormalizedPrefix(body, mailMatchPrefixLen) == want {
+			matches++
+			if deliveryID == 0 {
+				deliveryID, taskID = id, task
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate gmail delivery candidates: %w", err)
+	}
+	if deliveryID == 0 || matches > 1 {
+		return nil
+	}
+
+	// confirmed_at IS NULL is the idempotence guard: a --all replay re-runs this
+	// match, finds the row already confirmed, and emits no second event.
+	tag, err := tx.Exec(ctx,
+		`UPDATE deliveries
+		    SET confirmed_at=now(), status='sent',
+		        sent_at=COALESCE(sent_at, now()), updated_at=now()
+		  WHERE id=$1 AND confirmed_at IS NULL`, deliveryID)
+	if err != nil {
+		return fmt.Errorf("confirm gmail delivery %d: %w", deliveryID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
+	}
+	// The OBSERVED id is recorded here and nowhere else: evidence of what actually
+	// landed, never a replacement for the token we reserved.
+	payload, _ := json.Marshal(map[string]any{
+		"delivery_id":        deliveryID,
+		"matched_message_id": nm.ExternalMessageID,
+		"matched_by":         "body_prefix",
+	})
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1,'delivery_confirmed',$2)`,
+		taskID, payload); err != nil {
+		return fmt.Errorf("insert delivery_confirmed event: %w", err)
+	}
+	return tx.Commit(ctx)
 }

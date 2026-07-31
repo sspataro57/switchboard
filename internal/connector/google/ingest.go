@@ -26,6 +26,23 @@ type Account struct {
 	ID                     int64
 	Email                  string
 	CalendarInAvailability bool
+	// AuthType decides which ingest and send path this account uses:
+	// 'oauth' (Gmail API) or 'app_password' (IMAP/SMTP). Defaults to oauth so a
+	// row written before migration 0014 keeps its behaviour.
+	AuthType string
+	// Per-account endpoints; empty means the Gmail defaults.
+	IMAPHost string
+	IMAPPort int
+	SMTPHost string
+	SMTPPort int
+}
+
+// Hosts renders the account's endpoints with the Gmail defaults filled in.
+func (a Account) Hosts() MailHosts {
+	return MailHosts{
+		IMAPHost: a.IMAPHost, IMAPPort: a.IMAPPort,
+		SMTPHost: a.SMTPHost, SMTPPort: a.SMTPPort,
+	}.WithDefaults()
 }
 
 // Cursor holds both incremental positions side by side in sync_cursor.

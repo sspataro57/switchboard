@@ -55,7 +55,7 @@ const (
 	imapKey   = "itest-imap-token-key"
 
 	imapSharedMsgID    = "<shared-imap@mail.example>"
-	imapOwnMsgID       = "<sb-itest-imap-1@example.com>"       // = delivery 1's sent_external_id
+	imapOwnMsgID       = "<sb-itest-imap-1@example.com>"          // = delivery 1's sent_external_id
 	imapReservedMsgID  = "<sb-itest-imap-2-reserved@example.com>" // reserved, then REWRITTEN by the relay
 	imapRewrittenMsgID = "<rewritten-by-relay@mail.example>"      // what actually landed in Sent
 	imapBeltBody       = "Confirming the body-prefix belt: the relay rewrote our Message-ID, so the primary matcher can never fire."
