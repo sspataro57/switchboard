@@ -126,6 +126,24 @@ func IngestIMAP(ctx context.Context, src MailSource, sink Sink, acct Account, cf
 			if batchMax > maxUID {
 				maxUID = batchMax
 			}
+
+			// Save after EVERY batch, not only at the end of the pass.
+			//
+			// The invariant criterion 8 actually cares about is "never advance past
+			// a message that was not durably stored", and that still holds: every
+			// message in this batch is in raw_source_items before we get here. What
+			// changes is that a pass which runs out of time keeps its progress
+			// instead of discarding it.
+			//
+			// Discarding it is not theoretical. sspataro@gmail.com (106,930
+			// messages) exceeded the pass deadline every single run, so the cursor
+			// stayed null and each run restarted the same backfill — a livelock
+			// that made progress and never converged. With per-batch saves the
+			// backfill simply resumes, and successive runs walk it to completion.
+			cursor.IMAPFolders[folder.Name] = FolderCursor{UIDValidity: folder.UIDValidity, UIDNext: maxUID}
+			if err := sink.SaveCursor(ctx, acct.ID, cursor); err != nil {
+				return fail(fmt.Errorf("save cursor for %s: %w", acct.Email, err))
+			}
 		}
 
 		// Cursor advanced ONLY here, after every message in this folder's pass is

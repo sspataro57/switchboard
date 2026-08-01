@@ -508,6 +508,26 @@ func (s *IMAPClientSource) Fetch(ctx context.Context, folder string, uids []uint
 		return nil, fmt.Errorf("imap fetch metadata %s: %w", folder, err)
 	}
 
+	// Bodies for the whole batch in ONE round trip.
+	//
+	// This used to be one UID FETCH per message, which is what wedged
+	// sspataro@gmail.com in production: thousands of sequential round trips
+	// against a 106,930-message mailbox could not finish inside the pass deadline,
+	// so the cursor never advanced and every run re-did the same work from
+	// scratch — a livelock that made partial progress and never converged.
+	// Oversize messages still need individual part-selective fetches, so they are
+	// separated out and handled one at a time; there are very few of them.
+	whole := make([]uint32, 0, len(metas))
+	for _, m := range metas {
+		if !(maxBytes > 0 && int(m.Size) > maxBytes) {
+			whole = append(whole, m.Uid)
+		}
+	}
+	bodies, err := s.fetchBodies(conn, whole)
+	if err != nil {
+		return nil, fmt.Errorf("imap fetch bodies %s: %w", folder, err)
+	}
+
 	var out []FetchedMessage
 	for _, m := range metas {
 		fm := FetchedMessage{
@@ -516,12 +536,7 @@ func (s *IMAPClientSource) Fetch(ctx context.Context, folder string, uids []uint
 			Flags:        append([]string(nil), m.Flags...),
 			Size:         int(m.Size),
 		}
-		oversize := maxBytes > 0 && int(m.Size) > maxBytes
-		if !oversize {
-			body, err := s.fetchWhole(conn, m.Uid)
-			if err != nil {
-				return nil, fmt.Errorf("imap fetch %s/%d: %w", folder, m.Uid, err)
-			}
+		if body, ok := bodies[m.Uid]; ok {
 			fm.RFC822 = body
 			out = append(out, fm)
 			continue
@@ -537,6 +552,39 @@ func (s *IMAPClientSource) Fetch(ctx context.Context, folder string, uids []uint
 		fm.Truncated = true
 		fm.Parts = parts
 		out = append(out, fm)
+	}
+	return out, nil
+}
+
+// fetchBodies pulls full bodies for many UIDs in a single UID FETCH.
+func (s *IMAPClientSource) fetchBodies(conn *client.Client, uids []uint32) (map[uint32][]byte, error) {
+	out := map[uint32][]byte{}
+	if len(uids) == 0 {
+		return out, nil
+	}
+	seq := new(imap.SeqSet)
+	for _, u := range uids {
+		seq.AddNum(u)
+	}
+	section := &imap.BodySectionName{Peek: true}
+	ch := make(chan *imap.Message, len(uids))
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.UidFetch(seq, []imap.FetchItem{imap.FetchUid, section.FetchItem()}, ch)
+	}()
+	for m := range ch {
+		r := m.GetBody(section)
+		if r == nil {
+			continue
+		}
+		b, err := io.ReadAll(r)
+		if err != nil {
+			return nil, fmt.Errorf("read body for uid %d: %w", m.Uid, err)
+		}
+		out[m.Uid] = b
+	}
+	if err := <-done; err != nil {
+		return nil, err
 	}
 	return out, nil
 }
