@@ -409,28 +409,30 @@ func (s *IMAPClientSource) Folders(ctx context.Context) ([]Folder, error) {
 		out = append(out, f)
 	}
 
-	// Fill UIDVALIDITY, which is what the cursor keys on.
+	// Fill UIDVALIDITY for the folders we will actually ingest — and ONLY those.
 	//
-	// This SELECTs every listed mailbox, not just the two we ingest — roughly 29
-	// round trips on the personal account, repeated every reconcile in watch
-	// mode. SelectFolders cannot filter first because the Sent folder is
-	// discovered from LIST attributes and the fallbacks need names that only LIST
-	// provides. Worth narrowing if the reconcile interval ever drops.
-	for i := range out {
-		status, err := s.selectFolder(ctx, out[i].Name)
+	// UIDVALIDITY comes from SELECT, not LIST, so it costs a round trip per
+	// folder. Selecting every listed mailbox to get it is what wedged
+	// sspataro@gmail.com: a 20-year account lists ~29 mailboxes including
+	// [Gmail]/All Mail, and opening All Mail on 175k+ messages is slow enough
+	// that the whole pass deadline was gone before a single message was fetched.
+	// The two small mailboxes never showed it.
+	//
+	// SelectFolders needs only the name and the \Sent marker, both of which LIST
+	// already gave us, so the filter can run first and the round trips drop from
+	// ~29 to 2. Applying it here and again in IngestIMAP is harmless: selecting
+	// from an already-selected set returns the same set.
+	wanted := SelectFolders(out, FoldersFromEnv())
+	kept := make([]Folder, 0, len(wanted))
+	for _, f := range wanted {
+		status, err := s.selectFolder(ctx, f.Name)
 		if err != nil {
-			// A mailbox that cannot be opened is not fatal to the pass: it may be
-			// a shared folder we lack rights on. Drop it rather than failing.
-			out[i].Name = ""
+			// A mailbox we cannot open is not fatal to the pass — it may be a
+			// shared folder we lack rights on. Drop it rather than failing.
 			continue
 		}
-		out[i].UIDValidity = status.UidValidity
-	}
-	kept := out[:0]
-	for _, f := range out {
-		if f.Name != "" {
-			kept = append(kept, f)
-		}
+		f.UIDValidity = status.UidValidity
+		kept = append(kept, f)
 	}
 	return kept, nil
 }
