@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 
 	"golang.org/x/oauth2"
@@ -66,12 +68,15 @@ func (a *Auth) Routes(mux *http.ServeMux) {
 				user = "salvo"
 			}
 			a.setSession(w, user)
-			http.Redirect(w, r, "/deliveries", http.StatusFound)
+			http.Redirect(w, r, safeNext(r.URL.Query().Get("next")), http.StatusFound)
 		})
 		return
 	}
 	mux.HandleFunc("GET /auth/login", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, a.oidc.AuthCodeURL("sb-state"), http.StatusFound)
+		// The requested path rides in the OAuth state parameter, which the
+		// provider hands back verbatim on the callback. safeNext validates it on
+		// the way out, so a tampered state can only ever redirect within this app.
+		http.Redirect(w, r, a.oidc.AuthCodeURL(encodeState(r.URL.Query().Get("next"))), http.StatusFound)
 	})
 	mux.HandleFunc("GET /auth/callback", func(w http.ResponseWriter, r *http.Request) {
 		tok, err := a.oidc.Exchange(r.Context(), r.URL.Query().Get("code"))
@@ -85,9 +90,57 @@ func (a *Auth) Routes(mux *http.ServeMux) {
 			return
 		}
 		a.setSession(w, user)
-		http.Redirect(w, r, "/deliveries", http.StatusFound)
+		http.Redirect(w, r, safeNext(decodeState(r.URL.Query().Get("state"))), http.StatusFound)
 	})
 }
+
+// The post-login destination.
+//
+// Every page but one used to be unreachable by direct link: login threw away the
+// requested path and always landed on /deliveries, which dated from SWT-8 when
+// that was the only page. The symptom is vicious — you open /sources, get
+// silently redirected, and read the empty deliveries table as "ingestion is
+// broken" rather than "I am on the wrong page". It cost real debugging time.
+const defaultLanding = "/tasks"
+
+// safeNext returns a destination that is guaranteed to be inside this app.
+//
+// Anything else falls back to the landing page. The rules matter: a value must
+// start with a single "/" — "//evil.example" is protocol-relative and would send
+// the browser off-site, and a full URL would do so outright. That is the classic
+// open-redirect, and a login endpoint is exactly where it gets exploited, since
+// the victim is mid-authentication and expecting a redirect.
+func safeNext(next string) string {
+	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+		return defaultLanding
+	}
+	// A control character or a backslash can smuggle a second header or confuse
+	// the browser's URL parsing; neither belongs in a path we generated.
+	if strings.ContainsAny(next, "\\\r\n") {
+		return defaultLanding
+	}
+	return next
+}
+
+// encodeState packs the requested path into the OAuth state parameter alongside
+// the CSRF marker. decodeState reverses it, tolerating a state that carries no
+// path (an older link, or a provider that dropped it).
+func encodeState(next string) string {
+	if next == "" {
+		return oauthStateMarker
+	}
+	return oauthStateMarker + "|" + next
+}
+
+func decodeState(state string) string {
+	_, next, found := strings.Cut(state, "|")
+	if !found {
+		return ""
+	}
+	return next
+}
+
+const oauthStateMarker = "sb-state"
 
 func (a *Auth) fetchUser(ctx context.Context, tok *oauth2.Token) (string, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, a.userInfo, nil)
@@ -137,11 +190,19 @@ func (a *Auth) User(r *http.Request) string {
 func (a *Auth) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.User(r) == "" {
+			// Carry where they were going. Only the path and query — never the
+			// host — so the round trip cannot be turned into an off-site redirect.
+			login := "/auth/login"
 			if a.dev {
-				http.Redirect(w, r, "/dev/login", http.StatusFound)
-			} else {
-				http.Redirect(w, r, "/auth/login", http.StatusFound)
+				login = "/dev/login"
 			}
+			target := r.URL.RequestURI()
+			if r.Method != http.MethodGet {
+				// Replaying a POST after login would re-submit an action the user
+				// never re-confirmed; send them to the page instead.
+				target = r.URL.Path
+			}
+			http.Redirect(w, r, login+"?next="+url.QueryEscape(target), http.StatusFound)
 			return
 		}
 		next.ServeHTTP(w, r)

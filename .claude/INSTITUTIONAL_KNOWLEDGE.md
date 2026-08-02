@@ -63,6 +63,22 @@ comparison would turn a second of skew into a PERMANENT refusal.
 **Rule: any post-hoc matcher that identifies our own message by CONTENT needs a
 lower time bound.** Content matching alone cannot tell two identical sends apart.
 
+### A dashboard page that looks empty may be the wrong page
+**Location:** `internal/dashboard/auth.go`, bit 2026-08-02 (fixed same day)
+Login used to discard the requested path and always land on `/deliveries` — a
+default from SWT-8, when that was the only page. So opening `/sources` without a
+live session went `/sources` → `/dev/login` → `/deliveries`, and the near-empty
+deliveries table read as "ingestion is broken" rather than "I am not on the page
+I asked for". It cost real debugging time before anyone checked the browser tab
+title.
+Fixed: `Require()` carries the path through login (`?next=`), OIDC carries it in
+the OAuth state parameter, and `safeNext` refuses anything that is not a single
+in-app path — an absolute URL, a protocol-relative `//host`, a backslash or a
+CR/LF. A login endpoint is the classic place an open redirect is exploited,
+because the victim is mid-authentication and expecting to be sent somewhere.
+**Rule: when a dashboard page looks empty, check the page title before checking
+the data.**
+
 ### needs_feedback flips mid-run
 **Location:** task lifecycle, bit 2026-07-11 (test race)
 `request_feedback` sets the task to needs_feedback DURING the claude run —
