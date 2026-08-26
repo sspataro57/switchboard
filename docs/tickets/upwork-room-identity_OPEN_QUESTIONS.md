@@ -2,8 +2,10 @@
 
 # Open questions — upwork-room-identity
 
-**BOTH ANSWERED 2026-08-26 by the main session (which has psql).** Q1 is **(b)** —
-the answer that inverts criterion 10 — and Q2 is **(a)**. Data and reasoning under
+**BOTH ANSWERED 2026-08-26 by the main session (which has psql), and Q1 was then
+RE-ANSWERED the same day.** Q1 is **(a)** — the first pass said (b) because it
+counted `upwork_room_id` alone and there is a second room column,
+`send_room_id`, carrying exactly the rows that looked missing. Q2 is **(a)**. Data and reasoning under
 each heading below; the original text is preserved beneath the answers.
 
 Both are data questions, not design preferences. **This session had no shell**, so
@@ -14,7 +16,78 @@ review left.
 
 ---
 
-## Q1. ANSWERED — **(b)**. Outbound rows systematically lack a room id, and the gap is NOT closing.
+## Q1. RE-ANSWERED 2026-08-26 — **(a) after all. The first answer was measured on the wrong column.**
+
+**Outbound rows do not lack the room id. They carry it in `send_room_id`.**
+
+`communications` has TWO room columns, and the original Q1 query counted only one:
+
+| column | meaning | inbound | outbound |
+|---|---|---|---|
+| `upwork_room_id` | the room a message was OBSERVED in | 212 | 84 |
+| `send_room_id` | the room a send was DISPATCHED to | 0 | 136 |
+
+They are **disjoint per row** (no row has both) and they are the **same identifier
+space** — identical `room_<hex>` format, and 6 values appear in both columns
+(11 distinct upwork values, 9 distinct send values).
+
+`send_room_id` is written by exactly one path, and the correlation is perfect:
+
+```
+send_room_id IS NOT NULL        136
+send_requested_at IS NOT NULL   136
+both                            136
+disagree                          0     <- zero
+```
+
+So the shape is simply: a message we DISPATCHED through the CRM records the room
+it was sent to in `send_room_id`; a message OBSERVED coming back from Upwork
+records the room it was seen in as `upwork_room_id`. Nothing is missing.
+
+**Reading both columns, the number that drove the inversion disappears:**
+
+```
+API era (since 2026-07-21), COALESCE(upwork_room_id, send_room_id):
+  inbound    213 rows, 212 roomed   99.5%
+  outbound   188 rows, 186 roomed   98.9%     <- was reported as 44.7%
+```
+
+Only **2** API-era outbound rows have neither column set.
+
+**What this changes in the SPEC.**
+
+1. **The room source is `COALESCE(upwork_room_id, send_room_id)`, not
+   `upwork_room_id`.** `rawCommunication` must parse both. This is the single
+   most important correction — a normalizer reading one column would key 102 of
+   188 recent outbound messages onto the legacy thread while believing it had
+   read the room.
+2. **Q1 reverts to branch (a).** Roomed-ness is an API-era property in BOTH
+   directions, so §4's tolerance of unknown rooms is a **transition aid for
+   pre-2026-07-21 history**, not a permanent accommodation of a broken outbound
+   path. Criterion 10 still stands as written — an unroomed message must still be
+   able to claim a roomed delivery, because 576 legacy rows and 2 recent ones
+   have no room at all — but its justification changes from "outbound is
+   systematically unroomed" to "legacy history is unroomed", and criterion 10's
+   required test comment must cite 98.9%, not 44.7%.
+3. **The Future-work sub-question is CLOSED.** There is nothing to fix in the
+   CRM's send path; it was recording the room the whole time. Do not open a
+   ticket against the CRM for this.
+4. **Naming (criterion 20) survives and is reinforced**, for a better reason than
+   before: with both columns read, the outbound half genuinely IS mostly
+   room-scoped in the API era. The honest description is now "room-scoped for
+   API-era traffic in both directions, client-wide for pre-2026-07-21 history".
+
+**Worth one line in the SPEC as a hazard:** the two columns mean different things
+(dispatched-to vs observed-in), and 6 outbound bodies already appear more than
+once for the same client. If the CRM ever stores a dispatched message AND its
+observation as two rows, they would key to the same room correctly — but they are
+two rows in one thread with the same body, which is precisely the ambiguity the
+matcher's multi-match refusal exists to handle. That is an argument FOR keeping
+the refusal after rooms are real, not against it.
+
+### Original (b) answer, preserved — it was measured on `upwork_room_id` alone
+
+### ~~ANSWERED — (b). Outbound rows systematically lack a room id, and the gap is NOT closing.~~
 
 Run 2026-08-26 against `upwork_crm` on pg-main.
 

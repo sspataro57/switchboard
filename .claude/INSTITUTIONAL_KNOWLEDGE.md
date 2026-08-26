@@ -139,6 +139,33 @@ here in the opposite direction and would create PERMANENT refusals.
 **Rule: before adding a time floor, check that some code path actually writes the
 column for that channel.** Verify a claimed data path at every write site.
 
+### `communications` has TWO room columns; reading one is reading none
+**Location:** `upwork_crm.communications`, found 2026-08-26 while investigating
+SWT-19's Q1
+`upwork_room_id` is the room a message was **observed** in; `send_room_id` is the
+room a send was **dispatched** to. They are **disjoint per row** and the **same
+identifier space** (`room_<hex>`; 6 values appear in both). `send_room_id` is
+written by exactly one path — it agrees with `send_requested_at` on all 136 rows,
+zero disagreements.
+Consequence: outbound traffic looks unroomed if you count `upwork_room_id` alone,
+because our own sends record the room in the sibling column. The correct source
+is `COALESCE(upwork_room_id, send_room_id)`, and the difference is not marginal:
+
+```
+API-era outbound, upwork_room_id only    84/188   44.7%
+API-era outbound, COALESCE both         186/188   98.9%
+```
+
+This measurement error was made, reported, and used to invert a SPEC's central
+rule before being caught — so: **when a column looks empty for a subset of rows,
+list the table's columns before concluding the data is missing.** `\d
+communications` costs one command. It is the fourth costume of the same mistake
+(see the three entries above: an inert time floor, a constant discriminator, and
+a stats payload that cannot discriminate).
+Note also that `~/WebstormProjects/crm` — recorded above as the CRM repo — **does
+not exist on this workstation**, so the writer code cannot be read here and the
+semantics above were established from the data alone.
+
 ### One upworkcrm invocation writes TWO sync_runs rows
 **Location:** `internal/connector/upworkcrm/ingest.go:70` and
 `normalize.go:148`, found while speccing SWT-19
