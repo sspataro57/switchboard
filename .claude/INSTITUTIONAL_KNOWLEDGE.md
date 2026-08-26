@@ -139,6 +139,23 @@ here in the opposite direction and would create PERMANENT refusals.
 **Rule: before adding a time floor, check that some code path actually writes the
 column for that channel.** Verify a claimed data path at every write site.
 
+### One upworkcrm invocation writes TWO sync_runs rows
+**Location:** `internal/connector/upworkcrm/ingest.go:70` and
+`normalize.go:148`, found while speccing SWT-19
+`Ingest` and `Normalize` each call `StartRun`/`FinishRun`, and
+`cmd/connectors/upworkcrm` runs both, so a single CronJob execution leaves TWO
+rows with `status='ok'`. Verified against production: `sync_runs` for the upwork
+account arrive in pairs, one pair per `*/15` tick.
+Consequence: anything that counts completed passes as a proxy for "the poller has
+looked since X" — the shape slackweb's reconciler uses, where the threshold is 3
+passes — counts twice as fast here. A threshold copied across connectors fires
+after 1.5 real runs instead of 3.
+**Do NOT try to tell the two run kinds apart by their `stats` payload.** Both
+marshal the same struct, so the discriminating keys are present-and-zero in the
+run that did not populate them rather than absent — which is SWT-18's "the
+discriminating column is a constant" mistake in a third costume. If the two kinds
+must be distinguished, add a column that says so.
+
 ### A dashboard page that looks empty may be the wrong page
 **Location:** `internal/dashboard/auth.go`, bit 2026-08-02 (fixed same day)
 Login used to discard the requested path and always land on `/deliveries` — a
