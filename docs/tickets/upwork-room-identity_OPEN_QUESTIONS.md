@@ -65,8 +65,10 @@ Only **2** API-era outbound rows have neither column set.
    directions, so §4's tolerance of unknown rooms is a **transition aid for
    pre-2026-07-21 history**, not a permanent accommodation of a broken outbound
    path. Criterion 10 still stands as written — an unroomed message must still be
-   able to claim a roomed delivery, because 576 legacy rows and 2 recent ones
-   have no room at all — but its justification changes from "outbound is
+   able to claim a roomed delivery, because 1,218 legacy rows and 2 recent ones
+   have no room at all (**corrected 2026-08-26**: the 576 first written here was
+   the OUTBOUND half only; inbound adds 642. Source totals 1,650 = 432 roomed +
+   1,218 unroomed) — but its justification changes from "outbound is
    systematically unroomed" to "legacy history is unroomed", and criterion 10's
    required test comment must cite 98.9%, not 44.7%.
 3. **The Future-work sub-question is CLOSED.** There is nothing to fix in the
