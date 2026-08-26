@@ -107,6 +107,18 @@ const (
 	umhIdemExtID   = "upwork-room-msg-itest-umh-606"
 	umhIdemPriorID = "upwork-room-msg-itest-umh-606-prior"
 	umhIdemSlug    = "itest-umh-idempotent"
+
+	// Added 2026-08-26 after the go-reviewer pass: the two decisions SWT-18
+	// made deliberately had nothing pinning them.
+	umhAmbigClient = "dddddddd-0000-0000-0000-0000000000d7"
+	umhAmbigComm   = "dddddddd-0000-0000-0000-0000000000c7"
+	umhAmbigExtID  = "upwork-room-msg-itest-umh-707"
+	umhAmbigSlug   = "itest-umh-ambiguous"
+
+	umhClaimedClient = "dddddddd-0000-0000-0000-0000000000d8"
+	umhClaimedComm   = "dddddddd-0000-0000-0000-0000000000c8"
+	umhClaimedExtID  = "upwork-room-msg-itest-umh-808"
+	umhClaimedSlug   = "itest-umh-already-claimed"
 )
 
 // Whitespace fixture. The two bodies differ ONLY in whitespace, and the first
@@ -160,14 +172,18 @@ func umhRawComm(t *testing.T, commUUID, client, channel, body, extID string, sen
 
 func cleanupUpworkMatcher(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	slugs := []string{umhWSSlug, umhRoomASlug, umhRoomBSlug, umhLateSlug, umhBlankSlug, umhIdemSlug}
-	clients := []string{umhWSClient, umhRoomAClient, umhRoomBClient, umhLateClient, umhBlankClient, umhIdemClient}
+	slugs := []string{umhWSSlug, umhRoomASlug, umhRoomBSlug, umhLateSlug, umhBlankSlug, umhIdemSlug,
+		umhAmbigSlug, umhClaimedSlug}
+	clients := []string{umhWSClient, umhRoomAClient, umhRoomBClient, umhLateClient, umhBlankClient, umhIdemClient,
+		umhAmbigClient, umhClaimedClient}
 	comms := []string{
 		"communications:" + umhWSComm, "communications:" + umhRoomAComm,
 		"communications:" + umhRoomBComm, "communications:" + umhLateComm,
 		"communications:" + umhBlankComm, "communications:" + umhIdemComm,
+		"communications:" + umhAmbigComm, "communications:" + umhClaimedComm,
 	}
-	extIDs := []string{umhWSExtID, umhRoomAExtID, umhRoomBExtID, umhLateExtID, umhBlankExtID, umhIdemExtID}
+	extIDs := []string{umhWSExtID, umhRoomAExtID, umhRoomBExtID, umhLateExtID, umhBlankExtID, umhIdemExtID,
+		umhAmbigExtID, umhClaimedExtID}
 	var threads []string
 	for _, c := range clients {
 		threads = append(threads, umhThreadKey(c, "chat"), umhThreadKey(c, "room-b"))
@@ -581,5 +597,136 @@ func TestRegression_SWT18_UpworkMatcher_AlreadyStampedIsNotRestamped(t *testing.
 		`SELECT count(*) FROM task_events WHERE task_id=$1 AND event_type='delivery_confirmed'`, taskID); got != 1 {
 		t.Errorf("delivery_confirmed task_events after replay = %d, want 1: re-normalizing the same raw item must not "+
 			"emit a second confirmation (the IS NULL guards must be restated on the UPDATE and RowsAffected checked)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 6. Multi-match REFUSES. Two unconfirmed deliveries in the same thread whose
+//    bodies share the normalized 120-char prefix: neither is stamped and no
+//    event fires. Added after review — the refusal was a decided policy
+//    (google and slackweb refuse; jira keeps newest-wins) with nothing pinning
+//    it, so reverting `matches > 1` to newest-wins passed the whole suite.
+//
+//    It is not a nicety. On production data this refusal, NOT the target_ref
+//    equality, is what prevents the wrong-row bind: thread_key's third segment
+//    is communications.channel, which is the constant 'upwork' for every row in
+//    the source db, so one thread == one client and the equality selects the
+//    same candidate set the old client-wide LIKE did.
+//
+//    Refusing is the reversible half of the trade: two unconfirmed rows can
+//    still be confirmed by a later distinct message or resolved by a human,
+//    whereas one wrong stamp burns the external id under
+//    deliveries_sent_external_idx and locks the correct row out permanently.
+// ---------------------------------------------------------------------------
+
+func TestRegression_SWT18_UpworkMatcher_AmbiguousPrefixConfirmsNothing(t *testing.T) {
+	ctx, pool, acctID := umhOpen(t)
+	defer pool.Close()
+
+	cleanupUpworkMatcher(t, ctx, pool)
+	defer cleanupUpworkMatcher(t, ctx, pool)
+
+	msgSentAt := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+	taskID := umhSeedProjectTask(t, ctx, pool, umhAmbigSlug, "itest-umh-client-ambig")
+	room := umhThreadKey(umhAmbigClient, "chat")
+
+	// Same opening 120 characters, different tails — realistic for a reusable
+	// status-line template. Guard that the fixture is actually ambiguous and
+	// not two identical strings, the failure mode this suite exists to avoid.
+	bodyA := umhSharedBody + " Numbers attached."
+	bodyB := umhSharedBody + " Will follow up on the invoice separately."
+	if bodyA == bodyB {
+		t.Fatalf("fixture invalid: the two bodies are the same string")
+	}
+	if textmatch.NormalizedPrefix(bodyA, umhPrefixLen) != textmatch.NormalizedPrefix(bodyB, umhPrefixLen) {
+		t.Fatalf("fixture invalid: the bodies do not collide at %d characters, so nothing is ambiguous", umhPrefixLen)
+	}
+
+	olderID := umhSeedDelivery(t, ctx, pool, taskID, room, bodyA, msgSentAt.Add(-time.Hour))
+	newerID := umhSeedDelivery(t, ctx, pool, taskID, room, bodyB, msgSentAt)
+
+	umhSeedRaw(t, ctx, pool, acctID, umhAmbigComm, umhAmbigClient, "chat", bodyA, umhAmbigExtID, "itest-umh-hash-707", msgSentAt)
+	umhNormalize(t, ctx, pool)
+
+	for _, d := range []struct {
+		id   int64
+		name string
+	}{{olderID, "older"}, {newerID, "newer"}} {
+		ext, confirmed := umhReadDelivery(t, ctx, pool, d.id)
+		if ext != nil {
+			t.Errorf("delivery %d (%s) was stamped sent_external_id=%q: two pending deliveries in this thread share the "+
+				"normalized %d-char prefix, so the matcher cannot tell which produced the message. Guessing stamps a real "+
+				"send onto the wrong row and locks the other out of that id forever; the matcher must refuse",
+				d.id, d.name, *ext, umhPrefixLen)
+		}
+		if confirmed != nil {
+			t.Errorf("delivery %d (%s) has confirmed_at=%q; an ambiguous match must confirm nothing", d.id, d.name, *confirmed)
+		}
+	}
+	if got := scanInt(t, ctx, pool,
+		`SELECT count(*) FROM task_events WHERE task_id=$1 AND event_type='delivery_confirmed'`, taskID); got != 0 {
+		t.Errorf("delivery_confirmed task_events = %d, want 0", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 7. A message whose external id another delivery already claims is SKIPPED,
+//    and the normalize run must not fail. Added after review: this is the one
+//    case the other guards cannot catch, and its cost is not a missed
+//    confirmation but a crashed pass.
+//
+//    Shape: delivery A already holds THIS message's id. Delivery B is open with
+//    the same prefix in the same thread. The candidate query excludes A (its
+//    sent_external_id is not NULL), so exactly one candidate remains and the
+//    multi-match refusal does not fire — without the pre-check the matcher
+//    stamps B with an id deliveries_sent_external_idx already holds, and the
+//    unique violation propagates out of upsertMessage and fails the WHOLE
+//    normalize run rather than skipping one confirmation.
+// ---------------------------------------------------------------------------
+
+func TestRegression_SWT18_UpworkMatcher_ClaimedExternalIDSkipsWithoutFailingTheRun(t *testing.T) {
+	ctx, pool, acctID := umhOpen(t)
+	defer pool.Close()
+
+	cleanupUpworkMatcher(t, ctx, pool)
+	defer cleanupUpworkMatcher(t, ctx, pool)
+
+	msgSentAt := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+	taskID := umhSeedProjectTask(t, ctx, pool, umhClaimedSlug, "itest-umh-client-claimed")
+	room := umhThreadKey(umhClaimedClient, "chat")
+
+	// A: already confirmed against the very message we are about to ingest.
+	claimedID := umhSeedDelivery(t, ctx, pool, taskID, room, umhSharedBody, msgSentAt.Add(-2*time.Hour))
+	if _, err := pool.Exec(ctx,
+		`UPDATE deliveries SET sent_external_id=$2, confirmed_at=$3 WHERE id=$1`,
+		claimedID, umhClaimedExtID, msgSentAt); err != nil {
+		t.Fatalf("stamp the claiming delivery: %v", err)
+	}
+	// B: open, same thread, same prefix — the only remaining candidate.
+	openID := umhSeedDelivery(t, ctx, pool, taskID, room, umhSharedBody, msgSentAt)
+
+	umhSeedRaw(t, ctx, pool, acctID, umhClaimedComm, umhClaimedClient, "chat", umhSharedBody, umhClaimedExtID, "itest-umh-hash-808", msgSentAt)
+
+	// umhNormalize fails the test on error, which is exactly the assertion:
+	// without the pre-check this run dies on deliveries_sent_external_idx.
+	umhNormalize(t, ctx, pool)
+
+	// The message still normalized — the run did its real work.
+	if got := scanInt(t, ctx, pool,
+		`SELECT count(*) FROM normalized_messages WHERE external_message_id=$1`, umhClaimedExtID); got != 1 {
+		t.Errorf("normalized_messages for %q = %d, want 1: the message must be normalized even though its id is "+
+			"already claimed — a confirmation that cannot be made must not cost the ingest", umhClaimedExtID, got)
+	}
+	openExt, openConfirmed := umhReadDelivery(t, ctx, pool, openID)
+	if openExt != nil {
+		t.Errorf("delivery %d was stamped sent_external_id=%q, an id delivery %d already holds: the partial unique index "+
+			"makes this a constraint violation, not a duplicate row", openID, *openExt, claimedID)
+	}
+	if openConfirmed != nil {
+		t.Errorf("delivery %d has confirmed_at=%q; an already-claimed id is no evidence about this row", openID, *openConfirmed)
+	}
+	claimedExt, _ := umhReadDelivery(t, ctx, pool, claimedID)
+	if claimedExt == nil || *claimedExt != umhClaimedExtID {
+		t.Errorf("delivery %d (the claimant) has sent_external_id=%s, want %q unchanged", claimedID, umhStr(claimedExt), umhClaimedExtID)
 	}
 }

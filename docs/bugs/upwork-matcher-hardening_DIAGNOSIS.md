@@ -700,3 +700,77 @@ The fix takes effect only after an image build and a tag bump in the kube repo
 (`connector-upworkcrm` runs a pinned tag — currently `0.4.1`). Nothing is urgent:
 there has never been an `upwork_chat` delivery in production, so the matcher has
 nothing to bind either way until the draft worker and the Upwork tier go live.
+
+---
+
+## Post-merge review correction (2026-08-26) — "exact room matching" is not room matching
+
+A `go-reviewer` pass after the merge found that the fix's defect-2 half rests on
+a premise that does not hold on production data. **Verified independently
+against the source db before accepting it**, which is what this section records.
+
+`thread_key` is `upwork_crm:{client_id}:{communications.channel}`
+(`normalize.go:99`), and `channel` is the **constant `'upwork'`**:
+
+```
+SELECT channel, count(*), count(DISTINCT client_id) FROM communications GROUP BY channel;
+ upwork | 1650 | 26          -- one value, every row, every client
+
+SELECT DISTINCT split_part(thread_key,':',3) FROM normalized_threads WHERE thread_key LIKE 'upwork_crm:%';
+ upwork                       -- in the ops db too
+```
+
+So `target_ref = thread_key` is **client-scoped in production**, selecting
+exactly the candidate set the old `LIKE 'upwork_crm:{client}:%'` did. The rooms
+are real but the normalizer never reads them: `communications.upwork_room_id`
+has 296 populated rows over 11 distinct rooms, and one client
+(`e2ef9b65-9813-4d79-ac10-0e1813f788ff`) already has two — Salvador's reported
+scenario is real data, not a hypothetical.
+
+**What this does and does not change.**
+
+- It does NOT make the shipped change wrong. The equality is still strictly
+  tighter than the `LIKE`, and the outcome on ambiguity is refusal — the
+  reversible direction. No invariant is violated and nothing needs reverting.
+- It DOES mean the thing preventing a wrong-row bind today is the **multi-match
+  refusal**, not room identity. Every artifact that said otherwise (commit
+  message, `sink.go` comment, the IK paragraph, this file's Resolution section)
+  overstated the mechanism, and the `RoomDiscrimination` regression test proves
+  room scoping with channel values (`chat`, `room-b`) the source has never
+  emitted. The code comment and IK are corrected; this section corrects the
+  record here.
+- It makes the "survives the flow-3 transition" argument in "Superseded: the era
+  assumption" conditional rather than established: it lands only once
+  `thread_key` is keyed on `upwork_room_id`.
+
+**Follow-up (NOT this ticket):** key `thread_key` on `upwork_room_id`. It re-keys
+every existing upwork thread and touches dedup and `external_refs`, so it is its
+own ticket, and it should land before the Upwork tier goes live.
+
+### Also from the review, closed here
+
+- **Two coverage gaps, now closed.** The multi-match refusal and the
+  already-claimed pre-check were both decided policy with nothing pinning them.
+  Added `AmbiguousPrefixConfirmsNothing` and
+  `ClaimedExternalIDSkipsWithoutFailingTheRun`, and mutation-tested both:
+  reverting `matches > 1` to newest-wins fails the first; disabling the
+  pre-check fails the second with
+  `duplicate key value violates unique constraint "deliveries_sent_external_idx"`
+  — confirming the pre-check's real cost is a **crashed normalize run**, not a
+  missed confirmation.
+- **Two factual errors in the IK paragraph this ticket added**, both corrected:
+  google's matcher joins on `d.from_account_id`, not `thread_id`; slackweb uses
+  `target_ref=$1`, not `target_ref = ANY(...)`. They were carried over from this
+  file's own "structural question" section without being checked against the
+  source.
+- **Recorded, not fixed:** upworkcrm has no reconciler, so unlike slackweb an
+  ambiguity refusal here is silent — two rows sit unconfirmed with nothing
+  surfacing them. And with exact matching a non-canonical `target_ref` is now
+  permanently unconfirmable where the `LIKE` was forgiving, while
+  `draft_delivery` still validates only non-emptiness for upwork
+  (`internal/tools/delivery.go:107-108`). Both are in IK.
+- **Accepted as a four-matcher pattern question, not an SWT-18 defect:** the
+  `delivery_confirmed` insert sits outside the transaction, so a crash between
+  commit and insert loses the event. jira and slackweb have the identical hole,
+  and the event drives no orchestrator rule, so what is lost is an audit row
+  rather than a lifecycle transition.

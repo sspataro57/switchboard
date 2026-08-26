@@ -311,15 +311,30 @@ const upworkMatchPrefixLen = 120
 // disagree with no error anywhere (IK: the SWT-13 canonicalization landmine).
 // textmatch.NormalizedPrefix is the single spelling.
 //
-// 2. EXACT ROOM matching. The scope was target_ref LIKE 'upwork_crm:{client}:%'
-// — every room that client has — with ORDER BY sent_at DESC LIMIT 1 breaking
-// ties by recency. A client with several chat rooms and a reusable status line
-// therefore had a real path to binding a message from room A onto a delivery
-// sent in room B; the id is then locked to the wrong row by
-// deliveries_sent_external_idx and the correct row can never be claimed.
-// target_ref for an upwork_chat delivery IS the normalizer's thread_key
-// (internal/drafts/store.go assigns it verbatim from normalized_threads), so
-// equality is available and is what the room actually means.
+// 2. EXACT thread_key matching. The scope was
+// target_ref LIKE 'upwork_crm:{client}:%' with ORDER BY sent_at DESC LIMIT 1
+// breaking ties by recency, so a delivery sent AFTER a message already existed
+// could still win over the row that produced it. target_ref for an upwork_chat
+// delivery IS the normalizer's thread_key (internal/drafts/store.go assigns it
+// verbatim from normalized_threads), so equality is available and the LIKE was
+// never buying anything.
+//
+// READ THIS BEFORE TRUSTING THE WORD "ROOM" (corrected 2026-08-26 by review;
+// SWT-18 originally shipped claiming this was room-scoping, and it is not).
+// thread_key is Provider:{client_id}:{communications.channel} (normalize.go:99)
+// and `channel` is the CONSTANT 'upwork' on every row in the source db — 1,650
+// rows, 26 clients, one value — so thread_key is one thread per CLIENT and this
+// equality selects exactly the candidate set the old LIKE did. The real room id
+// is communications.upwork_room_id, which the normalizer never reads (296 rows
+// carry one, 11 distinct rooms, and one client already has two).
+//
+// So on today's data the thing that actually prevents the wrong-row bind is the
+// multi-match refusal below, NOT this predicate. The predicate is still correct
+// and still strictly tighter — it is what makes the fix survive the day
+// thread_key becomes room-keyed — but do not read it as protection that is
+// operating now. Making room identity real is a normalizer change (thread_key
+// on upwork_room_id) and belongs to its own ticket, because it re-keys every
+// existing upwork thread.
 //
 // There is deliberately NO time bound, unlike the other three. On this tier a
 // clock floor is not merely unnecessary, it is a no-op that looks like a fix:

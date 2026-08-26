@@ -80,13 +80,24 @@ happens, not before anything else.
 observed outbound Upwork message to the `deliveries` row that produced it. It
 compared `left(body,120)` **raw** (so any whitespace the browser round trip
 altered made the match fail permanently) and scoped to
-`target_ref LIKE 'upwork_crm:{client}:%'` — **every room that client has** — with
-recency breaking ties, so a message from one room could claim a delivery sent in
-another. It now compares `textmatch.NormalizedPrefix` on both sides in Go and
-matches the exact room (`target_ref = thread_key`). No time bound was added, on
-purpose: nothing writes `send_attempted_at` for this channel, so the sibling
-clause would have been always-true. Full reasoning in
+`target_ref LIKE 'upwork_crm:{client}:%'` with recency breaking ties, so a
+delivery sent after a message already existed could still win over the row that
+produced it. It now compares `textmatch.NormalizedPrefix` on both sides in Go,
+matches `target_ref = thread_key` exactly, and refuses when two pending
+deliveries share the prefix. No time bound was added, on purpose: nothing writes
+`send_attempted_at` for this channel, so the sibling clause would have been
+always-true. Full reasoning in
 `docs/bugs/upwork-matcher-hardening_DIAGNOSIS.md`.
+
+**Correction, 2026-08-26** (this handoff first described the change as "exact
+room matching" — a post-merge review showed that overstates it): `thread_key`'s
+third segment is `communications.channel`, which is the constant `'upwork'` on
+all 1,650 source rows, so the equality is client-scoped in production and
+selects the same candidates the `LIKE` did. The protection that actually
+operates today is the multi-match refusal. The change is still correct and still
+tighter — nothing to redeploy differently — but do not expect room-level
+behaviour from it. Real room identity needs `thread_key` keyed on
+`communications.upwork_room_id` and is a separate ticket.
 
 ## Deliberately NOT in this handoff
 
@@ -127,10 +138,10 @@ database side.
 
 ## One caveat, stated rather than hidden
 
-A `go-reviewer` pass on this diff was requested and has not returned a verdict
-yet (the first attempt died on an auth error before reading anything). The code
-is merged on the strength of: reproduction proved red before the fix and green
-after on the same fixtures, plus the full unit and integration suites green,
-22/22 packages. If the review comes back with a finding that changes the code,
-you will get a `0.4.4` and this handoff will be superseded — nothing you deploy
-now becomes wrong, it would just be one tag behind again.
+The `go-reviewer` pass has since returned. It found **no invariant violation, no
+transaction bug and no scope drift in the code**, so `0.4.3` stands and there is
+no `0.4.4`. What it did find was the room-scoping overstatement corrected above,
+two wrong sentences in an institutional-knowledge paragraph, and two missing
+regression tests. All are documentation and test changes landing in a follow-up
+commit; **none of them changes a compiled byte**, so the image you already have
+is still the right one.

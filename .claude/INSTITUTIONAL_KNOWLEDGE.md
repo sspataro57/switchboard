@@ -58,15 +58,43 @@ NOT mechanized: the time floor — its correct spelling differs per channel, so 
 source scan would certify the very no-op described below.
 
 **The four matchers agree on the comparison and on NOTHING else. Read the
-sibling before copying it.** Scope: gmail joins on `thread_id`, jira on
-`target_ref=`, slackweb on `target_ref = ANY(...)`, upwork on `target_ref=` (the
-thread_key — it was a client-wide `LIKE` until SWT-18, which let a message from
-one room bind a delivery sent in another). Status set: `('sending','sent',
-'failed')` / `('sending','sent')` / `('sent')`. Multi-match: google, slackweb and
-(since SWT-18) upwork REFUSE; jira keeps newest-wins as a documented carry-over.
-Refusing is the reversible choice — two unconfirmed rows can still be confirmed
-later, while one wrong stamp burns the external id under
-`deliveries_sent_external_idx` and locks the correct row out permanently.
+sibling before copying it.** Scope: google joins on `d.from_account_id` (against
+the raw item's `source_account_id`), jira on `target_ref=`, slackweb on
+`target_ref=`, upwork on `target_ref=` (was a client-wide `LIKE` until SWT-18).
+Status set: `('sending','sent','failed')` / `('sending','sent')` / `('sent')`.
+Multi-match: google, slackweb and (since SWT-18) upwork REFUSE; jira keeps
+newest-wins as a documented carry-over. Refusing is the reversible choice — two
+unconfirmed rows can still be confirmed later, while one wrong stamp burns the
+external id under `deliveries_sent_external_idx` and locks the correct row out
+permanently. **Cost of refusing, worth knowing before you copy it:** slackweb
+backs its refusal with a reconciler that flags stuck rows
+(`slackweb/reconcile.go`); upworkcrm has no equivalent, so an upwork refusal is
+SILENT — two rows sit unconfirmed and nothing surfaces them.
+
+### "Exact room matching" on Upwork is not room matching (SWT-18, corrected by review)
+**Location:** `internal/connector/upworkcrm/normalize.go:99`, `sink.go`
+SWT-18 replaced upwork's client-wide `target_ref LIKE` with `target_ref =
+thread_key` and described it — in the commit, the code comment, the diagnosis and
+this file — as scoping the match to one room. **It does not, on real data.**
+`thread_key` is `upwork_crm:{client_id}:{communications.channel}` and `channel`
+is the constant `'upwork'` for every row in the source db (1,650 rows, 26
+clients, one distinct value; every `normalized_threads` key in ops ends `:upwork`).
+So the equality selects exactly the candidate set the `LIKE` did, and the thing
+actually preventing a wrong-row bind today is the MULTI-MATCH REFUSAL.
+The real room id is `communications.upwork_room_id`, which the normalizer never
+reads — 296 rows carry one, 11 distinct rooms, and one client already has two,
+which is the scenario Salvador reported. Keying `thread_key` on it is a
+normalizer change that re-keys every existing upwork thread: its own ticket.
+**The general lesson, which is the same one three entries above:** a predicate
+whose discriminating column is a constant in production is a no-op that passes
+any test willing to fabricate values for it — SWT-18's `RoomDiscrimination` test
+proves room scoping using `chat` and `room-b`, channel values the source has
+never emitted. Verify a claimed data path against the DATA, not only the writes.
+Related and unguarded: with exact matching a non-canonical `target_ref` is now
+permanently unconfirmable where the `LIKE` was forgiving, and `draft_delivery`
+validates only that an upwork `target_ref` is non-empty
+(`internal/tools/delivery.go:107-108`) with no canonicalization — the SWT-13
+landmine's fourth instance.
 Note the review's hypothesis was WRONG in a useful way: it guessed the mismatch
 came from `ScrubAIAttribution` running at send but not at store. It doesn't —
 `draft_delivery` and `update_delivery` both store scrubbed bodies and the scrub is
