@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/textmatch"
 )
 
 // PGSink is the ops-db side of the connector: the ingest Sink and the
@@ -268,10 +269,11 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 
 	// Loop closure, assisted tier (invariant 5 / SWT-8): a manually-sent
 	// upwork_chat delivery has no Message-ID, so the confirmation is a
-	// post-hoc match — an OUTBOUND communication for the same client whose
-	// body starts with the delivery body's prefix claims the delivery,
-	// filling sent_external_id (the partial unique index makes double-claims
-	// impossible) + confirmed_at + a delivery_confirmed event.
+	// post-hoc match — an OUTBOUND communication IN THE SAME ROOM whose body
+	// opens the same way (whitespace-normalized) claims the delivery, filling
+	// sent_external_id (the partial unique index makes double-claims
+	// impossible) + confirmed_at + a delivery_confirmed event. The scope was
+	// client-wide and the comparison raw until SWT-18.
 	if nm.Direction == "outbound" {
 		if err := s.confirmUpworkDelivery(ctx, nm); err != nil {
 			return err
@@ -282,38 +284,165 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 
 const upworkMatchPrefixLen = 120
 
-// confirmUpworkDelivery runs the assisted-tier post-hoc matcher.
+// confirmUpworkDelivery runs the assisted-tier post-hoc matcher: an observed
+// OUTBOUND Upwork message claims the deliveries row that produced it, filling
+// sent_external_id + confirmed_at and emitting delivery_confirmed.
+//
+// It is the fourth of four post-hoc body matchers (google, jira, slackweb,
+// here) and until SWT-18 it was the only one that had received neither of the
+// two hardenings the others did. Both land here together, and they must:
+// normalization strictly WIDENS the candidate set, so shipping it without
+// narrowing the scope would make the wrong-row bind MORE likely, not less.
+//
+// 1. NORMALIZED comparison, computed in Go on both sides. The query used to
+// compare left(body,120) raw — the text we stored against the text Upwork
+// handed back after a browser round trip and a human copy/paste. A provider may
+// change line endings, trailing spaces, or blank-line runs without changing the
+// message, and any such change made the match fail PERMANENTLY, because nothing
+// retries a comparison that is already exact. The row then stays unclaimable
+// with sent_external_id NULL forever. This is not new policy: the SPEC this
+// matcher shipped against (08-draft-deliveries, criterion 8) already said
+// "whitespace-normalized"; the code never did it, and the test that shipped
+// alongside seeded ONE constant on both sides of the comparison, so raw and
+// normalized passed identically.
+//
+// Do NOT re-spell the rule in SQL. Postgres's POSIX \s does not cover the
+// unicode spaces Go's strings.Fields does, so an NBSP alone makes the two
+// disagree with no error anywhere (IK: the SWT-13 canonicalization landmine).
+// textmatch.NormalizedPrefix is the single spelling.
+//
+// 2. EXACT ROOM matching. The scope was target_ref LIKE 'upwork_crm:{client}:%'
+// — every room that client has — with ORDER BY sent_at DESC LIMIT 1 breaking
+// ties by recency. A client with several chat rooms and a reusable status line
+// therefore had a real path to binding a message from room A onto a delivery
+// sent in room B; the id is then locked to the wrong row by
+// deliveries_sent_external_idx and the correct row can never be claimed.
+// target_ref for an upwork_chat delivery IS the normalizer's thread_key
+// (internal/drafts/store.go assigns it verbatim from normalized_threads), so
+// equality is available and is what the room actually means.
+//
+// There is deliberately NO time bound, unlike the other three. On this tier a
+// clock floor is not merely unnecessary, it is a no-op that looks like a fix:
+// nothing writes send_attempted_at for upwork_chat (send_delivery is
+// policy-denied for the channel, so the only verb that moves one of these rows
+// to 'sent' is mark_delivery_sent, which writes status and sent_at only), and
+// sent_at is the instant a HUMAN clicked "mark sent" — legitimately hours after
+// the message went out. A floor on sent_at would convert a silent miss into a
+// PERMANENT refusal. Room identity settles what the floor was reaching for,
+// without reasoning about clocks at all. See IK, "The attempt-time floor is
+// INERT on the assisted tier".
+//
+// Multi-match policy is REFUSE, chosen rather than inherited. google and
+// slackweb refuse; jira keeps newest-wins as a documented carry-over. Refusing
+// is the reversible half of the trade: two unconfirmed rows can still be
+// confirmed by a later distinct message or resolved by a human, whereas one
+// wrong stamp burns the external id under the unique index and locks the
+// correct row out permanently (invariant 4).
 func (s *PGSink) confirmUpworkDelivery(ctx context.Context, nm NormalizedMessage) error {
-	if nm.ExternalMessageID == "" || nm.BodyText == "" {
+	if nm.ExternalMessageID == "" || nm.ThreadKey == "" {
+		// Without a room there is nothing to match on: target_ref is never
+		// empty on a real delivery (draft_delivery rejects it), so an empty
+		// key would simply select nothing — but the guard says why, rather
+		// than leaving it to the reader of the query. slackweb refuses the
+		// same way.
 		return nil
 	}
-	// The delivery's target_ref is the thread_key upwork_crm:{client}:{...};
-	// scope the match to the same client (any channel suffix).
-	clientPrefix := Provider + ":" + clientIDFromThreadKey(nm.ThreadKey) + ":%"
-
-	prefix := nm.BodyText
-	if len(prefix) > upworkMatchPrefixLen {
-		prefix = prefix[:upworkMatchPrefixLen]
-	}
-
-	var deliveryID, taskID int64
-	err := s.pool.QueryRow(ctx,
-		`UPDATE deliveries SET sent_external_id=$1, confirmed_at=now(), updated_at=now()
-		 WHERE id = (
-		   SELECT id FROM deliveries
-		   WHERE channel='upwork_chat' AND status='sent'
-		     AND sent_external_id IS NULL AND confirmed_at IS NULL
-		     AND target_ref LIKE $2
-		     AND left(body, $3) = left($4, $3)
-		   ORDER BY sent_at DESC LIMIT 1)
-		 RETURNING id, task_id`,
-		nm.ExternalMessageID, clientPrefix, upworkMatchPrefixLen, nm.BodyText).Scan(&deliveryID, &taskID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	want := textmatch.NormalizedPrefix(nm.BodyText, upworkMatchPrefixLen)
+	if want == "" {
+		// The old guard was nm.BodyText == "", which a whitespace-only body
+		// walks straight past. Normalized, such a body is "" and would match
+		// every candidate that also normalizes to "" — claiming a delivery on
+		// no evidence whatsoever. The other three matchers refuse it up front.
 		return nil
 	}
+
+	// Refuse a message some delivery already owns. Without this, a replay
+	// (--all, or a re-poll after normalized_at is cleared) that finds a second
+	// unconfirmed row with the same prefix would try to stamp an id the unique
+	// index already holds, failing the whole normalize run rather than skipping
+	// one confirmation. slackweb guards the same way.
+	var claimed bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM deliveries
+		   WHERE channel='upwork_chat' AND sent_external_id=$1)`,
+		nm.ExternalMessageID).Scan(&claimed); err != nil {
+		return fmt.Errorf("check upwork external id claim: %w", err)
+	}
+	if claimed {
+		return nil
+	}
+
+	// Selection and stamping run in ONE transaction with the candidates locked
+	// FOR UPDATE (the SWT-16 jira shape). The statement this replaces was a
+	// bare `WHERE id = (subquery)` carrying no guards on the outer UPDATE at
+	// all, so restating them below is strictly tighter, not a new exposure.
+	// Nothing can block on an in-flight upwork send: there is no automated one.
+	//
+	// status='sent' only, unchanged. An upwork_chat row has no 'sending' phase
+	// to self-heal from — switchboard never dispatches the click.
+	//
+	// COALESCE on body because it is nullable (0001) and scanning NULL into a
+	// string ERRORS, which would fail the entire normalize run instead of this
+	// one match.
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("confirm upwork delivery: %w", err)
+		return fmt.Errorf("begin upwork delivery match: %w", err)
 	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx,
+		`SELECT id, task_id, COALESCE(body,'') FROM deliveries
+		  WHERE channel='upwork_chat' AND status='sent'
+		    AND sent_external_id IS NULL AND confirmed_at IS NULL
+		    AND target_ref=$1
+		  ORDER BY id DESC
+		  FOR UPDATE`, nm.ThreadKey)
+	if err != nil {
+		return fmt.Errorf("select upwork deliveries to confirm: %w", err)
+	}
+	var deliveryID, taskID int64
+	matches := 0
+	for rows.Next() {
+		var id, task int64
+		var body string
+		if err := rows.Scan(&id, &task, &body); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan upwork delivery candidate: %w", err)
+		}
+		if textmatch.NormalizedPrefix(body, upworkMatchPrefixLen) == want {
+			matches++
+			if deliveryID == 0 {
+				deliveryID, taskID = id, task
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate upwork delivery candidates: %w", err)
+	}
+	if deliveryID == 0 || matches > 1 {
+		return nil
+	}
+
+	// The IS NULL guards restated here are what keep a replay idempotent: an id
+	// is never overwritten, so no second delivery_confirmed is emitted for the
+	// same claim. Under FOR UPDATE they are belt-and-braces; the RowsAffected
+	// check is not, because the event below must not fire on a stamp that did
+	// not happen.
+	tag, err := tx.Exec(ctx,
+		`UPDATE deliveries SET sent_external_id=$2, confirmed_at=now(), updated_at=now()
+		  WHERE id=$1 AND sent_external_id IS NULL AND confirmed_at IS NULL`,
+		deliveryID, nm.ExternalMessageID)
+	if err != nil {
+		return fmt.Errorf("confirm upwork delivery %d: %w", deliveryID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit upwork delivery match %d: %w", deliveryID, err)
+	}
+
 	payload, _ := json.Marshal(map[string]any{"delivery_id": deliveryID, "matched_external_id": nm.ExternalMessageID})
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1, 'delivery_confirmed', $2)`,
@@ -321,15 +450,6 @@ func (s *PGSink) confirmUpworkDelivery(ctx context.Context, nm NormalizedMessage
 		return fmt.Errorf("insert delivery_confirmed event: %w", err)
 	}
 	return nil
-}
-
-// clientIDFromThreadKey extracts the client uuid from upwork_crm:{client}:{channel}.
-func clientIDFromThreadKey(key string) string {
-	parts := strings.SplitN(key, ":", 3)
-	if len(parts) >= 2 {
-		return parts[1]
-	}
-	return key
 }
 
 func (s *PGSink) markNormalized(ctx context.Context, rawItemID int64) error {
