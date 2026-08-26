@@ -35,11 +35,38 @@ forever. Since SWT-16 that has a second cost: capture sees an outbound message n
 delivery claims and logs `outbound_observed` — a false claim that switchboard's
 own comment was sent by hand.
 Fix: compare `textmatch.NormalizedPrefix` (whitespace-collapsed, rune-truncated).
-**One spelling only** — the rule now lives in `internal/textmatch` and is used by
-slackweb's matcher, jira's matcher, and capture's preview. Do NOT re-spell it in
-SQL: Postgres's POSIX `\s` does not cover the unicode spaces Go's
+**One spelling only** — the rule lives in `internal/textmatch`. Do NOT re-spell it
+in SQL: Postgres's POSIX `\s` does not cover the unicode spaces Go's
 `strings.Fields` does, so an NBSP alone makes the two disagree, silently. This is
 the SWT-13 canonicalization landmine in a second costume.
+**There are FOUR post-hoc body matchers; a fix to this rule must reach all four**
+(naming them because SWT-16 named only three and upwork was missed for five
+weeks): `google/sink.go` `confirmDeliveryByBodyPrefix`, `jira/sink.go`
+`matchByBodyPrefix`, `slackweb/sink.go` `confirmDelivery`, `upworkcrm/sink.go`
+`confirmUpworkDelivery` — plus capture's preview. Upwork's was the OLDEST and
+shipped comparing raw bytes even though its own SPEC (08-draft-deliveries,
+criteria 8) said "whitespace-normalized"; the test that shipped with it seeded
+one constant on BOTH sides of the comparison, so raw and normalized passed
+identically. **A matcher test whose two bodies are the same string tests
+nothing.**
+Since SWT-18 the rule is **mechanically enforced**: `internal/textmatch/
+callsites_test.go` scans `internal/connector/*/sink.go` and fails any file that
+stamps `sent_external_id`/`confirmed_at` without calling
+`textmatch.NormalizedPrefix`. It is a plain unit test (no build tag, no db) and
+would have failed on 2026-07-31, the day SWT-16 left upwork behind. Deliberately
+NOT mechanized: the time floor — its correct spelling differs per channel, so a
+source scan would certify the very no-op described below.
+
+**The four matchers agree on the comparison and on NOTHING else. Read the
+sibling before copying it.** Scope: gmail joins on `thread_id`, jira on
+`target_ref=`, slackweb on `target_ref = ANY(...)`, upwork on `target_ref=` (the
+thread_key — it was a client-wide `LIKE` until SWT-18, which let a message from
+one room bind a delivery sent in another). Status set: `('sending','sent',
+'failed')` / `('sending','sent')` / `('sent')`. Multi-match: google, slackweb and
+(since SWT-18) upwork REFUSE; jira keeps newest-wins as a documented carry-over.
+Refusing is the reversible choice — two unconfirmed rows can still be confirmed
+later, while one wrong stamp burns the external id under
+`deliveries_sent_external_idx` and locks the correct row out permanently.
 Note the review's hypothesis was WRONG in a useful way: it guessed the mismatch
 came from `ScrubAIAttribution` running at send but not at store. It doesn't —
 `draft_delivery` and `update_delivery` both store scrubbed bodies and the scrub is
@@ -62,6 +89,27 @@ The two-minute allowance is not decoration — `send_attempted_at` is Postgres
 comparison would turn a second of skew into a PERMANENT refusal.
 **Rule: any post-hoc matcher that identifies our own message by CONTENT needs a
 lower time bound.** Content matching alone cannot tell two identical sends apart.
+
+### The attempt-time floor is INERT on the assisted tier
+**Location:** `internal/tools/delivery.go` `markDeliverySent`, found SWT-18
+`send_attempted_at` is written by exactly two places, both inside `send_delivery`
+(gmail `delivery.go:513`, slack `delivery.go:941`), plus migration 0012's one-shot
+backfill. `send_delivery` is policy-DENIED for `upwork_chat` (`matrix.go:120-125`,
+`channel_assisted`) and `prefill_delivery` refuses any non-`slack_reply` channel,
+so the only verb that moves an upwork row to `sent` is `mark_delivery_sent` — and
+it writes `status`/`sent_at` only. **Every `upwork_chat` row created since 0012
+has `send_attempted_at` NULL, forever.** Consequence: pasting the sibling clause
+`(send_attempted_at IS NULL OR send_attempted_at - interval '2 minutes' <= $2)`
+into an assisted-tier matcher yields a clause that is ALWAYS TRUE — a no-op that
+turns a repro test green (the fixture seeds the column; production never does)
+while production behaviour is unchanged. slackweb's `sink.go:210-219` says this
+out loud for its own assisted rows; upwork is assisted in its entirety.
+Use google's `COALESCE(send_attempted_at, sent_at)` spelling instead — but note
+`sent_at` on an assisted row is the instant a HUMAN clicked "mark sent", which is
+legitimately hours after the message, so the 2-minute skew allowance is wrong
+here in the opposite direction and would create PERMANENT refusals.
+**Rule: before adding a time floor, check that some code path actually writes the
+column for that channel.** Verify a claimed data path at every write site.
 
 ### A dashboard page that looks empty may be the wrong page
 **Location:** `internal/dashboard/auth.go`, bit 2026-08-02 (fixed same day)
