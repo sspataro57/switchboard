@@ -133,8 +133,17 @@ changes.
 
 ## Deploy
 
-Code-only, so the cluster needs an image build and a tag bump on
-`connector-upworkcrm` (kube repo, kube session's work).
+**Image is built and pushed — do not rebuild:**
+
+```
+192.168.50.20:5000/switchboard:0.5.0
+digest sha256:12a4e2373996ffd22a18b7a1774597d7d79db4b1853e6743843a52731f06cbb7
+built from main b695019 (clean tree)
+```
+
+The cluster needs a tag bump on `connector-upworkcrm` (kube repo, kube session's
+work). **This one is not optional the way SWT-18's was** — until it lands, new
+Upwork messages keep getting legacy keys, so the seam below keeps widening.
 
 **Bump the image first, then re-key** — but for a narrower reason than "the old
 image undoes it", which is what an earlier draft of this runbook claimed and is
