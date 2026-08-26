@@ -624,6 +624,20 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
   says. Only deleting the PR removes that, at the cost of its review history.
   A partial clean for that price is not worth it. The forward rule is unchanged:
   never write a new one.
+- **Four commits carry a `Claude-Session:` trailer, and they stay too** (Salvador,
+  2026-08-26): `c83202f`, `b522208`, `bb6b0f7` and `ae37ec5` — the SWT-17 SPEC,
+  the SWT-18 fix, its merge, and the SWT-18 deploy handoff. Same class of
+  violation as the three above (CLAUDE.md: "no AI references in commits — ever")
+  and caught by the go-reviewer pass, not by a hook. Decision: leave them and
+  record it. They are only five commits deep with no open PR, so a rewrite is
+  cheaper here than the `f0ab2cd` case — but rewriting re-SHAs the merge commit
+  and the two SHAs already quoted in `docs/runbooks/HANDOFF-kube-swt18.md` and in
+  the SWT-18 Jira comments, and buys nothing an honest record does not.
+  **Nothing appends this trailer** — no hook, nothing in `.claude/settings.json`;
+  it was typed into the `git commit` messages by the session. Forward rule
+  unchanged, and it is worth stating in the form that would have caught it: the
+  ban covers ANY AI reference, not just `Co-Authored-By`. Check the message you
+  are about to write, not just the trailer block.
 - Branches (once the repo has remotes/PR flow): `ticket-NN-short-kebab` for build-order
   steps, `bug-short-kebab` for bugs.
 - Specs live in `docs/tickets/`, bug artifacts in `docs/bugs/`.
