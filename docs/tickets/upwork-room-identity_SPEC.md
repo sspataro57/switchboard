@@ -407,6 +407,86 @@ struct, so the discriminating keys are present-and-zero in both — a predicate
 whose discriminating column is a constant, which is the exact mistake SWT-18's
 review caught.
 
+## Pre-verified against production, 2026-08-26 (read-only dry run)
+
+Before any test existed, the REAL normalizer (`NormalizeCommunication`, not a
+reimplementation) was applied to every production raw communication row and the
+keys it produced were parsed back with `ParseThreadKey`. Nothing was written.
+
+```
+total=2442  roomed=433  legacy=2009  normalize_failed=0  unparseable=0
+distinct_threads=38  distinct_rooms=14  clients_with_rooms=11  multi_room_clients=2
+```
+
+Three things this establishes that no unit test can:
+
+1. **Go and SQL agree exactly.** 433 roomed from the normalizer against 433 from
+   the independent `COALESCE(NULLIF(...), NULLIF(...))` query over the same rows.
+   That is criterion 23's property, demonstrated on real data before
+   implementation was reviewed.
+2. **Every key the normalizer produces parses.** `unparseable=0` — the producer
+   and the consumer of the format agree over 2,442 real rows, including whatever
+   punctuation real room ids and client uuids contain.
+3. **No row fails to normalize.** `normalize_failed=0`, so the re-key cannot
+   strand a message.
+
+**Correcting fact 7, which this SPEC recorded as unmeasured.** It said one client
+has two rooms and that whether more are multi-room once `send_room_id` is counted
+"has NOT been measured". Measured now — **there are TWO multi-room clients**:
+
+```
+43431d4c-d34a-43f2-b49b-2dc70c52c096   3 rooms
+e2ef9b65-9813-4d79-ac10-0e1813f788ff   2 rooms
+```
+
+So the "usable alone" check should name both, and the 3-room client is the better
+demonstration. Note this does not change the design — it enlarges the evidence
+that room identity is worth having, since the client with three rooms is
+currently one undifferentiated thread.
+
+## The corpus is LIVE — do not hardcode its counts (corrected 2026-08-26, during implementation)
+
+Criterion 23 originally asserted `432 roomed / 2,009 legacy / 2,441 total` as
+equalities, on my instruction, arguing that a range would let a one-column
+implementation pass. **The argument was right and the form was wrong.**
+`connector-upworkcrm` ingests every 15 minutes, and the corpus moved while the
+ticket was being implemented:
+
+```
+2026-08-26 ~19:30 UTC   2,441 raw / 432 roomed
+2026-08-26 ~21:30 UTC   2,442 raw / 433 roomed
+```
+
+A frozen literal therefore fails on any day a message arrives, which is every
+day — an alarm that cries wolf, which this repo has an IK entry about.
+
+**The rule instead: assert the normalizer's output against the same corpus
+measured at verification time by an INDEPENDENT computation.** The count of
+messages on `:room:` keys must EQUAL
+
+```sql
+SELECT count(*) FROM raw_source_items r
+  JOIN source_accounts a ON a.id = r.source_account_id
+ WHERE a.provider='upwork_crm' AND r.external_id LIKE 'communications:%'
+   AND COALESCE(NULLIF(r.raw_json->>'upwork_room_id',''),
+                NULLIF(r.raw_json->>'send_room_id','')) IS NOT NULL
+```
+
+and the legacy count must equal the total minus that. Still an equality, still
+exact, and a one-column implementation still fails it — it would produce the
+`upwork_room_id`-only count against a coalesce-derived expectation. Strictly
+better than both a literal and a range, because the two sides are computed
+independently rather than one being remembered.
+
+`NULLIF` on both columns because the Go reader treats an empty string as absent,
+identically to a missing key. Zero rows carry an empty-string room today, so both
+spellings agree — the `NULLIF` keeps the SQL measuring the Go semantics rather
+than drifting a row if that ever changes.
+
+**Fixture-owned corpora keep exact literals.** This applies only to assertions
+against production. Every count quoted elsewhere in this SPEC is "as of
+2026-08-26" and is illustration, not an invariant.
+
 ## Acceptance criteria
 
 1. `upworkcrm.ThreadKey` / `ParseThreadKey` exist in
@@ -519,13 +599,29 @@ review caught.
 22. `go test ./...` and `make integration` are green. The upworkcrm integration
     suite stays in the mutual-cleanup pact and its prefix cleanups
     (`integration_test.go:79,81`) still cover both key shapes.
-23. **The production re-key produces EXACTLY these counts** (fact 9), asserted as
-    equalities, never as a range: **432** messages on `:room:` keys, **2,009** on
-    unchanged legacy keys, **2,441** total — and the client
-    `e2ef9b65-9813-4d79-ac10-0e1813f788ff` on two distinct roomed keys. A range
-    would let a one-column implementation pass, which is precisely the bug
-    criterion 3 exists to catch: reading `upwork_room_id` alone yields 296 roomed,
-    not 432. This is the "usable alone" check.
+23. **The production re-key's roomed count must EQUAL an independently computed
+    expectation, measured at the same moment** — never a frozen literal.
+    **(SUPERSEDES this criterion's original text, which named 432 / 2,009 /
+    2,441; those were true on 2026-08-26 and the corpus moved to 2,442 / 433
+    within the same afternoon. See "The corpus is LIVE" above.)** The check:
+
+    ```sql
+    -- expected, from the raw JSON
+    COALESCE(NULLIF(raw_json->>'upwork_room_id',''), NULLIF(raw_json->>'send_room_id','')) IS NOT NULL
+    -- actual, from the keys the normalizer wrote
+    thread_key LIKE 'upwork\_crm:%:room:%'
+    ```
+
+    The two must be equal, and the legacy count must equal total minus roomed.
+    A range would let a one-column implementation pass, which is precisely the
+    bug criterion 3 exists to catch — such an implementation lands roughly two
+    thirds short on the outbound side while producing well-formed keys and no
+    errors. Also assert that clients with several rooms now occupy several
+    roomed threads (two such clients as of 2026-08-26, with 3 and 2 rooms — read
+    the count from the query, not from this line). Fixture-owned corpora keep
+    exact literals; this rule is only for production. The runbook
+    `docs/runbooks/upwork-room-rekey.md` carries the query verbatim. This is the
+    "usable alone" check.
 
 ## Data model changes
 
@@ -864,3 +960,53 @@ Two things closed after the first fold-in, recorded so they are not reopened:
   at send time, and the post-hoc matcher becomes a redundant safety net. The room
   keying landed here is what makes that transition graceful, and `send_room_id`
   shows the CRM already tracks the destination room at dispatch.
+
+---
+
+## Adversarial review (Codex, 2026-08-26) — what was fixed and what was deferred
+
+Four findings, three rated high. All four verified against the source before
+acting; two were fixed in this ticket, two are deferred to SWT-20 with a
+mitigation shipped here.
+
+**Fixed here.**
+
+1. *A parseable-but-nonexistent target is a client-wide confirmation wildcard.*
+   Opened by this ticket: `SameConversation` treats an unroomed key as compatible
+   with any room of the client (the legacy tolerance), and `draft_delivery`
+   checked only SHAPE — so `upwork_crm:{real-client}:typo` could be marked sent
+   and then confirmed by any outbound message from that client, burning its
+   external id on a delivery naming no real conversation. `draft_delivery` now
+   requires the target to name an ingested `normalized_threads` row. Legacy keys
+   are real threads, so the tolerance costs nothing. Tested, and
+   mutation-verified by disabling the check.
+2. *The reconciler's alarm named two verbs that both rejected the row it flags.*
+   `mark_delivery_sent` takes `approved` (plus two `slack_reply` edges) and the
+   flagged row is `sent`; `mark_delivery_failed` took `slack_reply` only. The
+   alarm was unactionable — worse than no alarm, because it trains the reader to
+   ignore the channel. `mark_delivery_failed` now accepts `upwork_chat` stuck at
+   `sent` (human-only, off MCP, still refusing any row carrying
+   `sent_external_id` or `confirmed_at`), and the note names it and says plainly
+   when to do nothing. No policy change: the verb is `humanOnly` and not
+   channel-gated.
+
+**Deferred to SWT-20, with a mitigation shipped here.**
+
+3. *Delivery targeting has no provenance for the originating room.* `DeliverTasks`
+   resolves a target from the task's CLIENT, so a task raised by room A can be
+   drafted into room B — and since this ticket a wrong-room delivery can never
+   confirm, surfacing only via the reconciler. The real fix is recording which
+   thread a task came from, which needs a schema change.
+   **Mitigation shipped:** when a client has MORE THAN ONE roomed thread and the
+   task carries no provenance, the draft worker now refuses to target it at all,
+   routing to the existing "unresolvable — tell the human" path. Refusing is
+   reversible; a wrong-room send is not. Two production clients are in this state.
+4. *Every outbound message locks every unresolved Upwork delivery.* The matcher
+   selects all `sent`+unconfirmed upwork rows `FOR UPDATE` and filters in Go, and
+   flagged rows never leave that set, so the cost is O(outbound × unresolved)
+   once the tier is live. Zero rows today. The fix is persisting indexed
+   structured delivery identity (client, optional room) to shortlist before
+   locking — a schema change, and the same one finding 3 needs.
+
+Both deferred items are **blockers for enabling the Upwork tier**, not for
+merging this: they concern a channel with zero deliveries in production.

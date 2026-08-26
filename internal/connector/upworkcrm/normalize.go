@@ -51,6 +51,44 @@ type rawCommunication struct {
 	CommunicatedAt time.Time `json:"communicated_at"`
 	Sender         *string   `json:"sender"`
 	ExternalID     *string   `json:"external_id"`
+
+	// TWO room columns, and reading one of them is reading none (SWT-19).
+	//
+	//   upwork_room_id  the room a message was OBSERVED in   (inbound 212, outbound  84)
+	//   send_room_id    the room a send was DISPATCHED to    (inbound   0, outbound 136)
+	//
+	// They are disjoint per row and share an identifier space (room_<hex>; 6
+	// values appear in both). send_room_id is written by the send path and
+	// nothing else — it agrees with send_requested_at on all 136 rows, with zero
+	// disagreements. Nothing in the CRM is broken; it has recorded the room all
+	// along.
+	//
+	// A normalizer reading upwork_room_id alone would file 136 outbound messages
+	// under the legacy key WHILE BELIEVING IT HAD READ THE ROOM — 62% of the
+	// roomed outbound corpus — and the keys it produced would look perfectly
+	// well-formed. That is undetectable at the write site and is this ticket's
+	// own bug reproduced inside its own fix. It is also how the 44.7% figure in
+	// an early draft of the SPEC came about: one column, measured confidently.
+	UpworkRoomID *string `json:"upwork_room_id"`
+	SendRoomID   *string `json:"send_room_id"`
+}
+
+// roomID is COALESCE(upwork_room_id, send_room_id), spelled once.
+//
+// Observed wins when both are set. They are disjoint today, so this is a
+// tiebreak for a case that does not exist — but leaving it to struct field order
+// is how the next reader learns the wrong rule, and observed is the right winner
+// because it is ground truth about where the message actually sits on Upwork,
+// which is what the matcher is trying to identify.
+//
+// An empty string counts as absent, exactly like a missing JSON key: the 815
+// pre-2026-07-11 raw rows lack the key entirely, and nothing guarantees a
+// present-but-blank value never appears.
+func (m rawCommunication) roomID() string {
+	if v := deref(m.UpworkRoomID); v != "" {
+		return v
+	}
+	return deref(m.SendRoomID)
 }
 
 func deref(s *string) string {
@@ -96,7 +134,12 @@ func NormalizeCommunication(raw json.RawMessage) (NormalizedMessage, error) {
 		return NormalizedMessage{}, fmt.Errorf("raw communication missing id/client_id")
 	}
 	return NormalizedMessage{
-		ThreadKey:         Provider + ":" + m.ClientID + ":" + m.Channel,
+		// Roomed IFF the source named a room, in one of the two columns. Never
+		// inferred: filling it from clients.upwork_room_id, or from the client's
+		// other messages, would usually be right for 25 of 26 clients and
+		// unfalsifiable — and for the one client with two rooms it would silently
+		// merge two conversations, which is the entire reason this ticket exists.
+		ThreadKey:         ThreadKey(m.ClientID, m.roomID(), m.Channel),
 		ClientID:          m.ClientID,
 		Direction:         m.Direction,
 		SentAt:            m.CommunicatedAt,

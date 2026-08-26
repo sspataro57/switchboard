@@ -389,10 +389,20 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 	approve(t, ctx, ex, rl)
 	callDenied(t, ctx, ex, pool, "send_delivery", `{"delivery_id":`+itoa(rl)+`}`, "rate_limit")
 
+	// SWT-19: draft_delivery now requires an upwork target_ref to name a thread we
+	// have actually ingested — a parseable-but-unknown key would otherwise be
+	// confirmable by any message from that client. Seed the thread this fixture
+	// targets.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
+		 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING`,
+		"upwork_crm:itest-del:upwork"); err != nil {
+		t.Fatalf("seed upwork thread: %v", err)
+	}
 	// 7. upwork_chat assisted tier: draft -> approve -> send DENIED (assisted) ->
 	//    mark_delivery_sent confirms manually (sent_external_id NULL).
 	outUp := callOK(t, ctx, ex, delActor, "draft_delivery",
-		`{"task_id":`+itoa(fx.parentID)+`,"channel":"upwork_chat","body":"thanks, will do","target_ref":"upwork_crm:itest-del:chat"}`)
+		`{"task_id":`+itoa(fx.parentID)+`,"channel":"upwork_chat","body":"thanks, will do","target_ref":"upwork_crm:itest-del:upwork"}`)
 	var up struct {
 		DeliveryID int64 `json:"delivery_id"`
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/connector/google"
 	"github.com/sspataro57/switchboard/internal/connector/slackweb"
+	"github.com/sspataro57/switchboard/internal/connector/upworkcrm"
 	"github.com/sspataro57/switchboard/internal/executor"
 )
 
@@ -112,6 +113,22 @@ func validateDraftDelivery(args []byte) error {
 			return fmt.Errorf("invalid slack_reply target_ref: %w", err)
 		}
 	}
+	if a.Channel == "upwork_chat" {
+		// Parallel to slack_reply above, and overdue: this was the SWT-13
+		// canonicalization landmine's fourth instance, validating only
+		// non-emptiness while slack_reply parsed. SWT-19 made it urgent — the
+		// matcher now compares target_ref by parsing it, so a target it cannot
+		// read is PERMANENTLY unconfirmable where the pre-SWT-18 LIKE was
+		// forgiving. Production has zero upwork_chat deliveries, so closing it
+		// costs nothing today and cannot be closed cheaply later.
+		//
+		// Both key shapes are accepted: the legacy corpus is real, and the
+		// matcher's tolerance of unknown rooms is what keeps an unroomed target
+		// confirmable.
+		if _, err := upworkcrm.ParseThreadKey(strings.TrimSpace(a.TargetRef)); err != nil {
+			return fmt.Errorf("invalid upwork_chat target_ref: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -197,6 +214,39 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 			return nil, fmt.Errorf("invalid slack_reply target_ref: %w", err)
 		}
 		a.TargetRef = target.CanonicalURL()
+	}
+	if a.Channel == "upwork_chat" {
+		// Same reason as slack_reply above, and now load-bearing: since SWT-19
+		// the matcher parses target_ref rather than pattern-matching it, so a
+		// stored variant the parser rejects is unconfirmable forever with nothing
+		// surfacing it but the reconciler.
+		ref, err := upworkcrm.ParseThreadKey(strings.TrimSpace(a.TargetRef))
+		if err != nil {
+			return nil, fmt.Errorf("invalid upwork_chat target_ref: %w", err)
+		}
+		a.TargetRef = upworkcrm.ThreadKey(ref.ClientID, ref.RoomID, ref.Channel)
+		// Parseable is NOT the same as real, and since SWT-19 the difference is
+		// dangerous. SameConversation treats an unroomed key as compatible with
+		// any room of that client, so a typo like upwork_crm:{real-client}:typo
+		// parses, canonicalizes, and then becomes a CLIENT-WIDE WILDCARD: the
+		// next outbound message from any room of that client can confirm it,
+		// burning that message's external id on a delivery that names a
+		// conversation which does not exist. Under the partial unique index the
+		// real delivery is then locked out of that id permanently.
+		//
+		// Requiring the target to name a thread we have actually ingested closes
+		// it. Legacy unroomed keys still pass — they are real threads — so this
+		// costs the tolerance nothing.
+		var exists bool
+		if err := pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM normalized_threads WHERE thread_key=$1)`,
+			a.TargetRef).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("check upwork_chat target_ref: %w", err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("upwork_chat target_ref %q names no ingested thread; "+
+				"an unrecognized target would be confirmable by any message from that client", a.TargetRef)
+		}
 	}
 	if a.Channel == "gmail" {
 		// From is resolved server-side from the thread's mailbox segment
@@ -1051,11 +1101,31 @@ func markDeliveryFailed(ctx context.Context, pool *pgxpool.Pool, args []byte) ([
 			}
 			return fmt.Errorf("lock delivery %d: %w", a.DeliveryID, err)
 		}
-		if channel != "slack_reply" {
-			return fmt.Errorf("mark_delivery_failed only supports slack_reply; delivery %d is %s", a.DeliveryID, channel)
+		// upwork_chat joins slack_reply (SWT-19). Without it the reconciler was an
+		// alarm with no valid response: it flags rows at status='sent', and
+		// mark_delivery_sent accepts only 'approved' (plus two slack_reply
+		// edges), so BOTH verbs its note named rejected the row it had just
+		// flagged. An alarm nobody can act on is worse than no alarm — it trains
+		// the reader to ignore the channel.
+		//
+		// Safe for the same reason it is safe for slack: this verb moves a row
+		// AWAY from the world, never toward it. It stays human-only and off the
+		// MCP surface, and the guards below still refuse a row that carries a
+		// sent_external_id or a confirmed_at — i.e. one we have positive evidence
+		// really landed.
+		if channel != "slack_reply" && channel != "upwork_chat" {
+			return fmt.Errorf("mark_delivery_failed only supports slack_reply and upwork_chat; delivery %d is %s", a.DeliveryID, channel)
 		}
-		if status != "sending" {
-			return fmt.Errorf("delivery %d is %s; only a stuck sending row can be marked failed", a.DeliveryID, status)
+		// slack_reply wedges at 'sending' (the click may or may not have landed).
+		// upwork_chat has no 'sending' phase at all — send_delivery is
+		// policy-denied for the channel, so mark_delivery_sent puts the row
+		// straight to 'sent' and that is where an unconfirmable one is stuck.
+		// Different status, identical situation: a row the system cannot resolve
+		// on its own, which a human has now checked.
+		stuck := status == "sending" || (channel == "upwork_chat" && status == "sent")
+		if !stuck {
+			return fmt.Errorf("delivery %d is %s; only a stuck row can be marked failed "+
+				"(slack_reply in 'sending', upwork_chat in 'sent')", a.DeliveryID, status)
 		}
 		// Both of these mean the message IS in Slack. Refuse rather than
 		// contradict the evidence — invariant 4 never walks back a send.

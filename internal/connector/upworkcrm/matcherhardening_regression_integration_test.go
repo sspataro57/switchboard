@@ -23,9 +23,20 @@ package upworkcrm_test
 //     makes the two disagree with no error anywhere. Today's matcher compares
 //     left(body,120) RAW, which the SPEC it shipped against (08-draft-deliveries,
 //     criterion 8) already said should be whitespace-normalized.
-//  2. EXACT ROOM matching — target_ref = {the message's thread_key}, replacing
-//     the client-wide target_ref LIKE 'upwork_crm:{client}:%'. **NO time bound of
-//     any kind.** A clock bound is a verified no-op on this tier: nothing writes
+//  2. Candidate SCOPING by thread identity, replacing the client-wide
+//     target_ref LIKE. SWT-18 shipped this as "exact room matching" and that was
+//     WRONG on production data: thread_key's third segment was
+//     communications.channel, a constant ('upwork') on every source row, so the
+//     equality selected exactly the candidate set the LIKE did and the thing
+//     preventing a wrong-row bind was the MULTI-MATCH REFUSAL. SWT-19 makes room
+//     identity real — thread_key carries the room from
+//     COALESCE(upwork_room_id, send_room_id) — and the rule becomes: a room
+//     MISMATCH is the only thing that excludes; an unknown room excludes nothing.
+//     Honestly stated: room-scoped for API-era traffic in both directions,
+//     client-wide for pre-2026-07-21 history. The RoomDiscrimination case below
+//     was re-based onto real `room_<hex>` ids by SWT-19 for exactly this reason;
+//     it used to prove "room scoping" with `chat` and `room-b`, channel values
+//     the source has never emitted. **NO time bound of any kind.** A clock bound is a verified no-op on this tier: nothing writes
 //     send_attempted_at for upwork_chat (send_delivery is policy-denied,
 //     matrix.go:120-125; mark_delivery_sent writes status/sent_at only,
 //     delivery.go:633), and sent_at is the instant a HUMAN clicked "mark sent" —
@@ -145,15 +156,42 @@ const umhSharedBody = "Quick status before EOD: the importer is deployed to stag
 // MATCHES it) and normalizing to "" (so the fixed matcher must refuse it).
 const umhBlankBody = "  \n\t \n\n "
 
+// umhChannel is the ONLY value communications.channel has ever held in the
+// source db (1,650 rows, 26 clients, one distinct value). SWT-18's fixtures used
+// `chat`, which the source has never emitted; re-based by SWT-19 so the unroomed
+// key here is the key production actually produces.
+const umhChannel = "upwork"
+
+// Real room ids, in the `room_<hex>` space BOTH communications room columns draw
+// from. These replace SWT-18's `chat` / `room-b`, which were channel values
+// dressed up as rooms.
+const (
+	umhRoomOne = "room_3c1d5e7f90"
+	umhRoomTwo = "room_a2b4c6d8e0"
+)
+
 func umhThreadKey(client, channel string) string {
 	return upworkcrm.Provider + ":" + client + ":" + channel
+}
+
+func umhRoomedKey(client, room string) string {
+	return upworkcrm.Provider + ":" + client + ":room:" + room
 }
 
 // umhRawComm builds a raw upwork_crm communications row: OUTBOUND, so triage's
 // inbound-only filter ignores it and the other suites are undisturbed.
 func umhRawComm(t *testing.T, commUUID, client, channel, body, extID string, sentAt time.Time) string {
 	t.Helper()
-	raw, err := json.Marshal(map[string]any{
+	return umhRawCommInRoom(t, commUUID, client, channel, "", "", body, extID, sentAt)
+}
+
+// umhRawCommInRoom builds the same row with a room in one of the TWO room
+// columns. roomColumn is "upwork_room_id" (the room a message was OBSERVED in)
+// or "send_room_id" (the room a send was DISPATCHED to); room=="" omits both,
+// which is the pre-2026-07-21 shape.
+func umhRawCommInRoom(t *testing.T, commUUID, client, channel, roomColumn, room, body, extID string, sentAt time.Time) string {
+	t.Helper()
+	row := map[string]any{
 		"id":              commUUID,
 		"client_id":       client,
 		"direction":       "outbound",
@@ -163,7 +201,11 @@ func umhRawComm(t *testing.T, commUUID, client, channel, body, extID string, sen
 		"communicated_at": sentAt.UTC().Format(time.RFC3339),
 		"sender":          "me",
 		"external_id":     extID,
-	})
+	}
+	if room != "" {
+		row[roomColumn] = room
+	}
+	raw, err := json.Marshal(row)
 	if err != nil {
 		t.Fatalf("marshal raw communication: %v", err)
 	}
@@ -186,7 +228,12 @@ func cleanupUpworkMatcher(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 		umhAmbigExtID, umhClaimedExtID}
 	var threads []string
 	for _, c := range clients {
-		threads = append(threads, umhThreadKey(c, "chat"), umhThreadKey(c, "room-b"))
+		// BOTH key shapes: SWT-19 keys a roomed message on
+		// upwork_crm:{client}:room:{room}, and a cleanup that knew only the
+		// legacy shape would leave roomed threads behind for the next run.
+		threads = append(threads,
+			umhThreadKey(c, umhChannel), umhThreadKey(c, "chat"), umhThreadKey(c, "room-b"),
+			umhRoomedKey(c, umhRoomOne), umhRoomedKey(c, umhRoomTwo))
 	}
 
 	stmts := []struct {
@@ -282,6 +329,16 @@ func umhSeedRaw(t *testing.T, ctx context.Context, pool *pgxpool.Pool, acctID in
 	}
 }
 
+func umhSeedRoomedRaw(t *testing.T, ctx context.Context, pool *pgxpool.Pool, acctID int64, commUUID, client, roomColumn, room, body, extID, hash string, sentAt time.Time) {
+	t.Helper()
+	raw := umhRawCommInRoom(t, commUUID, client, umhChannel, roomColumn, room, body, extID, sentAt)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO raw_source_items (source_account_id, external_id, raw_json, content_hash)
+		 VALUES ($1,$2,$3,$4)`, acctID, "communications:"+commUUID, raw, hash); err != nil {
+		t.Fatalf("seed raw communication %s: %v", commUUID, err)
+	}
+}
+
 func umhNormalize(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := upworkcrm.Normalize(ctx, upworkcrm.NewSink(pool), upworkcrm.Config{}); err != nil {
@@ -336,9 +393,9 @@ func TestRegression_SWT18_UpworkMatcher_WhitespaceNormalizedMatch(t *testing.T) 
 
 	taskID := umhSeedProjectTask(t, ctx, pool, umhWSSlug, "itest-umh-client-ws")
 	sentAt := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
-	deliveryID := umhSeedDelivery(t, ctx, pool, taskID, umhThreadKey(umhWSClient, "chat"), umhStoredBody, sentAt)
+	deliveryID := umhSeedDelivery(t, ctx, pool, taskID, umhThreadKey(umhWSClient, umhChannel), umhStoredBody, sentAt)
 
-	umhSeedRaw(t, ctx, pool, acctID, umhWSComm, umhWSClient, "chat", umhObservedBody, umhWSExtID, "itest-umh-hash-101", sentAt)
+	umhSeedRaw(t, ctx, pool, acctID, umhWSComm, umhWSClient, umhChannel, umhObservedBody, umhWSExtID, "itest-umh-hash-101", sentAt)
 	umhNormalize(t, ctx, pool)
 
 	sentExtID, confirmedAt := umhReadDelivery(t, ctx, pool, deliveryID)
@@ -359,10 +416,34 @@ func TestRegression_SWT18_UpworkMatcher_WhitespaceNormalizedMatch(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
-// 2. Exact-room matching: the delivery whose target_ref IS the message's
-//    thread_key confirms; a same-client, same-body delivery in another room is
-//    untouched — in BOTH sent_at orderings, so no case can pass because
-//    `ORDER BY sent_at DESC` happened to pick right.
+// 2. Room discrimination, RE-BASED ON REAL ROOM IDS BY SWT-19 (criterion 11).
+//
+//    What this case looked like before, and why it proved nothing: it built
+//    "two rooms" out of `chat` and `room-b` in the CHANNEL segment of
+//    upwork_crm:{client}:{channel}. `communications.channel` is the constant
+//    'upwork' on every row in the source db — 1,650 rows, 26 clients, one
+//    distinct value — so neither string has ever existed in production, the
+//    thread key was one thread per CLIENT, and the equality it was said to prove
+//    selected exactly the candidate set the old client-wide LIKE did. IK records
+//    the general form: a predicate whose discriminating column is a constant in
+//    production is a no-op that passes any test willing to fabricate values for
+//    it. Deleting the case outright was the alternative; re-basing keeps the two
+//    sent_at orderings, which are worth having.
+//
+//    Now: the message carries a REAL room id (`room_<hex>`), and the two
+//    deliveries target two roomed keys of the SAME client with BYTE-IDENTICAL
+//    bodies. Only the one naming the message's room may be stamped. This is the
+//    ONE exclusion the SWT-19 rule makes — a room MISMATCH — and the only place
+//    room identity pays.
+//
+//    The room arrives via `send_room_id`, not `upwork_room_id`: that is the
+//    column carrying the room for the majority of roomed OUTBOUND rows (136 of
+//    220 as of 2026-08-26), because our own sends record the room they were
+//    dispatched to. Exercising the discrimination through the other column would
+//    leave the one-column bug invisible in the very test written for rooms.
+//
+//    Both sent_at orderings, so no case can pass because `ORDER BY sent_at DESC`
+//    happened to pick right.
 // ---------------------------------------------------------------------------
 
 func TestRegression_SWT18_UpworkMatcher_RoomDiscrimination(t *testing.T) {
@@ -372,11 +453,17 @@ func TestRegression_SWT18_UpworkMatcher_RoomDiscrimination(t *testing.T) {
 	cleanupUpworkMatcher(t, ctx, pool)
 	defer cleanupUpworkMatcher(t, ctx, pool)
 
-	msgSentAt := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
+	msgSentAt := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+
+	// Fixture validity, hard-failed: two DIFFERENT rooms, or "the other room's
+	// delivery is untouched" is an assertion about the same row.
+	if umhRoomOne == umhRoomTwo {
+		t.Fatalf("fixture invalid: the two room ids are the same string (%q)", umhRoomOne)
+	}
 
 	cases := []struct {
 		name string
-		// the room the message is actually in; the other room is "room-b"
+		// the room the message is actually in; the other delivery names umhRoomTwo
 		client, comm, extID, slug, hash string
 		// sent_at of the CORRECT-room delivery relative to the wrong-room one
 		correctSentAt, otherSentAt time.Time
@@ -400,13 +487,31 @@ func TestRegression_SWT18_UpworkMatcher_RoomDiscrimination(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			taskID := umhSeedProjectTask(t, ctx, pool, tc.slug, "itest-umh-client-"+tc.slug)
-			correctRef := umhThreadKey(tc.client, "chat") // == the message's thread_key
-			otherRef := umhThreadKey(tc.client, "room-b")
+			correctRef := umhRoomedKey(tc.client, umhRoomOne) // == the message's thread_key
+			otherRef := umhRoomedKey(tc.client, umhRoomTwo)
+			if correctRef == otherRef {
+				t.Fatalf("fixture invalid: both deliveries target the same key %q", correctRef)
+			}
 			correctID := umhSeedDelivery(t, ctx, pool, taskID, correctRef, umhSharedBody, tc.correctSentAt)
 			otherID := umhSeedDelivery(t, ctx, pool, taskID, otherRef, umhSharedBody, tc.otherSentAt)
 
-			umhSeedRaw(t, ctx, pool, acctID, tc.comm, tc.client, "chat", umhSharedBody, tc.extID, tc.hash, msgSentAt)
+			umhSeedRoomedRaw(t, ctx, pool, acctID, tc.comm, tc.client, "send_room_id", umhRoomOne,
+				umhSharedBody, tc.extID, tc.hash, msgSentAt)
 			umhNormalize(t, ctx, pool)
+
+			// The message must actually have landed on the roomed thread; if it
+			// did not, everything below is testing the legacy key again.
+			var gotKey string
+			if err := pool.QueryRow(ctx,
+				`SELECT t.thread_key FROM normalized_messages m JOIN normalized_threads t ON t.id=m.thread_id
+				  WHERE m.external_message_id=$1`, tc.extID).Scan(&gotKey); err != nil {
+				t.Fatalf("read the message's thread: %v", err)
+			}
+			if gotKey != correctRef {
+				t.Fatalf("the message normalized onto thread %q, want the roomed %q. Its room was supplied in "+
+					"send_room_id — the column most roomed outbound rows use — so this is the one-column bug: "+
+					"the key is well-formed, nothing errors, and the room is simply not there", gotKey, correctRef)
+			}
 
 			correctExt, correctConfirmed := umhReadDelivery(t, ctx, pool, correctID)
 			otherExt, otherConfirmed := umhReadDelivery(t, ctx, pool, otherID)
@@ -456,7 +561,7 @@ func TestRegression_SWT18_UpworkMatcher_MarkedSentLongAfterTheMessageStillConfir
 	markedSentAt := msgSentAt.Add(5 * time.Hour)
 
 	taskID := umhSeedProjectTask(t, ctx, pool, umhLateSlug, "itest-umh-client-late")
-	deliveryID := umhSeedDelivery(t, ctx, pool, taskID, umhThreadKey(umhLateClient, "chat"), umhSharedBody, markedSentAt)
+	deliveryID := umhSeedDelivery(t, ctx, pool, taskID, umhThreadKey(umhLateClient, umhChannel), umhSharedBody, markedSentAt)
 
 	// Guard the fixture's whole point: production upwork rows have no attempt
 	// instant, so a floor built on send_attempted_at is a clause that is always
@@ -466,7 +571,7 @@ func TestRegression_SWT18_UpworkMatcher_MarkedSentLongAfterTheMessageStillConfir
 		t.Fatalf("fixture invalid: send_attempted_at is set on delivery %d; no upwork_chat code path writes it", deliveryID)
 	}
 
-	umhSeedRaw(t, ctx, pool, acctID, umhLateComm, umhLateClient, "chat", umhSharedBody, umhLateExtID, "itest-umh-hash-404", msgSentAt)
+	umhSeedRaw(t, ctx, pool, acctID, umhLateComm, umhLateClient, umhChannel, umhSharedBody, umhLateExtID, "itest-umh-hash-404", msgSentAt)
 	umhNormalize(t, ctx, pool)
 
 	sentExtID, confirmedAt := umhReadDelivery(t, ctx, pool, deliveryID)
@@ -506,9 +611,9 @@ func TestRegression_SWT18_UpworkMatcher_WhitespaceOnlyBodyClaimsNothing(t *testi
 
 	sentAt := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	taskID := umhSeedProjectTask(t, ctx, pool, umhBlankSlug, "itest-umh-client-blank")
-	deliveryID := umhSeedDelivery(t, ctx, pool, taskID, umhThreadKey(umhBlankClient, "chat"), umhBlankBody, sentAt)
+	deliveryID := umhSeedDelivery(t, ctx, pool, taskID, umhThreadKey(umhBlankClient, umhChannel), umhBlankBody, sentAt)
 
-	umhSeedRaw(t, ctx, pool, acctID, umhBlankComm, umhBlankClient, "chat", umhBlankBody, umhBlankExtID, "itest-umh-hash-505", sentAt)
+	umhSeedRaw(t, ctx, pool, acctID, umhBlankComm, umhBlankClient, umhChannel, umhBlankBody, umhBlankExtID, "itest-umh-hash-505", sentAt)
 	umhNormalize(t, ctx, pool)
 
 	sentExtID, confirmedAt := umhReadDelivery(t, ctx, pool, deliveryID)
@@ -543,7 +648,7 @@ func TestRegression_SWT18_UpworkMatcher_AlreadyStampedIsNotRestamped(t *testing.
 
 	msgSentAt := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	taskID := umhSeedProjectTask(t, ctx, pool, umhIdemSlug, "itest-umh-client-idem")
-	room := umhThreadKey(umhIdemClient, "chat")
+	room := umhThreadKey(umhIdemClient, umhChannel)
 
 	// A previous send in the SAME room with the SAME body, already confirmed
 	// against its own message.
@@ -558,7 +663,7 @@ func TestRegression_SWT18_UpworkMatcher_AlreadyStampedIsNotRestamped(t *testing.
 	// The open delivery this message actually closes.
 	openID := umhSeedDelivery(t, ctx, pool, taskID, room, umhSharedBody, msgSentAt)
 
-	umhSeedRaw(t, ctx, pool, acctID, umhIdemComm, umhIdemClient, "chat", umhSharedBody, umhIdemExtID, "itest-umh-hash-606", msgSentAt)
+	umhSeedRaw(t, ctx, pool, acctID, umhIdemComm, umhIdemClient, umhChannel, umhSharedBody, umhIdemExtID, "itest-umh-hash-606", msgSentAt)
 	umhNormalize(t, ctx, pool)
 
 	priorExt, priorConfirmed := umhReadDelivery(t, ctx, pool, priorID)
@@ -628,7 +733,7 @@ func TestRegression_SWT18_UpworkMatcher_AmbiguousPrefixConfirmsNothing(t *testin
 
 	msgSentAt := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	taskID := umhSeedProjectTask(t, ctx, pool, umhAmbigSlug, "itest-umh-client-ambig")
-	room := umhThreadKey(umhAmbigClient, "chat")
+	room := umhThreadKey(umhAmbigClient, umhChannel)
 
 	// Same opening 120 characters, different tails — realistic for a reusable
 	// status-line template. Guard that the fixture is actually ambiguous and
@@ -645,7 +750,7 @@ func TestRegression_SWT18_UpworkMatcher_AmbiguousPrefixConfirmsNothing(t *testin
 	olderID := umhSeedDelivery(t, ctx, pool, taskID, room, bodyA, msgSentAt.Add(-time.Hour))
 	newerID := umhSeedDelivery(t, ctx, pool, taskID, room, bodyB, msgSentAt)
 
-	umhSeedRaw(t, ctx, pool, acctID, umhAmbigComm, umhAmbigClient, "chat", bodyA, umhAmbigExtID, "itest-umh-hash-707", msgSentAt)
+	umhSeedRaw(t, ctx, pool, acctID, umhAmbigComm, umhAmbigClient, umhChannel, bodyA, umhAmbigExtID, "itest-umh-hash-707", msgSentAt)
 	umhNormalize(t, ctx, pool)
 
 	for _, d := range []struct {
@@ -693,7 +798,7 @@ func TestRegression_SWT18_UpworkMatcher_ClaimedExternalIDSkipsWithoutFailingTheR
 
 	msgSentAt := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	taskID := umhSeedProjectTask(t, ctx, pool, umhClaimedSlug, "itest-umh-client-claimed")
-	room := umhThreadKey(umhClaimedClient, "chat")
+	room := umhThreadKey(umhClaimedClient, umhChannel)
 
 	// A: already confirmed against the very message we are about to ingest.
 	claimedID := umhSeedDelivery(t, ctx, pool, taskID, room, umhSharedBody, msgSentAt.Add(-2*time.Hour))
@@ -705,7 +810,7 @@ func TestRegression_SWT18_UpworkMatcher_ClaimedExternalIDSkipsWithoutFailingTheR
 	// B: open, same thread, same prefix — the only remaining candidate.
 	openID := umhSeedDelivery(t, ctx, pool, taskID, room, umhSharedBody, msgSentAt)
 
-	umhSeedRaw(t, ctx, pool, acctID, umhClaimedComm, umhClaimedClient, "chat", umhSharedBody, umhClaimedExtID, "itest-umh-hash-808", msgSentAt)
+	umhSeedRaw(t, ctx, pool, acctID, umhClaimedComm, umhClaimedClient, umhChannel, umhSharedBody, umhClaimedExtID, "itest-umh-hash-808", msgSentAt)
 
 	// umhNormalize fails the test on error, which is exactly the assertion:
 	// without the pre-check this run dies on deliveries_sent_external_idx.

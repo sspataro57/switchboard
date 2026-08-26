@@ -60,16 +60,56 @@ source scan would certify the very no-op described below.
 **The four matchers agree on the comparison and on NOTHING else. Read the
 sibling before copying it.** Scope: google joins on `d.from_account_id` (against
 the raw item's `source_account_id`), jira on `target_ref=`, slackweb on
-`target_ref=`, upwork on `target_ref=` (was a client-wide `LIKE` until SWT-18).
+`target_ref=`, upwork on `upworkcrm.SameConversation` in Go (client + room, see
+the SWT-19 entry above; was a client-wide `LIKE` until SWT-18 and a plain
+`target_ref=` until SWT-19).
 Status set: `('sending','sent','failed')` / `('sending','sent')` / `('sent')`.
 Multi-match: google, slackweb and (since SWT-18) upwork REFUSE; jira keeps
 newest-wins as a documented carry-over. Refusing is the reversible choice — two
 unconfirmed rows can still be confirmed later, while one wrong stamp burns the
 external id under `deliveries_sent_external_idx` and locks the correct row out
-permanently. **Cost of refusing, worth knowing before you copy it:** slackweb
-backs its refusal with a reconciler that flags stuck rows
-(`slackweb/reconcile.go`); upworkcrm has no equivalent, so an upwork refusal is
-SILENT — two rows sit unconfirmed and nothing surfaces them.
+permanently. **Cost of refusing, worth knowing before you copy it:** a refusal is
+invisible unless something flags it. slackweb has `slackweb/reconcile.go` and
+upworkcrm has `upworkcrm/reconcile.go` (SWT-19; 6 passes, not 3 — see that
+entry). **google and jira still have no reconciler**, so a refusal in those two
+is SILENT: the rows sit unconfirmed and nothing surfaces them.
+
+### Upwork thread keys: one spelling, two shapes, and what the scope actually is (SWT-19)
+**Location:** `internal/connector/upworkcrm/threadkey.go`
+Since SWT-19 the key has two shapes and the difference is a PARSE, not a guess:
+`upwork_crm:{client}:room:{room_id}` (roomed) and `upwork_crm:{client}:{channel}`
+(unroomed, byte-identical to the pre-SWT-19 key). Segment COUNT separates them,
+which no room id can forge — keying on the third segment's contents instead would
+have been the SWT-13 magic-literal landmine again.
+`ThreadKey` / `ParseThreadKey` / `SameConversation` / `ClientThreadPrefix` are the
+ONLY spelling. **No SQL anywhere may build or pick apart this key** — a structural
+test (`keyspelling_test.go`) fails any `LIKE`/`split_part`/`||` in the same string
+as the provider literal anywhere under `internal/`, and it caught two real
+instances during SWT-19's own implementation. **What it does and does not see:**
+raw string literals are scanned wherever they appear — including a backtick-quoted
+example inside a comment, which is how it caught both — while `//` comment LINES
+are skipped deliberately, so prose may quote the old spelling to explain why it is
+gone. A tab-indented code block in a comment is therefore invisible to it. Do not
+describe it as catching every mention in a comment; it catches backticked ones. Filter by client with
+`ClientThreadPrefix` passed as a BIND PARAMETER. The matcher's client and room
+scoping is entirely in Go for this reason: "any roomed key of this client" is not
+an equality.
+**Describe the scope honestly, in these words:** *room-scoped for API-era traffic
+in both directions, client-wide for pre-2026-07-21 history.* Not "room matching"
+flat — SWT-18 called its change that and was wrong on production data, and this
+one is still conditional on the source having supplied a room. 576 outbound rows
+have no room in either column and all share one legacy thread per client; for
+those, the multi-match refusal is the only thing between an ambiguous body and a
+wrong bind.
+**The re-key is a re-normalize, not a migration** (`--full --all`): `raw_json`
+already carries both room columns, and only roomed rows move. Verified read-only
+against production before review — the real normalizer over all 2,442 rows gave
+433 roomed / 2,009 legacy, matching an independent SQL COALESCE exactly, with
+zero normalize failures and zero keys its own parser could not read.
+**Do not assert production counts as frozen literals.** That corpus is live —
+it moved from 2,441/432 to 2,442/433 during one afternoon's work. Assert the
+normalizer's output against the same corpus measured at verification time by an
+independent computation; a literal cries wolf every day a message arrives.
 
 ### "Exact room matching" on Upwork is not room matching (SWT-18, corrected by review)
 **Location:** `internal/connector/upworkcrm/normalize.go:99`, `sink.go`
@@ -81,20 +121,21 @@ is the constant `'upwork'` for every row in the source db (1,650 rows, 26
 clients, one distinct value; every `normalized_threads` key in ops ends `:upwork`).
 So the equality selects exactly the candidate set the `LIKE` did, and the thing
 actually preventing a wrong-row bind today is the MULTI-MATCH REFUSAL.
-The real room id is `communications.upwork_room_id`, which the normalizer never
-reads — 296 rows carry one, 11 distinct rooms, and one client already has two,
-which is the scenario Salvador reported. Keying `thread_key` on it is a
-normalizer change that re-keys every existing upwork thread: its own ticket.
+The real room id lives in `communications` — and in TWO columns, which the
+normalizer did not read at the time. **CLOSED by SWT-19**, which reads both and
+keys the thread on them; see the SWT-19 entry above for what the scope now is.
+Left here because the LESSON outlived the defect.
 **The general lesson, which is the same one three entries above:** a predicate
 whose discriminating column is a constant in production is a no-op that passes
 any test willing to fabricate values for it — SWT-18's `RoomDiscrimination` test
 proves room scoping using `chat` and `room-b`, channel values the source has
 never emitted. Verify a claimed data path against the DATA, not only the writes.
-Related and unguarded: with exact matching a non-canonical `target_ref` is now
-permanently unconfirmable where the `LIKE` was forgiving, and `draft_delivery`
-validates only that an upwork `target_ref` is non-empty
-(`internal/tools/delivery.go:107-108`) with no canonicalization — the SWT-13
-landmine's fourth instance.
+Related: with exact matching a non-canonical `target_ref` is permanently
+unconfirmable where the `LIKE` was forgiving, and `draft_delivery` used to
+validate only that an upwork `target_ref` was non-empty, with no
+canonicalization — the SWT-13 landmine's fourth instance. **CLOSED by SWT-19**:
+`validateDraftDelivery` now parses it with `upworkcrm.ParseThreadKey` and the
+handler stores the canonical spelling, exactly as `slack_reply` does.
 Note the review's hypothesis was WRONG in a useful way: it guessed the mismatch
 came from `ScrubAIAttribution` running at send but not at store. It doesn't —
 `draft_delivery` and `update_delivery` both store scrubbed bodies and the scrub is
