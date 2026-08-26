@@ -51,10 +51,12 @@ var humanOnly = map[string]bool{
 	"update_delivery": true, "approve_delivery": true, "send_delivery": true,
 	"mark_delivery_sent": true, "prefill_delivery": true, "set_sending_frozen": true,
 	"approve_plan_import": true, "reject_plan_import": true, "apply_plan_import": true,
-	// mark_delivery_failed asserts a human looked in Slack and the message is
-	// NOT there. It is human-only but deliberately not send-shaped: it moves a
-	// row AWAY from the world, so neither the kill switch nor the rate limit
-	// has any claim on it.
+	// mark_delivery_failed asserts a human looked at the conversation — Slack, or
+	// Upwork since SWT-19 — and the message is NOT there. It is human-only but
+	// deliberately not send-shaped: it moves a row AWAY from the world, so
+	// neither the kill switch nor the rate limit has any claim on it. Adding a
+	// channel therefore needs no change here, which is why the channel check
+	// lives in the handler.
 	"mark_delivery_failed": true,
 }
 

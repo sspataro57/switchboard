@@ -69,6 +69,17 @@ func run(full, normalizeOnly, all bool, overlap time.Duration) error {
 		return fmt.Errorf("normalize: %w", err)
 	}
 	printStats("normalize", stats)
+
+	// Printed unconditionally, including the zero, so "flagged nothing" and "did
+	// not run" look different in the CronJob log (the slackweb main's shape).
+	// Without that distinction a silent detector is indistinguishable from a
+	// detector that was never wired up — which is the failure this whole
+	// reconciler exists to avoid.
+	flagged, err := upworkcrm.ReconcileUnconfirmed(ctx, sink, upworkcrm.UnconfirmedFlagPasses())
+	if err != nil {
+		return fmt.Errorf("reconcile unconfirmed: %w", err)
+	}
+	fmt.Printf("reconcile: {\"flagged\":%d}\n", flagged)
 	return nil
 }
 

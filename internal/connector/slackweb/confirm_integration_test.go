@@ -449,7 +449,7 @@ func TestSlackConfirm_Integration_ReconcilerIgnoresConfirmedRows(t *testing.T) {
 	}
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_at)
-		 VALUES ($1,'upwork_chat','upwork_crm:itest-slack-confirm:chat','x','sent', now() - interval '30 minutes')
+		 VALUES ($1,'upwork_chat','upwork_crm:itest-slack-confirm:upwork','x','sent', now() - interval '30 minutes')
 		 RETURNING id`, taskID).Scan(&upwork); err != nil {
 		t.Fatalf("seed upwork delivery: %v", err)
 	}

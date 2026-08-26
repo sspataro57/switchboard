@@ -311,41 +311,28 @@ const upworkMatchPrefixLen = 120
 // disagree with no error anywhere (IK: the SWT-13 canonicalization landmine).
 // textmatch.NormalizedPrefix is the single spelling.
 //
-// 2. EXACT thread_key matching. The scope was
-// target_ref LIKE 'upwork_crm:{client}:%' with ORDER BY sent_at DESC LIMIT 1
-// breaking ties by recency, so a delivery sent AFTER a message already existed
-// could still win over the row that produced it. target_ref for an upwork_chat
-// delivery IS the normalizer's thread_key (internal/drafts/store.go assigns it
-// verbatim from normalized_threads), so equality is available and the LIKE was
-// never buying anything.
+// 2. CONVERSATION scoping, via SameConversation (threadkey.go) — and say what
+// that is, precisely, because SWT-18 shipped calling its version "exact room
+// matching" and was wrong on production data.
 //
-// READ THIS BEFORE TRUSTING THE WORD "ROOM" (corrected 2026-08-26 by review;
-// SWT-18 originally shipped claiming this was room-scoping, and it is not).
-// thread_key is Provider:{client_id}:{communications.channel} (normalize.go:99)
-// and `channel` is the CONSTANT 'upwork' on every row in the source db — 1,650
-// rows, 26 clients, one value — so thread_key is one thread per CLIENT and this
-// equality selects exactly the candidate set the old LIKE did. The real room id
-// is communications.upwork_room_id, which the normalizer never reads (296 rows
-// carry one, 11 distinct rooms, and one client already has two).
+// What it is: room-scoped for API-era traffic in both directions, client-wide
+// for pre-2026-07-21 history. A room MISMATCH excludes; an unknown room does
+// not. Since SWT-19 the normalizer reads BOTH room columns
+// (upwork_room_id, the room a message was observed in, and send_room_id, the
+// room a send was dispatched to), so API-era traffic is 98.9% roomed outbound
+// (186 of 188) and 99.5% inbound. The outbound send path is HEALTHY — it has
+// been recording its room in send_room_id all along. The 44.7% that appears in
+// early SWT-19 drafts was one column, measured confidently and wrongly.
 //
-// So on today's data the thing that actually prevents the wrong-row bind is the
-// multi-match refusal below, NOT this predicate. The predicate is still correct
-// and still strictly tighter — it is what makes the fix survive the day
-// thread_key becomes room-keyed — but do not read it as protection that is
-// operating now. Making room identity real is a normalizer change (thread_key
-// on upwork_room_id) and belongs to its own ticket, because it re-keys every
-// existing upwork thread.
+// What it is NOT: a guarantee that any two messages of one client are told
+// apart. 576 outbound rows are pre-2026-07-21 history with no room in either
+// column, and they all share one legacy thread per client. For those, this is
+// exactly the client-wide scope it has always been, and the multi-match refusal
+// below is the only thing standing between an ambiguous body and a wrong bind.
 //
-// There is deliberately NO time bound, unlike the other three. On this tier a
-// clock floor is not merely unnecessary, it is a no-op that looks like a fix:
-// nothing writes send_attempted_at for upwork_chat (send_delivery is
-// policy-denied for the channel, so the only verb that moves one of these rows
-// to 'sent' is mark_delivery_sent, which writes status and sent_at only), and
-// sent_at is the instant a HUMAN clicked "mark sent" — legitimately hours after
-// the message went out. A floor on sent_at would convert a silent miss into a
-// PERMANENT refusal. Room identity settles what the floor was reaching for,
-// without reasoning about clocks at all. See IK, "The attempt-time floor is
-// INERT on the assisted tier".
+// The scope was target_ref LIKE 'upwork_crm:{client}:%' before SWT-18 and an
+// equality against a key whose room segment was a constant before SWT-19. It is
+// now genuinely conditional on what the source supplied.
 //
 // Multi-match policy is REFUSE, chosen rather than inherited. google and
 // slackweb refuse; jira keeps newest-wins as a documented carry-over. Refusing
@@ -368,6 +355,14 @@ func (s *PGSink) confirmUpworkDelivery(ctx context.Context, nm NormalizedMessage
 		// walks straight past. Normalized, such a body is "" and would match
 		// every candidate that also normalizes to "" — claiming a delivery on
 		// no evidence whatsoever. The other three matchers refuse it up front.
+		return nil
+	}
+
+	messageRef, err := ParseThreadKey(nm.ThreadKey)
+	if err != nil {
+		// Our own normalizer built this key, so a parse failure is a bug here
+		// rather than bad data — but confirmation is a best-effort side channel
+		// and must not fail the normalize run over it.
 		return nil
 	}
 
@@ -405,13 +400,29 @@ func (s *PGSink) confirmUpworkDelivery(ctx context.Context, nm NormalizedMessage
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// The query keeps only channel/status/NULL guards; ALL client and room
+	// scoping happens in Go below (SWT-19). Forced, not stylistic: "any roomed
+	// key of this client" cannot be expressed as an equality, and writing it as a
+	// LIKE or a split_part would put a second spelling of the key format in SQL —
+	// the failure this repo has now paid for four times, and which threadkey.go
+	// exists to prevent. A structural test fails any SQL that tries.
+	//
+	// The candidate set is every upwork delivery never confirmed, EVER — across
+	// all clients, locked FOR UPDATE by every outbound message. Zero rows in
+	// production today. Note what the reconciler does and does not do about
+	// growth: it ANNOTATES a stuck row, it does not resolve it, so a flagged row
+	// keeps status='sent' with sent_external_id NULL and stays in this set
+	// permanently. The alarm tells a human to act; only mark_delivery_sent or
+	// mark_delivery_failed removes the row from here.
+	//
+	// Two concurrent connector runs lock in the same id DESC order, so they block
+	// rather than deadlock.
 	rows, err := tx.Query(ctx,
-		`SELECT id, task_id, COALESCE(body,'') FROM deliveries
+		`SELECT id, task_id, COALESCE(target_ref,''), COALESCE(body,'') FROM deliveries
 		  WHERE channel='upwork_chat' AND status='sent'
 		    AND sent_external_id IS NULL AND confirmed_at IS NULL
-		    AND target_ref=$1
 		  ORDER BY id DESC
-		  FOR UPDATE`, nm.ThreadKey)
+		  FOR UPDATE`)
 	if err != nil {
 		return fmt.Errorf("select upwork deliveries to confirm: %w", err)
 	}
@@ -419,10 +430,20 @@ func (s *PGSink) confirmUpworkDelivery(ctx context.Context, nm NormalizedMessage
 	matches := 0
 	for rows.Next() {
 		var id, task int64
-		var body string
-		if err := rows.Scan(&id, &task, &body); err != nil {
+		var targetRef, body string
+		if err := rows.Scan(&id, &task, &targetRef, &body); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan upwork delivery candidate: %w", err)
+		}
+		// A target_ref that does not parse is never a candidate. It does not rot
+		// silently: the reconciler flags it, which is how a legacy or hand-written
+		// target surfaces instead of sitting unconfirmable forever.
+		deliveryRef, err := ParseThreadKey(targetRef)
+		if err != nil {
+			continue
+		}
+		if !SameConversation(messageRef, deliveryRef) {
+			continue
 		}
 		if textmatch.NormalizedPrefix(body, upworkMatchPrefixLen) == want {
 			matches++
