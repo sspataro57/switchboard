@@ -611,23 +611,22 @@ func TestSlackDelivery_Integration_MarkSentAcceptsDraftedOnlyForLeafToken(t *tes
 		}
 	})
 
-	t.Run("upwork_chat behavior is unchanged: drafted refused even with leaf_token", func(t *testing.T) {
-		// SWT-19: an upwork target_ref must name an ingested thread.
-		if _, err := s.pool.Exec(ctx,
-			`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
-			 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING`,
-			"upwork_crm:itest-sds:upwork"); err != nil {
-			t.Fatalf("seed upwork thread: %v", err)
-		}
-		out := callOK(t, ctx, s.ex, sdsActor, "draft_delivery",
-			`{"task_id":`+itoa(s.taskID)+`,"channel":"upwork_chat","body":"thanks","target_ref":"upwork_crm:itest-sds:upwork"}`)
-		var r struct {
-			DeliveryID int64 `json:"delivery_id"`
-		}
-		mustUnmarshal(t, out, &r)
-		s.setApprovalSource(t, ctx, r.DeliveryID, "leaf_token")
-		if err := s.tryCall(ctx, "mark_delivery_sent", r.DeliveryID); err == nil {
-			t.Fatal("the drafted+leaf_token edge leaked to upwork_chat; criterion 12 scopes it to slack_reply")
+	t.Run("upwork_chat drafts are closed entirely, so leaf_token cannot reach them", func(t *testing.T) {
+		// This subtest used to draft an upwork row and prove mark_delivery_sent
+		// refused it in 'drafted' even with leaf_gated set — i.e. that the
+		// leaf-token edge was slack-only. That property still holds, but it can
+		// no longer be demonstrated this way, because the upwork DRAFT is now
+		// refused at the door (SWT-19, fourth adversarial pass): a target_ref
+		// cannot be bound to the task's client until SWT-20's provenance exists.
+		//
+		// So the assertion moves up a level. The leaf-token edge being
+		// slack-only is now guaranteed structurally rather than behaviourally —
+		// there is no upwork row to try it on.
+		if _, err := s.ex.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: sdsActor,
+			Args: []byte(`{"task_id":` + itoa(s.taskID) + `,"channel":"upwork_chat","body":"thanks",` +
+				`"target_ref":"upwork_crm:itest-sds:upwork"}`)}); err == nil {
+			t.Fatal("draft_delivery accepted an upwork_chat draft; the channel is closed until SWT-20 " +
+				"because a supplied target_ref could name another client's thread")
 		}
 	})
 }

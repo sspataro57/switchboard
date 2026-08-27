@@ -74,6 +74,26 @@ upworkcrm has `upworkcrm/reconcile.go` (SWT-19; 6 passes, not 3 — see that
 entry). **google and jira still have no reconciler**, so a refusal in those two
 is SILENT: the rows sit unconfirmed and nothing surfaces them.
 
+### An actor-prefix check is a transport label, not a trust boundary
+**Location:** `internal/tools/delivery.go`, found by adversarial review 2026-08-27
+`executor.ViaMCP(ctx)` tests whether the actor string starts with `mcp:`. That is
+useful for "this TRANSPORT may only make this state transition" — its original
+SWT-12 purpose — and useless as a security gate, because plenty of autonomous
+callers are not on that transport. **The counter-example is in this repo:** the
+drafts worker calls the executor directly as `drafts:gpt`, so a `ViaMCP` gate
+does nothing for the one component that would act automatically. `opsctl` and any
+direct caller are the same.
+SWT-19 shipped a go-live gate built on it and recorded that the gate "cannot be
+crossed by forgetting about it". It could. The fix was to close the channel for
+EVERY actor, and the test pins six actor shapes rather than one — because the
+defect was precisely that the check keyed on the caller.
+**Rule: if a restriction exists to stop an untrusted or automated caller, do not
+key it on the actor prefix.** Either deny the capability entirely until the real
+binding exists, or gate on something unforgeable. And when writing a test for
+such a gate, enumerate the actor shapes that exist in the repo — `dashboard:`,
+`opsctl:`, `mcp:worker:`, `mcp:manual:`, `drafts:gpt`, bare `worker:` — because
+one of them is usually the hole.
+
 ### Failing a delivery that R8 already processed corrupts the task lifecycle
 **Location:** `internal/tools/delivery.go` `markDeliveryFailed`, found by
 adversarial re-review 2026-08-27

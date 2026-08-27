@@ -15,6 +15,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/connector/upworkcrm"
 	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/store"
 )
 
 // The SWT-8 delivery lifecycle tools (invariant 4: nothing external without a
@@ -132,14 +133,6 @@ func validateDraftDelivery(args []byte) error {
 	return nil
 }
 
-// unconfirmedNoteMarker is the prefix both reconcilers write into
-// deliveries.error as their fire-once guard. It is duplicated from
-// slackweb/upworkcrm rather than imported because those are connector packages
-// and this is the tool layer — but it is ONE string in three places, and if it
-// ever drifts the alarms go permanently silent rather than erroring. A
-// re-arm that does not match the marker is indistinguishable from no re-arm.
-const unconfirmedNoteMarker = "unconfirmed after"
-
 // ---- prefill_delivery (assisted Slack tier) -----------------------------------
 
 func prefillDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, error) {
@@ -255,28 +248,37 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 			return nil, fmt.Errorf("upwork_chat target_ref %q names no ingested thread; "+
 				"an unrecognized target would be confirmable by any message from that client", a.TargetRef)
 		}
-		// Existence is NOT a tenant boundary, and the gap is worth naming: this
-		// proves the thread was ingested, not that it belongs to THIS task's
-		// client. Binding it would need a task-to-client relation, and the only
-		// one available today runs through projects.client_person_id — which
-		// SWT-17 drops. So the binding waits for SWT-20's provenance.
+		// STOP. Existence is not a tenant boundary, and the gate that used to sit
+		// here was not one either.
 		//
-		// Until then the gate is ENFORCED here rather than left as a note in a
-		// ticket: an agent-supplied upwork draft is refused outright. draft_delivery
-		// is MCP-listed, and this session ingests client mail and chat, so without
-		// this an injected call could name a real thread belonging to a DIFFERENT
-		// client and a human could later approve and send it. A human at the
-		// dashboard or opsctl is choosing the target deliberately and is not the
-		// exposure.
+		// This check proves the thread was ingested — NOT that it belongs to this
+		// task's client. Binding it needs a task-to-client relation, and the only
+		// one that exists today runs through projects.client_person_id, which
+		// SWT-17 deletes. So the binding waits for SWT-20's provenance.
 		//
-		// This costs nothing today — production has never had an upwork_chat
-		// delivery — and it means the SWT-20 go-live gate cannot be crossed by
-		// forgetting about it.
-		if executor.ViaMCP(ctx) {
-			return nil, fmt.Errorf("upwork_chat drafts are not available over MCP: the target cannot yet be " +
-				"bound to the task's client, so a supplied target_ref could name another client's thread " +
-				"(SWT-20 adds the provenance). Draft it from the dashboard or opsctl")
-		}
+		// An earlier cut gated only `executor.ViaMCP(ctx)` and claimed the
+		// go-live gate could no longer be crossed by forgetting about it. That
+		// was FALSE, and the counter-example is in this repo: the drafts worker
+		// calls draft_delivery through the executor as actor "drafts:gpt", so
+		// ViaMCP is false and the gate did nothing for the one component that
+		// would create upwork drafts automatically. An actor-prefix check
+		// describes a transport, not a trust level; it cannot tell a deliberate
+		// human from a model-backed worker or an injected agent with direct call
+		// access.
+		//
+		// So the channel is closed outright until the provenance exists. That is
+		// the honest form of the gate: it cannot be bypassed by choosing a
+		// different caller, and it also closes the deferred stale-candidate
+		// problem, because no new upwork delivery row can be created to reach
+		// that state.
+		//
+		// Cost today: zero. Production has never had an upwork_chat delivery, the
+		// draft worker is undeployed, and the assisted tier was never operational.
+		// Reopening this is SWT-20's job, together with the binding that makes it
+		// safe.
+		return nil, fmt.Errorf("upwork_chat drafts are disabled: a target_ref cannot yet be bound to the " +
+			"task's client, so any supplied target could name another client's thread. SWT-20 adds the " +
+			"provenance that makes this safe; until then no surface may draft this channel")
 	}
 	if a.Channel == "gmail" {
 		// From is resolved server-side from the thread's mailbox segment
@@ -649,9 +651,11 @@ func markDeliverySent(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]b
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
 		var status, channel string
 		var approvalSource *string
+		var priorError string
 		if err := tx.QueryRow(ctx,
-			`SELECT status, channel, task_id, approval_source FROM deliveries WHERE id=$1 FOR UPDATE`,
-			a.DeliveryID).Scan(&status, &channel, &taskID, &approvalSource); err != nil {
+			`SELECT status, channel, task_id, approval_source, COALESCE(error,'')
+			   FROM deliveries WHERE id=$1 FOR UPDATE`,
+			a.DeliveryID).Scan(&status, &channel, &taskID, &approvalSource, &priorError); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("delivery %d not found", a.DeliveryID)
 			}
@@ -726,12 +730,9 @@ func markDeliverySent(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]b
 			// real sender failure recorded before the flag would have been
 			// destroyed by the re-arm, which is the opposite of what a diagnostic
 			// column is for. Removing the marker alone keeps both properties.
-			`UPDATE deliveries
-			    SET status='sent', sent_at=now(), updated_at=now(),
-			        error = NULLIF(btrim(regexp_replace(
-			                  COALESCE(error,''),
-			                  '(^|\s\|\s)' || $2 || '[^|]*', '', 'g')), '')
-			  WHERE id=$1`, a.DeliveryID, unconfirmedNoteMarker); err != nil {
+			`UPDATE deliveries SET status='sent', sent_at=now(), updated_at=now(),
+			        error = NULLIF($2,'')
+			  WHERE id=$1`, a.DeliveryID, store.StripUnconfirmedNote(priorError)); err != nil {
 			return fmt.Errorf("mark sent: %w", err)
 		}
 		if _, err := insertTaskEvent(ctx, tx, taskID, "delivery_sent",

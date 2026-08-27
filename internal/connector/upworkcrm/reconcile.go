@@ -7,6 +7,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/sspataro57/switchboard/internal/store"
 )
 
 // DefaultUnconfirmedFlagPasses is how many completed successful sync runs an
@@ -50,10 +52,13 @@ func UnconfirmedFlagPasses() int {
 	return n
 }
 
-// unconfirmedNote prefixes the note ReconcileUnconfirmed writes, and doubles as
-// the fire-once guard. Matching the marker rather than requiring error IS NULL
-// lets the note append to a row that already carries an error.
-const unconfirmedNote = "unconfirmed after"
+// unconfirmedNote is the shared marker — ONE definition, in internal/store,
+// imported by both reconcilers and by the tool layer's re-arm. It had three
+// independent spellings before SWT-19's fourth review pass, with no contract
+// test: if any of them drifted, the re-arm would silently miss, the fire-once
+// guard would keep seeing a marker, and this delivery could never be flagged
+// again. Nothing would error.
+const unconfirmedNote = store.UnconfirmedNoteMarker
 
 // ReconcileUnconfirmed flags — never retries, never invents a sent_external_id —
 // upwork_chat deliveries that no run has confirmed after `passes` completed

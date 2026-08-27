@@ -1113,3 +1113,55 @@ Continuing to iterate would keep producing SWT-20-shaped findings about
 unreachable code. The honest close is: SWT-19's own change is verified and live;
 everything the reviewer keeps surfacing is the go-live gate, and that gate is now
 enforced rather than documented.
+
+## Adversarial pass FOUR (Codex, 2026-08-27) — the gate I claimed was enforced was not
+
+Three findings. The high one invalidated a claim made in the previous section of
+this very file, which is worth stating plainly rather than quietly editing.
+
+**The `ViaMCP` gate was a transport label, not a trust boundary — and the
+counter-example was already in this repo.** Pass three's fix refused
+agent-supplied `upwork_chat` drafts by testing `executor.ViaMCP(ctx)`, i.e.
+whether the actor string starts with `mcp:`, and this SPEC recorded that "the
+gate can no longer be crossed by forgetting about it." False. The drafts worker
+calls `draft_delivery` through the executor as actor **`drafts:gpt`**, so
+`ViaMCP` is false and the gate did nothing for the one component that would
+create upwork drafts automatically. `opsctl` and any direct executor caller walk
+past it the same way. An actor prefix describes a transport; it cannot tell a
+deliberate human from a model-backed worker.
+
+**So the channel is closed outright**, which is Codex's own first recommendation
+and the only form of the gate that does not depend on who is calling.
+`draft_delivery` refuses `upwork_chat` for every actor until SWT-20's provenance
+exists. A test pins that across six actor shapes — dashboard, opsctl, MCP worker,
+MCP interactive, `drafts:gpt`, and a bare direct caller — precisely because the
+previous gate's defect was that it keyed on the caller.
+
+This also closes the medium finding that a verified-but-unlinked row stays a
+matcher candidate forever: no new `upwork_chat` delivery row can be created at
+all, so nothing new can enter that state. The SWT-20 recovery work still has to
+handle rows created later.
+
+**The marker had three definitions and no contract test.** The reconcilers'
+fire-once guard and `mark_delivery_sent`'s re-arm are two halves of one contract,
+and they were spelled separately in three packages. Drift would be silent by
+construction — the strip misses, the guard keeps seeing a marker, and that
+delivery can never be flagged again. Now one definition in `internal/store`
+(`UnconfirmedNoteMarker`, `StripUnconfirmedNote`, `HasUnconfirmedNote`), used by
+both reconcilers and the re-arm, with a test asserting the guard and the strip
+agree.
+
+### What this costs, stated honestly
+
+Closing the channel makes part of this ticket's own code unreachable through the
+handler: the canonicalisation and thread-existence checks in `draft_delivery`
+cannot be exercised end to end while the closure stands. Their unit coverage
+remains (`delivery_upwork_target_test.go`, `threadkey_test.go`), and the
+integration tests that used to drive them now assert the closure instead — which
+is the honest thing to test, since it is what the code now does. Three
+integration tests changed shape for that reason, and one lifecycle assertion
+dropped from three denials to two because the upwork `channel_assisted` denial is
+no longer reachable from that route (the policy branch keeps its unit coverage).
+
+Nothing is lost operationally: production has never had an `upwork_chat`
+delivery, the draft worker is undeployed, and the assisted tier was never live.
