@@ -132,6 +132,14 @@ func validateDraftDelivery(args []byte) error {
 	return nil
 }
 
+// unconfirmedNoteMarker is the prefix both reconcilers write into
+// deliveries.error as their fire-once guard. It is duplicated from
+// slackweb/upworkcrm rather than imported because those are connector packages
+// and this is the tool layer — but it is ONE string in three places, and if it
+// ever drifts the alarms go permanently silent rather than erroring. A
+// re-arm that does not match the marker is indistinguishable from no re-arm.
+const unconfirmedNoteMarker = "unconfirmed after"
+
 // ---- prefill_delivery (assisted Slack tier) -----------------------------------
 
 func prefillDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, error) {
@@ -246,6 +254,28 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		if !exists {
 			return nil, fmt.Errorf("upwork_chat target_ref %q names no ingested thread; "+
 				"an unrecognized target would be confirmable by any message from that client", a.TargetRef)
+		}
+		// Existence is NOT a tenant boundary, and the gap is worth naming: this
+		// proves the thread was ingested, not that it belongs to THIS task's
+		// client. Binding it would need a task-to-client relation, and the only
+		// one available today runs through projects.client_person_id — which
+		// SWT-17 drops. So the binding waits for SWT-20's provenance.
+		//
+		// Until then the gate is ENFORCED here rather than left as a note in a
+		// ticket: an agent-supplied upwork draft is refused outright. draft_delivery
+		// is MCP-listed, and this session ingests client mail and chat, so without
+		// this an injected call could name a real thread belonging to a DIFFERENT
+		// client and a human could later approve and send it. A human at the
+		// dashboard or opsctl is choosing the target deliberately and is not the
+		// exposure.
+		//
+		// This costs nothing today — production has never had an upwork_chat
+		// delivery — and it means the SWT-20 go-live gate cannot be crossed by
+		// forgetting about it.
+		if executor.ViaMCP(ctx) {
+			return nil, fmt.Errorf("upwork_chat drafts are not available over MCP: the target cannot yet be " +
+				"bound to the task's client, so a supplied target_ref could name another client's thread " +
+				"(SWT-20 adds the provenance). Draft it from the dashboard or opsctl")
 		}
 	}
 	if a.Channel == "gmail" {
@@ -681,15 +711,27 @@ func markDeliverySent(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]b
 				a.DeliveryID, status)
 		}
 		if _, err := tx.Exec(ctx,
-			// error=NULL RE-ARMS the reconciler. Its fire-once guard is a marker
-			// string inside deliveries.error, so without this a row that was
-			// flagged, failed, re-approved and sent again would carry the old
-			// marker forever and could never be flagged again — the alarm would
-			// be permanently silent for exactly the delivery it had already
-			// caught once. sendDelivery's success paths clear it for the same
-			// reason; this one was missed. The prior text is not lost: it is in
-			// the audit trail and the task events.
-			`UPDATE deliveries SET status='sent', sent_at=now(), error=NULL, updated_at=now() WHERE id=$1`, a.DeliveryID); err != nil {
+			// Strip ONLY the reconciler's marker, keeping any other diagnostic.
+			//
+			// This re-arms the alarm: its fire-once guard is that marker string
+			// inside deliveries.error, so leaving it would mean a row that was
+			// flagged, failed, re-approved and sent again could never be flagged
+			// again — permanently silent for exactly the delivery it had already
+			// caught once.
+			//
+			// An earlier cut set error=NULL outright and justified it by claiming
+			// the old text survived in the audit trail. It does not: the executor
+			// audit stores the CALLER'S ARGUMENTS, not the row's prior state, and
+			// the surrounding task events carry only delivery_id/channel. So a
+			// real sender failure recorded before the flag would have been
+			// destroyed by the re-arm, which is the opposite of what a diagnostic
+			// column is for. Removing the marker alone keeps both properties.
+			`UPDATE deliveries
+			    SET status='sent', sent_at=now(), updated_at=now(),
+			        error = NULLIF(btrim(regexp_replace(
+			                  COALESCE(error,''),
+			                  '(^|\s\|\s)' || $2 || '[^|]*', '', 'g')), '')
+			  WHERE id=$1`, a.DeliveryID, unconfirmedNoteMarker); err != nil {
 			return fmt.Errorf("mark sent: %w", err)
 		}
 		if _, err := insertTaskEvent(ctx, tx, taskID, "delivery_sent",

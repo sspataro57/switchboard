@@ -164,32 +164,61 @@ func ReconcileUnconfirmed(ctx context.Context, sink *PGSink, passes int) (int, e
 		// So restate the full candidate predicate on the UPDATE. RowsAffected
 		// then reports whether the row was still unconfirmed at write time, and
 		// the event below is only written when it was.
-		tag, err := sink.pool.Exec(ctx,
-			`UPDATE deliveries
-			    SET error = CASE WHEN COALESCE(error,'') = '' THEN $2 ELSE error || ' | ' || $2 END,
-			        updated_at = now()
-			  WHERE id=$1
-			    AND status='sent'
-			    AND sent_external_id IS NULL
-			    AND confirmed_at IS NULL
-			    AND (error IS NULL OR position($3 in error) = 0)`,
-			c.deliveryID, note, unconfirmedNote)
+		// The marker and the event go in ONE transaction, holding the delivery row
+		// locked. Two separate statements autocommit between, which left two real
+		// holes: a normalize run could confirm the row in the gap, so the event
+		// announced "unconfirmed" about a delivery that was by then confirmed;
+		// and if the event insert failed, the marker was already committed, so
+		// the fire-once guard suppressed every future attempt and the signal was
+		// lost permanently. An alarm that can silently lose itself is worse than
+		// no alarm — the same lesson this file has now learned twice.
+		//
+		// SELECT ... FOR UPDATE first so the guard is evaluated against a row no
+		// concurrent matcher can change until this commits.
+		wrote, err := func() (bool, error) {
+			tx, err := sink.pool.Begin(ctx)
+			if err != nil {
+				return false, fmt.Errorf("begin flag for delivery %d: %w", c.deliveryID, err)
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+
+			tag, err := tx.Exec(ctx,
+				`UPDATE deliveries
+				    SET error = CASE WHEN COALESCE(error,'') = '' THEN $2 ELSE error || ' | ' || $2 END,
+				        updated_at = now()
+				  WHERE id=$1
+				    AND status='sent'
+				    AND sent_external_id IS NULL
+				    AND confirmed_at IS NULL
+				    AND (error IS NULL OR position($3 in error) = 0)`,
+				c.deliveryID, note, unconfirmedNote)
+			if err != nil {
+				return false, fmt.Errorf("flag unconfirmed upwork delivery %d: %w", c.deliveryID, err)
+			}
+			if tag.RowsAffected() == 0 {
+				// Another pass won the race and owns the event, or the matcher
+				// confirmed the row while this one was counting. Both mean: say
+				// nothing, and roll back rather than leave a marker behind.
+				return false, nil
+			}
+			payload, _ := json.Marshal(map[string]any{
+				"delivery_id": c.deliveryID, "channel": "upwork_chat", "passes": observed,
+			})
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO task_events (task_id, event_type, payload)
+				 VALUES ($1,'delivery_unconfirmed',$2)`, c.taskID, payload); err != nil {
+				return false, fmt.Errorf("insert delivery_unconfirmed event: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return false, fmt.Errorf("commit flag for delivery %d: %w", c.deliveryID, err)
+			}
+			return true, nil
+		}()
 		if err != nil {
-			return flagged, fmt.Errorf("flag unconfirmed upwork delivery %d: %w", c.deliveryID, err)
+			return flagged, err
 		}
-		if tag.RowsAffected() == 0 {
-			// Either another pass won the race and owns the event, or the matcher
-			// confirmed the row while this one was counting. Both mean: say
-			// nothing.
+		if !wrote {
 			continue
-		}
-		payload, _ := json.Marshal(map[string]any{
-			"delivery_id": c.deliveryID, "channel": "upwork_chat", "passes": observed,
-		})
-		if _, err := sink.pool.Exec(ctx,
-			`INSERT INTO task_events (task_id, event_type, payload)
-			 VALUES ($1,'delivery_unconfirmed',$2)`, c.taskID, payload); err != nil {
-			return flagged, fmt.Errorf("insert delivery_unconfirmed event: %w", err)
 		}
 		flagged++
 	}

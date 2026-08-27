@@ -243,3 +243,65 @@ func TestUpworkTarget_Integration_UnknownThreadIsRefused(t *testing.T) {
 		}
 	})
 }
+
+// The SWT-20 go-live gate is ENFORCED, not just documented (SWT-19, third
+// adversarial pass).
+//
+// The existence check above proves a target was ingested, not that it belongs to
+// this task's client — and binding it needs a task-to-client relation that does
+// not exist yet (the only candidate, projects.client_person_id, is dropped by
+// SWT-17). draft_delivery is MCP-listed and this session ingests client mail and
+// chat, so an injected call could otherwise name a real thread belonging to a
+// DIFFERENT client and a human could approve and send it later.
+//
+// Refusing the agent surface makes the gate impossible to cross by forgetting
+// about it. A human at the dashboard or opsctl is choosing deliberately and is
+// not the exposure, so that path stays open.
+func TestUpworkTarget_Integration_AgentDraftsAreGatedUntilProvenance(t *testing.T) {
+	if os.Getenv("DATABASE_URL") == "" {
+		t.Skip("DATABASE_URL not set; skipping Postgres integration test")
+	}
+	ctx := context.Background()
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		t.Fatalf("store.NewPool: %v", err)
+	}
+	defer pool.Close()
+
+	cleanupUpworkTarget(t, ctx, pool)
+	defer cleanupUpworkTarget(t, ctx, pool)
+
+	projID := seedProject(t, ctx, pool, utgSlug, "itest-utg-client")
+	var taskID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO tasks (project_id, title, assignee_type, status)
+		 VALUES ($1,'itest-utg gate','claude','done_locally') RETURNING id`, projID).Scan(&taskID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	ex := newExecutor(pool)
+
+	target := "upwork_crm:" + utgClient + ":upwork"
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
+		 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING`, target); err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+	args := []byte(`{"task_id":` + itoa(taskID) + `,"channel":"upwork_chat","body":"thanks, will do","target_ref":"` + target + `"}`)
+
+	// Over MCP: refused, even though the target is real and ingested.
+	// ViaMCP reads the actor prefix that the executor puts into context, so the
+	// mcp: actor is the whole mechanism — no separate transport flag.
+	if _, err := ex.Execute(ctx, executor.Call{
+		Tool: "draft_delivery", Actor: "mcp:worker:itest-utg", Args: args}); err == nil {
+		t.Fatal("draft_delivery accepted an upwork_chat draft over MCP. The target cannot yet be bound to the " +
+			"task's client, so an injected call could name another client's thread and a human could approve " +
+			"and send it. The gate must hold until SWT-20's provenance exists")
+	}
+
+	// The same call from a human surface still works — the gate must not become
+	// a blanket refusal of the channel.
+	if _, err := ex.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: utgActor, Args: args}); err != nil {
+		t.Fatalf("draft_delivery refused a dashboard-actor upwork draft: %v — a human choosing the target "+
+			"deliberately is not the exposure, and refusing them disables the assisted tier entirely", err)
+	}
+}

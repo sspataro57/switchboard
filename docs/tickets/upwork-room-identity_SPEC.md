@@ -1060,3 +1060,56 @@ load-bearing for delivery CORRECTNESS, not merely targeting quality**, which
 makes SWT-20 a hard go-live gate rather than a nice-to-have.
 
 Nothing here is reachable in production: the channel has never had a delivery.
+
+## Adversarial pass THREE (Codex, 2026-08-27) — and why the passes stop here
+
+Three fixed, one deferred. Notably, Codex independently searched for an
+alternative to the deferred client binding and confirmed there is none that does
+not depend on a column SWT-17 deletes — so that deferral is now corroborated
+rather than asserted.
+
+**Fixed.** *The reconciler race was narrowed, not closed.* The marker UPDATE and
+the `delivery_unconfirmed` insert were separate statements, so they autocommitted
+between: a normalize run could confirm the row in the gap (announcing
+"unconfirmed" about a confirmed delivery), and if the event insert failed the
+marker was already committed, suppressing every future attempt — an alarm that
+silently loses itself. Both now run in ONE transaction with the row locked.
+
+**Fixed.** *The re-arm destroyed diagnostics, and my comment about it was false.*
+`error=NULL` wiped any prior sender failure along with the marker, justified by a
+comment claiming the text survived in the audit trail. Codex checked: the
+executor audit stores the caller's ARGUMENTS, not the row's prior state, and the
+task events carry only ids. The re-arm now strips the marker substring alone and
+leaves unrelated diagnostics intact.
+
+**Fixed, and this was the pass's best idea.** *There was no ENFORCED go-live
+gate.* The deferred client binding lived only as a note in SWT-20, so nothing
+stopped the Upwork tier being switched on before provenance existed.
+`draft_delivery` is MCP-listed and this session ingests client mail and chat, so
+an injected call could name a real thread belonging to a DIFFERENT client for a
+human to approve later. Agent-supplied `upwork_chat` drafts are now refused
+outright; the dashboard and opsctl paths stay open, because a human choosing a
+target deliberately is not the exposure. Mutation-tested. **The gate can no
+longer be crossed by forgetting about it.**
+
+**Deferred to SWT-20.** *A verified-but-unlinked row stays a matcher candidate
+forever.* When the operator confirms the message IS in Upwork, there is no verb
+to attach the external id, so the row remains in the unconfirmed candidate set
+and a later same-prefix message could be claimed by it. Real, and it needs the
+same evidence-backed confirmation verb as the recovery transition — the two
+belong together in SWT-20 rather than as a third partial fix here.
+
+### Why this is the last pass
+
+Each round found real defects, and each round's findings sat further inside a
+code path that **cannot execute**: `upwork_chat` has never had a delivery in
+production, and it is now gated in code against being enabled. The remaining
+findings all converge on one thing — the delivery-recovery and provenance work in
+SWT-20 — rather than on the thread keying this ticket actually changed, which was
+verified against production on 2026-08-27: 434 roomed of 2,443, matching an
+independently computed expectation exactly, with both multi-room clients split.
+
+Continuing to iterate would keep producing SWT-20-shaped findings about
+unreachable code. The honest close is: SWT-19's own change is verified and live;
+everything the reviewer keeps surfacing is the go-live gate, and that gate is now
+enforced rather than documented.
