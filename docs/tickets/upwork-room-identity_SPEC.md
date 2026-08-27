@@ -1010,3 +1010,53 @@ mitigation shipped here.
 
 Both deferred items are **blockers for enabling the Upwork tier**, not for
 merging this: they concern a channel with zero deliveries in production.
+
+## Adversarial RE-review (Codex, 2026-08-27) — three of the four fixes were themselves defective
+
+The re-review of the previous round's fixes returned `needs-attention` with four
+more findings, three of them introduced BY those fixes. Each verified against the
+source before acting; one turned out to need a nuance the reviewer had not stated.
+
+**Reverted.** *Extending `mark_delivery_failed` to `upwork_chat` was worse than
+the gap it filled.* An upwork row reaches `sent` via `mark_delivery_sent`, which
+emits `delivery_sent`, which drives orchestrator **R8**: the work task flips to
+`delivered`, its Deliver task is CLOSED, and an orchestration row is recorded so
+R8 will not run again. `delivery_failed` has no orchestrator rule, so failing the
+delivery afterwards leaves a real non-delivery permanently recorded as delivered
+with its Deliver task shut — a database disagreeing with the world, silently,
+which is the exact class of failure this ticket exists to remove. `slack_reply`
+is unaffected because it wedges at `sending`, where `delivery_sent` never fired.
+The verb is slack-only again, the test asserting the refusal is restored with
+that history in it, and the reconciler's note names actions that exist and do not
+corrupt state.
+
+**Fixed.** *A new attempt did not re-arm the alarm.* The reconciler's fire-once
+guard is a marker inside `deliveries.error`, and `mark_delivery_sent` did not
+clear it — so a row that was flagged, failed, re-approved and re-sent kept the
+old marker forever and could never be flagged again. The alarm would have been
+permanently silent for precisely the delivery it had already caught once.
+`error=NULL` on that transition, matching what `send_delivery`'s success paths
+already did. (The reviewer's claim that *nothing* clears it was half right — a
+sibling function does; this one was missed.)
+
+**Fixed.** *The reconciler could annotate a row confirmed in the race window.*
+Candidates are read before pass counting, so a concurrent normalize run could
+confirm a row before the note was written, leaving a contradictory
+"unconfirmed" alarm in the task history where a human reads it as evidence. The
+full candidate predicate is now restated on the UPDATE, and the event is written
+only when `RowsAffected` says the row was still unconfirmed.
+
+**Deferred to SWT-20, with reasoning that decided it.** *The existence check does
+not bind the target to the task's client.* Correct: `draft_delivery` proves the
+`target_ref` names some ingested thread, not that it belongs to this task's
+client, so an agent-facing call can still name another client's thread and
+bypass the multi-room refusal in `drafts/store.go`. The reason it is not fixed
+here: the only task→client binding available today runs through
+`projects.client_person_id`, and **SWT-17 drops that column**. Building the check
+on it would be building on something already scheduled for deletion, and SWT-20
+introduces the provenance that replaces it. The existence check stays — it is a
+strict improvement — and the reviewer's framing is adopted: **provenance is
+load-bearing for delivery CORRECTNESS, not merely targeting quality**, which
+makes SWT-20 a hard go-live gate rather than a nice-to-have.
+
+Nothing here is reachable in production: the channel has never had a delivery.

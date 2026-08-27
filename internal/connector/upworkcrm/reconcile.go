@@ -135,30 +135,52 @@ func ReconcileUnconfirmed(ctx context.Context, sink *PGSink, passes int) (int, e
 			continue
 		}
 
-		// Name a verb that actually ACCEPTS this row. An earlier version of this
-		// note said "mark_delivery_sent or mark_delivery_failed" and both were
-		// wrong for the row it flags: mark_delivery_sent takes 'approved' (plus
-		// two slack_reply edges) and this row is 'sent', while
-		// mark_delivery_failed took slack_reply only. SWT-19 extended
-		// mark_delivery_failed to upwork_chat in 'sent' precisely so this alarm
-		// has a response. If the message IS in Upwork and only the id is missing,
-		// there is deliberately nothing to run — the row is already 'sent', which
-		// is the truth; the missing id costs a link, not a delivery.
+		// Name only actions that EXIST and do not corrupt state. This note has
+		// been wrong twice, in opposite directions, and the history is worth
+		// keeping: it first named mark_delivery_sent and mark_delivery_failed,
+		// both of which reject this row; the fix extended mark_delivery_failed to
+		// upwork, which was then reverted because failing a row that R8 had
+		// already processed leaves the work task permanently 'delivered' while
+		// the delivery says failed.
+		//
+		// So today the honest instruction is: if the message IS in Upwork,
+		// nothing needs doing — the row is 'sent', which is true, and only the
+		// external-id link is missing. If it is NOT, the delivery must be redone,
+		// and that needs a new task rather than a status flip, because the work
+		// task is already closed out as delivered. A one-verb recovery arrives
+		// with SWT-20's compensating lifecycle transition.
 		note := fmt.Sprintf("%s %d sync passes with no matching Upwork message. "+
-			"Check the Upwork thread: if the message is NOT there, mark_delivery_failed "+
-			"(opsctl/dashboard) reopens it for another attempt; if it IS there, leave the row "+
-			"as sent — only the external id is missing", unconfirmedNote, observed)
+			"Check the Upwork thread. If the message IS there, no action — only the external-id "+
+			"link is missing. If it is NOT there, the reply was never delivered: raise a new task "+
+			"to redo it (the work task is already closed as delivered, and no status flip fixes "+
+			"that until SWT-20)", unconfirmedNote, observed)
+		// The candidate list was read before the pass counting above, so a
+		// concurrent normalize run may have CONFIRMED this row in the meantime.
+		// Guarding only on the marker would then append "unconfirmed after N
+		// passes" to a row that is demonstrably confirmed, and emit the event to
+		// match — a contradictory alarm that outlives the race in the task
+		// history and on the dashboard, where a human reads it as evidence.
+		//
+		// So restate the full candidate predicate on the UPDATE. RowsAffected
+		// then reports whether the row was still unconfirmed at write time, and
+		// the event below is only written when it was.
 		tag, err := sink.pool.Exec(ctx,
 			`UPDATE deliveries
 			    SET error = CASE WHEN COALESCE(error,'') = '' THEN $2 ELSE error || ' | ' || $2 END,
 			        updated_at = now()
-			  WHERE id=$1 AND (error IS NULL OR position($3 in error) = 0)`,
+			  WHERE id=$1
+			    AND status='sent'
+			    AND sent_external_id IS NULL
+			    AND confirmed_at IS NULL
+			    AND (error IS NULL OR position($3 in error) = 0)`,
 			c.deliveryID, note, unconfirmedNote)
 		if err != nil {
 			return flagged, fmt.Errorf("flag unconfirmed upwork delivery %d: %w", c.deliveryID, err)
 		}
 		if tag.RowsAffected() == 0 {
-			// Another pass won the race; it owns the event.
+			// Either another pass won the race and owns the event, or the matcher
+			// confirmed the row while this one was counting. Both mean: say
+			// nothing.
 			continue
 		}
 		payload, _ := json.Marshal(map[string]any{

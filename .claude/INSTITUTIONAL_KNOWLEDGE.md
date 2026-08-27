@@ -74,6 +74,39 @@ upworkcrm has `upworkcrm/reconcile.go` (SWT-19; 6 passes, not 3 — see that
 entry). **google and jira still have no reconciler**, so a refusal in those two
 is SILENT: the rows sit unconfirmed and nothing surfaces them.
 
+### Failing a delivery that R8 already processed corrupts the task lifecycle
+**Location:** `internal/tools/delivery.go` `markDeliveryFailed`, found by
+adversarial re-review 2026-08-27
+`delivery_sent` drives orchestrator R8: the work task flips to `delivered`, its
+Deliver task is CLOSED, and an orchestration row is recorded so R8 never runs
+again for it. **`delivery_failed` has no orchestrator rule.** So flipping a row to
+`failed` AFTER it reached `sent` leaves a real non-delivery permanently recorded
+as delivered, with the Deliver task shut and the draft worker never picking it
+up — no error anywhere.
+This is why `mark_delivery_failed` is `slack_reply`-only. Slack wedges at
+`sending`, where `delivery_sent` never fired and R8 never ran, so failing it
+contradicts nothing. An `upwork_chat` row has no `sending` phase at all and is
+therefore always past R8 by the time it is stuck. SWT-19 extended the verb to
+upwork and had to revert it in the same ticket.
+**Rule: before allowing a status transition backwards, check which orchestrator
+rules the forward transition already fired.** A verb that "only moves a row away
+from the world" is still unsafe if something else acted on the row getting there.
+Recovery needs a compensating transition (reopen the work and its Deliver task),
+which is SWT-20.
+
+### An alarm whose fire-once marker is never cleared goes permanently silent
+**Location:** `internal/connector/upworkcrm/reconcile.go` + `markDeliverySent`,
+same review
+Both reconcilers guard against re-flagging by writing a marker string into
+`deliveries.error` and skipping rows that already contain it. That guard is only
+correct if every path that starts a NEW attempt clears the column.
+`send_delivery`'s success paths do (`error=NULL`); `mark_delivery_sent` did not —
+so a row flagged, failed, re-approved and re-sent kept the marker forever and
+could never be flagged again. The alarm was permanently silent for exactly the
+delivery it had already caught once.
+**Rule: a fire-once marker stored in mutable state needs a re-arm on every path
+that creates a new attempt.** When adding such a path, grep for the marker.
+
 ### Upwork thread keys: one spelling, two shapes, and what the scope actually is (SWT-19)
 **Location:** `internal/connector/upworkcrm/threadkey.go`
 Since SWT-19 the key has two shapes and the difference is a PARSE, not a guess:

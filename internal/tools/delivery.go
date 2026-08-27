@@ -681,7 +681,15 @@ func markDeliverySent(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]b
 				a.DeliveryID, status)
 		}
 		if _, err := tx.Exec(ctx,
-			`UPDATE deliveries SET status='sent', sent_at=now(), updated_at=now() WHERE id=$1`, a.DeliveryID); err != nil {
+			// error=NULL RE-ARMS the reconciler. Its fire-once guard is a marker
+			// string inside deliveries.error, so without this a row that was
+			// flagged, failed, re-approved and sent again would carry the old
+			// marker forever and could never be flagged again — the alarm would
+			// be permanently silent for exactly the delivery it had already
+			// caught once. sendDelivery's success paths clear it for the same
+			// reason; this one was missed. The prior text is not lost: it is in
+			// the audit trail and the task events.
+			`UPDATE deliveries SET status='sent', sent_at=now(), error=NULL, updated_at=now() WHERE id=$1`, a.DeliveryID); err != nil {
 			return fmt.Errorf("mark sent: %w", err)
 		}
 		if _, err := insertTaskEvent(ctx, tx, taskID, "delivery_sent",
@@ -1101,31 +1109,35 @@ func markDeliveryFailed(ctx context.Context, pool *pgxpool.Pool, args []byte) ([
 			}
 			return fmt.Errorf("lock delivery %d: %w", a.DeliveryID, err)
 		}
-		// upwork_chat joins slack_reply (SWT-19). Without it the reconciler was an
-		// alarm with no valid response: it flags rows at status='sent', and
-		// mark_delivery_sent accepts only 'approved' (plus two slack_reply
-		// edges), so BOTH verbs its note named rejected the row it had just
-		// flagged. An alarm nobody can act on is worse than no alarm — it trains
-		// the reader to ignore the channel.
+		// slack_reply ONLY — and the upwork_chat extension that briefly lived here
+		// was REVERTED, deliberately, because it was worse than the gap it filled.
 		//
-		// Safe for the same reason it is safe for slack: this verb moves a row
-		// AWAY from the world, never toward it. It stays human-only and off the
-		// MCP surface, and the guards below still refuse a row that carries a
-		// sent_external_id or a confirmed_at — i.e. one we have positive evidence
-		// really landed.
-		if channel != "slack_reply" && channel != "upwork_chat" {
-			return fmt.Errorf("mark_delivery_failed only supports slack_reply and upwork_chat; delivery %d is %s", a.DeliveryID, channel)
+		// An upwork_chat row reaches 'sent' through mark_delivery_sent, which
+		// emits delivery_sent, which drives orchestrator R8: the work task flips
+		// to delivered, its Deliver task is CLOSED, and an orchestration row is
+		// recorded so R8 will not run again. Flipping that delivery to 'failed'
+		// emits delivery_failed, for which there is NO orchestrator rule. The
+		// result is a real non-delivery permanently represented as delivered,
+		// with its Deliver task closed and the draft worker never picking it up —
+		// a database that disagrees with the world, silently, which is the exact
+		// class of failure SWT-18 and SWT-19 exist to remove.
+		//
+		// slack_reply does not have that problem: it wedges at 'sending', which
+		// means delivery_sent never fired and R8 never ran, so failing it
+		// contradicts nothing.
+		//
+		// The honest recovery for a flagged upwork row needs a compensating
+		// lifecycle transition — reopening the work and its Deliver task — and
+		// that belongs with SWT-20's other go-live blockers, not bolted onto this
+		// verb. Until then the reconciler's note names an action that exists and
+		// does not corrupt state. Reachable consequence today: none, production
+		// has never had an upwork_chat delivery.
+		if channel != "slack_reply" {
+			return fmt.Errorf("mark_delivery_failed only supports slack_reply; delivery %d is %s "+
+				"(upwork_chat recovery needs a compensating lifecycle transition — SWT-20)", a.DeliveryID, channel)
 		}
-		// slack_reply wedges at 'sending' (the click may or may not have landed).
-		// upwork_chat has no 'sending' phase at all — send_delivery is
-		// policy-denied for the channel, so mark_delivery_sent puts the row
-		// straight to 'sent' and that is where an unconfirmable one is stuck.
-		// Different status, identical situation: a row the system cannot resolve
-		// on its own, which a human has now checked.
-		stuck := status == "sending" || (channel == "upwork_chat" && status == "sent")
-		if !stuck {
-			return fmt.Errorf("delivery %d is %s; only a stuck row can be marked failed "+
-				"(slack_reply in 'sending', upwork_chat in 'sent')", a.DeliveryID, status)
+		if status != "sending" {
+			return fmt.Errorf("delivery %d is %s; only a stuck sending row can be marked failed", a.DeliveryID, status)
 		}
 		// Both of these mean the message IS in Slack. Refuse rather than
 		// contradict the evidence — invariant 4 never walks back a send.

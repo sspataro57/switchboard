@@ -757,54 +757,36 @@ func TestSlackDelivery_Integration_MarkDeliveryFailed(t *testing.T) {
 		}
 	})
 
-	// CHANGED BY SWT-19. This subtest used to assert that mark_delivery_failed
-	// refuses upwork_chat outright (SWT-12 criterion 12 scoped it to slack_reply).
-	// It now accepts an upwork_chat row STUCK AT 'sent', because SWT-19's
-	// reconciler flags exactly those and every verb its alarm could name refused
-	// them — mark_delivery_sent takes 'approved', and this verb took slack_reply
-	// only. An alarm with no valid response is worse than no alarm.
+	// This subtest flipped twice and is back where it started, which is worth
+	// recording rather than quietly restoring.
 	//
-	// The refusal that must survive is the STATUS one, not the channel one: an
-	// upwork row in any other state is still refused.
-	t.Run("upwork_chat: refused unless stuck at sent", func(t *testing.T) {
-		var approvedID int64
-		if err := s.pool.QueryRow(ctx,
-			`INSERT INTO deliveries (task_id, channel, target_ref, body, status)
-			 VALUES ($1,'upwork_chat','upwork_crm:itest-sds:upwork','not stuck','approved') RETURNING id`,
-			s.taskID).Scan(&approvedID); err != nil {
-			t.Fatalf("seed upwork approved row: %v", err)
-		}
-		if err := s.tryCall(ctx, "mark_delivery_failed", approvedID); err == nil {
-			t.Fatal("mark_delivery_failed accepted an upwork_chat row in 'approved'; only a row stuck at " +
-				"'sent' — the shape the reconciler flags — may be failed")
-		}
-
-		var sentID int64
+	// SWT-19 first extended mark_delivery_failed to upwork_chat, because the new
+	// reconciler flags rows at status='sent' and every verb its alarm could name
+	// refused them. The adversarial re-review then showed that extension was
+	// worse than the gap: an upwork row reaches 'sent' via mark_delivery_sent,
+	// which fires delivery_sent, which drives R8 to mark the work task delivered
+	// and CLOSE its Deliver task. delivery_failed has no orchestrator rule, so
+	// failing the delivery afterwards leaves a real non-delivery permanently
+	// recorded as delivered. Reverted; the compensating transition is SWT-20.
+	//
+	// slack_reply is unaffected because it wedges at 'sending', where
+	// delivery_sent never fired and R8 never ran.
+	t.Run("refused on a non-slack channel", func(t *testing.T) {
+		var id int64
 		if err := s.pool.QueryRow(ctx,
 			`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_at)
 			 VALUES ($1,'upwork_chat','upwork_crm:itest-sds:upwork','stuck','sent',now()) RETURNING id`,
-			s.taskID).Scan(&sentID); err != nil {
+			s.taskID).Scan(&id); err != nil {
 			t.Fatalf("seed upwork sent row: %v", err)
 		}
-		if err := s.tryCall(ctx, "mark_delivery_failed", sentID); err != nil {
-			t.Fatalf("mark_delivery_failed refused an upwork_chat row stuck at 'sent': %v — this is the row "+
-				"the reconciler flags, and refusing it leaves the alarm with no valid response", err)
+		if err := s.tryCall(ctx, "mark_delivery_failed", id); err == nil {
+			t.Fatal("mark_delivery_failed accepted an upwork_chat row. R8 has already marked the work task " +
+				"delivered and closed its Deliver task off the back of delivery_sent, and delivery_failed has " +
+				"no orchestrator rule — so this transition would leave a non-delivery recorded as delivered, " +
+				"permanently and silently. Recovery needs the compensating transition in SWT-20")
 		}
-		if r := s.row(t, ctx, sentID); r.status != "failed" {
-			t.Errorf("status after mark_delivery_failed = %q, want failed", r.status)
-		}
-
-		// A row with positive evidence it landed is still refused.
-		var confirmedID int64
-		if err := s.pool.QueryRow(ctx,
-			`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_at, sent_external_id)
-			 VALUES ($1,'upwork_chat','upwork_crm:itest-sds:upwork','landed','sent',now(),'upwork-evidence-sds')
-			 RETURNING id`, s.taskID).Scan(&confirmedID); err != nil {
-			t.Fatalf("seed upwork confirmed row: %v", err)
-		}
-		if err := s.tryCall(ctx, "mark_delivery_failed", confirmedID); err == nil {
-			t.Fatal("mark_delivery_failed accepted a row carrying sent_external_id; that is evidence the " +
-				"message really landed and must never be walked back to failed")
+		if r := s.row(t, ctx, id); r.status != "sent" {
+			t.Errorf("status after refusal = %q, want sent — the refusal must not move the row", r.status)
 		}
 	})
 }
