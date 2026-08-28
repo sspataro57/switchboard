@@ -189,9 +189,34 @@ go run ./cmd/opsctl capture-rules report
 names here were checked against `cmd/opsctl/main.go`; the first draft of this
 runbook invented four flags from Go struct-field names and none of them existed.
 
+### Seeded 2026-08-28 — the measured outcome
+
+Rules 11-28 in production, all `priority 5`, all attribution-only. The shadow
+pass over the whole corpus (`capture-rules run --all`, 2m27s):
+
+```
+considered 49,506   matched 35,033   unmatched 14,473
+tasks_created 0     appended 0
+```
+
+**1,602 messages attributed to `personal`**, all `action='attributed'`; `tasks`
+(20), `external_refs` (0) and `ai_extractions` (11) all unchanged. Triage's inbox
+went 16,075 → 14,473, and zero personal messages remain `unmatched`.
+
+Note what that means: attributed messages leave triage's inbox entirely, because
+the pending filter takes `latest decision = unmatched`. So `personal` mail is not
+"processed locally instead of remotely" today — nothing consumes it at all. If a
+worker ever does, `AssembleContext` resolves it to `personal` / `local_only` and
+the boundary classifies it restricted; and `projects.client` is NULL, so
+`task_get_next` cannot hand a personal task to a worker either.
+
+A consequence of the same fact: the `project_local_only` class reason cannot
+appear in a triage skip record while triage's inbox is unmatched-only. It is
+there for when that inbox widens, not for today.
+
 ### What the list covers, and what it does not
 
-1,601 of the 16,066 currently-unmatched messages — **10%**. The pattern is a
+1,601 of the 16,066 unmatched messages predicted — **10%**; 1,602 actual. The pattern is a
 case-insensitive substring of the raw `From` header, so a bare domain covers
 every subdomain (`bankofamerica.com` picks up `ealerts.`, `emcom.`, `receipts.`,
 `servicing.`, `clientfeedback.`). `@chase.com` keeps its `@` on purpose:
