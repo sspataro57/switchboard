@@ -108,6 +108,13 @@ Note the small model is SLOWER per message despite being fully resident — mode
 size is not the cost driver at this scale, so "use a small model for the cheap
 second pass" is true only because the subset is small, not because the model is.
 
+**ONE MODEL THIS TICKET.** qwen3:8b, nothing else (Salvador, 2026-08-28: "let's
+just use qwen now and we figure out later about the other model"). The two-model
+arithmetic below is recorded because it was measured and because it answers
+whether the future second pass is affordable — it is NOT a description of what
+this ticket builds. Anything here that loads a second model is out of scope; see
+Future work.
+
 **Because triage and this worker are BATCH, the cold load is amortised**: it is
 paid once per pass, not once per message. Over the 1,609-message personal pile
 that is 3.4s against ~6.8 min of work — **0.8% overhead**. This is the fact that
