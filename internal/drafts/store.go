@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sspataro57/switchboard/internal/connector/upworkcrm"
+	"github.com/sspataro57/switchboard/internal/provider"
 )
 
 // PGStore resolves the Deliver-task queue deterministically: channel from
@@ -45,6 +46,15 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 	// NULLIF because `projects.client` is '' (not NULL) on the real rows and
 	// `projects.name` is NOT NULL, so ClientName is now never empty — where an
 	// unmapped project used to render as orDash "—" in the prompt.
+	// p.ai_locality is read HERE, in the same row as the project it belongs to
+	// (SWT-21 criterion 24). It is the whole reason the boundary in drafts.go is
+	// not decorative: without this column DeliverTask.ProjectLocalOnly is false
+	// for every task in production, `ClassOf(AttrProject, false)` returns
+	// ClassGeneral, and a Deliver task on a local_only project is drafted by the
+	// hosted model — with a locality test passing the whole time, because the
+	// test sets the field on its own fixture. That is the repo's recurring
+	// landmine (a predicate whose discriminating column is constant in
+	// production), and it shipped inert in the first cut of this ticket.
 	q := `SELECT t.id, t.parent_id, p.slug,
 	             COALESCE(parent.title,''),
 	             COALESCE(NULLIF(p.client,''), p.name),
@@ -52,7 +62,8 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 	             (p.send_from_account IS NOT NULL),
 	             COALESCE((SELECT payload->>'summary' FROM task_events
 	                WHERE task_id = t.parent_id AND event_type='done_local'
-	                ORDER BY id DESC LIMIT 1),'')
+	                ORDER BY id DESC LIMIT 1),''),
+	             (p.ai_locality = 'local_only')
 	      FROM tasks t
 	      JOIN tasks parent ON parent.id = t.parent_id
 	      JOIN projects p ON p.id = t.project_id
@@ -78,7 +89,7 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 		var hasSendFrom bool
 		if err := rows.Scan(&dt.DeliverTaskID, &dt.ParentTaskID, &dt.ProjectSlug,
 			&dt.ParentTitle, &dt.ClientName, &channelCfg, &hasSendFrom,
-			&dt.ParentSummary); err != nil {
+			&dt.ParentSummary, &dt.ProjectLocalOnly); err != nil {
 			return nil, fmt.Errorf("scan deliver task: %w", err)
 		}
 		pending = append(pending, dt)
@@ -352,18 +363,39 @@ func (s *PGStore) upworkTarget(ctx context.Context, refKey string) (string, erro
 }
 
 func (s *PGStore) loadThreadContext(ctx context.Context, dt *DeliverTask) error {
+	// Each row carries the message AND its attribution (SWT-21). Deliberately ONE
+	// query rather than a second pass: this is the set of bodies that actually
+	// travels in the prompt, so classifying it here makes "what was sent" and
+	// "what was classified" the same set by construction. A separate neighbour
+	// query could drift — a different LIMIT, a different ordering, or simply
+	// being forgotten when this one changes — and the drift would be silent and
+	// in the unsafe direction.
 	var rows pgx.Rows
 	var err error
 	switch {
 	case dt.ThreadID != nil:
 		rows, err = s.pool.Query(ctx,
-			`SELECT direction, COALESCE(sender,''), COALESCE(subject,''), COALESCE(body_text,''), sent_at
+			`SELECT sub.direction, COALESCE(sub.sender,''), COALESCE(sub.subject,''),
+			        COALESCE(sub.body_text,''), sub.sent_at,
+			        COALESCE(p.ai_locality = 'local_only', false),
+			        EXISTS (SELECT 1 FROM capture_decisions cd2 WHERE cd2.message_id = sub.id),
+			        latest.project_id IS NOT NULL
 			 FROM (SELECT * FROM normalized_messages WHERE thread_id=$1 ORDER BY sent_at DESC LIMIT 6) sub
-			 ORDER BY sent_at`, *dt.ThreadID)
+			 LEFT JOIN LATERAL (SELECT cd.project_id FROM capture_decisions cd
+			                     WHERE cd.message_id = sub.id ORDER BY cd.id DESC LIMIT 1) latest ON true
+			 LEFT JOIN projects p ON p.id = latest.project_id
+			 ORDER BY sub.sent_at`, *dt.ThreadID)
 	case dt.TargetRef != "":
 		rows, err = s.pool.Query(ctx,
-			`SELECT m.direction, COALESCE(m.sender,''), COALESCE(m.subject,''), COALESCE(m.body_text,''), m.sent_at
+			`SELECT m.direction, COALESCE(m.sender,''), COALESCE(m.subject,''),
+			        COALESCE(m.body_text,''), m.sent_at,
+			        COALESCE(p.ai_locality = 'local_only', false),
+			        EXISTS (SELECT 1 FROM capture_decisions cd2 WHERE cd2.message_id = m.id),
+			        latest.project_id IS NOT NULL
 			 FROM normalized_messages m JOIN normalized_threads t ON t.id=m.thread_id
+			 LEFT JOIN LATERAL (SELECT cd.project_id FROM capture_decisions cd
+			                     WHERE cd.message_id = m.id ORDER BY cd.id DESC LIMIT 1) latest ON true
+			 LEFT JOIN projects p ON p.id = latest.project_id
 			 WHERE t.thread_key=$1 ORDER BY m.sent_at DESC LIMIT 6`, dt.TargetRef)
 	default:
 		return nil
@@ -374,10 +406,75 @@ func (s *PGStore) loadThreadContext(ctx context.Context, dt *DeliverTask) error 
 	defer rows.Close()
 	for rows.Next() {
 		var m ThreadMessage
-		if err := rows.Scan(&m.Direction, &m.Sender, &m.Subject, &m.BodyText, &m.SentAt); err != nil {
+		var localOnly, seen, hasProj bool
+		if err := rows.Scan(&m.Direction, &m.Sender, &m.Subject, &m.BodyText, &m.SentAt,
+			&localOnly, &seen, &hasProj); err != nil {
 			return fmt.Errorf("scan thread message: %w", err)
 		}
 		dt.Thread = append(dt.Thread, m)
+
+		// OUTBOUND messages are NOT folded (SWT-21, post-review correction).
+		//
+		// This is not an optimisation, it is a correctness fix, and the bug it
+		// repairs was permanent rather than transient. The capture engine filters
+		// `direction = 'inbound'` — that line IS invariant 5, and it means an
+		// outbound message will NEVER have a capture_decisions row, in any mode,
+		// on any pass. Measured: 21,194 outbound messages, zero decisions, 100%
+		// of them. So classifying one as AttrUnseen does not mean "not yet
+		// looked at", it means "not applicable", and folding it restricted the
+		// whole request FOREVER on any thread with two-way traffic — which is
+		// every thread a Deliver task exists to reply on, the moment its own
+		// send re-enters through ingestion.
+		//
+		// What makes skipping them SAFE is inheritance, not approval. An outbound
+		// message is structurally unclassifiable, so instead of defaulting it to
+		// `unseen` we let it take its CONVERSATION's class — which is folded
+		// anyway, from the Deliver task's own project and from every inbound
+		// sibling on the thread. Excluding it therefore removes a value that was
+		// never evidence, not a value that said "general".
+		//
+		// An earlier version of this comment justified it differently and WRONGLY:
+		// that an outbound message is our own send and reached these participants
+		// only by passing the delivery policy gate. Measured against production,
+		// that is false — 21,194 outbound messages against 1 delivery row.
+		// `direction='outbound'` is set by normalize.go when the From address is
+		// one of the five own accounts, so it is overwhelmingly mail Salvador
+		// typed in Gmail himself. The gate had seen ~0.005% of it. And the gate
+		// answers disclosure to the RECIPIENT, which is a different question from
+		// disclosure to a hosted API.
+		//
+		// RESIDUAL, stated because inheritance does not cover it: the outbound
+		// body is still rendered into the prompt (see below — it stays in the
+		// conversation). A hand-written reply that pastes personal material into
+		// a client thread introduces content that no inbound sibling holds and no
+		// project attribution describes, and it will travel to the hosted lane.
+		// Dropping outbound from the prompt would break the draft worker's job,
+		// and folding it restricted breaks every replied-on thread forever, so
+		// this is an accepted gap rather than an oversight. SPEC deviation 10.
+		if m.Direction == "outbound" {
+			continue
+		}
+
+		// SWT-17 §8's three states, spelled exactly as triage spells them
+		// (internal/triage/store.go) so the two workers cannot drift into two
+		// vocabularies for one rule.
+		//
+		// Unseen and unmatched fold IDENTICALLY here — both are restricted, and
+		// drafts has no report that tells them apart, so no test can distinguish
+		// them either. Keeping the distinction anyway is deliberate: it costs one
+		// EXISTS on a six-row query, it matches triage, and the moment drafts
+		// grows a skip report the number it needs is already being read. Do not
+		// mistake the missing test for missing coverage; there is nothing to
+		// observe.
+		st := provider.AttrUnseen
+		switch {
+		case hasProj:
+			st = provider.AttrProject
+		case seen:
+			st = provider.AttrUnmatched
+		}
+		dt.NeighbourAttribution = append(dt.NeighbourAttribution,
+			NeighbourClass{State: st, LocalOnly: localOnly})
 	}
 	return rows.Err()
 }

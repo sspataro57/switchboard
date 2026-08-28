@@ -34,6 +34,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sspataro57/switchboard/internal/provider"
 	"github.com/sspataro57/switchboard/internal/store"
 	"github.com/sspataro57/switchboard/internal/triage"
 )
@@ -152,8 +153,8 @@ func seedCorpus(t *testing.T, ctx context.Context, pool *pgxpool.Pool) seeded {
 	// mappedPersonID still exists and still drives identity resolution; what it
 	// no longer does is select a project.
 	s.projectID = insID(t, ctx, pool,
-		`INSERT INTO projects (name, slug, client)
-		 VALUES ('itest-triage Acme', 'itest-triage-acme', 'Acme') RETURNING id`)
+		`INSERT INTO projects (name, slug, client, ai_locality)
+		 VALUES ('itest-triage Acme', 'itest-triage-acme', 'Acme', 'any') RETURNING id`)
 
 	// Two open tasks = attach candidates for the mapped project.
 	s.candidate1 = insID(t, ctx, pool,
@@ -266,14 +267,18 @@ func TestTriage_Integration_ShadowMode(t *testing.T) {
 	mappedResp := fmt.Sprintf(`{"actionable":{"value":true,"confidence":0.92},"kind":{"value":"action_request","confidence":0.88},"title":{"value":"Fix staging login","confidence":0.81},"body":{"value":"login broken on staging","confidence":0.7},"priority":{"value":2,"confidence":0.6},"attach_to_task_id":{"value":%d,"confidence":0.75},"summary":"clear bug report"}`, sd.candidate1)
 	unmappedResp := `{"actionable":{"value":false,"confidence":0.95},"kind":{"value":"fyi","confidence":0.9},"title":{"value":"Thanks note","confidence":0.9},"body":{"value":"thanks","confidence":0.9},"priority":{"value":0,"confidence":0.9},"attach_to_task_id":{"value":null,"confidence":0.9},"summary":"acknowledgement"}`
 
-	prov := &fakeProvider{scripts: []scriptedResp{
+	// The LOCAL lane (SWT-21). This corpus is seeded `unmatched` above, and
+	// unmatched is ClassRestricted — so after the boundary the only lane that may
+	// process it is a local one. A hosted fake here would make the whole suite
+	// skip and pass while asserting nothing.
+	prov := &fakeProvider{local: true, scripts: []scriptedResp{
 		{resp: okResp(mappedResp)},
 		{resp: okResp(unmappedResp)},
 	}}
 
 	cfg := triage.Config{Model: itestModel, MaxTokens: 512}
 
-	stats, err := triage.Run(ctx, st, prov, cfg)
+	stats, err := triage.Run(ctx, st, provider.NewRouter(nil, prov, 0), cfg)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -287,8 +292,13 @@ func TestTriage_Integration_ShadowMode(t *testing.T) {
 	}
 
 	// Criterion 4: two ai_runs (worker_type triage, model, status ok, tokens/latency).
+	//
+	// provider is 'fake-local', not 'openai': since SWT-21 the column names the
+	// LANE THAT SERVED (the client's Describe().Name), and this corpus is
+	// restricted, so the local lane is the only one that could have served it.
+	// Pinning 'openai' here would have asserted the audit trail lies.
 	if got := scanInt(t, ctx, pool,
-		`SELECT count(*) FROM ai_runs WHERE model=$1 AND worker_type='triage' AND provider='openai' AND status='ok'`, itestModel); got != 2 {
+		`SELECT count(*) FROM ai_runs WHERE model=$1 AND worker_type='triage' AND provider='fake-local' AND status='ok'`, itestModel); got != 2 {
 		t.Errorf("ai_runs (triage, ok) = %d, want 2", got)
 	}
 	if got := scanInt(t, ctx, pool,
@@ -372,8 +382,11 @@ func TestTriage_Integration_ShadowMode(t *testing.T) {
 	}
 
 	// Criterion 8: idempotent second run — 0 processed, 0 provider calls.
-	prov2 := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{}`)}}}
-	stats2, err := triage.Run(ctx, st, prov2, cfg)
+	// local:true here too. A hosted fake would also record 0 calls — but because
+	// the boundary skipped it, not because the filter excluded it, and the
+	// assertion below would pass for the wrong reason.
+	prov2 := &fakeProvider{local: true, scripts: []scriptedResp{{resp: okResp(`{}`)}}}
+	stats2, err := triage.Run(ctx, st, provider.NewRouter(nil, prov2, 0), cfg)
 	if err != nil {
 		t.Fatalf("Run (rerun): %v", err)
 	}

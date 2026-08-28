@@ -287,8 +287,8 @@ func umhSeedProjectTask(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s
 	t.Helper()
 	var projID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,$2,'manual','dashboard','/tmp/itest') RETURNING id`, slug, client).Scan(&projID); err != nil {
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,$2,'manual','dashboard','/tmp/itest', 'any') RETURNING id`, slug, client).Scan(&projID); err != nil {
 		t.Fatalf("seed project %s: %v", slug, err)
 	}
 	var taskID int64

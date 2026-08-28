@@ -58,8 +58,8 @@ func TestMCP_Integration_ListAndCallRoundTrip(t *testing.T) {
 	// Seed a project + one ready claude task for task_get_next to return.
 	var projectID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery)
-		 VALUES ($1,$1,$2,'manual','dashboard') RETURNING id`,
+		`INSERT INTO projects (name, slug, client, execution, delivery, ai_locality)
+		 VALUES ($1,$1,$2,'manual','dashboard', 'any') RETURNING id`,
 		smokeSlug, smokeClient).Scan(&projectID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}

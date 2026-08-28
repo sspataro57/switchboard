@@ -21,6 +21,42 @@ type OpenAI struct {
 	http    *http.Client
 }
 
+// Probe answers "can you serve right now" without running a completion
+// (SWT-21). It exists because the boundary refuses a local client that cannot
+// demonstrate reachability — a declaration is not evidence.
+//
+// GET {base}/models is the cheapest thing an OpenAI-compatible server answers,
+// and ollama and llama.cpp both serve it. Any non-2xx or transport failure is
+// ErrUnavailable rather than a wrapped error: to the router this is a state, not
+// a fault.
+func (o *OpenAI) Probe(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.baseURL+"/models", nil)
+	if err != nil {
+		return fmt.Errorf("%w: build probe: %v", ErrUnavailable, err)
+	}
+	if o.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+o.apiKey)
+	}
+	resp, err := o.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("%w: probe returned %d", ErrUnavailable, resp.StatusCode)
+	}
+	return nil
+}
+
+// Describe reports the endpoint this adapter will POST to, which is what
+// LocalityOf classifies (SWT-21). It returns the CONFIGURED base URL rather than
+// a constant, because that is the whole point: this same type serves the local
+// lane when pointed at ollama or llama.cpp, and the hosted lane when pointed at
+// api.openai.com. Repointing it is exactly the change the boundary must catch.
+func (o *OpenAI) Describe() Descriptor {
+	return Descriptor{Name: "openai", Endpoint: o.baseURL}
+}
+
 // NewOpenAI builds the adapter. baseURL defaults to the public API when empty.
 func NewOpenAI(apiKey, baseURL string) *OpenAI {
 	if baseURL == "" {
@@ -98,7 +134,19 @@ func (o *OpenAI) Complete(ctx context.Context, req Request) (Response, error) {
 	start := time.Now()
 	httpResp, err := o.http.Do(httpReq)
 	if err != nil {
-		return Response{}, fmt.Errorf("openai request: %w", err)
+		// A TRANSPORT failure is unavailability, not a broken adapter (SWT-21
+		// criterion 8). Wrapping it in ErrUnavailable is what lets the caller
+		// SKIP the message instead of counting it toward the consecutive-error
+		// abort — and that distinction is the difference between "the local box
+		// is busy" and "this adapter is broken". A 4B model at low priority on a
+		// machine kept usable as a desktop makes refused connections and blown
+		// deadlines routine, so treating them as faults would exit the run
+		// non-zero on a normal Tuesday.
+		// TWO %w verbs: the sentinel for classification, the cause for diagnosis.
+		// %v on the cause would let a caller ask "is this unavailability?" but
+		// leave a human unable to ask "why" — and a boundary that swallows the
+		// reason is how a busy box and a wrong URL become the same log line.
+		return Response{}, fmt.Errorf("openai request: %w: %w", ErrUnavailable, err)
 	}
 	defer httpResp.Body.Close()
 	latency := int(time.Since(start).Milliseconds())

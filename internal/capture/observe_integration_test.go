@@ -89,8 +89,8 @@ func newCaptureSuite(t *testing.T, ctx context.Context) *captureSuite {
 
 	s := &captureSuite{pool: pool}
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,'itest-capture','manual','dashboard','/tmp/itest-capture') RETURNING id`,
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,'itest-capture','manual','dashboard','/tmp/itest-capture', 'any') RETURNING id`,
 		capProjectSlug).Scan(&s.projectID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}

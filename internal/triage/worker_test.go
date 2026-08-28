@@ -102,7 +102,37 @@ type fakeProvider struct {
 	scripts  []scriptedResp // consumed in order; last repeats if exhausted
 	requests []provider.Request
 	calls    int
+	// local makes this fake describe a loopback endpoint and answer Probe, so it
+	// can serve the RESTRICTED lane. Needed by integration_test.go, whose corpus
+	// is `unmatched` in capture_decisions and therefore restricted by
+	// construction — the hosted default would skip the whole suite.
+	local bool
 }
+
+// Describe is required by provider.Client since SWT-21.
+//
+// This fake sits in the GENERAL lane and describes a hosted endpoint, which is
+// the honest placement: these suites are about response handling — malformed
+// JSON, the consecutive-error abort, prompt assembly — and SWT-21 gave the
+// RESTRICTED lane deliberately different failure semantics (a failure there is a
+// skip, not an error, because a busy local box is normal operation). Run them on
+// the restricted lane and they assert the opposite of locality_skip_test.go.
+//
+// The first adaptation of this file did declare a local endpoint, to keep these
+// tests exercising their subject. It kept them running and made them test the
+// wrong lane's contract; putting the fake where its assertions are true is the
+// fix.
+func (f *fakeProvider) Describe() provider.Descriptor {
+	if f.local {
+		return provider.Descriptor{Name: "fake-local", Endpoint: "http://127.0.0.1:11434/v1"}
+	}
+	return provider.Descriptor{Name: "fake", Endpoint: "https://api.example.test/v1"}
+}
+
+// Probe: a local client that cannot demonstrate reachability is treated as
+// UNREACHABLE, not ready (router.probe). Without this the local fake would skip
+// every call and its suite would pass while exercising nothing.
+func (f *fakeProvider) Probe(_ context.Context) error { return nil }
 
 func (f *fakeProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
 	f.requests = append(f.requests, req)
@@ -158,11 +188,24 @@ func (s *fakeStore) PendingMessages(_ context.Context, cfg triage.Config) ([]tri
 	return s.pending, nil
 }
 
+// AssembleContext defaults Attribution to AttrProject (SWT-21).
+//
+// The zero value is AttrUnseen, which is RESTRICTED — fail-closed, and correct
+// for production. But every fixture in this file predates the boundary and none
+// of them care about attribution, so inheriting the zero value would route the
+// whole file down the restricted lane and skip it. That is the trap the runbook
+// names: a suite that passes suspiciously fast because it stopped exercising its
+// subject. Defaulting here says "these cases are about response handling, on a
+// permitted lane" once, instead of in twenty fixtures.
 func (s *fakeStore) AssembleContext(_ context.Context, m triage.PendingMessage) (triage.MessageContext, error) {
-	if mc, ok := s.contexts[m.MessageID]; ok {
-		return mc, nil
+	mc, ok := s.contexts[m.MessageID]
+	if !ok {
+		mc = triage.MessageContext{Message: m}
 	}
-	return triage.MessageContext{Message: m}, nil
+	if mc.Attribution == provider.AttrUnseen && !mc.ProjectLocalOnly {
+		mc.Attribution = provider.AttrProject
+	}
+	return mc, nil
 }
 
 func (s *fakeStore) RecordRun(_ context.Context, run triage.AIRun) (int64, error) {
@@ -252,7 +295,7 @@ func TestPromptAssembly_UserCarriesContext(t *testing.T) {
 	store.contexts[mc.Message.MessageID] = mc
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{"actionable":{"value":true,"confidence":0.9},"kind":{"value":"action_request","confidence":0.9},"title":{"value":"Fix staging login","confidence":0.9},"body":{"value":"login broken","confidence":0.8},"priority":{"value":2,"confidence":0.8},"attach_to_task_id":{"value":10,"confidence":0.7},"summary":"clear bug report"}`)}}}
 
-	if _, err := triage.Run(context.Background(), store, prov, defaultCfg()); err != nil {
+	if _, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(prov.requests) != 1 {
@@ -286,7 +329,7 @@ func TestPromptAssembly_SystemCarriesRubric(t *testing.T) {
 	store.contexts[mc.Message.MessageID] = mc
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{"actionable":{"value":true,"confidence":0.9},"kind":{"value":"question","confidence":0.9},"title":{"value":"t","confidence":0.9},"body":{"value":"b","confidence":0.9},"priority":{"value":0,"confidence":0.9},"attach_to_task_id":{"value":null,"confidence":0.9},"summary":"s"}`)}}}
 
-	if _, err := triage.Run(context.Background(), store, prov, defaultCfg()); err != nil {
+	if _, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	sys := strings.ToLower(prov.requests[0].System)
@@ -323,7 +366,7 @@ func TestRun_InputRecordsPromptVersionAndIDs(t *testing.T) {
 	store.contexts[mc.Message.MessageID] = mc
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{"actionable":{"value":true,"confidence":0.9},"kind":{"value":"action_request","confidence":0.9},"title":{"value":"t","confidence":0.9},"body":{"value":"b","confidence":0.9},"priority":{"value":1,"confidence":0.9},"attach_to_task_id":{"value":10,"confidence":0.8},"summary":"s"}`)}}}
 
-	if _, err := triage.Run(context.Background(), store, prov, defaultCfg()); err != nil {
+	if _, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(store.runs) != 1 {
@@ -333,8 +376,13 @@ func TestRun_InputRecordsPromptVersionAndIDs(t *testing.T) {
 	if r.WorkerType != "triage" {
 		t.Errorf("run.WorkerType = %q, want triage", r.WorkerType)
 	}
-	if r.Provider != "openai" {
-		t.Errorf("run.Provider = %q, want openai", r.Provider)
+	// Since SWT-21 this column names the LANE THAT SERVED, taken from the
+	// client's Describe(), not the constant "openai" it used to be. Two lanes now
+	// exist, so a hardcoded value would label every locally-processed row as
+	// hosted — the one question this column answers, answered wrongly, in the
+	// audit trail.
+	if r.Provider != "fake" {
+		t.Errorf("run.Provider = %q, want the serving lane's descriptor name %q", r.Provider, "fake")
 	}
 	if r.Model != "gpt-5-mini" {
 		t.Errorf("run.Model = %q, want gpt-5-mini", r.Model)
@@ -369,7 +417,7 @@ func TestResponseHandling_PerFieldConfidencePreserved(t *testing.T) {
 	store.contexts[mc.Message.MessageID] = mc
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{"actionable":{"value":true,"confidence":0.91},"kind":{"value":"action_request","confidence":0.83},"title":{"value":"Fix staging login","confidence":0.77},"body":{"value":"login broken on staging","confidence":0.66},"priority":{"value":2,"confidence":0.55},"attach_to_task_id":{"value":10,"confidence":0.72},"summary":"clear bug report"}`)}}}
 
-	if _, err := triage.Run(context.Background(), store, prov, defaultCfg()); err != nil {
+	if _, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(store.extractions) != 1 {
@@ -424,7 +472,7 @@ func TestResponseHandling_ClampsOutOfRangeConfidence(t *testing.T) {
 	store.contexts[mc.Message.MessageID] = mc
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{"actionable":{"value":true,"confidence":1.5},"kind":{"value":"question","confidence":-0.2},"title":{"value":"t","confidence":0.9},"body":{"value":"b","confidence":0.9},"priority":{"value":0,"confidence":0.9},"attach_to_task_id":{"value":null,"confidence":0.9},"summary":"s"}`)}}}
 
-	if _, err := triage.Run(context.Background(), store, prov, defaultCfg()); err != nil {
+	if _, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	f := fieldsMap(t, store.extractions[0].fields)
@@ -449,7 +497,7 @@ func TestResponseHandling_NonCandidateAttachNulled(t *testing.T) {
 	store.contexts[mc.Message.MessageID] = mc
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{"actionable":{"value":true,"confidence":0.9},"kind":{"value":"action_request","confidence":0.9},"title":{"value":"t","confidence":0.9},"body":{"value":"b","confidence":0.9},"priority":{"value":1,"confidence":0.9},"attach_to_task_id":{"value":999,"confidence":0.9},"summary":"s"}`)}}}
 
-	if _, err := triage.Run(context.Background(), store, prov, defaultCfg()); err != nil {
+	if _, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	f := fieldsMap(t, store.extractions[0].fields)
@@ -478,7 +526,7 @@ func TestResponseHandling_UnmappedPersonExtractedWithNullProject(t *testing.T) {
 	}
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{"actionable":{"value":false,"confidence":0.95},"kind":{"value":"fyi","confidence":0.9},"title":{"value":"Thanks note","confidence":0.9},"body":{"value":"thanks","confidence":0.9},"priority":{"value":0,"confidence":0.9},"attach_to_task_id":{"value":10,"confidence":0.5},"summary":"acknowledgement"}`)}}}
 
-	if _, err := triage.Run(context.Background(), store, prov, defaultCfg()); err != nil {
+	if _, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(store.extractions) != 1 {
@@ -519,7 +567,7 @@ func TestResponseHandling_MalformedProviderJSONIsNonFatal(t *testing.T) {
 		{resp: okResp(`{"actionable":{"value":true,"confidence":0.9},"kind":{"value":"action_request","confidence":0.9},"title":{"value":"t","confidence":0.9},"body":{"value":"b","confidence":0.9},"priority":{"value":1,"confidence":0.9},"attach_to_task_id":{"value":null,"confidence":0.9},"summary":"s"}`)},
 	}}
 
-	stats, err := triage.Run(context.Background(), store, prov, defaultCfg())
+	stats, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg())
 	if err == nil {
 		t.Errorf("Run: expected non-nil error at end when a message failed (exit non-zero)")
 	}
@@ -564,7 +612,7 @@ func TestRun_AbortsAfterConsecutiveProviderErrors(t *testing.T) {
 	// Every provider call is a hard error.
 	prov := &fakeProvider{scripts: []scriptedResp{{err: errors.New("provider is down")}}}
 
-	_, err := triage.Run(context.Background(), store, prov, defaultCfg())
+	_, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg())
 	if err == nil {
 		t.Fatalf("Run: expected a non-nil error when the provider is down")
 	}
@@ -589,7 +637,7 @@ func TestRun_ProcessesOnlyWhatFilterReturns(t *testing.T) {
 	store.pending = []triage.PendingMessage{mc.Message}
 	store.contexts[mc.Message.MessageID] = mc
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{"actionable":{"value":true,"confidence":0.9},"kind":{"value":"question","confidence":0.9},"title":{"value":"t","confidence":0.9},"body":{"value":"b","confidence":0.9},"priority":{"value":0,"confidence":0.9},"attach_to_task_id":{"value":null,"confidence":0.9},"summary":"s"}`)}}}
-	if _, err := triage.Run(context.Background(), store, prov, defaultCfg()); err != nil {
+	if _, err := triage.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), defaultCfg()); err != nil {
 		t.Fatalf("Run 1: %v", err)
 	}
 	if prov.calls != 1 {
@@ -599,7 +647,7 @@ func TestRun_ProcessesOnlyWhatFilterReturns(t *testing.T) {
 	// Second run: filter now returns nothing (already extracted) ⇒ zero calls.
 	empty := newFakeStore()
 	prov2 := &fakeProvider{scripts: []scriptedResp{{resp: okResp(`{}`)}}}
-	stats, err := triage.Run(context.Background(), empty, prov2, defaultCfg())
+	stats, err := triage.Run(context.Background(), empty, provider.NewRouter(prov2, nil, 0), defaultCfg())
 	if err != nil {
 		t.Fatalf("Run 2: %v", err)
 	}

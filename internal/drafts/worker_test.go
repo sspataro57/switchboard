@@ -87,6 +87,14 @@ type fakeProvider struct {
 	calls    int
 }
 
+// Describe is required by provider.Client since SWT-21. The fake sits in the
+// GENERAL lane and describes a hosted endpoint, which is where this work
+// actually belongs: these fixtures draft client-facing replies for client projects, which is
+// general content by construction.
+func (f *fakeProvider) Describe() provider.Descriptor {
+	return provider.Descriptor{Name: "fake", Endpoint: "https://api.example.test/v1"}
+}
+
 func (f *fakeProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
 	f.requests = append(f.requests, req)
 	i := f.calls
@@ -172,7 +180,7 @@ func TestDrafts_PromptCarriesContext_SchemaIsSubjectBodyOnly(t *testing.T) {
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okDraft("Re: login broken", "Pushed the fix to staging.")}}}
 	exec := &fakeExec{}
 
-	if _, err := drafts.Run(context.Background(), store, prov, exec, defaultCfg()); err != nil {
+	if _, err := drafts.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), exec, defaultCfg()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(prov.requests) != 1 {
@@ -246,7 +254,7 @@ func TestDrafts_CreatesDraftViaExecutor(t *testing.T) {
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okDraft("Re: login broken", "Pushed the fix to staging.")}}}
 	exec := &fakeExec{}
 
-	stats, err := drafts.Run(context.Background(), store, prov, exec, defaultCfg())
+	stats, err := drafts.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), exec, defaultCfg())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -296,8 +304,11 @@ func TestDrafts_CreatesDraftViaExecutor(t *testing.T) {
 	if r.WorkerType != "drafts" {
 		t.Errorf("run.WorkerType = %q, want drafts", r.WorkerType)
 	}
-	if r.Provider != "openai" {
-		t.Errorf("run.Provider = %q, want openai", r.Provider)
+	// Since SWT-21 this column names the LANE THAT SERVED, from the client's
+	// Describe(), not the constant "openai". Two lanes now exist, and a hardcoded
+	// value would label every locally-processed row as hosted.
+	if r.Provider != "fake" {
+		t.Errorf("run.Provider = %q, want the serving lane's descriptor name %q", r.Provider, "fake")
 	}
 	if r.Status != "ok" {
 		t.Errorf("run.Status = %q, want ok", r.Status)
@@ -332,7 +343,7 @@ func TestDrafts_UnresolvableAppendsLogAndSkips(t *testing.T) {
 			prov := &fakeProvider{scripts: []scriptedResp{{resp: okDraft("x", "y")}}}
 			exec := &fakeExec{}
 
-			stats, err := drafts.Run(context.Background(), store, prov, exec, defaultCfg())
+			stats, err := drafts.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), exec, defaultCfg())
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
@@ -375,7 +386,7 @@ func TestDrafts_ProviderErrorNonFatal(t *testing.T) {
 	}}
 	exec := &fakeExec{}
 
-	stats, err := drafts.Run(context.Background(), store, prov, exec, defaultCfg())
+	stats, err := drafts.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), exec, defaultCfg())
 	if err == nil {
 		t.Errorf("Run: want a non-nil error at the end when a task failed (exit non-zero)")
 	}

@@ -98,8 +98,8 @@ func TestSlackWeb_Integration_RawNormalizeLoopClosure(t *testing.T) {
 
 	var projectID, taskID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,'itest-slack-web','manual','dashboard','/tmp/itest') RETURNING id`, itSlug).Scan(&projectID); err != nil {
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,'itest-slack-web','manual','dashboard','/tmp/itest', 'any') RETURNING id`, itSlug).Scan(&projectID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	if err := pool.QueryRow(ctx,

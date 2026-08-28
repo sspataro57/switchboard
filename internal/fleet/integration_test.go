@@ -141,8 +141,8 @@ func seedTask(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int64 {
 	t.Helper()
 	var projectID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery)
-		 VALUES ($1,$2,$3,'manual','dashboard') RETURNING id`,
+		`INSERT INTO projects (name, slug, client, execution, delivery, ai_locality)
+		 VALUES ($1,$2,$3,'manual','dashboard', 'any') RETURNING id`,
 		"Fleet Integ", itProjectSlug, "FleetClient").Scan(&projectID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}

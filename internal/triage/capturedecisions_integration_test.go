@@ -103,8 +103,8 @@ func seedCaptureInbox(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *ci
 	accountID := ins(`INSERT INTO source_accounts (provider, account_email, send_enabled)
 	                  VALUES ($1, 'itest-capinbox@pg-main', false) RETURNING id`, cinboxProvider)
 	c.personID = ins(`INSERT INTO people (display_name) VALUES ('itest-capinbox-Client') RETURNING id`)
-	c.projectID = ins(`INSERT INTO projects (name, slug, client, execution, delivery)
-	                   VALUES ($1,$1,'Capinbox','manual','dashboard') RETURNING id`, cinboxProject)
+	c.projectID = ins(`INSERT INTO projects (name, slug, client, execution, delivery, ai_locality)
+	                   VALUES ($1,$1,'Capinbox','manual','dashboard', 'any') RETURNING id`, cinboxProject)
 	// participants is what mc.PersonID still comes from after the column drop —
 	// §8(a) keeps PersonID/PersonName, it only replaces the PROJECT lookup.
 	c.threadID = ins(`INSERT INTO normalized_threads (thread_key, subject, participants)

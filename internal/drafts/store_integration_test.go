@@ -80,6 +80,15 @@ func dsCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		// to_regclass so this suite still runs against a db that predates it.
 		{`DO $$ BEGIN IF to_regclass('public.capture_decisions') IS NOT NULL THEN
 		    DELETE FROM capture_decisions WHERE task_id IN ` + tasksOf + `; END IF; END $$;`, nil},
+		// Also by PROJECT (SWT-21): attributeThread writes decisions with a
+		// project_id and no task_id, and capture_decisions.project_id has no ON
+		// DELETE CASCADE — so without this the `DELETE FROM projects` below fails
+		// on a foreign key and takes the whole suite's cleanup with it. The
+		// message_id side does cascade from normalized_messages; the project side
+		// does not, and that asymmetry is exactly the kind of thing a cleanup
+		// pact gets wrong once.
+		{`DO $$ BEGIN IF to_regclass('public.capture_decisions') IS NOT NULL THEN
+		    DELETE FROM capture_decisions WHERE project_id IN ` + projs + `; END IF; END $$;`, nil},
 		{`DELETE FROM external_refs WHERE task_id IN ` + tasksOf, nil},
 		{`DELETE FROM task_events WHERE task_id IN ` + tasksOf, nil},
 		{`DELETE FROM task_claims WHERE task_id IN ` + tasksOf, nil},
@@ -166,6 +175,7 @@ type projectSpec struct {
 	refSystem    string // "" = no external_refs row
 	refKey       string
 	refOnDeliver bool // attach the ref to the Deliver task instead of its parent
+	localOnly    bool // projects.ai_locality = 'local_only' (SWT-21)
 }
 
 // project seeds a project, a done_locally work task, its Deliver child, and
@@ -181,10 +191,14 @@ func (f *dsFixture) project(t *testing.T, ctx context.Context, spec projectSpec)
 	if spec.withSendFrom {
 		sendFrom = f.account
 	}
+	locality := "any"
+	if spec.localOnly {
+		locality = "local_only"
+	}
 	projectID = f.ins(t, ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, send_from_account, policies)
-		 VALUES ($1,$2,$3,'manual','dashboard','/tmp/itest-dstore',$4,$5::jsonb) RETURNING id`,
-		"itest-dstore "+spec.name, slug, spec.client, sendFrom, policies)
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, send_from_account, policies, ai_locality)
+		 VALUES ($1,$2,$3,'manual','dashboard','/tmp/itest-dstore',$4,$5::jsonb,$6) RETURNING id`,
+		"itest-dstore "+spec.name, slug, spec.client, sendFrom, policies, locality)
 	parentID = f.ins(t, ctx,
 		`INSERT INTO tasks (project_id, title, assignee_type, status)
 		 VALUES ($1,'itest-dstore work','claude','done_locally') RETURNING id`, projectID)
@@ -205,6 +219,27 @@ func (f *dsFixture) project(t *testing.T, ctx context.Context, spec projectSpec)
 			 VALUES ($1,$2,$3,NULL,'in') RETURNING id`, owner, spec.refSystem, spec.refKey)
 	}
 	return deliverID, parentID, projectID
+}
+
+// attributeThread gives every message on a thread a capture_decisions row
+// pointing at a project (SWT-21).
+//
+// Needed because the locality fold classifies the thread NEIGHBOURS whose bodies
+// travel in the prompt, and a message with no decision row is AttrUnseen —
+// restricted. Without this, EVERY fixture thread folds to restricted and any
+// "it skipped" assertion passes for a reason that has nothing to do with what it
+// claims to test.
+//
+// It is also the production shape: the capture pass attributes a client's thread
+// long before a Deliver task exists for it.
+func (f *dsFixture) attributeThread(t *testing.T, ctx context.Context, threadID, projectID int64) {
+	t.Helper()
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO capture_decisions (message_id, mode, action, project_id, reason)
+		 SELECT id, 'live', 'attributed', $2, 'itest-dstore: fixture attribution'
+		   FROM normalized_messages WHERE thread_id = $1`, threadID, projectID); err != nil {
+		t.Fatalf("attribute thread %d: %v", threadID, err)
+	}
 }
 
 // deliverTask pulls one Deliver task out of the global queue by id.
