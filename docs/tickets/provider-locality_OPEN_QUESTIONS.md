@@ -86,8 +86,10 @@ newsletters ~1,557, dev/infra ~814, brand marketing the largest share. A rule se
 built from that, eyeballed before it is added, is honest; a list I write from
 imagination is not.
 
-**THE DEVIATION, and the thing to review: an UNMATCHED message should be
-RESTRICTED, not general.**
+**THE DEVIATION — ACCEPTED (Salvador, 2026-08-28): "go with the deviation,
+triage waits for the classifier."** An UNMATCHED message is RESTRICTED, not
+general. The sequencing consequence below is accepted deliberately: SWT-21 gates
+triage on the local classifier rather than the reverse.
 
 The SPEC maps unseen → restricted, unmatched → general, project → per
 `ai_locality`. That mapping is what makes rule completeness load-bearing: a
@@ -110,8 +112,10 @@ a costly choice on this corpus, for two measured reasons:
 The honest cost: triage's whole inbox becomes local-only, so triage cannot run at
 all until a local adapter exists. Today that costs nothing — triage last ran
 2026-07-12 and is shadow-only — but it does mean this ticket gates triage on the
-classifier ticket rather than the other way round. **That is the consequence
-worth a decision, and it is why this is flagged rather than assumed.**
+classifier ticket rather than the other way round. **That consequence is ACCEPTED.** Triage does not run again until a local adapter
+exists. It has not run since 2026-07-12 and is shadow-only, so nothing stops
+today — but the dependency is now explicit and belongs on the board rather than
+in a reader's head.
 
 ---
 
@@ -194,5 +198,8 @@ all, where it will actually discriminate something.
 
 ---
 
-Answer by editing the entries. Say "questions answered" and I'll fold them into
-the SPEC.
+**All four are answered above and folded into the SPEC, which is FINAL. Nothing
+here is pending.** This file is kept as the reasoning trail — particularly for Q2,
+where the accepted answer is a deviation from the options originally offered, and
+for Q3, whose threshold is explicitly a guess awaiting a real failure to tune
+against.
