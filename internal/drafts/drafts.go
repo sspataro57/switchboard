@@ -75,6 +75,21 @@ type DeliverTask struct {
 	ParentSummary string
 	ClientName    string
 	Thread        []ThreadMessage
+
+	// The locality boundary's inputs (SWT-21). A Deliver task belongs to a
+	// project, so its class comes from that project's ai_locality rather than
+	// from a capture decision — but the thread context folded into the prompt is
+	// message content, and its attribution counts the same way it does in triage.
+	ProjectLocalOnly     bool
+	NeighbourAttribution []NeighbourClass
+}
+
+// NeighbourClass is one thread message's attribution, for the most-restrictive
+// fold. Spelled identically to triage's on purpose: the two workers assemble
+// context the same way and must not drift into two spellings of one rule.
+type NeighbourClass struct {
+	State     provider.AttributionState
+	LocalOnly bool
 }
 
 type AIRun struct {
@@ -112,7 +127,11 @@ type Stats struct {
 const Actor = "drafts:gpt"
 
 // Run drains the Deliver-task queue once.
-func Run(ctx context.Context, store Store, client provider.Client, exec Executor, cfg Config) (Stats, error) {
+// Run takes a ROUTER rather than a Client since SWT-21, so the boundary decides
+// per task rather than per worker. Unlike triage, drafts' hosted lane stays
+// genuinely useful: a Deliver task on a project with ai_locality='any' is client
+// work and routes general as before.
+func Run(ctx context.Context, store Store, router *provider.Router, exec Executor, cfg Config) (Stats, error) {
 	var stats Stats
 
 	tasks, err := store.DeliverTasks(ctx, cfg)
@@ -143,7 +162,51 @@ func Run(ctx context.Context, store Store, client provider.Client, exec Executor
 			"user_prompt":     user,
 		})
 
-		resp, callErr := client.Complete(ctx, provider.Request{
+		// THE BOUNDARY (SWT-21). The task's own project, folded with every thread
+		// neighbour whose body will travel in the prompt.
+		classes := []provider.Class{provider.ClassOf(provider.AttrProject, dt.ProjectLocalOnly)}
+		for _, n := range dt.NeighbourAttribution {
+			classes = append(classes, provider.ClassOf(n.State, n.LocalOnly))
+		}
+		lane, decision, reason := router.Route(ctx, provider.MostRestrictive(classes...))
+		if decision != provider.DecideAllow {
+			// Skip, never fall back. A Deliver task on a local-only project whose
+			// local lane is down waits for the next pass; it does not get drafted
+			// by a hosted model instead.
+			//
+			// The refusal is logged onto the Deliver task through the SAME
+			// draft_skip path an unresolvable channel uses (criterion 24) — a
+			// second skip vocabulary would mean a human reading the task sees
+			// "nothing happened" in one case and a log line in the other.
+			//
+			// The reason string is load-bearing, not decoration. A test fixture
+			// that forgets ai_locality produces a SKIP rather than a failure
+			// mentioning locality, so this line is the only thing that tells its
+			// author which of the two they are looking at.
+			//
+			// Unlike triage's aggregate, this logs per task per pass. Deliver
+			// tasks are tens, not the ~16,000 of triage's inbox, so the SWT-17
+			// amplification arithmetic does not apply — but if a stuck task ever
+			// sits here for weeks, this is the line that will have accumulated.
+			stats.Skipped++
+			slog.Info("drafts skipped a task: no permitted provider",
+				"task", dt.DeliverTaskID, "project", dt.ProjectSlug, "reason", reason)
+			msg, _ := json.Marshal(fmt.Sprintf(
+				"draft skipped for task #%d: no permitted provider for project %s (%s). "+
+					"Restricted content is never drafted by a hosted model; it retries next pass.",
+				dt.ParentTaskID, dt.ProjectSlug, reason))
+			if _, err := exec.Execute(ctx, executor.Call{Tool: "task_append_log", Actor: Actor,
+				Args: []byte(fmt.Sprintf(`{"task_id":%d,"message":%s,"kind":"draft_skip"}`, dt.DeliverTaskID, msg))}); err != nil {
+				slog.Warn("append locality skip log failed", "task", dt.DeliverTaskID, "err", err)
+			}
+			continue
+		}
+
+		// ai_runs.provider names the LANE THAT SERVED, matching triage. A
+		// constant "openai" here would be the same lie the triage change fixed,
+		// in the other worker that can now route local.
+		laneName := lane.Describe().Name
+		resp, callErr := lane.Complete(ctx, provider.Request{
 			Model:      cfg.Model,
 			System:     SystemPrompt,
 			User:       user,
@@ -171,7 +234,7 @@ func Run(ctx context.Context, store Store, client provider.Client, exec Executor
 			status = "error"
 		}
 		if _, err := store.RecordRun(ctx, AIRun{
-			WorkerType: "drafts", Provider: "openai", Model: cfg.Model, Status: status,
+			WorkerType: "drafts", Provider: laneName, Model: cfg.Model, Status: status,
 			Input: input, Output: safeJSON(resp.Raw),
 			PromptTokens: resp.PromptTokens, CompletionTokens: resp.CompletionTokens, LatencyMS: resp.LatencyMS,
 		}); err != nil {

@@ -180,8 +180,8 @@ func TestValidate_HardInvalid(t *testing.T) {
 			wantSub: "assignee_type",
 		},
 		{
-			name: "over the 200-task cap",
-			tree: planimport.Tree{Tasks: overCap(201)},
+			name:    "over the 200-task cap",
+			tree:    planimport.Tree{Tasks: overCap(201)},
 			wantSub: "200",
 		},
 	}

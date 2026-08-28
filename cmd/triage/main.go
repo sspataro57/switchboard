@@ -5,7 +5,11 @@
 //	triage report [--threshold 0.7] [--since 720h]
 //
 //	DATABASE_URL                 ops db, required
-//	OPENAI_API_KEY               required for run
+//	OPENAI_API_KEY               OPTIONAL since SWT-21 — a pass that only ever
+//	                             touches restricted content never needs it
+//	OPS_LOCAL_PROVIDER_URL        local lane base URL, e.g. http://127.0.0.1:11434/v1
+//	OPS_LOCAL_MODEL               local lane model, e.g. qwen3:8b
+//	OPS_LOCAL_API_KEY             usually empty; local servers rarely check it
 //	TRIAGE_MODEL                 default gpt-5-mini
 //	OPENAI_BASE_URL              optional
 //	TRIAGE_CONFIDENCE_THRESHOLD  report default 0.7
@@ -16,6 +20,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
@@ -53,10 +58,14 @@ func runCmd(argv []string) error {
 		return err
 	}
 
+	// OPENAI_API_KEY is NO LONGER REQUIRED to start (SWT-21, criterion 21).
+	//
+	// After the locality boundary, a pass that never touches the general lane is
+	// the NORMAL case — triage's whole inbox is unmatched, unmatched is
+	// restricted, so until a local adapter exists (SWT-22) every message is
+	// skipped and no hosted call is made at all. Refusing to start without a key
+	// would make the safe configuration the one that cannot run.
 	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		return fmt.Errorf("OPENAI_API_KEY is not set")
-	}
 	model := os.Getenv("TRIAGE_MODEL")
 	if model == "" {
 		model = "gpt-5-mini"
@@ -81,9 +90,45 @@ func runCmd(argv []string) error {
 	}
 	defer release()
 
-	client := provider.NewOpenAI(apiKey, os.Getenv("OPENAI_BASE_URL"))
-	stats, runErr := triage.Run(ctx, st, client, triage.Config{
-		Model: model, MaxTokens: 2048, Limit: *limit, Since: *since,
+	// Two lanes, and which one a message may use is decided per message by the
+	// boundary rather than here (SWT-21). Building the general client is
+	// conditional on a key existing; building the local one is conditional on
+	// OPS_LOCAL_PROVIDER_URL being set, and that URL is also what proves its
+	// locality — LocalityOf reads the endpoint, so pointing this at a hosted API
+	// makes it not-local and restricted content stops flowing rather than
+	// silently leaking.
+	var general provider.Client
+	if apiKey != "" {
+		general = provider.NewOpenAI(apiKey, os.Getenv("OPENAI_BASE_URL"))
+	}
+	var local provider.Client
+	localModel := model
+	if base := os.Getenv("OPS_LOCAL_PROVIDER_URL"); base != "" {
+		// The local stack serves an OpenAI-compatible /v1 route (ollama and
+		// llama.cpp both do), so the SAME adapter drives it. That is precisely
+		// why locality cannot be a property of the adapter's type.
+		local = provider.NewOpenAI(os.Getenv("OPS_LOCAL_API_KEY"), base)
+		// The local lane runs a different model from the hosted one, so it needs
+		// its own name. OPS_LOCAL_MODEL is what the runbook tells an operator to
+		// set; a variable the runbook names and the code never reads makes that
+		// smoke test pass while testing nothing.
+		if lm := os.Getenv("OPS_LOCAL_MODEL"); lm != "" {
+			localModel = lm
+		}
+		// Say at startup what the boundary will decide, so a misconfigured URL is
+		// found by reading one log line rather than by wondering why every
+		// message skipped. A URL that is not local is not an error here — the
+		// pass still runs and still refuses restricted content — but it is
+		// something the operator meant to get right.
+		if loc := provider.LocalityOf(local.Describe()); loc != provider.LocalityLocal {
+			slog.Warn("OPS_LOCAL_PROVIDER_URL is not a local endpoint; restricted content will be skipped",
+				"url", base, "locality", loc)
+		}
+	}
+	router := provider.NewRouter(general, local, 0)
+
+	stats, runErr := triage.Run(ctx, st, router, triage.Config{
+		Model: model, LocalModel: localModel, MaxTokens: 2048, Limit: *limit, Since: *since,
 	})
 	out, _ := json.Marshal(stats)
 	fmt.Println(string(out))

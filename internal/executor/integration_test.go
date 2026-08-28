@@ -68,8 +68,8 @@ func TestExecutor_Integration_WritesAuditAndPolicyRows(t *testing.T) {
 	// Seed a project to satisfy create_task's slug -> id resolution.
 	var projectID int64
 	err = pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery)
-		 VALUES ($1, $2, $3, 'manual', 'dashboard') RETURNING id`,
+		`INSERT INTO projects (name, slug, client, execution, delivery, ai_locality)
+		 VALUES ($1, $2, $3, 'manual', 'dashboard', 'any') RETURNING id`,
 		"Integ Test Executor", slug, "IntegClient").Scan(&projectID)
 	if err != nil {
 		t.Fatalf("seed project: %v", err)

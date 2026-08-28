@@ -105,8 +105,15 @@ func proposeCmd(argv []string) error {
 	}
 	defer pool.Close()
 
-	client := provider.NewOpenAI(apiKey, os.Getenv("OPENAI_BASE_URL"))
-	prop, err := planimport.Propose(ctx, planimport.NewStore(pool), client,
+	// General lane only, and there is no locality question here to answer
+	// (SWT-21 criterion 25): a plan file is switchboard's OWN build input, not
+	// captured content, so Propose classifies it ClassGeneral explicitly rather
+	// than deriving a class from an attribution it does not have.
+	//
+	// The router is still the thing that hands out the client, so there is one
+	// path to a provider rather than two. apiKey is non-empty by the check above.
+	router := provider.NewRouter(provider.NewOpenAI(apiKey, os.Getenv("OPENAI_BASE_URL")), nil, 0)
+	prop, err := planimport.Propose(ctx, planimport.NewStore(pool), router,
 		planimport.Config{Model: model, MaxTokens: 8192}, *project, *file, content)
 	if err != nil {
 		return err

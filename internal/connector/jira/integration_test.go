@@ -150,8 +150,8 @@ func TestJira_Integration_PollNormalizeLoopClosure(t *testing.T) {
 	// ambiguous-send hole the prefix matcher must close).
 	var projID, taskID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,'itest-jira-client','manual','dashboard','/tmp/itest') RETURNING id`, itSlug).Scan(&projID); err != nil {
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,'itest-jira-client','manual','dashboard','/tmp/itest', 'any') RETURNING id`, itSlug).Scan(&projID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	if err := pool.QueryRow(ctx,

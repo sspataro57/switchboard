@@ -217,8 +217,8 @@ func TestIMAP_Integration_RawFirstNormalizeDedupLoopClosure(t *testing.T) {
 	// survived submission (primary matcher) and one the relay rewrote (belt).
 	var projID, taskID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,'itest-imap-client','manual','dashboard','/tmp/itest') RETURNING id`, imapSlug).Scan(&projID); err != nil {
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,'itest-imap-client','manual','dashboard','/tmp/itest', 'any') RETURNING id`, imapSlug).Scan(&projID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
@@ -493,8 +493,8 @@ func TestIMAP_Integration_BeltRefusesADeliveryAttemptedAfterTheMessage(t *testin
 	}
 	var projID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,'itest-imap-client','manual','dashboard','/tmp/itest') RETURNING id`,
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,'itest-imap-client','manual','dashboard','/tmp/itest', 'any') RETURNING id`,
 		imapSlug).Scan(&projID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}

@@ -77,6 +77,14 @@ type fakeProvider struct {
 	calls    int
 }
 
+// Describe is required by provider.Client since SWT-21. The fake sits in the
+// GENERAL lane and describes a hosted endpoint, which is where this work
+// actually belongs: a plan file is switchboard's own build input, classified ClassGeneral
+// explicitly by Propose, never restricted content.
+func (f *fakeProvider) Describe() provider.Descriptor {
+	return provider.Descriptor{Name: "fake", Endpoint: "https://api.example.test/v1"}
+}
+
 func (f *fakeProvider) Complete(_ context.Context, req provider.Request) (provider.Response, error) {
 	f.requests = append(f.requests, req)
 	i := f.calls
@@ -179,7 +187,7 @@ func TestPropose_ProviderCallCarriesSchemaAndContent(t *testing.T) {
 	store := &fakeStore{}
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(goodTreeJSON)}}}
 
-	if _, err := planimport.Propose(context.Background(), store, prov, cfg(),
+	if _, err := planimport.Propose(context.Background(), store, provider.NewRouter(prov, nil, 0), cfg(),
 		"switchboard", "/home/salvo/plans/followups.md", []byte(planContent)); err != nil {
 		t.Fatalf("Propose: %v", err)
 	}
@@ -213,7 +221,7 @@ func TestPropose_RawFirstWithFullContent(t *testing.T) {
 	store := &fakeStore{}
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(goodTreeJSON)}}}
 
-	prop, err := planimport.Propose(context.Background(), store, prov, cfg(),
+	prop, err := planimport.Propose(context.Background(), store, provider.NewRouter(prov, nil, 0), cfg(),
 		"switchboard", "/home/salvo/plans/followups.md", []byte(planContent))
 	if err != nil {
 		t.Fatalf("Propose: %v", err)
@@ -255,7 +263,7 @@ func TestPropose_ProviderErrorRecordsErrorRunNoExtraction(t *testing.T) {
 	store := &fakeStore{}
 	prov := &fakeProvider{scripts: []scriptedResp{{err: errors.New("provider is down")}}}
 
-	_, err := planimport.Propose(context.Background(), store, prov, cfg(),
+	_, err := planimport.Propose(context.Background(), store, provider.NewRouter(prov, nil, 0), cfg(),
 		"switchboard", "/home/salvo/plans/followups.md", []byte(planContent))
 	if err == nil {
 		t.Fatalf("Propose: want a non-nil error on provider failure")
@@ -285,7 +293,7 @@ func TestPropose_HardInvalidTreeRecordsErrorRunNoExtraction(t *testing.T) {
 	store := &fakeStore{}
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(cyclicTreeJSON)}}}
 
-	_, err := planimport.Propose(context.Background(), store, prov, cfg(),
+	_, err := planimport.Propose(context.Background(), store, provider.NewRouter(prov, nil, 0), cfg(),
 		"switchboard", "/home/salvo/plans/followups.md", []byte(planContent))
 	if err == nil {
 		t.Fatalf("Propose: want a non-nil error on a hard-invalid tree")
@@ -306,7 +314,7 @@ func TestPropose_SuccessRecordsRunAndExtraction(t *testing.T) {
 	store := &fakeStore{}
 	prov := &fakeProvider{scripts: []scriptedResp{{resp: okResp(goodTreeJSON)}}}
 
-	prop, err := planimport.Propose(context.Background(), store, prov, cfg(),
+	prop, err := planimport.Propose(context.Background(), store, provider.NewRouter(prov, nil, 0), cfg(),
 		"switchboard", "/home/salvo/plans/followups.md", []byte(planContent))
 	if err != nil {
 		t.Fatalf("Propose: %v", err)

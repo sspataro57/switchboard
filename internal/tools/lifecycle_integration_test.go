@@ -109,8 +109,8 @@ func seedProject(t *testing.T, ctx context.Context, pool *pgxpool.Pool, slug, cl
 	t.Helper()
 	var id int64
 	err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1, $2, $3, 'manual', 'dashboard', '/tmp/itest') RETURNING id`,
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1, $2, $3, 'manual', 'dashboard', '/tmp/itest', 'any') RETURNING id`,
 		slug, slug, client).Scan(&id)
 	if err != nil {
 		t.Fatalf("seed project %q: %v", slug, err)

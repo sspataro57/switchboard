@@ -131,8 +131,8 @@ func cleanupOrch(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 func seedProjectDelivery(t *testing.T, ctx context.Context, pool *pgxpool.Pool, slug, client, delivery string) {
 	t.Helper()
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$2,$3,'manual',$4,'/tmp/itest')`,
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$2,$3,'manual',$4,'/tmp/itest', 'any')`,
 		slug, slug, client, delivery); err != nil {
 		t.Fatalf("seed project %q: %v", slug, err)
 	}

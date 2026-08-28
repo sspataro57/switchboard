@@ -36,7 +36,7 @@ type Store interface {
 // Proposal is what Propose returns; cmd/planimport feeds these ids to the
 // executor propose_plan_import call.
 type Proposal struct {
-	ProjectSlug, SourcePath, ContentHash string
+	ProjectSlug, SourcePath, ContentHash     string
 	RawSourceItemID, AIRunID, AIExtractionID int64
 }
 
@@ -45,7 +45,9 @@ type Proposal struct {
 // (plan_tree strict schema) → deterministic Validate → RecordRun (+
 // RecordExtraction on success). A provider error OR a hard-invalid tree
 // records an error ai_run and returns non-nil with NO extraction.
-func Propose(ctx context.Context, store Store, client provider.Client, cfg Config,
+// Propose takes a ROUTER since SWT-21 so every hosted-model call site in the
+// repo declares a class rather than assuming one.
+func Propose(ctx context.Context, store Store, router *provider.Router, cfg Config,
 	projectSlug, sourcePath string, content []byte) (Proposal, error) {
 	if IsStub(string(content)) {
 		return Proposal{}, fmt.Errorf("%s is already an imported-plan stub; new work goes through create_child_task", sourcePath)
@@ -88,7 +90,16 @@ func Propose(ctx context.Context, store Store, client provider.Client, cfg Confi
 	}
 
 	start := time.Now()
-	resp, provErr := client.Complete(ctx, req)
+	// EXPLICIT ClassGeneral, not the zero value (SWT-21 criterion 25). A plan
+	// file is something a human named on the command line, not captured message
+	// content — it never passed through the funnel and has no attribution to
+	// consult. Relying on the zero value would restrict plan import by accident
+	// AND leave that reasoning written down nowhere.
+	lane, decision, _ := router.Route(ctx, provider.ClassGeneral)
+	if decision != provider.DecideAllow {
+		return Proposal{}, fmt.Errorf("plan import: no permitted provider")
+	}
+	resp, provErr := lane.Complete(ctx, req)
 	run := AIRun{
 		WorkerType: "plan_import", Provider: "openai", Model: cfg.Model,
 		Status: "ok", Input: input, Output: resp.Raw,

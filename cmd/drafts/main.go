@@ -60,8 +60,25 @@ func run(limit int) error {
 	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
 	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 
-	client := provider.NewOpenAI(apiKey, os.Getenv("OPENAI_BASE_URL"))
-	stats, runErr := drafts.Run(ctx, drafts.NewStore(pool), client, ex,
+	// The general lane only, and the nil local lane is the POINT (SWT-21).
+	//
+	// Restricted content therefore always skips here rather than being processed
+	// by anything. That is exactly criterion 24: this worker's job is
+	// client-facing drafts on projects marked `any`, and a local_only project's
+	// Deliver task waits instead.
+	//
+	// Wiring a local lane in was tried and reverted. It is outside criterion 21
+	// (which names cmd/triage), and this worker does not implement criterion 18's
+	// tier 1 — an ErrUnavailable from Complete would become a hard error and a
+	// non-zero exit, so a busy local box would look like an outage. SWT-22 adds
+	// the lane together with the skip semantics that make it safe.
+	//
+	// OPENAI_API_KEY is still REQUIRED here (checked above). It became optional
+	// in cmd/triage only, because triage's whole inbox is restricted and a pass
+	// that never touches the hosted lane is its normal case; drafts' inbox is
+	// client work on `any` projects, so no key means no work.
+	router := provider.NewRouter(provider.NewOpenAI(apiKey, os.Getenv("OPENAI_BASE_URL")), nil, 0)
+	stats, runErr := drafts.Run(ctx, drafts.NewStore(pool), router, ex,
 		drafts.Config{Model: model, MaxTokens: 2048, Limit: limit})
 	out, _ := json.Marshal(stats)
 	fmt.Println(string(out))

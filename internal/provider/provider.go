@@ -30,6 +30,18 @@ type Response struct {
 
 // Client is the worker-facing contract. Implementations must be safe for
 // sequential reuse; tests use fakes, never live providers.
+//
+// Describe() is on the INTERFACE rather than in a registry or a config field,
+// deliberately (SWT-21). It is the answer to "what cannot be forgotten": a new
+// adapter that does not declare where it sends does not compile. A registry can
+// be missed, a config flag can be wrong, and a locality inferred from the
+// adapter's type would be a lie in both directions — llama.cpp and ollama serve
+// an OpenAI-compatible /v1 route, so the same adapter type serves both the local
+// and the hosted lane with nothing but a different base URL.
+//
+// The zero Descriptor classifies as not-local (locality.go), so forgetting to
+// populate it fails closed rather than silently permitting restricted content.
 type Client interface {
 	Complete(ctx context.Context, req Request) (Response, error)
+	Describe() Descriptor
 }

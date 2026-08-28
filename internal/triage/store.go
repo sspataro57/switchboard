@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/provider"
 )
 
 // AdvisoryLockKey guards single-instance triage runs.
@@ -168,16 +170,98 @@ func (s *PGStore) AssembleContext(ctx context.Context, m PendingMessage) (Messag
 		// stop. If that row carries no project, there is no project — which is
 		// also what makes an unmatched message projectless, as §8b intends.
 		// Deliberate deviation from §8a's literal SQL; recorded in the SPEC.
-		`SELECT p.id, p.slug
+		// ai_locality comes from the SAME read (SWT-21). Deliberately one query,
+		// not two: the class and the project must not be able to disagree about
+		// what the capture engine decided, and two queries can be reordered,
+		// cached differently, or have one of them forgotten by a later edit.
+		//
+		// hasDecision distinguishes UNSEEN from UNMATCHED — SWT-17 §8's three
+		// states, which this reuses rather than inventing a parallel vocabulary.
+		// Both are restricted under SWT-21, but they are different facts and the
+		// report tells them apart.
+		`SELECT p.id, p.slug, p.ai_locality = 'local_only'
 		   FROM (SELECT cd.project_id FROM capture_decisions cd
 		          WHERE cd.message_id = $1 ORDER BY cd.id DESC LIMIT 1) latest
 		   JOIN projects p ON p.id = latest.project_id`,
-		m.MessageID).Scan(&projectID, &projectSlug)
+		m.MessageID).Scan(&projectID, &projectSlug, &mc.ProjectLocalOnly)
 	if err == nil {
 		mc.ProjectID = &projectID
 		mc.ProjectSlug = projectSlug
-	} else if !errors.Is(err, pgx.ErrNoRows) {
+		mc.Attribution = provider.AttrProject
+	} else if errors.Is(err, pgx.ErrNoRows) {
+		// No project-bearing decision. Ask whether the engine has looked at all,
+		// because unseen and unmatched are different facts even though this
+		// ticket treats them the same way.
+		var seen bool
+		if err := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM capture_decisions WHERE message_id = $1)`,
+			m.MessageID).Scan(&seen); err != nil {
+			return mc, fmt.Errorf("resolve attribution state for message %d: %w", m.MessageID, err)
+		}
+		if seen {
+			mc.Attribution = provider.AttrUnmatched
+		} else {
+			mc.Attribution = provider.AttrUnseen
+		}
+	} else {
 		return mc, fmt.Errorf("resolve project for message %d: %w", m.MessageID, err)
+	}
+
+	// The neighbours' classes, for the most-restrictive fold. Their bodies travel
+	// with the focus message (Thread is rendered into the prompt), so their
+	// attribution counts even though they are not the message being triaged.
+	//
+	// INBOUND ONLY, and the filter is load-bearing rather than tidy. The capture
+	// engine reads `direction = 'inbound'` (internal/capture/rules_store.go) —
+	// that line IS invariant 5 — so an outbound message will NEVER carry a
+	// capture_decisions row, on any pass, in any mode. Folding one would read
+	// "no decision" as "unclassified" when it actually means "not applicable",
+	// and would restrict every thread that has ever been replied on, forever.
+	// Spelled the same way in internal/drafts/store.go; see the long note there
+	// for the ground (structural unclassifiability, plus inheritance of the
+	// conversation's class) and for the residual it does not cover.
+	//
+	// NOTE the asymmetry with drafts, because it matters if triage's inbox ever
+	// widens: drafts always folds the Deliver task's own project, so "inherit the
+	// conversation's class" is really enforced there. Triage folds the focus
+	// message and its inbound neighbours, and nothing here stands for the
+	// thread's own class. Today that cannot bite — triage's inbox is `unmatched`
+	// by construction, so the focus message is already restricted and the fold
+	// cannot change the outcome. A ticket that makes unmatched general again must
+	// supply the missing thread-level class before relying on this fold.
+	if m.ThreadID != 0 {
+		rows, err := s.pool.Query(ctx,
+			`SELECT COALESCE(p.ai_locality = 'local_only', false),
+			        EXISTS (SELECT 1 FROM capture_decisions cd2 WHERE cd2.message_id = nm.id),
+			        latest.project_id IS NOT NULL
+			   FROM normalized_messages nm
+			   LEFT JOIN LATERAL (SELECT cd.project_id FROM capture_decisions cd
+			                       WHERE cd.message_id = nm.id ORDER BY cd.id DESC LIMIT 1) latest ON true
+			   LEFT JOIN projects p ON p.id = latest.project_id
+			  WHERE nm.thread_id = $1 AND nm.id <> $2
+			    AND nm.direction = 'inbound'`, m.ThreadID, m.MessageID)
+		if err != nil {
+			return mc, fmt.Errorf("resolve neighbour attribution for message %d: %w", m.MessageID, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var localOnly, seen, hasProj bool
+			if err := rows.Scan(&localOnly, &seen, &hasProj); err != nil {
+				return mc, fmt.Errorf("scan neighbour attribution: %w", err)
+			}
+			st := provider.AttrUnseen
+			switch {
+			case hasProj:
+				st = provider.AttrProject
+			case seen:
+				st = provider.AttrUnmatched
+			}
+			mc.NeighbourAttribution = append(mc.NeighbourAttribution,
+				NeighbourClass{State: st, LocalOnly: localOnly})
+		}
+		if err := rows.Err(); err != nil {
+			return mc, fmt.Errorf("iterate neighbour attribution: %w", err)
+		}
 	}
 
 	// Candidates: find_related_tasks — deterministic recency + project scope.

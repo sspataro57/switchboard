@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -106,6 +107,120 @@ func Report(ctx context.Context, pool *pgxpool.Pool, w io.Writer, threshold floa
 	fmt.Fprintf(w, "Triage shadow report (threshold %.2f)\n", threshold)
 	fmt.Fprintf(w, "  processed: %d  actionable: %d  would-create: %d  would-attach: %d  human-review: %d  unmapped: %d\n\n",
 		total, actionable, wouldCreate, wouldAttach, belowThreshold, unmapped)
+	if err := reportSkipped(ctx, pool, w, since); err != nil {
+		return err
+	}
 	fmt.Fprintln(w, strings.Join(lines, "\n"))
 	return nil
+}
+
+// reportSkipped renders the lane the extraction join above CANNOT see (SWT-21
+// criterion 20).
+//
+// The report joins `status='ok'` rows, and a refused message writes no
+// extraction at all — that is what keeps "no permitted provider looked"
+// structurally different from "the model looked and found nothing". The cost is
+// that without this section a fully-skipped pass renders as `processed: 0` and
+// is indistinguishable from a dead poller, a bad key, or an empty inbox. After
+// this ticket and before SWT-22 that is EVERY pass, so the section is not a nice
+// extra: it is the only place an operator learns the difference.
+func reportSkipped(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Duration) error {
+	q := `SELECT input FROM ai_runs WHERE worker_type='triage' AND status='skipped'`
+	args := []any{}
+	if since > 0 {
+		args = append(args, since.String())
+		q += ` AND created_at >= now() - $1::interval`
+	}
+	q += ` ORDER BY created_at`
+
+	rows, err := pool.Query(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("select skipped runs: %w", err)
+	}
+	defer rows.Close()
+
+	byAvail := map[string]int{}
+	byClass := map[string]int{}
+	totalSkipped := 0
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return fmt.Errorf("scan skipped run: %w", err)
+		}
+		var rec struct {
+			AvailReason  string         `json:"avail_reason"`
+			AvailReasons map[string]int `json:"avail_reasons"`
+			ClassReasons map[string]int `json:"class_reasons"`
+			SkippedCount *int           `json:"skipped_count"`
+		}
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			continue
+		}
+		// A pass aggregate carries skipped_count; a per-message skip is one
+		// message and carries none. Defaulting to 1 keeps the two row shapes
+		// summable in the same column instead of needing two reports.
+		n := 1
+		if rec.SkippedCount != nil {
+			n = *rec.SkippedCount
+		}
+		totalSkipped += n
+		// Prefer the BREAKDOWN when the row carries one. A pass can refuse for
+		// more than one reason — the probe TTL expiring mid-pass makes
+		// `no_local_provider` and `local_unreachable` coexist — and
+		// `avail_reason` is only the dominant one. Filing the whole count under
+		// it would print a wrong number in the one place an operator looks, which
+		// is worse than printing no breakdown at all.
+		if len(rec.AvailReasons) > 0 {
+			for k, v := range rec.AvailReasons {
+				byAvail[k] += v
+			}
+		} else {
+			// Older rows, and every per-message skip, carry a single reason.
+			reason := rec.AvailReason
+			if reason == "" {
+				reason = "unrecorded"
+			}
+			byAvail[reason] += n
+		}
+		// class_reasons accumulates either way. An early `continue` above put it
+		// on the breakdown branch only, which silently emptied the whole
+		// "why it was restricted" section for exactly the rows that have one.
+		for k, v := range rec.ClassReasons {
+			byClass[k] += v
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate skipped runs: %w", err)
+	}
+	if totalSkipped == 0 {
+		return nil
+	}
+
+	fmt.Fprintf(w, "  skipped: %d (never sent to any provider)\n", totalSkipped)
+	// Sorted, because an operator compares two reports by eye and map order
+	// would make an unchanged breakdown look different every run.
+	for _, k := range sortedKeys(byAvail) {
+		fmt.Fprintf(w, "    why the lane refused   %-28s %d\n", k, byAvail[k])
+	}
+	for _, k := range sortedKeys(byClass) {
+		fmt.Fprintf(w, "    why it was restricted  %-28s %d\n", k, byClass[k])
+	}
+	// The half a counter cannot carry. Nothing in the numbers above distinguishes
+	// "idle by design" from "broken", and the obvious fix a reader invents for
+	// "broken" is a fallback to the hosted lane — the one change this ticket
+	// exists to prevent.
+	fmt.Fprintln(w, "    NOTE: an all-skipped pass is EXPECTED by design until a local model exists (SWT-22).")
+	fmt.Fprintln(w, "          Personal content is only ever processed locally; falling back to a hosted")
+	fmt.Fprintln(w, "          provider is never the fix. See docs/runbooks/provider-locality.md.")
+	fmt.Fprintln(w)
+	return nil
+}
+
+func sortedKeys(m map[string]int) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

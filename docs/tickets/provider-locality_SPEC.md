@@ -684,6 +684,128 @@ Recorded so a reader of the first draft is not misled.
   per message. The SWT-17 amplification incident is the reason, and after decision
   B the restricted population is the entire inbox.
 
+## Deviations from this SPEC, accepted during implementation (2026-08-28)
+
+Recorded here rather than left as a silent difference between the SPEC and the
+code. Each fails closed at least as hard as what the SPEC pinned.
+
+**1. The enums are ints, not strings, and `Locality` gained a third value.**
+The SPEC sketched `ClassRestricted Class = ""` / `ClassGeneral = "general"` and a
+two-valued `Locality`. Shipped: `iota` ints with `LocalityUnknown` as the zero
+value. Reason: an unparseable or empty endpoint is genuinely a third state, and
+naming it stops it from having to masquerade as "remote". Every zero value still
+fails closed (`LocalityUnknown`, `ClassRestricted`, `AvailAbsent`, `DecideSkip`).
+
+**2. No `LocalOnly(c Class)` predicate.** `Decide` and `MostRestrictive` switch
+on the PERMITTED case (`c != ClassGeneral` restricts), which is what makes an
+unrecognised value fail closed. A `LocalOnly` helper would have been a second
+place to get that polarity wrong.
+
+**3. `Decision` is `{DecideSkip, DecideAllow}`, not
+`{DecideSkip, DecideLocal, DecideGeneral}`.** `Decide` answers "may this be
+processed at all"; `Router.Route` answers "by which client". Criterion 6's
+"restricted content must never yield `DecideGeneral`" therefore moves up to the
+router, where `TestRouter_RestrictedWithNoLocalClient_NeverTouchesGeneral`
+asserts it with a call count rather than an enum comparison — a stronger check.
+
+**4. `internal/capture/attribution.go` was not created.** The attribution read
+lives in `internal/triage/store.go` and `internal/drafts/store.go`, in the SAME
+query that resolves the project, so the class and the project cannot disagree.
+It also keeps `internal/capture` free of a `provider` import.
+
+**5. `probe` caches for a TTL rather than exactly once per pass** (criterion 22's
+wording). A pass longer than the TTL re-probes. Safe direction: a local box that
+came back mid-pass starts serving again instead of staying refused.
+
+**6. `ai_runs.provider` now records the serving lane, not the constant
+`"openai"`.** Not requested by the SPEC, but with two lanes the constant would
+label every locally-processed row as hosted — the one question that column
+answers, answered wrongly, in the audit trail. Applied to triage and drafts;
+planimport keeps a constant because it is always `ClassGeneral`. Nothing reads
+the column, so the 11 historical rows are unaffected.
+
+**7. No index on `ai_locality`.** The SPEC did not ask for one; the first cut
+added a partial index anyway and it was removed. Every read reaches `projects` by
+primary key, and the table has tens of rows.
+
+**8. `Route` returns `(nil, DecideSkip, no_general_provider)` when general
+content has no hosted client.** Not in the SPEC. Since criterion 21 made
+`OPENAI_API_KEY` optional, "no hosted client" is a supported triage
+configuration, and the previous shape returned a nil client with `DecideAllow`
+for every caller to dereference.
+
+**9. `AssembleContext` classifies ALL inbound thread messages, not only the ones
+the prompt renders.** Criterion 15 says "every thread message it includes in the
+prompt", and the prompt query has `LIMIT 10` plus a `sent_at` bound. The class
+fold reads a superset, which is the safe direction, at the cost of an unbounded
+scan on a very long thread. `internal/drafts/store.go` does it the tighter way —
+same query as the bodies — and is the better pattern to copy.
+
+**10. Outbound thread messages are excluded from the fold.** Not in the SPEC, and
+found only in re-review. The capture engine filters `direction = 'inbound'`
+(invariant 5), so an outbound message can never carry a capture decision:
+classifying one as `unseen` meant "restricted forever", and since a Deliver task
+exists to reply on a thread, the first send re-entering through ingestion would
+have blocked that thread permanently. Measured at the time: 21,194 outbound
+messages, zero decisions, 1,043 of 18,089 threads already affected.
+
+The ground is **structural unclassifiability plus inheritance**: an outbound
+message takes its conversation's class, which drafts folds anyway from the task's
+own project and from every inbound sibling. It is NOT that our sends passed the
+delivery policy gate — the first version of this justification said that and it
+is false. `direction='outbound'` is set when the From address is one of the five
+own accounts, so it is mostly mail typed in Gmail by hand: 21,194 such messages
+against 1 delivery row. The gate also answers disclosure to the recipient, which
+is a different question from disclosure to a hosted API.
+
+*Residual this does not cover*, named rather than left implicit: the outbound
+body is still rendered into the prompt — excluded from the class fold, not from
+the conversation. A hand-written reply that pastes personal material into a
+client thread introduces content no inbound sibling holds and no project
+attribution describes, and it reaches the hosted lane unclassified. Dropping
+outbound from the prompt would break the draft worker's job; folding it
+restricted breaks every replied-on thread. Accepted gap.
+
+*Qualification to criterion 16*, which claims the fold "is what would stop the
+thread hole if a later ticket ever makes unmatched general again": that holds for
+inbound neighbours only. Drafts enforces the inheritance rule because it always
+folds the Deliver task's own project; **triage does not** — it folds the focus
+message and its inbound neighbours, and nothing there stands for the thread's own
+class. Harmless today (triage's focus message is `unmatched`, hence restricted,
+by construction), but a ticket widening that inbox must supply a thread-level
+class before relying on the fold.
+
+**11. `cmd/drafts` and `cmd/planimport` do NOT get a local lane.** They were
+wired for one and it was reverted: criterion 21 names `cmd/triage`, and neither
+worker implements criterion 18's tier 1, so an `ErrUnavailable` there would
+become a hard error and a non-zero exit — a busy local box looking like an
+outage. Their routers are built with a nil local lane, which is exactly
+criterion 24: restricted content skips rather than being processed by anything.
+SWT-22 adds the lane with the skip semantics that make it safe.
+
+## Post-review correction: the drafts guard shipped inert (2026-08-28)
+
+Worth recording because it is the fourth or fifth appearance of the same failure
+in this repo. The first implementation wired `drafts.Run` to the boundary and
+added `internal/drafts/locality_skip_test.go`, which passed — while
+`DeliverTasks` never selected `p.ai_locality`. Nothing populated
+`DeliverTask.ProjectLocalOnly` outside test fixtures, so in production every
+Deliver task folded to `ClassGeneral` and reached the hosted lane, including on a
+`local_only` project.
+
+The unit test could not have caught it: the unit test is the thing supplying the
+value. The general shape — **a predicate whose discriminating column is a
+constant in production** — now has an integration test per instance, here
+`internal/drafts/locality_store_integration_test.go`, which makes Postgres
+produce the value instead of a fixture.
+
+The fix then introduced its own version of the same failure, in the opposite
+direction: with the column armed, outbound neighbours (structurally undecidable,
+per invariant 5) restricted every replied-on thread forever. Also invisible to
+every test, because every fixture thread contained inbound messages only. Both
+are now covered by tests whose fixtures are shaped like production rather than
+like the assertion.
+
 ## Future work (not this ticket)
 
 - **SWT-22 — the local classifier and adapter.** Its inputs are recorded in

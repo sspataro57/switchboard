@@ -115,14 +115,14 @@ func seedDash(t *testing.T, ctx context.Context, pool *pgxpool.Pool) dashSeed {
 	var s dashSeed
 
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,$2,'manual','dashboard','/tmp/itest') RETURNING id`, dashSlug, dashClient).Scan(&s.projectID); err != nil {
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,$2,'manual','dashboard','/tmp/itest', 'any') RETURNING id`, dashSlug, dashClient).Scan(&s.projectID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	var otherID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,$2,'manual','dashboard','/tmp/itest') RETURNING id`, dashOther, dashClient).Scan(&otherID); err != nil {
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,$2,'manual','dashboard','/tmp/itest', 'any') RETURNING id`, dashOther, dashClient).Scan(&otherID); err != nil {
 		t.Fatalf("seed other project: %v", err)
 	}
 

@@ -205,11 +205,11 @@ func (s *crSuite) seed(t *testing.T, ctx context.Context) {
 	t.Helper()
 
 	s.reengine = s.insID(t, ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,'','manual','dashboard','/tmp/itest-caprules') RETURNING id`, crReengineSlug)
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,'','manual','dashboard','/tmp/itest-caprules', 'any') RETURNING id`, crReengineSlug)
 	s.collab = s.insID(t, ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path)
-		 VALUES ($1,$1,'','manual','dashboard','/tmp/itest-caprules') RETURNING id`, crCollabSlug)
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
+		 VALUES ($1,$1,'','manual','dashboard','/tmp/itest-caprules', 'any') RETURNING id`, crCollabSlug)
 
 	// The acceptance rule set, in miniature. Rule ids are assigned by the
 	// sequence, so priority is what must separate them — not insertion order.
