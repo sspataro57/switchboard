@@ -176,3 +176,33 @@ free string, the model returns the same concept in three casings —
 to an enum, every response landed inside it. An unconstrained `kind` would be a
 report field that silently means nothing, which is this repo's recurring landmine
 in yet another costume.
+
+**5. The corpus is BILINGUAL, and the original is kept — no translation pass.**
+51 of the 1,609 personal messages are Spanish; Bank of America duplicates its
+alerts. Decision (Salvador, 2026-08-28): "if it can parse spanish better to keep
+the original."
+
+Measured on matched pairs — the same notice in both languages, which this corpus
+supplies for free:
+
+```
+we've transferred money to cover…  EN true/payment_due   ES true/payment_due   agree
+your available balance is low      EN true/payment_due   ES true/payment_due   agree
+your statement is available        EN false/informational ES false/informational agree
+a direct deposit was credited      EN false/informational ES TRUE/payment_due   DISAGREE
+your account may not have funds    EN true/payment_due   ES true/payment_due   agree
+```
+
+4/5, with valid schema output in both languages every time. So Spanish is not a
+comprehension problem and a translation pass would be a second inference per
+message plus a new failure mode — a bad translation silently changes the answer
+and leaves nothing to compare against. Keeping the original also keeps
+raw-first's promise that reprocessing is always possible.
+
+The 1/5 disagreement is the finding, not a rounding error: `a direct deposit was
+credited` is a BORDERLINE case where the model is unstable, and the language
+flipped it. A translation pass would have concealed that instability rather than
+fixed it. Consequence for the eval set: the Spanish messages get their own
+labelled rows (12 are in the worksheet) so language-driven disagreement is
+MEASURED per release rather than assumed away, and the prompt is written to be
+language-neutral rather than English-with-Spanish-tolerated.
