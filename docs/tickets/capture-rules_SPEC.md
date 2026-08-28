@@ -720,6 +720,43 @@ behind it changes — so `internal/drafts/worker_test.go`'s imposed surface
 None. This pass publishes and subscribes to nothing. `fleet.NewSpineClient` is
 not used; no heartbeat, no command topic, no LWT.
 
+## SPEC re-validated 2026-08-28, before implementation
+
+This SPEC was written on 2026-08-20. SWT-18 and SWT-19 have since landed and both
+touched files it depends on, so its assumptions were re-checked against `main`
+rather than trusted. **The design holds unchanged.** Three checks:
+
+- **§9's rework targets still exist.** `internal/drafts/store.go` still carries
+  `client_person_id`, `hasUpworkIdentity` and the `people`/`person_identities`
+  joins that sites A-E describe. SWT-19 rewrote the *upwork target resolution*
+  inside the same function (roomed-thread preference, and a refusal to guess when
+  a client has several rooms), so the rework must PRESERVE that behaviour rather
+  than reverting it — the multi-room refusal is SWT-20's shipped mitigation and
+  removing it silently reopens a wrong-room send.
+- **Migration 0015 is still free.** Highest applied and highest in the repo is
+  `0014_imap_mail.sql`; SWT-19 added none, exactly as it predicted.
+- **The fixture rules are unaffected by SWT-19's key change.** They match on
+  `jira:` and github thread-key prefixes, not upwork ones, so the new
+  `upwork_crm:{client}:room:{id}` shape does not touch them. A `thread_key_prefix`
+  rule on `upwork_crm:` would still match either shape, which is the property the
+  prefix design was chosen for.
+
+**Two files must be added to "Files likely to touch" — neither existed when this
+SPEC was written**, and both reference the column §9 drops:
+
+- `internal/connector/upworkcrm/matcherhardening_regression_integration_test.go`
+  (SWT-18) — its cleanup subqueries `projects.client_person_id`.
+- `internal/drafts/store_upwork_room_integration_test.go` (SWT-19) — same cleanup
+  subquery, plus an `INSERT` that SETS the column.
+
+A third hit, `internal/tools/delivery_lifecycle_integration_test.go`, is a comment
+only and needs nothing. `internal/tools/delivery.go` likewise mentions the column
+in prose explaining why SWT-20's binding waits for it — no code dependency.
+
+Dropping a column is exactly the change where a stale file list bites: the
+migration succeeds, and the failure surfaces later as a test that cannot clean up
+after itself.
+
 ## Files likely to touch
 
 New:
