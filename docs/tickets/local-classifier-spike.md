@@ -1,0 +1,124 @@
+# Spike — local model for actionability classification (2026-08-28)
+
+Measured, not argued. Everything here ran against the real corpus on the
+workstation's **RX 6650 XT (RDNA2, 8 GB) via Vulkan**. Decision at the end.
+
+**Outcome: qwen3:8b** (Salvador, 2026-08-28).
+
+## Why this was worth measuring
+
+SWT-17 shipped and left 15,993 messages unmatched — triage's inbox. That
+residue is disproportionately personal, and personal mail is the reason the
+classifier must be local (SWT-21). The open question was whether a local model
+is a *compromise* accepted for privacy, or actually good enough. It is the
+latter, which materially strengthens SWT-21: the restricted lane is not a
+degraded lane.
+
+## Results
+
+Two evals. The general one is 30 actionable / 45 not, drawn from the unmatched
+pile with a deliberate **near-miss class** (statement-available, balance,
+card-was-used from the *same* senders) so nothing can win by matching on sender.
+The Pines one is all 31 messages from a single HOA property manager that sends
+both routine announcements and violation notices carrying fines — the
+same-sender-different-actionability case in its purest form.
+
+| model | where | general recall | general precision | Pines recall | Pines missed | median |
+|---|---|---:|---:|---:|---:|---:|
+| **qwen3:8b** | local | **0.90** | 0.61 | **1.00** | 0 | 1.23s |
+| gemma3:12b | local | 0.87 | 0.76 | 0.40 | 3 | 5.69s¹ |
+| gemma3:4b | local | 0.80 | 0.86 | 0.80 | 1 | 0.93s |
+| gpt-5.4 | proxy | 0.80 | 0.92 | — | — | 1.31s |
+| gpt-5.4-mini | proxy | 0.77 | 1.00 | 0.40 | 3 | 1.20s |
+| gpt-5.6-terra | proxy | 0.73 | 1.00 | — | — | 1.50s |
+| gpt-5.6-sol | proxy | 0.73 | 1.00 | — | — | 1.94s |
+| llama3.1:8b | local | 0.70 | 0.84 | 1.00 | 0 | 2.52s |
+| qwen3:4b | local | 0.57 | 1.00 | — | — | 0.65s |
+| qwen2.5:3b | local | 0.10 | 0.27 | — | — | 0.71s |
+
+¹ spilled to CPU — the desktop holds ~3 GB of the 8 GB. On a headless box it fits.
+
+**Recall is the objective, not accuracy.** A missed payment notice is a late fee;
+a false alarm costs a second to dismiss (Salvador, 2026-08-28: "safer false
+positives than false negatives"). Accuracy is actively misleading here — always
+answering "not actionable" scores 99.8% on the real distribution.
+
+## What the numbers say
+
+**Local beats hosted on recall.** Nothing on the proxy exceeded 0.80, and
+gpt-5.4-mini and gpt-5.6 both missed **3 of 5** violation notices on Pines.
+Local is also faster, having no network hop.
+
+**The newest hosted models were the worst of them** — gpt-5.6-terra and -sol at
+0.73, below both 5.4 variants, and slowest. Consistent with what Salvador found
+independently on proposalWriter. This is a small crisp discrimination; extra
+capability shows up as latency, not accuracy.
+
+**Bigger did not win.** gemma3:12b is *worse* than gemma3:4b on Pines (0.40 vs
+0.80). Scaling within a family moved the balance toward caution — the wrong
+direction here.
+
+## Three findings that will bite whoever builds this
+
+**1. Thinking models are the wrong tool, and fail invisibly.** The first qwen3:4b
+run scored 0.00 across the board with 70/70 malformed outputs: it spent its
+entire token budget reasoning about a ten-word subject line and returned EMPTY
+content with `done_reason: length`. Set `"think": false`. Reasoning is pure
+latency on a binary classification.
+
+**2. Self-reported confidence is a constant and must not be used as a
+threshold.** qwen3:8b returns exactly `0.95` on everything it flags — 27 true
+positives and 17 false positives, identical. There is no dial. This is the
+"predicate whose discriminating column is a constant" landmine wearing a model's
+clothes; a confidence gate built on it would look principled and do nothing.
+To trade precision for recall, use a **second pass** — let qwen3:8b flag broadly,
+then re-check only the flagged subset with a *different* model. Two disagreeing
+small models beat one model's self-assessment.
+
+**3. Do not prompt differently per sender.** That is rules in a costume:
+unbounded maintenance, untestable in aggregate, and unattributable when it
+misfires. What Pines actually shows is a missing *context* fact — the model does
+not know this sender emits both announcements and fines — and a fact belongs in
+a column, editable through `opsctl` and visible in the report, injected into ONE
+prompt. Better still, "First Notice" and "violation" are keywords a rule catches
+perfectly and reproducibly; the classifier's job is the sender nobody has
+written a rule for yet.
+
+## Operational facts
+
+- ROCm **crashed** during GPU discovery on gfx1032. Vulkan works and is OFF by
+  default: `OLLAMA_VULKAN=1`. Expect the same on the RX 570 (Polaris/gfx803),
+  where ROCm support was dropped entirely — Vulkan is the only route.
+- qwen3:8b Q4 is ~5.2 GB. It did NOT fully fit here (35/37 layers on GPU, output
+  layer on CPU) because the desktop holds ~3 GB. On a headless 8 GB card it fits.
+- Prompt size is small: the classifier needs subject + sender for most senders,
+  ~25 tokens. **Pines is the exception that proves the body is sometimes
+  required** — its subjects are a `[#XN######] Message from <Association> - ...`
+  template with the topic truncated away, so the signal is only in the body.
+- Ceiling on Pines regardless of model: the body says *"Please see attachment for
+  additional detail"*, and the fine amount and cure-by date are in a PDF that is
+  ingested inside `rfc822_b64` but never extracted. No classifier can read them
+  today. Raising "HOA violation notice — open the attachment" is the honest
+  best, and the raw message is preserved, so extraction is future work rather
+  than lost data.
+
+## Caveats on this spike's own credibility
+
+- 75 general and 31 Pines messages. Roughly ±10 points of noise: 0.80 vs 0.77 is
+  not a real difference; the local-vs-hosted recall gap probably is.
+- **Labels are mine, generated by regex, and were wrong once already.** The first
+  general eval scored every model at 0.10–0.27 recall because it labelled "your
+  statement is available" as actionable while the prompt said informational
+  notices were not. The models were right and the fixture was wrong; gemma3:4b
+  went 0.27 → 0.80 on the fix. The Pines labels are auto-generated the same way
+  and are worth eyeballing before anyone tunes against them.
+- A properly labelled set — a few hundred messages, hand-checked — is the
+  prerequisite for tuning anything. This spike answers "is it good enough to
+  build on", not "which threshold".
+
+## Left on the workstation
+
+An `ollama serve` process (started with `OLLAMA_VULKAN=1`) and ~25 GB of models
+under `~/.ollama/models`: qwen3:8b, gemma3:12b, gemma3:4b, llama3.1:8b,
+qwen3:4b, qwen2.5:3b-instruct. Only qwen3:8b is needed going forward; the rest
+are ~20 GB reclaimable with `ollama rm`.
