@@ -357,6 +357,42 @@ Numbered and testable. 1-8 are unit tests with `httptest` — never a live model
     structural test fails any file in `internal/classify` that branches the prompt
     on a sender string: per-sender prompts are rules in a costume — unbounded
     maintenance, untestable in aggregate, unattributable when they misfire.
+19b. **The verdict carries the message's actionable LINK, and the model never
+    authors it** (Salvador, 2026-08-28: "what we need to do is preserve the links
+    on the summaries"). This is added AFTER the test pass was written, so it needs
+    its own tests.
+
+    The rule that makes it safe: a model asked for a URL will invent a plausible
+    one, and a hallucinated portal link on a task about a fine is worse than no
+    link at all. So links are extracted DETERMINISTICALLY by the application and
+    offered to the model as a numbered closed set of anchor TEXTS; the model
+    returns `link_index` (an integer, or null), and the application resolves the
+    index back to the URL. An out-of-range index is rejected. **The model cannot
+    emit a URL because it is never given the chance to** — spine/leaves, exactly
+    as CLAUDE.md states it.
+
+    Extraction, measured over 400 personal messages on 2026-08-28:
+    * ANCHORS ONLY (`<a href>`). Never `img src`: the only "link" in a Pines
+      First Notice is an `<img>` pointing at `/wf/open`, a SendGrid open-tracking
+      pixel. Following img src would put a tracking beacon on a task.
+    * Drop by URL: unsubscribe, opt-out, privacy, terms, preferences, `/wf/open`,
+      and asset/CDN hosts.
+    * Drop by ANCHOR TEXT too, which the URL filter alone misses — "Unsubscribe",
+      "Privacy", "Terms of Use", "View in Browser", "here". Also drop EMPTY text:
+      those are image wrappers, not destinations.
+    * Result: median 2 candidates per message (from a median of 4 and a mean of
+      12 unfiltered), 288 of 400 messages at 1-3, 3 messages at zero. What
+      survives is the real call to action — `VIEW DETAILS`, `VIEW ACCOUNT`,
+      `See My Loan Option`, the `portal.pinespropertymanagement.com` link.
+
+    Cap the set at 8 and pass the texts, not the hrefs, so a long marketing mail
+    cannot flood the prompt.
+
+    **Fetching the link is out of scope and stays out.** The Pines portal
+    requires a login (Salvador, 2026-08-28: "you can't it requires login"), so
+    the destination is unreachable to this system by design. The link exists so a
+    HUMAN can open it. Nothing in this ticket dereferences a URL.
+
 20. `classify report` prints: counts (`classified`, `flagged`, by `kind`), the
     flagged set newest-first with sender / subject / kind / title, and the
     skipped lane in `internal/triage/report.go`'s `reportSkipped` shape and
