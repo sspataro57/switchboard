@@ -32,6 +32,18 @@ manufactures tasks faster than anyone reads them.
 
 ## Seeding the fixture rules
 
+**`opsctl` is not in the container image** — it builds the connectors, `migrate`,
+`dashboard` and `google-auth` only. Run it from a checkout, which is where an
+operator is anyway:
+
+```bash
+cd ~/projects/personal/switchboard
+eval "$(grep '^export OPS_DATABASE_URL=' ~/.bashrc)"
+alias opsctl='DATABASE_URL="$OPS_DATABASE_URL" go run ./cmd/opsctl'
+```
+
+Every `opsctl` command below assumes that.
+
 The nine fixture rules are in the SPEC's "Fixture rules (the acceptance data)"
 table. Add them with:
 
@@ -89,8 +101,7 @@ Capture runs inside the connector mains automatically, after
 `capture.ObserveOutbound`. To run one by hand:
 
 ```bash
-eval "$(grep '^export OPS_DATABASE_URL=' ~/.bashrc)"
-DATABASE_URL="$OPS_DATABASE_URL" opsctl capture-rules run --since 168h
+opsctl capture-rules run --since 168h
 ```
 
 **Shadow is the default and there is no `--mode` flag.** Acting requires `--live`.
@@ -118,7 +129,7 @@ how you get a second task for a ticket that already has one.
 ## Reading the report
 
 ```bash
-DATABASE_URL="$OPS_DATABASE_URL" opsctl capture-rules report --since 168h
+opsctl capture-rules report --since 168h
 ```
 
 What to look for, in order:
