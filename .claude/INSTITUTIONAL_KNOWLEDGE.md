@@ -195,6 +195,51 @@ came from `ScrubAIAttribution` running at send but not at store. It doesn't —
 idempotent, so stored body == sent body. Verify a claimed data path at every
 write site before acting on it.
 
+### The landmine's 6th and 7th instances, both inside SWT-21 itself
+**Location:** `internal/drafts/store.go`, found by review, twice, in one ticket.
+
+**(6) A guard whose column no query selected.** `drafts.Run` was wired to the
+locality boundary and `internal/drafts/locality_skip_test.go` asserted that a
+`local_only` project's Deliver task is skipped. It passed from the day it was
+written while the guard was INERT: `DeliverTasks` never selected
+`p.ai_locality`, so nothing outside test fixtures ever wrote
+`DeliverTask.ProjectLocalOnly`. Every real task folded to `ClassGeneral` and
+would have reached the hosted model.
+**The unit test could not have caught it, by construction — the unit test is the
+thing supplying the value.** Only a test that makes POSTGRES produce it can. That
+is the rule now: for any predicate whose input comes from a column, the
+regression test belongs in the integration suite, and it must fail when the
+column is dropped from the SELECT. Mutate the SELECT to a literal and watch it go
+red; if it stays green you have tested your fixture.
+
+**(7) Fixing it introduced the mirror image: a value that is a constant in
+production for a STRUCTURAL reason.** The neighbour fold classified thread
+messages by their `capture_decisions` row — but `internal/capture/rules_store.go`
+filters `direction = 'inbound'` (that line IS invariant 5), so an **outbound
+message can never have a decision, on any pass, in any mode**. Measured: 21,194
+outbound messages, ZERO decisions, and 1,043 of 18,089 threads already carrying
+one. So `unseen` on an outbound message does not mean "not classified yet", it
+means "restricted forever" — and since a Deliver task exists to REPLY on a
+thread, the first send re-entering through ingestion (invariant 5 again) would
+have blocked that thread permanently, with no error and no remedy.
+**Rule: before treating "absent row" as "not yet known", check whether some other
+invariant guarantees the row can never exist.** Absent-because-pending and
+absent-because-impossible need different handling, and the second one is
+invisible in every fixture that only contains the first.
+
+**Both were invisible for the same reason: the fixtures were shaped like the
+assertion, not like production.** Every thread fixture in the repo contained
+inbound messages only. When a fold or a filter reads a column, seed the fixture
+from a `SELECT ... GROUP BY` of the real table first.
+
+**Also from this ticket: a comment can be a defect.** Two comments shipped
+stating the OPPOSITE of their code — the `Prober` doc ("treated as ready" when
+`router.probe` returns `AvailUnreachable`) and the outbound-exclusion rationale
+(claimed our sends passed the delivery policy gate: 1 delivery row against 21,194
+outbound messages; `direction='outbound'` only means the From address is one of
+the five own accounts). In a boundary file, the comment is what the next session
+trusts. Verify the claim in a comment the same way you verify a predicate.
+
 ### A post-hoc matcher without an attempt-time floor binds the wrong send
 **Location:** `internal/connector/jira/sink.go` `matchByBodyPrefix`, found SWT-16
 slackweb got this floor in SWT-12 (see 0012's third defect); **jira never did**,
