@@ -662,15 +662,68 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
 - Step 8 re-consent: extend `google.ReadonlyScopes` with send/write scopes and
   re-run google-auth add per account.
 
+## Capture rules contract (shipped in SWT-17, SHADOW MODE)
+
+Deterministic project assignment. A priority-ordered rule engine runs as a
+post-normalize pass in every connector main, writes one `capture_decisions` row
+per message, and in LIVE mode only creates one task per external ticket through
+the executor. Runbook: `docs/runbooks/capture-rules.md`.
+
+- Mode from `CAPTURE_RULES_MODE` (shadow default); advisory-lock key
+  `0x51570015`. Shadow is real — it decides everything and creates nothing.
+- **Capture runs BEFORE triage, and the ordering is load-bearing.** Triage's
+  inbox is `action='unmatched'`; a routed message is never re-triaged. Reversed,
+  triage spends model calls on messages the rules would have routed. The two
+  mode flips are ordered, not independent: capture goes live first.
+- **Three states, and conflating the first two is the trap.** No decision row =
+  UNSEEN (skip, the engine has not looked yet). Latest decision `unmatched` =
+  the inbox. Latest decision routed = never re-triage. Treating unseen as
+  unmatched hands every fresh message to the model before the rules run.
+- **The pending filter skips decisions OF THE SAME MODE, not just live ones.**
+  Keyed on `cd.mode = <this pass's mode>`. It was `= 'live'`, which meant a
+  shadow pass excluded nothing and re-evaluated the WHOLE inbound corpus every
+  run — 49,415 messages and ~65 MB of body text per pass, four mains on `*/15`
+  plus a watch loop on every IDLE wake. Do NOT "simplify" it to "any decision":
+  that starves the shadow→live transition, because after a shadow period every
+  message already carries a shadow row and the first live pass would decide
+  nothing. Neither failure is visible at fixture scale.
+- **`external_refs.system` has THREE spellings** — the CHECK in 0015,
+  `captureExternalSystems` in `internal/tools/capturerules.go`, and
+  `validateLinkExternalRef` in `internal/tools/prci.go`. Drift between them is
+  not an error: capture creates the task, commits the decision, then fails the
+  link, and the next message for that key creates a SECOND task while the live
+  claim is already spent. Change all three together.
+- `capture_decisions.message_id` is `ON DELETE CASCADE`. A decision without its
+  message means nothing, and 19 test suites clear fixtures by deleting
+  `normalized_messages` — without the cascade they fail inside cleanup, which
+  reads like the cross-pollution pact breaking.
+- **Triage can no longer produce an `attach` verdict from the live pass.** The
+  pending filter yields only unmatched messages, unmatched carries no project,
+  and candidates load only when a project resolved. An inert path that still
+  looks alive — recorded so nobody debugs it as broken.
+- Two tools, `capture_rule_add` / `capture_rule_set_enabled`, both `humanOnly`
+  and both OFF the MCP surface: an agent must not be able to redirect the funnel.
+- **`external_refs` is UNIQUE on `(system, external_key)`** — one ticket, one
+  task, enforced by the database rather than assumed by the reader. Capture's
+  dedup is a lookup in that table, and `link_external_ref` IS on the agent
+  surface, so without the constraint a worker could claim a ticket for a task of
+  its choosing and every later notification would append there, silently.
+  Added at zero rows, when it was free. **Consequence: a ticket cannot be
+  attached to two tasks.** No task-plus-follow-up on one key; that would need a
+  deliberate design, not the absence of a constraint.
+
 ## Triage contract (shipped in SWT-6, SHADOW MODE)
 
 - `OPENAI_API_KEY` lives in `~/.bashrc` — same non-interactive early-exit
   caveat as JIRA_TOKEN_PERSONAL: `eval "$(grep '^export OPENAI_API_KEY=' ~/.bashrc)"`.
 - `TRIAGE_MODEL` default `gpt-5-mini`; advisory-lock key `0x51570006`.
-- Client→project mapping recipe (manual, per client):
-  `UPDATE projects SET client_person_id = (SELECT person_id FROM
-  person_identities WHERE provider='upwork_crm' AND value='<client uuid>')
-  WHERE slug='<slug>';` — unmapped people show in the report's UNMAPPED lane.
+- ~~Client→project mapping recipe~~ **DEAD since SWT-17.** It said
+  `UPDATE projects SET client_person_id = ...`, and that column no longer exists
+  (migration 0015 drops it) — the statement is now a runtime error, and it was
+  the first thing a session looking for "how do I map a client to a project"
+  would have found. **Project membership is a capture-rules question now:**
+  `opsctl capture-rules add --project <slug> --type <kind> --pattern <pattern>`.
+  Triage reads the resulting decision; it no longer maps anything itself.
 - Shadow is structural: `triage.Store` has no task-write method (reflection
   test enforces); going live ADDS the executor create_task call.
 - Routine until live: connector sync → `triage run` → `triage report`; diff

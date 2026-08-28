@@ -148,10 +148,12 @@ func seedCorpus(t *testing.T, ctx context.Context, pool *pgxpool.Pool) seeded {
 	s.unmappedPersonID = insID(t, ctx, pool,
 		`INSERT INTO people (display_name) VALUES ('itest-triage-Stranger') RETURNING id`)
 
-	// Project mapped to the mapped person via migration 0004's client_person_id.
+	// The project no longer carries a person mapping — 0015 dropped the column.
+	// mappedPersonID still exists and still drives identity resolution; what it
+	// no longer does is select a project.
 	s.projectID = insID(t, ctx, pool,
-		`INSERT INTO projects (name, slug, client, client_person_id)
-		 VALUES ('itest-triage Acme', 'itest-triage-acme', 'Acme', $1) RETURNING id`, s.mappedPersonID)
+		`INSERT INTO projects (name, slug, client)
+		 VALUES ('itest-triage Acme', 'itest-triage-acme', 'Acme') RETURNING id`)
 
 	// Two open tasks = attach candidates for the mapped project.
 	s.candidate1 = insID(t, ctx, pool,
@@ -198,6 +200,31 @@ func seedCorpus(t *testing.T, ctx context.Context, pool *pgxpool.Pool) seeded {
 		 VALUES ($1, $2, 'inbound', 'itm-3', '2026-07-03T10:00:00Z', 'thanks, all good!', 'thanks', 'stranger@x.example', 'email') RETURNING id`,
 		s.rawUnmapped, unmappedThread)
 
+	// Put the two INBOUND messages in triage's inbox (SWT-17 §8b).
+	//
+	// Since 0015, triage consumes messages whose LATEST capture decision is
+	// 'unmatched' — evaluated by the rule engine and covered by no rule. A
+	// message with NO decision row is UNSEEN, not unmatched, and is deliberately
+	// skipped: the capture pass hitchhikes on connector CronJobs, so a triage run
+	// can easily outrun it, and treating unseen as unroutable would hand every
+	// fresh message to the model before the deterministic rules ever looked. That
+	// inversion is the whole thing §8b exists to prevent.
+	//
+	// So this seeding is not scaffolding — it encodes the ordering the design
+	// depends on. Without it triage processes nothing here, correctly, and the
+	// suite fails with counts of zero.
+	//
+	// The outbound message gets no decision on purpose: it is never triaged
+	// regardless, and leaving it undecided keeps that independent of this filter.
+	for _, msg := range []string{"itm-1", "itm-3"} {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO capture_decisions (message_id, mode, action, reason)
+			 SELECT id, 'shadow', 'unmatched', 'itest-triage: no rule covers this'
+			   FROM normalized_messages WHERE external_message_id = $1`, msg); err != nil {
+			t.Fatalf("seed capture decision for %s: %v", msg, err)
+		}
+	}
+
 	return s
 }
 
@@ -216,12 +243,12 @@ func TestTriage_Integration_ShadowMode(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// Criterion 2: migration 0004 artifact — projects.client_person_id exists.
-	if got := scanInt(t, ctx, pool,
-		`SELECT count(*) FROM information_schema.columns
-		 WHERE table_name='projects' AND column_name='client_person_id'`); got != 1 {
-		t.Fatalf("projects.client_person_id column missing — apply migration 0004_gpt_triage.sql (make migrate)")
-	}
+	// SWT-6's criterion 2 pinned projects.client_person_id as a migration-0004
+	// artifact. Migration 0015 DROPS that column: project membership is a
+	// capture_decisions question now (SWT-17 §8a), not a person mapping. The
+	// assertion is removed rather than inverted — "the column is absent" pins
+	// nothing useful, and the replacement mechanism has its own suite in
+	// capturedecisions_integration_test.go.
 
 	cleanupTriage(t, ctx, pool)
 	sd := seedCorpus(t, ctx, pool)
@@ -285,15 +312,42 @@ func TestTriage_Integration_ShadowMode(t *testing.T) {
 	if got := fieldObjI(t, mappedFields, "actionable")["confidence"]; got != 0.92 {
 		t.Errorf("mapped actionable.confidence = %v, want 0.92 (verbatim)", got)
 	}
-	if got := mappedFields["verdict"]; got != "attach" {
-		t.Errorf("mapped verdict = %v, want attach", got)
+	// CHANGED BY SWT-17, and the change is a real one rather than a fixture nit.
+	//
+	// This used to assert `attach` to candidate1. It cannot any more, and not
+	// because of how the fixture is seeded: triage's pending loop consumes ONLY
+	// messages whose latest capture decision is 'unmatched' (§8b), an unmatched
+	// decision carries no project (§8a), and AssembleContext loads attach
+	// candidates only when a project resolved (store.go:166-172). So every
+	// message the live pass sees has no project, no candidates, and therefore
+	// cannot produce an attach verdict.
+	//
+	// That makes attach-vs-create UNREACHABLE FROM THE PASS THAT RUNS. It is a
+	// consequence of §8b rather than a defect — if capture routed a message,
+	// capture owns creating its task; if capture did not, there is no project to
+	// attach within — but the SPEC states the token saving and not this, so it is
+	// written down here and in the SPEC's own §8 notes.
+	//
+	// AssembleContext's project lookup is still exercised for attributed and
+	// routed messages, directly, in capturedecisions_integration_test.go. What is
+	// gone is the route from the pending loop to a candidate list.
+	if got := mappedFields["verdict"]; got != "create" {
+		t.Errorf("mapped verdict = %v, want create: an unmatched message has no project (§8a) and so no "+
+			"attach candidates, which is the only verdict shape the live pass can now produce", got)
 	}
-	if got := fieldObjI(t, mappedFields, "attach_to_task_id")["value"]; got != float64(sd.candidate1) {
-		t.Errorf("mapped attach_to_task_id.value = %v, want candidate1 %d", got, sd.candidate1)
+	if v, ok := mappedFields["attach_to_task_id"]; ok {
+		if obj, isObj := v.(map[string]any); isObj && obj["value"] != nil {
+			t.Errorf("attach_to_task_id.value = %v on a projectless message; there are no candidates to "+
+				"attach to, so proposing one would be the model inventing a task id", obj["value"])
+		}
 	}
-	if got := mappedFields["project_id"]; got != float64(sd.projectID) {
-		t.Errorf("mapped project_id = %v, want %d (mapped via client_person_id)", got, sd.projectID)
-	}
+	_ = sd.candidate1
+	// project_id is deliberately NOT asserted here any more. It used to arrive
+	// via projects.client_person_id, which migration 0015 drops; triage now reads
+	// it from capture_decisions (SWT-17 §8a), and that path is owned by
+	// capturedecisions_integration_test.go. Asserting it here without seeding a
+	// decision would pin the absence of a mechanism rather than the presence of
+	// one — and this suite is about shadow-mode EXTRACTION, which is unaffected.
 
 	// Criterion: unmapped person still extracted, project null.
 	unmappedFields := fetchFields(t, ctx, pool, sd.rawUnmapped)

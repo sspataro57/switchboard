@@ -58,6 +58,13 @@ var humanOnly = map[string]bool{
 	// channel therefore needs no change here, which is why the channel check
 	// lives in the handler.
 	"mark_delivery_failed": true,
+	// SWT-17: capture rules decide which project a captured message belongs to,
+	// so they are the funnel's steering. Human-only for the same reason the
+	// plan-import verdicts are: an agent that could add a rule could route any
+	// client's traffic to any project and then be handed the work. Not
+	// send-shaped — nothing leaves the system — so neither the kill switch nor
+	// a rate limit has any claim on them.
+	"capture_rule_add": true, "capture_rule_set_enabled": true,
 }
 
 // snapshotGated tools need the loader (channel/rate/freeze state).

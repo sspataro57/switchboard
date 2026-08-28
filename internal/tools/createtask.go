@@ -75,6 +75,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"approve_plan_import", validatePlanImportID, approvePlanImport},
 		{"reject_plan_import", validatePlanImportID, rejectPlanImport},
 		{"apply_plan_import", validatePlanImportID, applyPlanImport},
+		// SWT-17 capture rules. Human-only (policy.humanOnly) and deliberately
+		// NOT in internal/mcpserver/schemas.go — an agent must not be able to
+		// redirect the funnel at itself. See internal/tools/capturerules.go.
+		{"capture_rule_add", validateCaptureRuleAdd, captureRuleAdd},
+		{"capture_rule_set_enabled", validateCaptureRuleSetEnabled, captureRuleSetEnabled},
 	} {
 		t := t
 		reg.Register(executor.Tool{

@@ -1046,3 +1046,100 @@ something he was not asked about.
   rule is a floor, not a final answer.
 - Extend the draft worker to `jira_comment` / `slack_reply` targets, now that
   §9's thread resolution is channel-agnostic and already resolves those threads.
+
+---
+
+## Implementation deviations and findings (2026-08-28)
+
+Implemented by seven file-disjoint agents in parallel plus two cross-file seam
+checks. Everything compiled on first assembly; what the seam checks found was the
+class of defect no single-file agent can see, which is what they were for.
+
+### Three deliberate deviations from this SPEC
+
+**1. `capture_decisions.message_id` is `ON DELETE CASCADE`.** §Data model spelled a
+bare `REFERENCES normalized_messages(id)`. A decision is a record of evaluating a
+message and means nothing without it, so cascading is the honest semantics — and
+the bare form was a live footgun: **19 test suites** clear fixtures by deleting
+`normalized_messages`, and the capture pass writes decision rows over *other*
+suites' fixture messages, so under `make integration`'s `-p 1` those suites fail
+inside cleanup with a foreign-key violation. That reads exactly like the
+cross-pollution pact breaking and sends the reader somewhere else entirely. No
+production code deletes `normalized_messages` (verified: every `DELETE` is in a
+test), so the cascade costs nothing. Proven by execution, not assumed.
+
+**2. §8a's project lookup takes the LATEST decision, not the latest
+project-bearing one.** The SPEC's SQL is
+`WHERE cd.project_id IS NOT NULL ORDER BY cd.id DESC`, which skips *past* a newer
+decision to find an older project. §8b's inbox filter takes the latest row
+unconditionally. So a message attributed by an earlier pass and re-evaluated as
+`unmatched` — a rule disabled, a pattern narrowed — would be served to triage as
+inbox AND handed the project from the decision that superseded it: stale
+attribution, no error, and the two reads drifting apart in exactly the way §8b's
+own comment promises they will not. Both reads now mean the newest row, full stop.
+
+**3. `link_external_ref` accepts five systems.** 0015 widens
+`external_refs_system_check` to include `slack` and `gmail`, and
+`capture_rule_add` accepts them — but `validateLinkExternalRef` still hard-coded
+three. In live mode that produced a **duplicate-task loop**: create the task,
+commit the decision, then fail the link at validate, so the pass errors, the
+CronJob exits nonzero, the task has no `external_refs` row, and the next message
+for the same key creates another one — while `capture_decisions_live_uniq` has
+already spent the claim, so the original is never retried. Two agents each wrote
+a comment describing this gap and neither owned it, which is precisely why the
+seam phase exists.
+
+### A consequence this SPEC does not state
+
+**Triage's attach-vs-create path is unreachable from the pass that runs.** The
+chain is entirely within §8: the pending filter consumes only `unmatched`
+messages, an unmatched message resolves no project, and `AssembleContext` loads
+attach candidates only when a project resolved. So every message the live pass
+sees is projectless, has no candidates, and cannot produce an `attach` verdict.
+
+That follows from the design rather than contradicting it — if capture routed a
+message, capture owns creating its task; if it did not, there is no project to
+attach within. But §8 documents the token saving and the shadow-mode fall-through
+without saying that a headline behaviour of build step 6 becomes inert, and an
+inert mechanism that still looks alive is the failure this repo has now paid for
+in SWT-18, SWT-19 and here. `AssembleContext`'s project lookup is still exercised
+directly for attributed and routed messages; what is gone is the route from the
+pending loop to a candidate list. `find_related_tasks` remains available as a tool.
+
+### Superseded
+
+`internal/drafts/store_upwork_room_integration_test.go` (SWT-19) is DELETED, not
+patched. Its setup seeded the client through `projects.client_person_id`, the
+route §9 removes. Both behaviours it protected — the roomed-thread preference and
+the refusal to target a client with several rooms — survived the rework and are
+covered by dedicated tests in the new `store_integration_test.go`, which is the
+only reason deleting it is safe rather than a coverage loss.
+
+### Fifth deviation: `external_refs` is unique on `(system, external_key)`
+
+Added on Salvador's decision after the go-reviewer pass, which flagged that
+capture's dedup — "does this ticket already have a task?" — is a lookup in a
+table with no uniqueness rule of any kind, written by a tool that is on the agent
+surface. A worker could claim a ticket for a task of its choosing and every later
+notification about it would append there instead, with capture simply believing
+what it read. The SPEC's own reason for making the `capture_rule_*` tools
+humanOnly ("an agent must not be able to redirect the funnel") applies to the
+same funnel through a different door, and this ticket is what turns
+`external_refs` from inert — zero rows, no systematic reader — into the thing
+that decides where a client's ticket traffic lands.
+
+Free at zero rows. **The accepted cost is that one ticket can no longer attach to
+two tasks** — no task-plus-follow-up on the same key. If that is ever wanted it
+needs a deliberate design (a link type, or a primary flag), not the absence of a
+constraint.
+
+### Sixth deviation, recorded rather than chosen
+
+§9 site D says an explicit `policies->>'delivery_channel'` "still wins,
+unchanged". It no longer does: when the configured channel disagrees with the
+resolved thread's channel and is not `gmail`, the channel is zeroed and the task
+routes to the unresolvable-tell-the-human path. That is a safety improvement the
+rework brought with it — the old behaviour handed `draft_delivery` a row with an
+empty `target_ref`, which `drafts.go`'s skip predicate does not catch — but it is
+a behaviour change to a shipped path, so it is named here rather than left for
+someone to discover.

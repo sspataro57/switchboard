@@ -255,7 +255,7 @@ func cleanupUpworkMatcher(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 		// Orphan people left behind, minus any a project maps as its client
 		// (integration_test.go:83-86's pattern).
 		{`DELETE FROM people WHERE id NOT IN (SELECT person_id FROM person_identities)
-		    AND id NOT IN (SELECT client_person_id FROM projects WHERE client_person_id IS NOT NULL)`, nil},
+`, nil},
 	}
 	for _, st := range stmts {
 		if _, err := pool.Exec(ctx, st.sql, st.args...); err != nil {
