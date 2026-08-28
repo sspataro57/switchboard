@@ -347,9 +347,13 @@ Numbered and testable. 1-8 are unit tests with `httptest` — never a live model
     clothes.
 19. The prompt states the objective it was measured on — recall first, a missed
     payment notice is a late fee and a false alarm costs a second to dismiss — and
-    handles the attachment ceiling explicitly: when the body defers to an
+    handles the defer-to-attachment case explicitly: when the body defers to an
     attachment, say so in `title` ("HOA violation notice — open the attachment")
-    rather than guessing an amount or a date. **One prompt for all senders.** A
+    rather than guessing an amount or a date. Note the measured wrinkle this
+    guards against (spike finding 6): the Pines template says "please see
+    attachment for additional detail" on messages that carry NO attachment, so
+    the prompt must not promise the reader a document that is not there. The
+    body itself carries the date, the violation and the rule. **One prompt for all senders.** A
     structural test fails any file in `internal/classify` that branches the prompt
     on a sender string: per-sender prompts are rules in a costume — unbounded
     maintenance, untestable in aggregate, unattributable when they misfire.
@@ -530,10 +534,22 @@ filter are unchanged — only the adapter behind its local lane changes),
   ONE prompt, editable through `opsctl` and visible in the report. That is right
   and it is not this ticket: it needs the labelled set first, or there is no way
   to tell whether it helped.
-- **PDF / attachment extraction.** The fine amount and cure-by date live in a PDF
-  that is ingested inside `rfc822_b64` and never extracted. No classifier can
-  read them today; "open the attachment" is the honest best (criterion 19). Raw
-  is preserved, so this is future data work, not lost data.
+- **PDF / attachment extraction.** Still out of scope, but it is a MUCH smaller
+  thing than this SPEC first claimed, and the claim was measured and corrected on
+  2026-08-28 (see the spike doc, finding 6). The violation notices carry **no
+  attachment at all** — the body says "please see attachment" and none is sent —
+  and everything that matters (inspection date, the specific violation, the rule
+  cited) is in `body_text`, which the normalizer extracts from HTML correctly.
+  The only fact genuinely locked in an attachment is the AMOUNT on four Pembroke
+  Pines utility bills, whose bodies already carry the due date and account. So
+  this is a four-message enhancement, not a ceiling on the classifier.
+- **Copying attachments onto tasks.** Explicitly not done, now or later. The full
+  MIME already lives in `raw_source_items.rfc822_b64` (invariant 1), so copying
+  the bytes onto a task duplicates what is already stored, creates a second thing
+  to keep in sync, and forces a storage decision — blob column, attachments
+  table, filesystem path — that nothing today requires. A task carries the
+  message id; rendering or downloading an attachment from the raw item on demand
+  is a dashboard concern.
 - **Deploying anything to the cluster.** No CronJob, no image, no manifest — the
   kube repo is a different session's territory (institutional knowledge). This
   ticket runs on the workstation.

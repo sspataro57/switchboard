@@ -206,3 +206,45 @@ fixed it. Consequence for the eval set: the Spanish messages get their own
 labelled rows (12 are in the worksheet) so language-driven disagreement is
 MEASURED per release rather than assumed away, and the prompt is written to be
 language-neutral rather than English-with-Spanish-tolerated.
+
+**6. CORRECTION — the "violation PDF" does not exist, and attachments are not the
+ceiling this document claimed.** Measured by decoding `rfc822_b64` for every
+Pines / Pembroke Pines message, 2026-08-28.
+
+This document said: "the fine amount and cure-by date are in a PDF that is
+ingested inside `rfc822_b64` but never extracted. No classifier can read them
+today." Both halves are wrong.
+
+The two actual `First Notice` messages carry **NO attachment at all** — 8,243
+bytes, a single `text/html` part. The body says *"Please see attachment for
+additional detail"* and there is no attachment; the sender's template promises
+one it does not send. What the body DOES carry is extracted and available today:
+
+```
+inspection conducted on 08/12/2026 by the Silverlakes Community Association Inc
+Covenants Enforcement Committee ... the following violation of the covenants was
+noted: Shrub Trim- Pursuant to the SL Mod Gudelines ... (p. 28)
+```
+
+Date, specific violation, and the rule cited. `body_text` for that message is
+1,254 characters — the normalizer extracts HTML correctly, and only 1 of 1,609
+personal messages has a body under 40 characters.
+
+What the Pines PDFs actually are: board meeting agendas and notices, proposed
+parking rules, community guidelines, portal login info. Announcements.
+
+The ONE fact genuinely locked in an attachment is the **amount on the Pembroke
+Pines utility bills** (4 messages, `application/octet-stream`). Their body gives
+the due date, customer id and account number — everything except the figure. And
+"utility bill due 09/01/2026" is already an actionable task without it.
+
+So attachment extraction is a small enhancement affecting four messages, not a
+hard ceiling on the classifier. Do not budget for it as though it were.
+
+**Design consequence — reference attachments, never copy them onto tasks.** The
+complete MIME already lives in `raw_source_items.rfc822_b64` (invariant 1), so a
+task copying those bytes creates a second copy of something already stored and a
+second thing to keep in sync, and forces a storage decision — blob column?
+attachments table? filesystem? — that nothing today needs. A task carries the
+message id; rendering or downloading the attachment from the raw item on demand
+is a dashboard concern.
