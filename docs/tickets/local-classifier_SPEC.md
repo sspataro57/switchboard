@@ -1,4 +1,9 @@
 > Jira: SWT-22
+> Jira description is SPLIT: this SPEC is ~47k characters of wiki markup and
+> Jira's description field caps at 32,767. The issue carries everything up to
+> "Invariants that apply"; the remainder is the first comment on the issue. A
+> re-sync must split at an h2 boundary again, not truncate. This file is the
+> authoritative copy.
 
 # local-classifier — qwen3:8b behind the locality boundary, and what it actually reads
 
