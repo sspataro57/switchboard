@@ -8,6 +8,8 @@
 //	GMAIL_CONNECTOR_BRIDGE     optional absolute local bridge binary
 //	OPS_TOKEN_KEY              required for direct mode unless --normalize-only
 //	GOOGLE_CLIENT_SECRET_FILE  default ~/.config/switchboard/google_client_secret.json
+//	CAPTURE_RULES_MODE         shadow (default) | live
+//	CAPTURE_RULES_SINCE        Go duration bounding the capture-rules pass
 package main
 
 import (
@@ -19,9 +21,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/connector/google"
+	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/policy"
 	"github.com/sspataro57/switchboard/internal/store"
+	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 func main() {
@@ -149,7 +157,58 @@ func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account
 	// Printed unconditionally: a silent pass and a pass that did not run look
 	// identical in the logs, and this one is expected to find nothing most times.
 	fmt.Printf("capture: {\"outbound_observed\":%d}\n", observed)
+
+	// Deterministic project assignment (SWT-17). Channel-agnostic, so this pass
+	// covers messages every connector ingested, not only Gmail's — four CronJobs
+	// racing is expected and is what the advisory lock inside EvaluateRules is
+	// for. This main built no executor before; tasks/external_refs/task_events
+	// are reachable only through it (invariant 3).
+	rulesCfg := captureRulesConfig()
+	rules, err := capture.EvaluateRules(ctx, pool, newExecutor(pool), rulesCfg)
+	// Same rule as the line above, and the reason this printf is not guarded by
+	// err: the counts go out unconditionally, zeros included, so "matched
+	// nothing" and "never ran" are different lines in a CronJob log.
+	printCaptureRules(rulesCfg, rules)
+	if err != nil {
+		return fmt.Errorf("capture rules: %w", err)
+	}
 	return nil
+}
+
+// captureRulesConfig builds the pass's configuration.
+//
+// Mode and horizon come from capture's own readers, not from a local os.Getenv:
+// the "720 is not a Go duration" defence has ONE spelling, and a second copy in
+// each of five mains is exactly how four of them end up disagreeing. Actor names
+// this connector so the audit trail says which CronJob won the lock.
+//
+// It lives in this file rather than being inlined because the google connector has
+// TWO drivers — the one-shot pass and the resident watch loop — and they must not
+// be configured differently.
+func captureRulesConfig() capture.RulesConfig {
+	mode := capture.RulesMode()
+	return capture.RulesConfig{
+		Mode:    mode,
+		Horizon: capture.RulesHorizon(mode),
+		Actor:   "capture:google",
+	}
+}
+
+// printCaptureRules emits the pass's counts, always, including all zeros.
+func printCaptureRules(cfg capture.RulesConfig, stats capture.RulesStats) {
+	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
+		"\"tasks_created\":%d,\"appended\":%d}\n",
+		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended)
+}
+
+// newExecutor is the four-line block cmd/connectors/github/main.go established:
+// registry → tools.Register → policy.NewMatrix → executor.New. Shared by the
+// one-shot path and the watch loop, which builds it once rather than per pass.
+func newExecutor(pool *pgxpool.Pool) *executor.Executor {
+	reg := executor.NewRegistry()
+	tools.Register(reg, pool)
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	return executor.New(reg, checker, audit.NewPGStore(pool))
 }
 
 func printStats(phase string, stats google.Stats) {

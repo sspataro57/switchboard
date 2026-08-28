@@ -13,6 +13,7 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/connector/google"
+	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/store"
 )
 
@@ -73,12 +74,15 @@ func runWatch(pool *pgxpool.Pool, cfg google.Config) error {
 	idleRefresh := envDuration("MAIL_IDLE_REFRESH", defaultIdleRefresh)
 
 	sink := google.NewPGSink(pool)
+	// Built once, not per pass: the registry and policy matrix are stateless and
+	// a resident loop must not rebuild them every ten minutes.
+	ex := newExecutor(pool)
 	fmt.Printf("watch: reconcile=%s idle_refresh=%s\n", reconcile, idleRefresh)
 
 	// One pass immediately: a process that has just started should not wait a
 	// full interval before doing anything, and this is also the fastest way to
 	// surface a credential or connectivity problem at deploy time.
-	watchPass(ctx, pool, sink, cfg, "initial")
+	watchPass(ctx, pool, sink, ex, cfg, "initial")
 
 	accounts, err := google.ListAppPasswordAccounts(ctx, pool, cfg.AccountEmail)
 	if err != nil {
@@ -100,14 +104,14 @@ func runWatch(pool *pgxpool.Pool, cfg google.Config) error {
 			// Scoped to the account that woke us; the sweep below covers the rest.
 			passCfg := cfg
 			passCfg.AccountEmail = email
-			watchPass(ctx, pool, sink, passCfg, "wake "+email)
+			watchPass(ctx, pool, sink, ex, passCfg, "wake "+email)
 		case <-ticker.C:
-			watchPass(ctx, pool, sink, cfg, "reconcile")
+			watchPass(ctx, pool, sink, ex, cfg, "reconcile")
 		}
 	}
 }
 
-// watchPass is one complete cycle: ingest, normalize, then capture.
+// watchPass is one complete cycle: ingest, normalize, then the two capture passes.
 //
 // Normalize is NOT optional here, which is the whole reason this helper exists.
 // Ingest writes raw_source_items and nothing else; every consequence that makes
@@ -119,7 +123,9 @@ func runWatch(pool *pgxpool.Pool, cfg google.Config) error {
 //
 // Errors are logged and the loop continues: a resident process must not exit on
 // a transient failure, and each phase already records its own sync_runs row.
-func watchPass(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, cfg google.Config, why string) {
+func watchPass(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, ex *executor.Executor,
+	cfg google.Config, why string) {
+
 	if _, err := runIMAPIngest(ctx, pool, sink, cfg); err != nil {
 		fmt.Printf("watch: ingest (%s) failed: %v\n", why, err)
 		// Normalize anyway: a partial ingest still wrote raw rows, and leaving
@@ -138,11 +144,26 @@ func watchPass(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, cfg
 	observed, err := capture.ObserveOutbound(ctx, pool, capture.Gmail)
 	if err != nil {
 		fmt.Printf("watch: observe outbound (%s) failed: %v\n", why, err)
-		return
-	}
-	if observed > 0 {
+		// Not a return: the two capture passes are independent, and a failure to
+		// log an externally-sent reply must not also stop project assignment.
+	} else if observed > 0 {
 		fmt.Printf("watch: outbound_observed=%d\n", observed)
 	}
+
+	// Deterministic project assignment (SWT-17), same position as the one-shot
+	// path: after Normalize, and channel-agnostic, so a resident mail watcher
+	// also drains what the suspended connectors ingested. The advisory lock
+	// inside EvaluateRules keeps it from racing the CronJobs.
+	rulesCfg := captureRulesConfig()
+	rules, err := capture.EvaluateRules(ctx, pool, ex, rulesCfg)
+	if err != nil {
+		// Logged, never fatal: a resident process must not exit on a transient
+		// failure (rule 3 above).
+		fmt.Printf("watch: capture rules (%s) failed: %v\n", why, err)
+	}
+	// Printed unconditionally, zeros included, even after an error: a pass that
+	// matched nothing and a pass that never ran must not look the same.
+	printCaptureRules(rulesCfg, rules)
 }
 
 // watchAccount holds one IDLE connection on INBOX and signals on every change.

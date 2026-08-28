@@ -3,6 +3,9 @@
 //
 //	opsctl create-task --project <slug> --title "..." [--body ... --assignee human|claude --priority N --subproject X]
 //	opsctl call --tool <name> [--args '<json>']   (raw executor call; used by the negative smoke)
+//	opsctl fleet
+//	opsctl answer-feedback --id N --answer "..." [--resume]
+//	opsctl capture-rules <list|add|run|report> [flags]
 package main
 
 import (
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sspataro57/switchboard/internal/audit"
+	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/connector/google"
 	"github.com/sspataro57/switchboard/internal/connector/jira"
 	"github.com/sspataro57/switchboard/internal/connector/slackweb"
@@ -26,7 +30,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules> [flags]")
 		os.Exit(2)
 	}
 
@@ -47,6 +51,23 @@ func main() {
 		return
 	case "answer-feedback":
 		if err := runAnswerFeedback(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "opsctl:", err)
+			os.Exit(1)
+		}
+		return
+	case "capture-rules":
+		// `add` mutates routing, so it is a tool call and falls through to the
+		// executor path below like create-task. list/run/report are their own
+		// paths: two are reads and `run` needs a deadline the 30s one cannot give.
+		if len(os.Args) < 3 {
+			err = fmt.Errorf("usage: opsctl capture-rules <list|add|run|report> [flags]")
+			break
+		}
+		if os.Args[2] == "add" {
+			toolName, args, err = parseCaptureRuleAdd(os.Args[3:])
+			break
+		}
+		if err := runCaptureRules(os.Args[2], os.Args[3:]); err != nil {
 			fmt.Fprintln(os.Stderr, "opsctl:", err)
 			os.Exit(1)
 		}
@@ -284,5 +305,283 @@ func runFleet() error {
 	if n == 0 {
 		fmt.Println("no workers")
 	}
+	return nil
+}
+
+// ---- capture-rules (SWT-17) ----------------------------------------------------
+//
+// Four verbs, three shapes. `add` is a routing MUTATION and therefore an executor
+// tool call (capture_rule_add, humanOnly) reached through the same path as
+// create-task — "who changed the routing and when" is answerable from
+// audit_events. `list` and `report` are reads, so they are plain SELECTs, the
+// same standing runFleet has. `run` drives the pass itself.
+//
+// There is deliberately no `set-enabled` verb: the SPEC's CLI surface is
+// list|add|run|report, and disabling a rule is already reachable as
+//
+//	opsctl call --tool capture_rule_set_enabled --args '{"rule_id":3,"enabled":false}'
+
+const (
+	// Generous on purpose. `run` walks the message corpus; SWT-13 already paid
+	// for an opsctl deadline (30s) that was sized for a tool call and then cut a
+	// long operation in half.
+	captureRulesRunTimeout    = 15 * time.Minute
+	captureRulesReportTimeout = 5 * time.Minute
+	captureRulesListTimeout   = 30 * time.Second
+)
+
+func runCaptureRules(sub string, argv []string) error {
+	switch sub {
+	case "list":
+		return runCaptureRulesList(argv)
+	case "run":
+		return runCaptureRulesRun(argv)
+	case "report":
+		return runCaptureRulesReport(argv)
+	default:
+		return fmt.Errorf("unknown capture-rules command %q (want list|add|run|report)", sub)
+	}
+}
+
+// parseCaptureRuleAdd builds the capture_rule_add call. It validates only
+// presence: `pattern` and `key_regex` are compiled by the TOOL (criterion 5), and
+// a second regexp.Compile here would be a second spelling of the same rule that
+// could disagree with the one that actually gates the insert.
+func parseCaptureRuleAdd(argv []string) (string, json.RawMessage, error) {
+	fs := flag.NewFlagSet("capture-rules add", flag.ContinueOnError)
+	project := fs.String("project", "", "project slug (required)")
+	criteria := fs.String("type", "", "criteria_type: body_regex|sender|thread_key_prefix|thread_key_contains|source_slack_workspace|person (required)")
+	pattern := fs.String("pattern", "", "the criterion's pattern (required)")
+	subproject := fs.String("subproject", "", "subproject for tasks this rule creates")
+	externalSystem := fs.String("external-system", "", "jira|github|upwork_crm|slack|gmail; empty means attribution only, no task")
+	keyRegex := fs.String("key-regex", "", "external key extractor; empty reuses --pattern for body_regex, else the thread_key")
+	urlTemplate := fs.String("url-template", "", "external_url builder; must contain {key}")
+	priority := fs.Int("priority", 0, "evaluation priority; evaluation order is priority DESC, id ASC and first match wins")
+	note := fs.String("note", "", "why this rule exists")
+	if err := fs.Parse(argv); err != nil {
+		return "", nil, err
+	}
+	if *project == "" || *criteria == "" || *pattern == "" {
+		return "", nil, fmt.Errorf("--project, --type and --pattern are required")
+	}
+
+	// priority is always sent, including 0: it is the load-bearing field (SPEC
+	// §2), and omitting it to mean "default" hides the one number a reader of the
+	// audit row needs.
+	payload := map[string]any{
+		"project":       *project,
+		"criteria_type": *criteria,
+		"pattern":       *pattern,
+		"priority":      *priority,
+	}
+	optional := []struct {
+		key, value string
+	}{
+		{"subproject", *subproject},
+		{"external_system", *externalSystem},
+		{"key_regex", *keyRegex},
+		{"url_template", *urlTemplate},
+		{"note", *note},
+	}
+	for _, o := range optional {
+		if o.value != "" {
+			payload[o.key] = o.value
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", nil, fmt.Errorf("marshal args: %w", err)
+	}
+	return "capture_rule_add", raw, nil
+}
+
+// runCaptureRulesList prints every rule in EVALUATION order (priority DESC, id
+// ASC), enabled and disabled alike.
+//
+// Both choices are deliberate. Printing in evaluation order means the listing
+// answers the question the SPEC calls load-bearing — which rule claims a message
+// first — by reading top to bottom. Printing disabled rules with an on/off column
+// rather than hiding them means a rule that stopped matching because someone
+// disabled it is visible, instead of looking exactly like a rule that was never
+// added.
+func runCaptureRulesList(argv []string) error {
+	fs := flag.NewFlagSet("capture-rules list", flag.ContinueOnError)
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureRulesListTimeout)
+	defer cancel()
+
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	rows, err := pool.Query(ctx,
+		`SELECT r.id, p.slug, COALESCE(r.subproject,''), r.criteria_type, r.pattern,
+		        COALESCE(r.external_system,''), COALESCE(r.key_regex,''), COALESCE(r.url_template,''),
+		        r.priority, r.enabled, COALESCE(r.note,'')
+		   FROM capture_rules r JOIN projects p ON p.id = r.project_id
+		  ORDER BY r.priority DESC, r.id`)
+	if err != nil {
+		return fmt.Errorf("select capture_rules: %w", err)
+	}
+	defer rows.Close()
+
+	n := 0
+	for rows.Next() {
+		var id int64
+		var slug, subproject, criteria, pattern, extSystem, keyRegex, urlTemplate, note string
+		var priority int
+		var enabled bool
+		if err := rows.Scan(&id, &slug, &subproject, &criteria, &pattern,
+			&extSystem, &keyRegex, &urlTemplate, &priority, &enabled, &note); err != nil {
+			return fmt.Errorf("scan capture_rule: %w", err)
+		}
+		n++
+		state := "off"
+		if enabled {
+			state = "on"
+		}
+		project := slug
+		if subproject != "" {
+			project = slug + "/" + subproject
+		}
+		fmt.Printf("%-5d prio %-4d %-3s %-22s %-22s %s\n", id, priority, state, project, criteria, pattern)
+		// The key derivation on its own line: it is what turns a match into a
+		// task, and "attribution only, no task" is the difference between a rule
+		// that files tickets and one that only labels a message (SPEC §3).
+		if extSystem == "" {
+			fmt.Printf("      -> attribution only (no external_system, so no task)\n")
+		} else {
+			detail := fmt.Sprintf("      -> %s key", extSystem)
+			if keyRegex != "" {
+				detail += fmt.Sprintf(" %s", keyRegex)
+			}
+			if urlTemplate != "" {
+				detail += fmt.Sprintf(" url %s", urlTemplate)
+			}
+			fmt.Println(detail)
+		}
+		if note != "" {
+			fmt.Printf("      note: %s\n", note)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate capture_rules: %w", err)
+	}
+	if n == 0 {
+		fmt.Println("no capture rules")
+	}
+	return nil
+}
+
+// runCaptureRulesRun drives one pass.
+func runCaptureRulesRun(argv []string) error {
+	fs := flag.NewFlagSet("capture-rules run", flag.ContinueOnError)
+	live := fs.Bool("live", false, "act: create tasks and append logs. Default is shadow, which records decisions and creates nothing")
+	since := fs.Duration("since", 0, "bound sent_at to the last N (Go duration); 0 keeps the mode's default")
+	limit := fs.Int("limit", 0, "stop after N messages; 0 means no limit")
+	all := fs.Bool("all", false, "re-evaluate messages that already carry a live decision row; SHADOW-ONLY, refused in live mode")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureRulesRunTimeout)
+	defer cancel()
+
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	// The same four-line block every connector main now carries
+	// (cmd/connectors/github/main.go is the precedent): the pass reaches tasks,
+	// external_refs and task_events only through create_task, link_external_ref
+	// and task_append_log.
+	reg := executor.NewRegistry()
+	tools.Register(reg, pool)
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	ex := executor.New(reg, checker, audit.NewPGStore(pool))
+
+	cfg := captureRulesConfig(*live, *since, *limit, *all)
+	stats, err := capture.EvaluateRules(ctx, pool, ex, cfg)
+	// Printed unconditionally, zeros included, and before the error check: a pass
+	// that matched nothing and a pass that never ran must not look the same.
+	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
+		"\"tasks_created\":%d,\"appended\":%d}\n",
+		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended)
+	if err != nil {
+		return fmt.Errorf("capture rules: %w", err)
+	}
+	return nil
+}
+
+// captureRulesConfig resolves the pass's knobs: environment first, because that
+// is how a CronJob is configured, then flags on top, because that is how a human
+// runs it.
+//
+// Mode and horizon come from capture's own readers rather than a second os.Getenv
+// here — the "720 is not a Go duration" defence and the shadow-unbounded /
+// live-bounded split each have exactly ONE spelling, and opsctl disagreeing with
+// the CronJobs about what CAPTURE_RULES_SINCE means is a routing outage nobody
+// would see. --live can only turn the mode ON: a human asking for live while the
+// environment says shadow gets live, and there is deliberately no --shadow to
+// argue with a manifest that says live.
+//
+// --all is passed through and refused by EvaluateRules in live mode (criterion
+// 10); the refusal lives there so it also binds a caller that is not this CLI.
+func captureRulesConfig(live bool, since time.Duration, limit int, all bool) capture.RulesConfig {
+	mode := capture.RulesMode()
+	if live {
+		mode = capture.RulesModeLive
+	}
+	cfg := capture.RulesConfig{
+		Mode:    mode,
+		Horizon: capture.RulesHorizon(mode),
+		Limit:   limit,
+		Actor:   "capture:opsctl",
+		All:     all,
+	}
+	if since > 0 {
+		cfg.Horizon = since
+	}
+	return cfg
+}
+
+// runCaptureRulesReport prints the shadow-diff report from capture_decisions.
+//
+// --since defaults to unbounded (the zero time), not to the pass's horizon: the
+// report's job is to show what the rules have decided so far, and silently
+// hiding older decisions would make a rule that stopped firing indistinguishable
+// from one that never fired.
+func runCaptureRulesReport(argv []string) error {
+	fs := flag.NewFlagSet("capture-rules report", flag.ContinueOnError)
+	since := fs.Duration("since", 0, "report on decisions from the last N (Go duration); 0 means all of them")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureRulesReportTimeout)
+	defer cancel()
+
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	var from time.Time
+	if *since > 0 {
+		from = time.Now().Add(-*since)
+	}
+	out, err := capture.Report(ctx, pool, from)
+	if err != nil {
+		return fmt.Errorf("capture rules report: %w", err)
+	}
+	fmt.Print(out)
 	return nil
 }

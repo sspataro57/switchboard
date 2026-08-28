@@ -25,7 +25,28 @@ func NewStore(pool *pgxpool.Pool) *PGStore {
 }
 
 // PendingMessages is the queue-as-filter: inbound messages with no triage
-// extraction for their raw item, oldest first.
+// extraction for their raw item AND whose latest capture decision says the
+// deterministic rules did not cover them, oldest first.
+//
+// UNMATCHED IS TRIAGE'S INBOX (SPEC 17 §8b, Q3). Three states of
+// capture_decisions must stay distinct:
+//
+//	no decision row at all              -> SKIP: the capture pass has not
+//	                                       evaluated this message yet, so it is
+//	                                       unseen, not unroutable. Triage runs
+//	                                       can outrun the pass (it hitchhikes on
+//	                                       the connector CronJobs); treating
+//	                                       unseen as unmatched would hand every
+//	                                       fresh message to the model before the
+//	                                       deterministic rules ever looked at it.
+//	latest action = 'unmatched'         -> CONSUME: this is the inbox.
+//	latest action attributed/task/      -> NEVER: deterministically routed;
+//	  task_log                             re-triaging it would double-process.
+//
+// So the guard is an EXISTS on an 'unmatched' LATEST decision, never a
+// NOT EXISTS over decisions generally. "Latest" is id DESC, the same ordering
+// AssembleContext's project lookup uses (SPEC §8a) — the two reads key on the
+// same rows and must not drift apart.
 func (s *PGStore) PendingMessages(ctx context.Context, cfg Config) ([]PendingMessage, error) {
 	q := `SELECT m.id, m.raw_source_item_id, COALESCE(m.thread_id, 0), m.sent_at,
 	             COALESCE(m.sender,''), COALESCE(m.subject,''), COALESCE(m.channel,''),
@@ -35,7 +56,15 @@ func (s *PGStore) PendingMessages(ctx context.Context, cfg Config) ([]PendingMes
 	        AND NOT EXISTS (
 	          SELECT 1 FROM ai_extractions e
 	          JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type = 'triage'
-	          WHERE e.raw_source_item_id = m.raw_source_item_id)`
+	          WHERE e.raw_source_item_id = m.raw_source_item_id)
+	        AND EXISTS (
+	          SELECT 1 FROM (
+	            SELECT cd.action
+	              FROM capture_decisions cd
+	             WHERE cd.message_id = m.id
+	             ORDER BY cd.id DESC
+	             LIMIT 1) latest
+	          WHERE latest.action = 'unmatched')`
 	args := []any{}
 	if cfg.Since > 0 {
 		args = append(args, cfg.Since.String())
@@ -110,19 +139,45 @@ func (s *PGStore) AssembleContext(ctx context.Context, m PendingMessage) (Messag
 		}
 	}
 
-	// Project: people.id -> projects.client_person_id.
-	if mc.PersonID != nil {
-		var projectID int64
-		var slug string
-		err := s.pool.QueryRow(ctx,
-			`SELECT id, slug FROM projects WHERE client_person_id=$1 ORDER BY id LIMIT 1`,
-			*mc.PersonID).Scan(&projectID, &slug)
-		if err == nil {
-			mc.ProjectID = &projectID
-			mc.ProjectSlug = slug
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			return mc, fmt.Errorf("resolve project: %w", err)
-		}
+	// Project: the capture engine's decision for this message, and nothing else
+	// (SPEC 17 §8a, Q3). projects.client_person_id is dropped in migration 0015,
+	// so there is no person-based fallback: capture_rules is now the single
+	// source of project assignment. Latest decision carrying a project wins,
+	// ordered by id DESC as in the inbox filter above.
+	//
+	// nil ProjectID stays meaningful — it is the report's UNMAPPED lane, and it
+	// is the normal state for the inbox, since an 'unmatched' decision has
+	// project_id IS NULL by construction.
+	var projectID int64
+	var projectSlug string
+	err := s.pool.QueryRow(ctx,
+		// LATEST decision, then its project — NOT the latest decision that happens
+		// to have one.
+		//
+		// The SPEC's §8a spells this `WHERE cd.project_id IS NOT NULL ORDER BY
+		// cd.id DESC`, and that is a different query: it skips past a newer
+		// decision to find an older project-bearing one. A message attributed by
+		// an earlier pass and re-evaluated as unmatched after a rule was disabled
+		// or narrowed would then be served to triage as inbox (the filter above
+		// takes the latest row unconditionally) AND handed the project from the
+		// decision that superseded it. Stale attribution, no error, and the two
+		// reads drifting apart in exactly the way the filter's own comment
+		// promises they will not.
+		//
+		// So both reads now mean the same thing by "latest": the newest row, full
+		// stop. If that row carries no project, there is no project — which is
+		// also what makes an unmatched message projectless, as §8b intends.
+		// Deliberate deviation from §8a's literal SQL; recorded in the SPEC.
+		`SELECT p.id, p.slug
+		   FROM (SELECT cd.project_id FROM capture_decisions cd
+		          WHERE cd.message_id = $1 ORDER BY cd.id DESC LIMIT 1) latest
+		   JOIN projects p ON p.id = latest.project_id`,
+		m.MessageID).Scan(&projectID, &projectSlug)
+	if err == nil {
+		mc.ProjectID = &projectID
+		mc.ProjectSlug = projectSlug
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return mc, fmt.Errorf("resolve project for message %d: %w", m.MessageID, err)
 	}
 
 	// Candidates: find_related_tasks — deterministic recency + project scope.

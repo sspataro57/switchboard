@@ -31,10 +31,23 @@ func validateLinkExternalRef(args []byte) error {
 	if a.TaskID == 0 {
 		return errors.New("missing task_id")
 	}
+	// Must match external_refs' CHECK, which migration 0015 widened to five.
+	// It did not, and the gap was ugly: capture_rule_add accepted a slack or
+	// gmail rule, live capture created the task and committed its decision, and
+	// THEN link_external_ref refused at validate. The pass returns the error, the
+	// CronJob exits nonzero, and the task exists with no external_refs row — so
+	// the next message for the same key takes the create-task branch again, and
+	// again, while capture_decisions' live claim is already spent so the original
+	// is never retried. A duplicate-task loop from a validator that was merely
+	// out of date.
+	//
+	// Keep this list and captureExternalSystems (internal/tools/capturerules.go)
+	// in step with the migration. Three spellings of one enum is the shape this
+	// repo keeps paying for.
 	switch a.System {
-	case "jira", "github", "upwork_crm":
+	case "jira", "github", "upwork_crm", "slack", "gmail":
 	default:
-		return fmt.Errorf("system %q: must be jira, github, or upwork_crm", a.System)
+		return fmt.Errorf("system %q: must be jira, github, upwork_crm, slack, or gmail", a.System)
 	}
 	if a.ExternalKey == "" {
 		return errors.New("missing external_key")

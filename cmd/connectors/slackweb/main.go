@@ -6,6 +6,8 @@
 // DATABASE_URL            ops db, required
 // SLACK_WEB_BRIDGE_SCRIPT absolute path to the compiled TypeScript bridge
 // SLACK_WEB_NODE          Node.js executable (default: node)
+// CAPTURE_RULES_MODE      shadow (default) | live
+// CAPTURE_RULES_SINCE     Go duration bounding the capture-rules pass
 package main
 
 import (
@@ -16,9 +18,13 @@ import (
 	"os"
 	"time"
 
+	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/connector/slackweb"
+	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/policy"
 	"github.com/sspataro57/switchboard/internal/store"
+	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 func main() {
@@ -81,6 +87,38 @@ func run(normalizeOnly, all bool) error {
 	// Printed unconditionally: a silent pass and a pass that did not run look
 	// identical in the logs, and this one is expected to find nothing most times.
 	fmt.Printf("capture: {\"outbound_observed\":%d}\n", observed)
+
+	// Deterministic project assignment (SWT-17). Channel-agnostic, so this pass
+	// covers messages every connector ingested, not only Slack's — four CronJobs
+	// racing is expected and is what the advisory lock inside EvaluateRules is
+	// for. This main built no executor before; tasks/external_refs/task_events
+	// are reachable only through it (invariant 3).
+	reg := executor.NewRegistry()
+	tools.Register(reg, pool)
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	ex := executor.New(reg, checker, audit.NewPGStore(pool))
+
+	// Mode and horizon come from capture's own readers, not from a local
+	// os.Getenv: the "720 is not a Go duration" defence has ONE spelling, and a
+	// second copy in each of five mains is exactly how four of them end up
+	// disagreeing. Actor names this connector so the audit trail says which
+	// CronJob won the lock.
+	mode := capture.RulesMode()
+	rulesCfg := capture.RulesConfig{
+		Mode:    mode,
+		Horizon: capture.RulesHorizon(mode),
+		Actor:   "capture:slackweb",
+	}
+	rules, err := capture.EvaluateRules(ctx, pool, ex, rulesCfg)
+	// Same rule as the line above, and the reason this printf is not guarded by
+	// err: the counts go out unconditionally, zeros included, so "matched
+	// nothing" and "never ran" are different lines in a CronJob log.
+	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
+		"\"tasks_created\":%d,\"appended\":%d}\n",
+		rulesCfg.Mode, rules.Considered, rules.Matched, rules.Unmatched, rules.TasksCreated, rules.Appended)
+	if err != nil {
+		return fmt.Errorf("capture rules: %w", err)
+	}
 	return nil
 }
 
