@@ -2,8 +2,9 @@
 
 # local-classifier — open questions
 
-Two. Both change the SPEC's shape, so it is marked PROVISIONAL until they are
-answered.
+Two. Both change the SPEC's shape, so it was marked PROVISIONAL until answered.
+
+**ANSWERED 2026-08-28. The SPEC is now FINAL.**
 
 ---
 
@@ -33,7 +34,25 @@ against pile A whenever that seems worth the GPU hours. Building for pile A mean
 running a client-work prompt over brand marketing for about five hours a pass and
 quoting recall numbers taken on a corpus that no longer exists.
 
-**Answer:**
+**Answer: BOTH** (Salvador, 2026-08-28), chosen with the cost and the
+wrong-prompt caveat both visible.
+
+As this file's own note says, "both" is not a third option — it is this ticket
+plus a second one, and the second is cheap once the adapter exists. So it splits:
+
+* *SWT-22 (this ticket)* — the ollama adapter, the `classify` worker in shadow
+  over pile B, the labelled eval set, and triage's local lane wired and proven.
+  That last part is what makes pile A *reachable*; it is the expensive half of
+  the work and it is done here.
+* *SWT-23 (follow-up, created)* — actually running over pile A. The wiring is
+  already done by then, so the real content of that ticket is the question this
+  one does not answer: **what prompt does the residue get?** Triage's existing
+  prompt asks client-work questions — action requests, ticket keys,
+  attach-vs-create — and asking those of Humble Bundle and Indeed alerts is
+  ~5 GPU-hours of asking the wrong question. It needs its own prompt and its own
+  labelled set, drawn from the residue rather than from the spike's corpus.
+
+Nothing is dropped by the split; it is sequencing, not scope reduction.
 
 ---
 
@@ -115,7 +134,18 @@ not really a schedule. C is the right home but adds an uninstalled card, an
 untested Vulkan path on an older generation, and an unmeasured slot — none of
 which should block the adapter and the eval set being built.
 
-**Answer:**
+**Answer: Option A** — taken as the recommended default rather than referred back,
+because it needs no new hardware, changes nothing about how the system is
+operated today (no worker is deployed; triage has only ever been run by hand from
+this box), and is one environment variable from either of the others. If that is
+wrong, say so and it costs a config change, not a rewrite.
+
+The two facts that make it reversible are recorded in the SPEC so the move is not
+re-derived later: the locality check accepts only a numeric address, so any
+cluster path needs a `192.168.50.x` load-balancer IP rather than a service name;
+and on camserv the model and a future second model should both be held resident
+(`OLLAMA_MAX_LOADED_MODELS=2`, `KEEP_ALIVE=-1`) so the slow slot is paid once at
+boot rather than once per pass.
 
 ---
 

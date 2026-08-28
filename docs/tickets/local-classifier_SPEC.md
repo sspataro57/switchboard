@@ -1,17 +1,34 @@
 > Jira: SWT-22
 > Jira description is SPLIT: this SPEC is ~47k characters of wiki markup and
 > Jira's description field caps at 32,767. The issue carries everything up to
-> "Invariants that apply"; the remainder is the first comment on the issue. A
+> "In scope / Out of scope"; the remainder is a comment on the issue. A
 > re-sync must split at an h2 boundary again, not truncate. This file is the
 > authoritative copy.
 
 # local-classifier — qwen3:8b behind the locality boundary, and what it actually reads
 
-**Status: PROVISIONAL.** Two questions in
-`docs/tickets/local-classifier_OPEN_QUESTIONS.md` change this SPEC's shape if
-answered the other way. Everything below is written against the recommended
-answers and says so where it depends on them. Do not start implementing until
-they are answered.
+**Status: FINAL** (both questions answered 2026-08-28; see
+`docs/tickets/local-classifier_OPEN_QUESTIONS.md`).
+
+**Q1 — which pile: BOTH.** Which, as that file argued, is this ticket plus a
+cheap second one rather than a third option. THIS ticket builds the adapter, the
+`classify` worker in shadow over the ~1,609 `personal`-attributed messages, the
+labelled eval set, and triage's local lane wired and proven — the last of which
+is what makes the ~14,500 `unmatched` residue reachable at all. **SWT-23** then
+runs over that residue, and owns the question this ticket does not answer: what
+prompt the residue gets, since triage's existing prompt asks client-work
+questions and asking those of newsletters is ~5 GPU-hours of asking the wrong
+question.
+
+**Q2 — where it runs: Option A**, the workstation, by hand. No new hardware, and
+one environment variable from the cluster or from camserv later. The two facts
+that keep that move cheap are in this SPEC rather than left to be re-derived:
+`LocalityOf` accepts only a numeric address (so a cluster path needs a
+`192.168.50.x` load-balancer IP, never a service name), and on camserv both
+models should be held resident so the narrow slot is paid once at boot.
+
+**One model this ticket: qwen3:8b.** The second-pass precision mechanism stays in
+Future work.
 
 ## Source
 
@@ -767,6 +784,11 @@ If the ticket is to classify population 1 (the ~14,500 `unmatched`) instead:
 
 Answering "both" is not a third option here — it is this ticket plus a second
 one, and the second one is cheap once the adapter exists.
+
+**This is what was chosen** (2026-08-28). The residue work is tracked as SWT-23
+rather than folded in here: its expensive half — the adapter, the boundary proof,
+the local lane — is delivered by this ticket, and what remains genuinely belongs
+in its own ticket because it is a prompt-and-labels problem, not a wiring one.
 
 ## Future work (not this ticket)
 
