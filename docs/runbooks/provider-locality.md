@@ -37,9 +37,8 @@ client. Keep it that way.
 
 | variable | lane | meaning |
 |---|---|---|
-| `OPS_LOCAL_PROVIDER_URL` | local | base URL of the local OpenAI-compatible server, e.g. `http://127.0.0.1:11434/v1` |
-| `OPS_LOCAL_MODEL` | local | model name on that server, e.g. `qwen3:8b` |
-| `OPS_LOCAL_API_KEY` | local | usually empty; local servers rarely check it |
+| `OPS_LOCAL_PROVIDER_URL` | local | base URL of the local **ollama** server — `http://127.0.0.1:11434`, with **no `/v1`** |
+| `OPS_LOCAL_MODEL` | local | model name on that server, e.g. `qwen3:8b`. **Required** once the URL is set |
 | `OPENAI_API_KEY` | general | **no longer required to start** — a pass that never touches the hosted lane is now normal |
 | `OPENAI_BASE_URL` | general | optional override |
 
@@ -50,7 +49,28 @@ stops flowing. The misconfiguration you would most fear is the one that trips th
 guard. Triage logs a warning at startup when the URL is not local.
 
 Loopback and private LAN addresses both classify local, so `127.0.0.1:11434` and
-`192.168.50.x` work with no special case. `http`/`https` only.
+`192.168.50.x` work with no special case. `http`/`https` only. A cluster service
+*name* like `ollama.ops.svc` classifies REMOTE — `LocalityOf` refuses any host
+that is not an IP literal, deliberately, since resolving one would be I/O and a
+TOCTOU — so an off-box deployment needs a `192.168.50.x` load-balancer address,
+the same shape Postgres has.
+
+**No `/v1`, and no API key.** Since SWT-22 the local lane is
+`provider.NewOllama`, which speaks ollama's **native `/api/chat`** API rather
+than the OpenAI-compatible `/v1` route. That is not a preference: `/v1` has
+nowhere to carry `think`, and with thinking left on qwen3 returns EMPTY content
+with `done_reason: length` — a 0.00 score, invisible unless you read the raw
+response. `format` (the bare schema) and `keep_alive` are likewise native-only.
+`NewOllama` trims a trailing `/v1` and logs when it does, because this runbook
+taught the `/v1` spelling for the OpenAI adapter first — but set it correctly:
+untrimmed it would POST to `/v1/api/chat`, a 404, and a 404 is an HTTP error
+rather than `ErrUnavailable`, so every message would count as an
+`unclassified_error` and trip the ratio raise instead of skipping.
+
+`OPS_LOCAL_MODEL` is REQUIRED once the URL is set, with no fallback to the hosted
+model name. Missing it leaves the lane ABSENT with one logged refusal — a
+skipped pass an operator can act on — rather than sending `gpt-5-mini` to ollama
+and getting a 404 per message.
 
 ## Verifying the boundary
 

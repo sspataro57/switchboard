@@ -7,9 +7,9 @@
 //	DATABASE_URL                 ops db, required
 //	OPENAI_API_KEY               OPTIONAL since SWT-21 — a pass that only ever
 //	                             touches restricted content never needs it
-//	OPS_LOCAL_PROVIDER_URL        local lane base URL, e.g. http://127.0.0.1:11434/v1
-//	OPS_LOCAL_MODEL               local lane model, e.g. qwen3:8b
-//	OPS_LOCAL_API_KEY             usually empty; local servers rarely check it
+//	OPS_LOCAL_* (two of them)    the local lane's base URL and model; the code
+//	                             below is the authority on their exact names, and
+//	                             docs/runbooks/provider-locality.md documents them
 //	TRIAGE_MODEL                 default gpt-5-mini
 //	OPENAI_BASE_URL              optional
 //	TRIAGE_CONFIDENCE_THRESHOLD  report default 0.7
@@ -91,38 +91,50 @@ func runCmd(argv []string) error {
 	defer release()
 
 	// Two lanes, and which one a message may use is decided per message by the
-	// boundary rather than here (SWT-21). Building the general client is
-	// conditional on a key existing; building the local one is conditional on
-	// OPS_LOCAL_PROVIDER_URL being set, and that URL is also what proves its
-	// locality — LocalityOf reads the endpoint, so pointing this at a hosted API
-	// makes it not-local and restricted content stops flowing rather than
-	// silently leaking.
+	// boundary rather than here (SWT-21). The general client is built only when
+	// a key exists; the local one only when its base URL is set — and that URL is
+	// also what PROVES its locality, since LocalityOf reads the endpoint. Point
+	// it at a hosted API and it stops being local, so restricted content stops
+	// flowing rather than silently leaking.
 	var general provider.Client
 	if apiKey != "" {
 		general = provider.NewOpenAI(apiKey, os.Getenv("OPENAI_BASE_URL"))
 	}
 	var local provider.Client
-	localModel := model
+	var localModel string
 	if base := os.Getenv("OPS_LOCAL_PROVIDER_URL"); base != "" {
-		// The local stack serves an OpenAI-compatible /v1 route (ollama and
-		// llama.cpp both do), so the SAME adapter drives it. That is precisely
-		// why locality cannot be a property of the adapter's type.
-		local = provider.NewOpenAI(os.Getenv("OPS_LOCAL_API_KEY"), base)
-		// The local lane runs a different model from the hosted one, so it needs
-		// its own name. OPS_LOCAL_MODEL is what the runbook tells an operator to
-		// set; a variable the runbook names and the code never reads makes that
-		// smoke test pass while testing nothing.
-		if lm := os.Getenv("OPS_LOCAL_MODEL"); lm != "" {
-			localModel = lm
-		}
-		// Say at startup what the boundary will decide, so a misconfigured URL is
-		// found by reading one log line rather than by wondering why every
-		// message skipped. A URL that is not local is not an error here — the
-		// pass still runs and still refuses restricted content — but it is
-		// something the operator meant to get right.
-		if loc := provider.LocalityOf(local.Describe()); loc != provider.LocalityLocal {
-			slog.Warn("OPS_LOCAL_PROVIDER_URL is not a local endpoint; restricted content will be skipped",
-				"url", base, "locality", loc)
+		// OPS_LOCAL_MODEL is REQUIRED once a local URL is set, and there is
+		// deliberately NO fallback to the hosted model name (SWT-22 criterion 9).
+		//
+		// The previous spelling assigned the HOSTED model name into the local
+		// one, defaulting this lane to gpt-5-mini. On ollama that is a 404 PER
+		// MESSAGE — an
+		// unclassified error on every one of ~14,000 messages, which trips the
+		// ratio raise and reads as a broken adapter. Missing the model name must
+		// instead leave the lane ABSENT: one logged refusal and a skipped pass,
+		// which is a state an operator can act on.
+		localModel = os.Getenv("OPS_LOCAL_MODEL")
+		if localModel == "" {
+			slog.Error("OPS_LOCAL_PROVIDER_URL is set but OPS_LOCAL_MODEL is empty; the local lane is DISABLED",
+				"url", base,
+				"why", "guessing the hosted model name here would 404 on every message instead of skipping",
+				"fix", "export OPS_LOCAL_MODEL=qwen3:8b")
+		} else {
+			// The ollama NATIVE adapter, not NewOpenAI pointed at :11434. The
+			// difference is not cosmetic: /v1 has nowhere to carry `think`, and
+			// with thinking on qwen3 returns empty content with done_reason
+			// "length" — the 0.00-scoring configuration, invisible unless you
+			// read the raw response.
+			local = provider.NewOllama(base, localModel)
+			// Say at startup what the boundary will decide, so a misconfigured
+			// URL is found by reading one log line rather than by wondering why
+			// every message skipped. A non-local URL is not an error here — the
+			// pass still runs and still refuses restricted content — but it is
+			// something the operator meant to get right.
+			if loc := provider.LocalityOf(local.Describe()); loc != provider.LocalityLocal {
+				slog.Warn("OPS_LOCAL_PROVIDER_URL is not a local endpoint; restricted content will be skipped",
+					"url", base, "locality", loc)
+			}
 		}
 	}
 	router := provider.NewRouter(general, local, 0)
