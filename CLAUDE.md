@@ -153,14 +153,22 @@ Scope: established clients only — unknown senders tagged prospect, stay CRM-si
 6. GPT triage (port CRM triage prompt; add attach-vs-create via
    find_related_tasks, per-field confidence). Run SHADOW MODE first —
    extract everything, create nothing, diff for days before going live.
-7. Google OAuth (one project, Desktop-app client, loopback flow, publish to
-   In Production to avoid 7-day token expiry; test users = the 5 accounts;
-   readonly scopes only). Gmail + Calendar pollers (5–15 min). Message-ID
-   dedup across accounts. Availability service (free/busy merge +
-   propose_slots — deterministic, no LLM).
-8. Draft worker + deliveries + dashboard approve/edit/send + Gmail send
-   adapter (threading headers, From inherited from thread — never
-   model-chosen) + Upwork assisted tier.
+7. Gmail ingestion over **IMAP with app passwords — NOT OAuth** (superseded;
+   see below). Message-ID dedup across accounts. Availability service
+   (free/busy merge + propose_slots — deterministic, no LLM).
+
+   *This step originally said "Google OAuth (Desktop-app client, loopback flow,
+   publish to In Production…)". That is not what shipped, and the OAuth code in
+   `internal/connector/google/oauth.go` is not the live path.* Verified
+   2026-08-28: all three `google` rows in `source_accounts` have a NULL
+   `refresh_token_encrypted` and empty scopes, and all 16,490 Google
+   `raw_source_items` carry `source: "imap"` with an IMAP envelope (`folder`,
+   `uid`, `uidvalidity`, `rfc822_b64`, `flags`, `internaldate`). `MAIL_SOURCE`
+   selects between `imap`, `bridge` and `gmail_api`; production is `imap`.
+   Sending is SMTP (`internal/connector/google/smtp.go`), not the Gmail API.
+8. Draft worker + deliveries + dashboard approve/edit/send + SMTP send adapter
+   (threading headers, From inherited from thread — never model-chosen) +
+   Upwork assisted tier.
 9. Jira connector (poll in, gated comments out). GitHub webhooks (review_pr
    tasks, CI events driving pr_open→merged states).
 10. Plan import (one-way: .md → task tree via LLM-assisted parse + dashboard
