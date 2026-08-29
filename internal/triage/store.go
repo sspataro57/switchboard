@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -338,5 +339,21 @@ func (s *PGStore) TryLock(ctx context.Context) (bool, func(), error) {
 		conn.Release()
 		return false, nil, nil
 	}
-	return true, conn.Release, nil
+	// Explicit unlock BEFORE returning the connection to the pool. A session-level
+	// advisory lock belongs to the SESSION, and a pooled connection going back to
+	// the pool does not end the session — so releasing the connection alone leaks
+	// the lock for the life of the process, and a second pass in that process is
+	// locked out by a run that already finished. Harmless in a one-shot CLI where
+	// pool.Close() ends the session; a silent deadlock in anything long-lived.
+	// internal/capture/rules_store.go documents the same trap; this file had the
+	// leaky shape until SWT-22.
+	return true, func() {
+		// context.Background(): the unlock must happen even when the run was
+		// cancelled, which is exactly when it most needs releasing.
+		if _, err := conn.Exec(context.Background(),
+			`SELECT pg_advisory_unlock($1)`, AdvisoryLockKey); err != nil {
+			slog.Warn("releasing triage advisory lock", "key", fmt.Sprintf("0x%X", AdvisoryLockKey), "err", err)
+		}
+		conn.Release()
+	}, nil
 }

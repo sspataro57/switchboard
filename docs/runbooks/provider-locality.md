@@ -5,15 +5,19 @@ enforced in code, not configured per worker, and it fails closed.
 
 ## Read this before you look at a triage report
 
-**An all-skipped triage report is the SUCCESS state right now.** Triage's entire
-inbox is `action='unmatched'`, unmatched is restricted, and no local adapter
-exists yet — so every message skips and `processed` is zero. That is the boundary
-working exactly as designed, not an outage. Do not open an incident against it.
+Triage's entire inbox is `action='unmatched'`, and unmatched is restricted — so
+triage processes a message only when a LOCAL lane is configured and answering.
+SWT-22 shipped that lane (`provider.NewOllama`), so an all-skipped report is no
+longer the permanent state; it now means the local model is not configured or not
+running, which the reasons below tell you apart.
 
-Triage becomes useful again when **SWT-22** ships the local classifier. The
-dependency runs the opposite way from what a reader assumes: **SWT-21 gates
-triage on SWT-22**, deliberately, because the alternative was a boundary that
-was only as good as somebody's sender list.
+**An all-skipped pass is still EXPECTED whenever the local box is down**, and it
+is not an outage of triage. Do not open an incident against it, and do not "fix"
+it with a fallback.
+
+The dependency runs the opposite way from what a reader assumes: **SWT-21 gated
+triage on SWT-22**, deliberately, because the alternative was a boundary only as
+good as somebody's sender list.
 
 ## The one rule that no code can enforce
 

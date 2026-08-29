@@ -570,7 +570,13 @@ func TestRunbook_ProviderLocalityUpdatedForSWT22(t *testing.T) {
 			"message; the new behaviour is an ABSENT lane, and an operator has to know which one they are "+
 			"looking at", rel)
 	}
-	if strings.Contains(lower, "no local adapter exists yet") {
+	// Whitespace-COLLAPSED before matching. The first version of this test grepped
+	// the raw text for the literal phrase, and the runbook wrapped between
+	// "adapter" and "exists" — so the sentence it was written to catch sat in the
+	// file untouched while the test passed. A guard that cannot match its own
+	// target is worse than no guard: it reports the prose as corrected.
+	collapsed := regexp.MustCompile(`\s+`).ReplaceAllString(lower, " ")
+	if strings.Contains(collapsed, "no local adapter exists yet") {
 		t.Errorf("%s still says 'no local adapter exists yet'. SWT-22 ships one, so that sentence is now "+
 			"false — and it is the sentence that tells an operator an all-skipped report is fine. Left "+
 			"stale, it turns a real outage into an expected state (criterion 26)", rel)

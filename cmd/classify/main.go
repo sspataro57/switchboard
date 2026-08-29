@@ -5,8 +5,12 @@
 //	classify report [--since 720h]
 //	classify eval   --labels docs/evals/personal-actionability.jsonl
 //
-//	DATABASE_URL   ops db, required
-//	CLASSIFY_MODEL optional override; defaults to the local model
+//	DATABASE_URL           ops db, required
+//	OPS_LOCAL_PROVIDER_URL local ollama base URL, no /v1
+//	OPS_LOCAL_MODEL        required once the URL is set; no fallback
+//	CLASSIFY_MODEL         optional override of OPS_LOCAL_MODEL, applied to the
+//	                       CLIENT as well as the request so the probe and the
+//	                       completion always name the same model
 //
 // There is NO hosted lane here, and that is the design rather than an omission.
 // Every message this worker reads is attributed to a project whose ai_locality
@@ -80,13 +84,22 @@ func buildRouter() (*provider.Router, string) {
 			"fix", "export OPS_LOCAL_MODEL=qwen3:8b")
 		return provider.NewRouter(nil, nil, 0), ""
 	}
+	// CLASSIFY_MODEL is applied BEFORE the client is built, and that ordering is
+	// the whole point. Applied after, the adapter would probe /api/tags for
+	// OPS_LOCAL_MODEL and then POST requests naming a different model: the probe
+	// passes, every /api/chat 404s, and a 404 is deliberately not ErrUnavailable
+	// — so it lands in the unclassified-error ratio and raises as "a broken
+	// adapter, not a busy one" when the adapter is fine and the config is wrong.
+	// That is the exact failure the no-fallback rule above exists to avoid, and
+	// the first cut of this function had it.
+	if m := os.Getenv("CLASSIFY_MODEL"); m != "" {
+		slog.Info("CLASSIFY_MODEL overrides OPS_LOCAL_MODEL", "model", m)
+		model = m
+	}
 	local := provider.NewOllama(base, model)
 	if loc := provider.LocalityOf(local.Describe()); loc != provider.LocalityLocal {
 		slog.Warn("OPS_LOCAL_PROVIDER_URL is not a local endpoint; every message will be skipped",
 			"url", base, "locality", loc)
-	}
-	if m := os.Getenv("CLASSIFY_MODEL"); m != "" {
-		model = m
 	}
 	return provider.NewRouter(nil, local, 0), model
 }
@@ -168,6 +181,10 @@ func evalCmd(argv []string) error {
 	}
 	defer pool.Close()
 
+	// buildRouter resolves the model ONCE, into the client itself, so `eval` and
+	// `run` cannot score and classify different models — see the CLASSIFY_MODEL
+	// note there. Eval prints the model the server reports, which is the truthful
+	// answer to "what was this number measured on".
 	router, _ := buildRouter()
 	return classify.Eval(ctx, classify.NewStore(pool), router, labels, os.Stdout)
 }

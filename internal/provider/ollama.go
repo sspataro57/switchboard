@@ -56,10 +56,11 @@ const defaultKeepAlive = "30m"
 // NewOllama builds the adapter.
 //
 // It trims a trailing "/" AND a trailing "/v1", and says so when it does. That
-// is not tidiness: docs/runbooks/provider-locality.md currently tells the
-// operator to set OPS_LOCAL_PROVIDER_URL=http://127.0.0.1:11434/v1 for the
-// OpenAI adapter, so a stale value carrying /v1 is the FIRST thing this adapter
-// will be handed. Untrimmed it would POST to /v1/api/chat, which 404s — and a
+// is not tidiness: docs/runbooks/provider-locality.md USED to tell the operator
+// to set OPS_LOCAL_PROVIDER_URL=http://127.0.0.1:11434/v1, for the OpenAI
+// adapter that served this lane before SWT-22. The runbook now says "no /v1" —
+// but anyone who configured the box while it said otherwise still has the old
+// value exported. Untrimmed it would POST to /v1/api/chat, which 404s — and a
 // 404 is an HTTP error, not ErrUnavailable, so every message would be recorded
 // as an unclassified_error and the pass would trip the ratio raise. A stale URL
 // would read as a broken adapter instead of a misconfigured one.

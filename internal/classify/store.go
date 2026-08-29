@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -203,10 +204,18 @@ func (s *PGStore) RecordExtraction(ctx context.Context, aiRunID, rawSourceItemID
 	return nil
 }
 
-// TryLock serialises passes on AdvisoryLockKey, mirroring triage's shape. The
-// lock is held on ONE pooled connection and released with it: a pass that dies
-// takes its lock with it, which is what stops a crashed run from blocking every
-// later one.
+// TryLock serialises passes on AdvisoryLockKey.
+//
+// It UNLOCKS explicitly before returning the connection to the pool, following
+// internal/capture/rules_store.go rather than triage's shape. A session-level
+// advisory lock is held by the SESSION, and returning a pooled connection does
+// not end the session — so releasing the connection alone leaks the lock for the
+// life of the process, and the next pass in that process finds itself locked out
+// by a run that already finished. Harmless in a one-shot CLI where pool.Close()
+// ends the session; a silent deadlock the moment anything runs two passes.
+//
+// The unlock uses context.Background() deliberately: it must happen even when
+// the run was cancelled, which is exactly when the lock most needs releasing.
 func (s *PGStore) TryLock(ctx context.Context) (bool, func(), error) {
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
@@ -221,5 +230,11 @@ func (s *PGStore) TryLock(ctx context.Context) (bool, func(), error) {
 		conn.Release()
 		return false, nil, nil
 	}
-	return true, conn.Release, nil
+	return true, func() {
+		if _, err := conn.Exec(context.Background(),
+			`SELECT pg_advisory_unlock($1)`, AdvisoryLockKey); err != nil {
+			slog.Warn("releasing classify advisory lock", "key", fmt.Sprintf("0x%X", AdvisoryLockKey), "err", err)
+		}
+		conn.Release()
+	}, nil
 }

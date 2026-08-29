@@ -111,9 +111,17 @@ func Eval(ctx context.Context, store Store, router *provider.Router, labels []La
 		actionable bool
 		latencyMS  int
 	}
+	// The model as the API REPORTED it, not as we asked for it. An eval whose
+	// output does not name what it scored is a number nobody can reproduce, and
+	// the server's own answer is the truthful source — it reflects what actually
+	// ran, including a `:latest` the caller did not spell out.
+	scoredModel := ""
 	var outcomes []outcome
 	for _, m := range scored {
 		resp, err := lane.Complete(ctx, provider.Request{
+			// Empty: the adapter uses the model it was CONSTRUCTED with, which
+			// cmd/classify resolves once for both `run` and `eval`. Naming a model
+			// here would be a second source of truth for the same fact.
 			Model:      "",
 			System:     SystemPrompt,
 			User:       renderUser(m),
@@ -127,6 +135,9 @@ func Eval(ctx context.Context, store Store, router *provider.Router, labels []La
 		var v verdict
 		if err := json.Unmarshal(resp.Raw, &v); err != nil {
 			return fmt.Errorf("parse verdict for message %d: %w", m.MessageID, err)
+		}
+		if scoredModel == "" {
+			scoredModel = resp.Model
 		}
 		outcomes = append(outcomes, outcome{id: m.MessageID, actionable: v.Actionable, latencyMS: resp.LatencyMS})
 	}
@@ -148,7 +159,8 @@ func Eval(ctx context.Context, store Store, router *provider.Router, labels []La
 		lat = append(lat, o.latencyMS)
 	}
 
-	fmt.Fprintf(w, "classify eval — n=%d scored (%d labels in the file)\n", len(outcomes), len(labels))
+	fmt.Fprintf(w, "classify eval — model %s — n=%d scored (%d labels in the file)\n",
+		displayModel(scoredModel), len(outcomes), len(labels))
 	fmt.Fprintf(w, "  recall    %s   (%d of %d actionable messages caught)\n", ratio(tp, tp+fn), tp, tp+fn)
 	fmt.Fprintf(w, "  precision %s   (%d of %d flagged were actionable)\n", ratio(tp, tp+fp), tp, tp+fp)
 	fmt.Fprintf(w, "  median latency %d ms\n\n", median(lat))
@@ -172,6 +184,15 @@ func Eval(ctx context.Context, store Store, router *provider.Router, labels []La
 	fmt.Fprintln(w, "costs a second to dismiss. Tune against these labels, never against intuition — this")
 	fmt.Fprintln(w, "fixture has been wrong before and the models were right.")
 	return nil
+}
+
+// displayModel names the model in the header. An eval whose output does not say
+// what it scored is a number nobody can reproduce.
+func displayModel(model string) string {
+	if model == "" {
+		return "(model not reported)"
+	}
+	return model
 }
 
 func ratio(num, den int) string {
