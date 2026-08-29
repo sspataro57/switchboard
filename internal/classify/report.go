@@ -46,6 +46,8 @@ func Report(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Dur
 			Kind       string `json:"kind"`
 			Title      string `json:"title"`
 			Reason     string `json:"reason"`
+			Sender     string `json:"sender"`
+			Subject    string `json:"subject"`
 			MessageID  int64  `json:"normalized_message_id"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
@@ -57,8 +59,12 @@ func Report(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Dur
 			continue
 		}
 		flagged++
-		lines = append(lines, fmt.Sprintf("  %s  #%-7d %-16s %s",
-			createdAt.Format("2006-01-02 15:04"), f.MessageID, f.Kind, f.Title))
+		// Sender and subject as well as the verdict (criterion 20): the title is
+		// the model's summary, and an operator deciding whether to trust it needs
+		// to see what it was summarising.
+		lines = append(lines, fmt.Sprintf("  %s  #%-7d %-16s %-34s %-40s %s",
+			createdAt.Format("2006-01-02 15:04"), f.MessageID, f.Kind,
+			trunc(f.Sender, 34), trunc(f.Subject, 40), f.Title))
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate verdicts: %w", err)
@@ -172,6 +178,13 @@ func reportSkipped(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since t
 	fmt.Fprintln(w, "          provider is never the fix. See docs/runbooks/provider-locality.md.")
 	fmt.Fprintln(w)
 	return nil
+}
+
+func trunc(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 func sortedKeys(m map[string]int) []string {

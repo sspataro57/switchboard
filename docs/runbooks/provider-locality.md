@@ -301,6 +301,11 @@ one of the five own accounts" — mostly mail typed in Gmail by hand. It does *n
 mean the content passed a delivery policy gate; there are 21,194 outbound
 messages and 1 delivery row.)
 
+**Link preservation is SWT-25**, not this ticket: `body_text` carries no URL in
+837 of 1,613 personal messages because the normalizer keeps anchor text and drops
+hrefs, so the links have to be extracted at normalize time rather than read out
+of a field that does not hold them.
+
 **Residual, so nobody discovers it the hard way:** the outbound body is still
 rendered into the prompt — it is excluded from the class fold, not from the
 conversation. A hand-written reply that pastes personal material into a client

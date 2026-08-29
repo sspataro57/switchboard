@@ -34,9 +34,18 @@ func NewStore(pool *pgxpool.Pool) *PGStore { return &PGStore{pool: pool} }
 //     message back out, which is the ordinary way a rule set is tuned. Reading
 //     any-project-bearing-decision would keep classifying against a project the
 //     rules no longer assign.
-//   - `latest.action = 'attributed'`. Unseen (no row) and unmatched (a row with
-//     no project) are both excluded. Unmatched is TRIAGE's inbox — the ~14,500
-//     residue SWT-23 owns, which needs a different prompt entirely.
+//   - `latest.action = 'attributed'`. Note WHICH of these exclusions this clause
+//     actually performs, because it is not the obvious one. Unmatched is already
+//     excluded by the project join: the schema enforces
+//     `(action='unmatched') = (project_id IS NULL)`, so an unmatched row has no
+//     project to join to. Verified by mutation — adding 'unmatched' to this list
+//     changes nothing. What the clause DOES exclude is `task` and `task_log`,
+//     which name a project and would otherwise be pending: those messages already
+//     produced a task, and classifying them again would double-count them. That
+//     is a real trap rather than a hypothetical — give a personal capture rule an
+//     `external_system` and its messages start arriving as 'task'. The
+//     integration suite pins it with a 'task' fixture, added after mutation
+//     testing showed the clause was untested.
 //   - `p.ai_locality = 'local_only'`. THE DISCRIMINATOR, and the only column
 //     here with two values in production. Drop this join and the worker starts
 //     classifying client work; the integration test's ai_locality='any' case is

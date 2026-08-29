@@ -78,6 +78,7 @@ type ciCorpus struct {
 	anyAttrID    int64 // latest 'attributed' to an ai_locality='any' project
 	localAttrID  int64 // latest 'attributed' to ai_locality='local_only'  <- OURS
 	supersededID int64 // attributed to local_only, then re-evaluated unmatched
+	taskAttrID   int64 // latest decision 'task' on local_only — a rule that CREATES tasks
 	outboundID   int64 // our own send, re-entered through ingestion
 
 	localRaw int64
@@ -173,6 +174,8 @@ func ciSeed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *ciCorpus {
 		"minimum payment $35 due 2026-09-03 on account ending 1234", "inbound", 30)
 	c.supersededID, _ = msg("superseded", "alerts@bank.example", "Your statement is available",
 		"attributed once, then the rule was narrowed", "inbound", 20)
+	c.taskAttrID, _ = msg("taskattr", "alerts@bank.example", "Your payment is due",
+		"a personal rule that was given an external_system, so the engine created a task", "inbound", 25)
 	c.outboundID, _ = msg("outbound", "me@sb.example", "re: Login broken on staging",
 		"we are on it", "outbound", 10)
 
@@ -195,6 +198,15 @@ func ciSeed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *ciCorpus {
 	ins(`INSERT INTO capture_decisions (message_id, mode, action, project_id, reason)
 	     VALUES ($1,'shadow','unmatched',NULL,'itest-classify: rule narrowed') RETURNING id`,
 		c.supersededID)
+	// action='task': the shape a personal rule takes once it is given an
+	// external_system. It NAMES a project, so the project join does not exclude
+	// it — only `latest.action = 'attributed'` does. Without this fixture that
+	// clause is untested: widening it to IN ('attributed','task','task_log')
+	// leaves every other assertion in this file green.
+	ins(`INSERT INTO capture_decisions (message_id, mode, action, project_id, external_system, external_key, reason)
+	     VALUES ($1,'shadow','task',$2,'gmail','itest-classify-task','itest-classify: rule with a system') RETURNING id`,
+		c.taskAttrID, c.localProject)
+
 	// The outbound message gets NO decision, and it never can: the capture engine
 	// reads direction='inbound' (that line IS invariant 5). See the note in the
 	// first test about what this fixture can and cannot prove.
@@ -292,6 +304,25 @@ func TestClassifyStore_Integration_InboxIsAttributedToALocalOnlyProject(t *testi
 			"worker's inbox. The filter must read the LATEST decision (ORDER BY id DESC), not any decision "+
 			"that happens to name a project — otherwise a disabled rule leaves messages classified against "+
 			"a project the rules no longer assign them", c.supersededID)
+	}
+
+	// action='task' on the SAME local_only project. This is the assertion that
+	// makes `latest.action = 'attributed'` load-bearing rather than decorative:
+	// a 'task' decision names a project, so the project join keeps it and only
+	// the action clause drops it. Verified by mutation — widening the clause to
+	// IN ('attributed','task','task_log') leaves every other assertion here
+	// green, which is why this case exists.
+	//
+	// The behaviour it pins is a real operational trap: give a personal capture
+	// rule an external_system and its messages start arriving as 'task', which
+	// silently removes them from this worker's inbox. Excluding them is correct —
+	// a message that already produced a task is not un-triaged work — but it must
+	// be a decision the query states, not an accident of a join.
+	if _, ok := got[c.taskAttrID]; ok {
+		t.Errorf("message %d has a latest decision of 'task' on a local_only project and was returned as "+
+			"pending. It already produced a task; classifying it again would double-count it. The clause "+
+			"that excludes it is `latest.action = 'attributed'` — the project join does NOT, because a "+
+			"'task' decision names a project", c.taskAttrID)
 	}
 
 	// The outbound message is excluded. STATED HONESTLY: this assertion cannot

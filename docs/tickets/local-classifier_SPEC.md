@@ -357,41 +357,34 @@ Numbered and testable. 1-8 are unit tests with `httptest` — never a live model
     structural test fails any file in `internal/classify` that branches the prompt
     on a sender string: per-sender prompts are rules in a costume — unbounded
     maintenance, untestable in aggregate, unattributable when they misfire.
-19b. **The verdict carries the message's actionable LINK, and the model never
-    authors it** (Salvador, 2026-08-28: "what we need to do is preserve the links
-    on the summaries"). This is added AFTER the test pass was written, so it needs
-    its own tests.
+19b. **DESCOPED to SWT-25 on 2026-08-29, after measuring where links actually
+    live.** The requirement stands; it cannot be met from inside this ticket.
 
-    The rule that makes it safe: a model asked for a URL will invent a plausible
-    one, and a hallucinated portal link on a task about a fine is worse than no
-    link at all. So links are extracted DETERMINISTICALLY by the application and
-    offered to the model as a numbered closed set of anchor TEXTS; the model
-    returns `link_index` (an integer, or null), and the application resolves the
-    index back to the URL. An out-of-range index is rejected. **The model cannot
-    emit a URL because it is never given the chance to** — spine/leaves, exactly
-    as CLAUDE.md states it.
+    The plan was: extract anchors deterministically, offer the model a numbered
+    closed set of anchor TEXTS, have it return `link_index`, and resolve the
+    index back to a URL in the application — so the model can never author a URL.
+    That design is right and is carried forward verbatim.
 
-    Extraction, measured over 400 personal messages on 2026-08-28:
-    * ANCHORS ONLY (`<a href>`). Never `img src`: the only "link" in a Pines
-      First Notice is an `<img>` pointing at `/wf/open`, a SendGrid open-tracking
-      pixel. Following img src would put a tracking beacon on a task.
-    * Drop by URL: unsubscribe, opt-out, privacy, terms, preferences, `/wf/open`,
-      and asset/CDN hosts.
-    * Drop by ANCHOR TEXT too, which the URL filter alone misses — "Unsubscribe",
-      "Privacy", "Terms of Use", "View in Browser", "here". Also drop EMPTY text:
-      those are image wrappers, not destinations.
-    * Result: median 2 candidates per message (from a median of 4 and a mean of
-      12 unfiltered), 288 of 400 messages at 1-3, 3 messages at zero. What
-      survives is the real call to action — `VIEW DETAILS`, `VIEW ACCOUNT`,
-      `See My Loan Option`, the `portal.pinespropertymanagement.com` link.
+    What broke it is the source of the links. Measured against production:
+    **`normalized_messages.body_text` carries no URL at all in 837 of 1,613
+    personal messages**, and the messages that matter most are in that half — the
+    Pines portal message (id 29410) has ZERO URLs in `body_text` and two anchors
+    in its raw MIME. The normalizer keeps anchor TEXT and drops the hrefs.
 
-    Cap the set at 8 and pass the texts, not the hrefs, so a long marketing mail
-    cannot flood the prompt.
+    So the links exist only in `raw_source_items.rfc822_b64`, and there are only
+    two ways to reach them, neither of which belongs here:
 
-    **Fetching the link is out of scope and stays out.** The Pines portal
-    requires a login (Salvador, 2026-08-28: "you can't it requires login"), so
-    the destination is unreachable to this system by design. The link exists so a
-    HUMAN can open it. Nothing in this ticket dereferences a URL.
+    * the classifier parses raw MIME itself — a second decoder beside the
+      normalizer, and exactly the side door invariant 1 exists to prevent
+      ("nothing in this ticket may parse an attachment out of raw and skip
+      normalize", already written into this SPEC's In-scope section); or
+    * the NORMALIZER extracts links into a column or table — correct, and a
+      schema change plus a connector change, which is a different ticket.
+
+    Forcing it into SWT-22 would mean duplicating the normalizer to satisfy a
+    criterion added mid-ticket. SWT-25 owns it, together with the note that the
+    two HOA First Notices have no usable link at all — only a SendGrid tracking
+    pixel — so the null case is the common one and must never be an error.
 
 20. `classify report` prints: counts (`classified`, `flagged`, by `kind`), the
     flagged set newest-first with sender / subject / kind / title, and the

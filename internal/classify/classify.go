@@ -274,11 +274,18 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 		// written for EVERY classified message — including a not-actionable one.
 		// "The classifier looked and found nothing" and "nothing looked" must
 		// stay structurally different.
+		// sender and subject are stored HERE, not looked up at report time
+		// (criterion 20). The report reads ai_extractions alone, so a printer that
+		// wanted them would have to join back to normalized_messages — and the
+		// verdict would then describe a message that may since have been
+		// re-normalised. What was classified is what should be shown.
 		fields, _ := json.Marshal(map[string]any{
 			"actionable":            v.Actionable,
 			"kind":                  v.Kind,
 			"title":                 v.Title,
 			"reason":                v.Reason,
+			"sender":                m.Sender,
+			"subject":               m.Subject,
 			"project_id":            m.ProjectID,
 			"project_slug":          m.ProjectSlug,
 			"normalized_message_id": m.MessageID,
