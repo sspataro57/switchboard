@@ -126,6 +126,33 @@ tune against. It carries **no message content**: message id, label, and a hash o
 the normalised subject. Bodies are loaded from the database at eval time, so the
 file is safe to commit while the mail never leaves the machine.
 
+**Current set and scores** (record here on every regeneration or re-run):
+
+| date       | n   | actionable | recall | precision | median latency | model    |
+|------------|-----|-----------:|-------:|----------:|---------------:|----------|
+| 2026-08-30 | 280 | 35         | 0.83   | 0.58      | 6.3 s          | qwen3:8b |
+
+The 280 ids are hand-checked, drawn from the `personal` population (1,624
+messages at draw time, 2026-08-29; the population grows daily): every Pines
+Property Management message including the announcements-vs-violations pairs,
+capped per-sender draws favouring distinct subject templates, a targeted sweep
+for actionable-shaped subjects, and a uniform 10% sample of the last three
+months.
+
+Four "your statement is available" messages are labelled `actionable` even
+though the prompt names that exact subject as informational. That is not the
+spike's fixture error repeating: those four are labelled on the BODY, which
+states a minimum payment with an amount and a due date, and the model itself
+agrees on three of the four. Do not "correct" them back by subject — that
+would move the score with no visible cause.
+
+The six false negatives of the first run: 25541 and 27641 (appointment
+confirmations read as done-deal informational), 26018 (the one
+statement-with-minimum-payment miss), 26919 (a due-date warning whose body is
+an empty view-your-message shell), 27871 (a doctor's-office portal message,
+content behind login), 84710 (a portal notice built from an unfilled
+template). Tuning against them is future work, not this ticket.
+
 `classify eval` refuses to run on anything but the local lane, and reports **label
 drift** — any id whose subject hash no longer matches is printed and EXCLUDED
 before it is classified. The labels are the fixture and this fixture has been
