@@ -122,3 +122,129 @@ An `ollama serve` process (started with `OLLAMA_VULKAN=1`) and ~25 GB of models
 under `~/.ollama/models`: qwen3:8b, gemma3:12b, gemma3:4b, llama3.1:8b,
 qwen3:4b, qwen2.5:3b-instruct. Only qwen3:8b is needed going forward; the rest
 are ~20 GB reclaimable with `ollama rm`.
+
+---
+
+## Reproduced and extended, 2026-08-28 (during SWT-22 ticket-start)
+
+Re-run against the same box and model before building an adapter that depends on
+these findings. All four are wire-level measurements, not recollections.
+
+**1. The thinking failure reproduces EXACTLY.** With `"think": true` and a
+200-token budget, qwen3:8b on `/api/chat` returned:
+
+```
+done_reason: length | content length: 0 | thinking length: 974 | eval_count: 200
+```
+
+Unparseable, because there is nothing to parse. The whole budget went to
+reasoning about a two-line message. Same request with `"think": false`:
+`done_reason: stop`, 242 characters of valid schema-conforming JSON, 5.7s.
+This is criterion 3's entire justification and it is current, not historical.
+
+**2. The prompt is load-bearing, and far more so than the model.** The first
+attempt here used a bare "Classify." instruction with no system prompt, and
+qwen3:8b called an HOA violation notice carrying a fine `actionable: false` — a
+miss on precisely the class the spike reports 1.00 recall for. With a proper
+system prompt (defining actionable as "requires the recipient to DO something
+with a consequence", and naming the near-miss class explicitly), the same model
+scored 5/5:
+
+```
+HOA violation + fine      -> true   (want true)
+payment due               -> true   (want true)
+statement available       -> false  (want false)
+card was used             -> false  (want false)
+HOA announcement          -> false  (want false)
+```
+
+Both near-misses correct — the cases this spike built specifically to defeat
+sender-matching. So the spike's numbers reproduce; the adapter is the easy half.
+
+**3. Dropping the near-miss guidance breaks it, which is what the labelled set is
+for.** A SHORTENED system prompt, identical except that it no longer enumerated
+"statement-available, balance notices, card was used" as informational, flipped
+"your statement is available" to `actionable: true`. One clause in the prompt is
+the difference between a false positive and a correct answer on the single most
+common message shape in the corpus (883 BofA messages). Tune the prompt against
+a labelled set, never against intuition.
+
+**4. `format` enforces a JSON-schema `enum`, so `kind` MUST be one.** Left as a
+free string, the model returns the same concept in three casings —
+`"payment due"`, `"violation_to_cure"`, `"statement-availabl…"`,
+`"transaction_notifi…"` — which is a column nothing can `GROUP BY`. Constrained
+to an enum, every response landed inside it. An unconstrained `kind` would be a
+report field that silently means nothing, which is this repo's recurring landmine
+in yet another costume.
+
+**5. The corpus is BILINGUAL, and the original is kept — no translation pass.**
+51 of the 1,609 personal messages are Spanish; Bank of America duplicates its
+alerts. Decision (Salvador, 2026-08-28): "if it can parse spanish better to keep
+the original."
+
+Measured on matched pairs — the same notice in both languages, which this corpus
+supplies for free:
+
+```
+we've transferred money to cover…  EN true/payment_due   ES true/payment_due   agree
+your available balance is low      EN true/payment_due   ES true/payment_due   agree
+your statement is available        EN false/informational ES false/informational agree
+a direct deposit was credited      EN false/informational ES TRUE/payment_due   DISAGREE
+your account may not have funds    EN true/payment_due   ES true/payment_due   agree
+```
+
+4/5, with valid schema output in both languages every time. So Spanish is not a
+comprehension problem and a translation pass would be a second inference per
+message plus a new failure mode — a bad translation silently changes the answer
+and leaves nothing to compare against. Keeping the original also keeps
+raw-first's promise that reprocessing is always possible.
+
+The 1/5 disagreement is the finding, not a rounding error: `a direct deposit was
+credited` is a BORDERLINE case where the model is unstable, and the language
+flipped it. A translation pass would have concealed that instability rather than
+fixed it. Consequence for the eval set: the Spanish messages get their own
+labelled rows (12 are in the worksheet) so language-driven disagreement is
+MEASURED per release rather than assumed away, and the prompt is written to be
+language-neutral rather than English-with-Spanish-tolerated.
+
+**6. CORRECTION — the "violation PDF" does not exist, and attachments are not the
+ceiling this document claimed.** Measured by decoding `rfc822_b64` for every
+Pines / Pembroke Pines message, 2026-08-28.
+
+This document said: "the fine amount and cure-by date are in a PDF that is
+ingested inside `rfc822_b64` but never extracted. No classifier can read them
+today." Both halves are wrong.
+
+The two actual `First Notice` messages carry **NO attachment at all** — 8,243
+bytes, a single `text/html` part. The body says *"Please see attachment for
+additional detail"* and there is no attachment; the sender's template promises
+one it does not send. What the body DOES carry is extracted and available today:
+
+```
+inspection conducted on 08/12/2026 by the Silverlakes Community Association Inc
+Covenants Enforcement Committee ... the following violation of the covenants was
+noted: Shrub Trim- Pursuant to the SL Mod Gudelines ... (p. 28)
+```
+
+Date, specific violation, and the rule cited. `body_text` for that message is
+1,254 characters — the normalizer extracts HTML correctly, and only 1 of 1,609
+personal messages has a body under 40 characters.
+
+What the Pines PDFs actually are: board meeting agendas and notices, proposed
+parking rules, community guidelines, portal login info. Announcements.
+
+The ONE fact genuinely locked in an attachment is the **amount on the Pembroke
+Pines utility bills** (4 messages, `application/octet-stream`). Their body gives
+the due date, customer id and account number — everything except the figure. And
+"utility bill due 09/01/2026" is already an actionable task without it.
+
+So attachment extraction is a small enhancement affecting four messages, not a
+hard ceiling on the classifier. Do not budget for it as though it were.
+
+**Design consequence — reference attachments, never copy them onto tasks.** The
+complete MIME already lives in `raw_source_items.rfc822_b64` (invariant 1), so a
+task copying those bytes creates a second copy of something already stored and a
+second thing to keep in sync, and forces a storage decision — blob column?
+attachments table? filesystem? — that nothing today needs. A task carries the
+message id; rendering or downloading the attachment from the raw item on demand
+is a dashboard concern.

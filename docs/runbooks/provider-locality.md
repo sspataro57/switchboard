@@ -5,15 +5,19 @@ enforced in code, not configured per worker, and it fails closed.
 
 ## Read this before you look at a triage report
 
-**An all-skipped triage report is the SUCCESS state right now.** Triage's entire
-inbox is `action='unmatched'`, unmatched is restricted, and no local adapter
-exists yet — so every message skips and `processed` is zero. That is the boundary
-working exactly as designed, not an outage. Do not open an incident against it.
+Triage's entire inbox is `action='unmatched'`, and unmatched is restricted — so
+triage processes a message only when a LOCAL lane is configured and answering.
+SWT-22 shipped that lane (`provider.NewOllama`), so an all-skipped report is no
+longer the permanent state; it now means the local model is not configured or not
+running, which the reasons below tell you apart.
 
-Triage becomes useful again when **SWT-22** ships the local classifier. The
-dependency runs the opposite way from what a reader assumes: **SWT-21 gates
-triage on SWT-22**, deliberately, because the alternative was a boundary that
-was only as good as somebody's sender list.
+**An all-skipped pass is still EXPECTED whenever the local box is down**, and it
+is not an outage of triage. Do not open an incident against it, and do not "fix"
+it with a fallback.
+
+The dependency runs the opposite way from what a reader assumes: **SWT-21 gated
+triage on SWT-22**, deliberately, because the alternative was a boundary only as
+good as somebody's sender list.
 
 ## The one rule that no code can enforce
 
@@ -37,9 +41,8 @@ client. Keep it that way.
 
 | variable | lane | meaning |
 |---|---|---|
-| `OPS_LOCAL_PROVIDER_URL` | local | base URL of the local OpenAI-compatible server, e.g. `http://127.0.0.1:11434/v1` |
-| `OPS_LOCAL_MODEL` | local | model name on that server, e.g. `qwen3:8b` |
-| `OPS_LOCAL_API_KEY` | local | usually empty; local servers rarely check it |
+| `OPS_LOCAL_PROVIDER_URL` | local | base URL of the local **ollama** server — `http://127.0.0.1:11434`, with **no `/v1`** |
+| `OPS_LOCAL_MODEL` | local | model name on that server, e.g. `qwen3:8b`. **Required** once the URL is set |
 | `OPENAI_API_KEY` | general | **no longer required to start** — a pass that never touches the hosted lane is now normal |
 | `OPENAI_BASE_URL` | general | optional override |
 
@@ -50,7 +53,28 @@ stops flowing. The misconfiguration you would most fear is the one that trips th
 guard. Triage logs a warning at startup when the URL is not local.
 
 Loopback and private LAN addresses both classify local, so `127.0.0.1:11434` and
-`192.168.50.x` work with no special case. `http`/`https` only.
+`192.168.50.x` work with no special case. `http`/`https` only. A cluster service
+*name* like `ollama.ops.svc` classifies REMOTE — `LocalityOf` refuses any host
+that is not an IP literal, deliberately, since resolving one would be I/O and a
+TOCTOU — so an off-box deployment needs a `192.168.50.x` load-balancer address,
+the same shape Postgres has.
+
+**No `/v1`, and no API key.** Since SWT-22 the local lane is
+`provider.NewOllama`, which speaks ollama's **native `/api/chat`** API rather
+than the OpenAI-compatible `/v1` route. That is not a preference: `/v1` has
+nowhere to carry `think`, and with thinking left on qwen3 returns EMPTY content
+with `done_reason: length` — a 0.00 score, invisible unless you read the raw
+response. `format` (the bare schema) and `keep_alive` are likewise native-only.
+`NewOllama` trims a trailing `/v1` and logs when it does, because this runbook
+taught the `/v1` spelling for the OpenAI adapter first — but set it correctly:
+untrimmed it would POST to `/v1/api/chat`, a 404, and a 404 is an HTTP error
+rather than `ErrUnavailable`, so every message would count as an
+`unclassified_error` and trip the ratio raise instead of skipping.
+
+`OPS_LOCAL_MODEL` is REQUIRED once the URL is set, with no fallback to the hosted
+model name. Missing it leaves the lane ABSENT with one logged refusal — a
+skipped pass an operator can act on — rather than sending `gpt-5-mini` to ollama
+and getting a 404 per message.
 
 ## Verifying the boundary
 
@@ -276,6 +300,11 @@ every inbound sibling. (Note that `direction='outbound'` means only "sent from
 one of the five own accounts" — mostly mail typed in Gmail by hand. It does *not*
 mean the content passed a delivery policy gate; there are 21,194 outbound
 messages and 1 delivery row.)
+
+**Link preservation is SWT-25**, not this ticket: `body_text` carries no URL in
+837 of 1,613 personal messages because the normalizer keeps anchor text and drops
+hrefs, so the links have to be extracted at normalize time rather than read out
+of a field that does not hold them.
 
 **Residual, so nobody discovers it the hard way:** the outbound body is still
 rendered into the prompt — it is excluded from the class fold, not from the

@@ -30,6 +30,9 @@ var workerPackages = []string{
 	"internal/drafts",
 	"internal/planimport",
 	"internal/capture",
+	// SWT-22 criterion 14: the classifier is a worker like the others. Nothing in
+	// internal/classify constructs a client — the Router is built in cmd/classify.
+	"internal/classify",
 }
 
 // goSources lists the non-test .go files in a package directory, relative to the
@@ -114,6 +117,10 @@ func TestWorkerEntryPoints_TakeARouter(t *testing.T) {
 		{"internal/triage/triage.go", "func Run("},
 		{"internal/drafts/drafts.go", "func Run("},
 		{"internal/planimport/planimport.go", "func Propose("},
+		// SWT-22 criterion 14. classify.Run takes the ROUTER for the same reason
+		// the others do — and here it is what makes "zero hosted calls" a property
+		// of the type rather than of the worker's own discipline.
+		{"internal/classify/classify.go", "func Run("},
 	}
 
 	for _, tc := range cases {
