@@ -24,7 +24,7 @@
   {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
 
   <form class="filters" method="get" action="/tasks">
-    <select name="project">
+    <select name="project" onchange="this.form.submit()">
       <option value="">all projects</option>
       {{$sel := index .Filters "project"}}
       {{range .Projects}}<option value="{{.}}" {{if eq . $sel}}selected{{end}}>{{.}}</option>{{end}}
