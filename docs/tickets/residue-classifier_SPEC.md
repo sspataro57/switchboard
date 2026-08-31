@@ -1,8 +1,9 @@
 > Jira: SWT-23
 > Jira description is SPLIT: this SPEC exceeds Jira's 32,767-character
-> description cap. The issue carries everything up to "In scope / Out of scope";
-> the remainder goes in as a comment on the issue. A re-sync must split at an h2
-> boundary again, not truncate. This file is the authoritative copy.
+> description cap. The issue carries the front sections up to an h2 boundary
+> that fits; the remainder goes in as one or more comments on the issue. A
+> re-sync must split at h2 boundaries again, not truncate. This file is the
+> authoritative copy.
 
 # residue-classifier — what the unmatched pile is for, what a rule can claim, and what a model should ever see
 
