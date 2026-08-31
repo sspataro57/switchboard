@@ -143,6 +143,75 @@ What to look for, in order:
    you genuinely cannot route by pattern — not a symptom of a rule that silently
    stopped matching.
 
+## Reading the residue (SWT-23)
+
+The census answers "what rule should exist next" at the granularity a rule is
+written at — the sender DOMAIN — with cumulative coverage, and the channel /
+no-address split that separates work from noise:
+
+```bash
+DATABASE_URL=... go run ./cmd/opsctl capture-rules report --since 0
+DATABASE_URL=... go run ./cmd/opsctl capture-rules report --domain sspataro.com
+```
+
+`--domain` is the Phase-0 investigation and it is a BLOCKER: no rule may be
+written for a domain until its detail has been run and read. It is what turned
+`sspataro.com` (518) from a suspicion into `test@sspataro.com` session
+notifications (bulk), and `upwork.com` (106) into "Invitation to Interview"
+(work — refused).
+
+**The claim gate.** A domain is claimed only when the census shows >= 100
+residue messages AND a hand-checked sample of at least 20 of its messages
+contains ZERO actionable ones AND it is not on the refusal list. The gate rows
+join `docs/evals/residue-actionability.jsonl` as stratum `domain_gate`, so the
+gate is auditable and the reading is done once.
+
+**Seeded 2026-08-31** — 24 attribution-only rules, one per gated domain, all
+`--project bulk --type sender --priority 5`:
+
+```bash
+go run ./cmd/opsctl capture-rules add --project bulk --type sender --pattern linkedin.com --priority 5   --note "SWT-23 bulk: gated 2026-08-31, 20-sample zero actionable"
+# ... identically for: jobalert.indeed.com match.indeed.com sspataro.com medium.com
+#     mailer.humblebundle.com ss/rs/is.email.nextdoor.com ziprecruiter.com
+#     discover/explore.pinterest.com amazon.com nytimes.com nl.mail.washingtonpost.com
+#     fastweb.com mail.instagram.com glassdoor.com notifications.monster.com
+#     motorola-mail.com emails.cinemark.com ezcontacts.com statuspage.io
+#     email.informeddelivery.usps.com
+```
+
+**Attribution only, no task in any mode**: every rule above has no
+external_system, and `opsctl capture-rules list` prints exactly
+`-> attribution only (no external_system, so no task)` for each. That is what
+makes them safe to seed while capture is still in shadow — their live behaviour
+is identical to their shadow behaviour, and the engine cannot create a task on
+them, live or not.
+
+**Measured before/after (2026-08-31).** Residue before the rules: **14,743**
+unmatched messages. After seeding and one `--since 0 --all` shadow pass:
+**8,703** — 6,040 messages (41%) claimed to `bulk`. Every one of the 24 rules
+matched (linkedin.com 707 down to ezcontacts.com 101); a rule that had matched
+zero messages would have been disabled and recorded here, not left in place —
+the go-live checklist's own rule, applied to this ticket's additions. Tasks
+and external_refs counts were unchanged by the pass (20 / 0).
+
+**The refusal list** — domains deliberately NOT claimed, with reasons:
+
+- `github.com` (455) — unrouted WORK, not noise: predominantly
+  Foundry-Underwriting CI failures plus OSS threads. A "noise" rule over them
+  would take work out of triage's inbox and give it nothing.
+- `upwork.com` (106) — platform mail including "Invitation to Interview";
+  actionable work.
+- `sspataro.com`... claimed, but only after `--domain` showed it is
+  `test@sspataro.com` machine notifications — the investigation, not the
+  count, is what earned the rule.
+- `google.com` (239) — mixed: security alerts (the most actionable mail in
+  the corpus) and marketing under one domain.
+- `browardschools.com` (293), `rocketmoney.com` (174) — school deadlines and
+  financial notices; exactly what the classifier exists to catch.
+- `facebookmail.com` (156) — FAILED the gate: its 20-sample contained a
+  new-device login security alert. One actionable in twenty refuses the
+  domain.
+
 ## Go-live checklist
 
 - [ ] Rules seeded and `opsctl capture-rules list` shows them enabled.
