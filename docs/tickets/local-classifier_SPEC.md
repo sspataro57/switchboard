@@ -338,7 +338,7 @@ Numbered and testable. 1-8 are unit tests with `httptest` — never a live model
 18. Prompt and schema live in `internal/classify/prompt.go`, with a
     `PromptVersion` constant recorded in every `ai_runs.input` (triage's
     convention). Output contract, deliberately small:
-    `{actionable: bool, kind: enum(payment_due|deadline|appointment|action_required|informational), title: string, reason: string}`.
+    `{actionable: bool, kind: enum(payment_due|deadline|appointment|action_required|informational), title: string, reason: string}`. *Amended 2026-08-31 (SWT-25): the contract is now FIVE fields — `link_index` (integer|null), a 1-based index into `normalized_messages.links`, never a URL; see docs/tickets/link-preservation_SPEC.md.*
     **No confidence field anywhere**, and a test asserts the schema contains no
     `confidence` key, with the reason in its failure message: qwen3:8b returns
     exactly 0.95 on everything it flags — 27 true positives and 17 false
@@ -358,7 +358,7 @@ Numbered and testable. 1-8 are unit tests with `httptest` — never a live model
     on a sender string: per-sender prompts are rules in a costume — unbounded
     maintenance, untestable in aggregate, unattributable when they misfire.
 19b. **DESCOPED to SWT-25 on 2026-08-29, after measuring where links actually
-    live.** The requirement stands; it cannot be met from inside this ticket.
+    live. DELIVERED by SWT-25 (2026-08-31).** The requirement stands; it cannot be met from inside this ticket.
 
     The plan was: extract anchors deterministically, offer the model a numbered
     closed set of anchor TEXTS, have it return `link_index`, and resolve the

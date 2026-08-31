@@ -12,7 +12,13 @@ const PromptVersion = "classify-v1"
 // either lane.
 const SchemaName = "classify_verdict"
 
-// VerdictSchema is the output contract: four fields, nothing else.
+// VerdictSchema is the output contract: five fields, nothing else.
+//
+// `link_index` (SWT-25) is an INDEX into normalized_messages.links — 1-based,
+// integer or null — and never a URL. The application resolves it via
+// ResolveLink; the model is never given a string field to author a link into,
+// which is what makes "the model never authors a URL" structural rather than a
+// matter of prompt discipline.
 //
 // NOTE WHAT IS ABSENT: there is no `confidence` field, and that is deliberate
 // rather than an oversight. Measured on the real corpus, qwen3:8b returns
@@ -33,7 +39,7 @@ const SchemaName = "classify_verdict"
 var VerdictSchema = json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
-  "required": ["actionable", "kind", "title", "reason"],
+  "required": ["actionable", "kind", "title", "reason", "link_index"],
   "properties": {
     "actionable": {"type": "boolean"},
     "kind": {
@@ -41,7 +47,8 @@ var VerdictSchema = json.RawMessage(`{
       "enum": ["payment_due", "deadline", "appointment", "action_required", "informational"]
     },
     "title": {"type": "string"},
-    "reason": {"type": "string"}
+    "reason": {"type": "string"},
+    "link_index": {"type": ["integer", "null"]}
   }
 }`)
 
@@ -93,9 +100,16 @@ read. Say so plainly in the title — for example "HOA violation notice — open
 attachment" — and never guess an amount or a date that is not in the text you
 were given.
 
+When a numbered list of links is shown after the message, it is the complete
+set of links available. Answer link_index with the number of the one link a
+person would open to act on this message. Answer null when none of them is that
+link, or when no list is shown at all — null is a normal answer, not a failure.
+Never invent a number that is not in the list.
+
 Fields:
   actionable  true or false, as above.
   kind        payment_due | deadline | appointment | action_required | informational
   title       one short line a human can act on, naming the amount and date ONLY
               if they appear in the message.
-  reason      one sentence, citing the words that decided it.`
+  reason      one sentence, citing the words that decided it.
+  link_index  the number of the chosen link from the list, or null.`

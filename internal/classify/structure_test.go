@@ -5,7 +5,14 @@ package classify_test
 // collision scan), 13 (the honesty label), 18 (NO confidence field, and the
 // output contract), 19 (one prompt for all senders), 20 (the closing note both
 // reports must carry), 21/24 (the labelled set's shape), 25 and 26 (the two
-// runbooks), and the data-model claim that this ticket adds no migration.
+// runbooks), and the data-model guard on migrations.
+//
+// EXTENDED BY SWT-25 (link-preservation), which changes several of the facts
+// SWT-22 pinned here and therefore had to edit this file rather than add a
+// second one beside it (criterion 26): the output contract is FIVE fields now,
+// the migration guard pins 0017 instead of asserting that no migration exists,
+// and three new scans cover the URL-free schema (criterion 19), the no-fetch
+// rule (24) and the docs (25, 27, 28).
 //
 // ZERO I/O beyond reading this repo's own source, docs and eval file. Same shape
 // as internal/provider/structure_test.go and internal/capture/rules_structure_test.go,
@@ -26,7 +33,9 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -180,14 +189,22 @@ func TestSchema_HasNoConfidenceFieldAnywhere(t *testing.T) {
 // "payment due", "violation_to_cure" and "statement-availabl…" in a single run —
 // a column nothing can GROUP BY, which is this repo's recurring landmine in yet
 // another costume. `format` enforces the enum, so the schema is where it lives.
+//
+// AMENDED BY SWT-25 (link-preservation), criteria 18 and 26. The contract is now
+// FIVE fields: {actionable, kind, title, reason, link_index}. `link_index` is
+// `{"type": ["integer","null"]}` — an INDEX into normalized_messages.links, 1-based,
+// never a URL. This test is updated in the SAME change as prompt.go rather than
+// left contradicting it, because "a comment that states the opposite of its code"
+// is a defect this repo has shipped twice (SWT-21) and criterion 26 exists to
+// stop a third.
 func TestSchema_MatchesTheOutputContract(t *testing.T) {
 	var schema struct {
 		Type                 string   `json:"type"`
 		AdditionalProperties *bool    `json:"additionalProperties"`
 		Required             []string `json:"required"`
 		Properties           map[string]struct {
-			Type string   `json:"type"`
-			Enum []string `json:"enum"`
+			Type json.RawMessage `json:"type"`
+			Enum []string        `json:"enum"`
 		} `json:"properties"`
 	}
 	if err := json.Unmarshal(classify.VerdictSchema, &schema); err != nil {
@@ -200,21 +217,24 @@ func TestSchema_MatchesTheOutputContract(t *testing.T) {
 		t.Errorf("schema does not set additionalProperties:false; a model that invents a field would have " +
 			"it stored unchallenged")
 	}
-	want := map[string]string{
-		"actionable": "boolean",
-		"kind":       "string",
-		"title":      "string",
-		"reason":     "string",
+	want := map[string][]string{
+		"actionable": {"boolean"},
+		"kind":       {"string"},
+		"title":      {"string"},
+		"reason":     {"string"},
+		"link_index": {"integer", "null"},
 	}
-	for name, typ := range want {
+	for name, types := range want {
 		p, ok := schema.Properties[name]
 		if !ok {
-			t.Errorf("schema has no %q property; criterion 18's contract is "+
-				"{actionable, kind, title, reason} and nothing else", name)
+			t.Errorf("schema has no %q property; the contract is {actionable, kind, title, reason, "+
+				"link_index} and nothing else. SWT-25 criterion 18 made it FIVE fields: the model answers "+
+				"with the NUMBER of the link a person would open, and the application resolves that number "+
+				"to a URL", name)
 			continue
 		}
-		if p.Type != typ {
-			t.Errorf("schema property %q has type %q, want %q", name, p.Type, typ)
+		if got := csTypeSet(t, name, p.Type); !reflect.DeepEqual(got, types) {
+			t.Errorf("schema property %q has type %v, want %v", name, got, types)
 		}
 	}
 	for name := range schema.Properties {
@@ -249,6 +269,105 @@ func TestSchema_MatchesTheOutputContract(t *testing.T) {
 	}
 }
 
+// csTypeSet reads a JSON-Schema `type`, which is legally either a string or an
+// array of strings, and returns it sorted so a union can be compared.
+func csTypeSet(t *testing.T, prop string, raw json.RawMessage) []string {
+	t.Helper()
+	var one string
+	if err := json.Unmarshal(raw, &one); err == nil {
+		return []string{one}
+	}
+	var many []string
+	if err := json.Unmarshal(raw, &many); err != nil {
+		t.Fatalf("schema property %q has a `type` that is neither a string nor an array: %s", prop, raw)
+	}
+	sort.Strings(many)
+	return many
+}
+
+// ---- SWT-25 criterion 19: the model CANNOT emit a URL -------------------------
+
+// The structural half of this ticket, and the reason the whole design returns an
+// index. A string field named `link` would put the guarantee back into prompt
+// discipline, where it does not survive a model update — and a URL a model wrote
+// is a URL nothing verified, stored in ai_extractions and printed in a report a
+// human acts on.
+func TestSchema_HasNoURLTypedField(t *testing.T) {
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(classify.VerdictSchema, &schema); err != nil {
+		t.Fatalf("classify.VerdictSchema is not valid JSON: %v", err)
+	}
+	if len(schema.Properties) == 0 {
+		t.Fatalf("the schema declares no properties; a scan with nothing to scan proves nothing")
+	}
+	urlish := regexp.MustCompile(`(?i)(url|href|link_url|uri)`)
+
+	// link_index is the ONLY new property, and its declared type contains only
+	// integer and null. Asserted here as well as in the contract test above so
+	// this test fails on a MISSING link_index too: a test that can only ever go
+	// red when someone adds a bad field is a test that passes today for the
+	// wrong reason.
+	li, ok := schema.Properties["link_index"]
+	if !ok {
+		t.Errorf("the schema has no `link_index` property. This is the field that makes 'the model never " +
+			"authors a URL' STRUCTURAL rather than a matter of prompt discipline: the numbered list offers " +
+			"TEXTS, the model answers with a position, and the application resolves it")
+	} else if got := csTypeSet(t, "link_index", liType(t, li)); !reflect.DeepEqual(got, []string{"integer", "null"}) {
+		t.Errorf("link_index type = %v, want [integer null] exactly. `null` is not optional: it is how the "+
+			"model says 'none of these', which is ORDINARY output — and a schema-constrained decoder needs "+
+			"the union to be able to emit it at all", got)
+	}
+
+	for name := range schema.Properties {
+		if urlish.MatchString(name) {
+			t.Errorf("the output schema declares a property %q. THE MODEL MUST NEVER AUTHOR A URL: the "+
+				"numbered candidate list is offered as TEXTS, the model returns link_index, and the "+
+				"application resolves the index against normalized_messages.links. Returning an INDEX is "+
+				"what makes that structural — a string field here makes it a matter of prompt discipline, "+
+				"which does not survive a model update", name)
+		}
+	}
+	// And the whole schema document, so a url can not arrive as an enum value, a
+	// `format: uri`, or a nested property either.
+	var whole any
+	if err := json.Unmarshal(classify.VerdictSchema, &whole); err != nil {
+		t.Fatalf("classify.VerdictSchema is not valid JSON: %v", err)
+	}
+	var walk func(node any, path string)
+	walk = func(node any, path string) {
+		switch v := node.(type) {
+		case map[string]any:
+			for k, child := range v {
+				if strings.EqualFold(k, "format") {
+					if s, ok := child.(string); ok && urlish.MatchString(s) {
+						t.Errorf("the schema declares %s: %q — a URI-typed value is still a URL the model authored", path, s)
+					}
+				}
+				walk(child, path+"."+k)
+			}
+		case []any:
+			for i, child := range v {
+				walk(child, path+"["+strconv.Itoa(i)+"]")
+			}
+		}
+	}
+	walk(whole, "$")
+}
+
+// liType pulls the `type` member out of one raw schema property.
+func liType(t *testing.T, prop json.RawMessage) json.RawMessage {
+	t.Helper()
+	var obj struct {
+		Type json.RawMessage `json:"type"`
+	}
+	if err := json.Unmarshal(prop, &obj); err != nil || len(obj.Type) == 0 {
+		t.Fatalf("schema property link_index declares no `type`: %s", prop)
+	}
+	return obj.Type
+}
+
 // ---- criterion 19: the prompt, and ONE of it ---------------------------------
 
 func TestPrompt_StatesTheObjectiveAndTheAttachmentCeiling(t *testing.T) {
@@ -279,6 +398,33 @@ func TestPrompt_StatesTheObjectiveAndTheAttachmentCeiling(t *testing.T) {
 		t.Errorf("the prompt does not name the near-miss class (statement-available / balance / " +
 			"card-was-used as informational). Dropping that one clause was measured to flip the most common " +
 			"message shape in the corpus into a false positive")
+	}
+
+	// SWT-25 criterion 23: ONE short paragraph about the numbered list. The
+	// attachment clause above stays EXACTLY as it is — "defer to the attachment"
+	// and "defer to the portal" are different shapes, and only the second one is
+	// answerable now.
+	numbered := regexp.MustCompile(`number|numbered|list`)
+	if !numbered.MatchString(lower) {
+		t.Errorf("the prompt never mentions the numbered list of links (criterion 23). The list is the " +
+			"COMPLETE set of links available, and the model has to be told to answer with the NUMBER of the " +
+			"one a person would open — not with a URL, which it must never author")
+	}
+	if !strings.Contains(lower, "null") {
+		t.Errorf("the prompt never mentions `null` (criterion 23). link_index: null is ORDINARY output: it " +
+			"is the answer when none of the offered links is the one to act on AND the answer when no list " +
+			"is shown at all — which is the common case, because the two HOA First Notices have no usable " +
+			"link, only a tracking pixel. A model that is not told this invents a number")
+	}
+	invent := regexp.MustCompile(`never invent|do not invent|don't invent|never make up`)
+	if !invent.MatchString(lower) {
+		t.Errorf("the prompt does not forbid inventing a number (criterion 23). Out-of-range is handled " +
+			"structurally by ResolveLink — rejected, recorded, never an error — but the prompt still has to " +
+			"ask for an index that exists")
+	}
+	if strings.Contains(lower, "http://") || strings.Contains(lower, "https://") {
+		t.Errorf("the SystemPrompt contains a URL. The prompt offers anchor TEXTS ONLY (criterion 17); " +
+			"showing the model a URL is showing it the shape of the thing it must never author")
 	}
 }
 
@@ -583,14 +729,47 @@ func TestRunbook_ProviderLocalityUpdatedForSWT22(t *testing.T) {
 	}
 }
 
-// ---- data model: this ticket adds no migration --------------------------------
+// ---- data model: SWT-25 adds exactly ONE migration, 0017 ----------------------
 
-func TestNoMigrationWasAdded(t *testing.T) {
+// REPLACES SWT-22's TestNoMigrationWasAdded, which asserted the highest
+// migration stays 0016. That guard was CORRECT for SWT-22 and is wrong for
+// SWT-25, and criterion 26 says what to do about it: rewrite it to the new
+// truth, do NOT delete it. A guard that becomes wrong and gets deleted is how
+// the next ticket adds a migration nobody notices — and the migrate runner keys
+// on schema_migrations.version with NO checksum, so a stray or edited file is
+// skipped silently and the schema diverges with no error anywhere.
+func TestMigration0017_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 	// Control first: 0016 must be there, or a glob returning nothing below would
 	// prove only that the directory moved.
 	if _, err := os.Stat(filepath.Join("..", "..", "migrations", "0016_provider_locality.sql")); err != nil {
 		t.Fatalf("migrations/0016_provider_locality.sql is missing: %v", err)
 	}
+
+	const rel = "migrations/0017_normalized_message_links.sql"
+	if _, err := os.Stat(filepath.Join("..", "..", rel)); err != nil {
+		t.Fatalf("%s does not exist: %v. SWT-25 criterion 12 adds exactly one forward-only migration, and "+
+			"0017 is its number (0016_provider_locality.sql is the current highest). Merging a migration is "+
+			"not applying it — check `SELECT max(version) FROM schema_migrations` before deploying", rel, err)
+	}
+	sql := strings.ToLower(csRepoFile(t, rel))
+	if !regexp.MustCompile(`(?s)alter\s+table\s+normalized_messages.{0,120}add\s+column\s+links`).MatchString(sql) {
+		t.Errorf("%s does not ALTER TABLE normalized_messages ADD COLUMN links. The links belong on the "+
+			"canonical normalized_messages row (invariant 2: no new table, no new vocabulary) — "+
+			"normalized_events.attendees JSONB NOT NULL DEFAULT '[]' is the precedent", rel)
+	}
+	if !strings.Contains(sql, "jsonb") || !strings.Contains(sql, "default '[]'") {
+		t.Errorf("%s does not declare the column JSONB NOT NULL DEFAULT '[]'::jsonb. The default is what "+
+			"keeps the upwork / jira / slackweb inserts — which name no links column — working", rel)
+	}
+	if !strings.Contains(sql, "jsonb_typeof(links) = 'array'") {
+		t.Errorf("%s has no CHECK (jsonb_typeof(links) = 'array'). The model answers with a 1-based "+
+			"POSITION into this value; something that is not an array has no positions", rel)
+	}
+	if strings.Contains(sql, "drop column") || regexp.MustCompile(`(?s)--\s*down`).MatchString(sql) {
+		t.Errorf("%s looks like it carries a down migration. Migrations here are FORWARD-ONLY, no exceptions", rel)
+	}
+
+	// And nothing ABOVE 0017: one new file, exactly.
 	entries, err := os.ReadDir(filepath.Join("..", "..", "migrations"))
 	if err != nil {
 		t.Fatalf("read migrations/: %v", err)
@@ -604,15 +783,216 @@ func TestNoMigrationWasAdded(t *testing.T) {
 		}
 		seenAny = true
 		n, _ := strconv.Atoi(m[1])
-		if n > 16 {
-			t.Errorf("migrations/%s exists. The SPEC's data-model section is \"None\": the highest applied "+
-				"migration stays 0016, and `go run ./cmd/tools/migrate` must be a no-op. Verdicts are rows in "+
-				"the existing ai_runs (worker_type='classify') + ai_extractions, discriminated exactly as "+
-				"plan_import's are — a classified_messages or personal_alerts table would be invariant 2's "+
-				"violation", e.Name())
+		if n > 17 {
+			t.Errorf("migrations/%s exists. SWT-25's data-model section is ONE migration: 0017. `ls "+
+				"migrations/` must show exactly one new file against main", e.Name())
 		}
 	}
 	if !seenAny {
 		t.Fatalf("no numbered migrations found; the scan has nothing to scan")
+	}
+}
+
+// ---- SWT-25 criterion 24: nothing in internal/classify fetches anything -------
+
+// The other half of criterion 1's scan. internal/classify has no HTTP import
+// today and must not grow one: the moment this code makes a request it becomes a
+// beacon-follower, and the whole reason `img src` is never extracted is that we
+// do not do that. Invariant 4 in its sharper reading — a URL in the corpus is
+// never dereferenced, so no outbound request exists to need a delivery row.
+//
+// It also re-states invariant 1's concrete demand: NOTHING in internal/classify
+// may read raw_source_items or decode MIME. The links arrive in a COLUMN, filled
+// by the normalizer; a second decoder beside the normalizer is the side door
+// invariant 1 exists to prevent, and SWT-22 rejected it explicitly.
+func TestClassifyPackage_FetchesNothingAndDecodesNoMIME(t *testing.T) {
+	banned := []struct{ token, why string }{
+		{`"net/http"`, "criterion 24: nothing fetches a link, anywhere, ever — no HEAD to expand a tracking redirect, no title fetch, no screenshot"},
+		{`"net/url"`, "the application resolves an INDEX to a stored URL; it never parses, rewrites or unwraps one"},
+		{`"mime"`, "invariant 1: nothing in internal/classify decodes MIME — that is the normalizer's job and a second decoder is the side door raw-first exists to close"},
+		{"raw_source_items", "invariant 1: the classifier reads normalized rows and the links COLUMN, never raw"},
+	}
+	for _, rel := range csSources(t, "internal/classify") {
+		code := csGoCode(t, rel)
+		for _, b := range banned {
+			if strings.Contains(code, b.token) {
+				t.Errorf("%s mentions %q in code (comments stripped) — %s", rel, b.token, b.why)
+			}
+		}
+	}
+}
+
+// ---- SWT-25 criterion 26: the five statements this change makes false ---------
+
+// "A comment that states the opposite of its code" is a defect this repo has
+// shipped twice (SWT-21, in a boundary file, where the comment is what the next
+// reader trusts). Criterion 26 names five statements that become false the
+// moment link_index exists and requires all of them fixed in the SAME change.
+// Three are mechanical and this test owns them; the fourth is
+// TestSchema_MatchesTheOutputContract above (already updated), and the fifth is
+// TestMigration0017_IsTheOnlyOneThisTicketAdds.
+func TestContradictions_AreFixedInTheSameChange(t *testing.T) {
+	t.Run("prompt.go no longer says four fields", func(t *testing.T) {
+		src := csRepoFile(t, "internal/classify/prompt.go")
+		lower := strings.ToLower(src)
+		four := regexp.MustCompile(`four fields`)
+		if four.MatchString(lower) {
+			t.Errorf("internal/classify/prompt.go still says \"four fields, nothing else\". The contract is " +
+				"FIVE now: {actionable, kind, title, reason, link_index}. Leaving the sentence makes the " +
+				"file's own documentation contradict the schema three lines below it")
+		}
+		if !strings.Contains(lower, "five fields") {
+			t.Errorf("internal/classify/prompt.go does not say the contract is five fields. Criterion 26 " +
+				"asks for the correction, not the deletion: the sentence is what tells the next reader the " +
+				"schema is deliberately small")
+		}
+		if !strings.Contains(lower, "link_index") || !regexp.MustCompile(`index into|never a url|not a url`).MatchString(lower) {
+			t.Errorf("internal/classify/prompt.go does not note that link_index is an INDEX into " +
+				"normalized_messages.links and never a URL. That one line is the whole architectural claim " +
+				"of this ticket, sitting where someone editing the schema will read it")
+		}
+	})
+
+	t.Run("the SWT-22 SPEC is amended in place", func(t *testing.T) {
+		const rel = "docs/tickets/local-classifier_SPEC.md"
+		spec := csRepoFile(t, rel)
+		if !strings.Contains(spec, "SWT-25") {
+			t.Errorf("%s never mentions SWT-25. Criterion 26: criterion 18's four-field statement is amended "+
+				"IN PLACE with a dated pointer, and 19b's \"DESCOPED to SWT-25\" gains \"DELIVERED by "+
+				"SWT-25 (date)\" — the rest of 19b stays, because it is the record of WHY and it is still "+
+				"true", rel)
+		}
+		if !regexp.MustCompile(`(?i)delivered by swt-25`).MatchString(spec) {
+			t.Errorf("%s's criterion 19b does not record that SWT-25 DELIVERED it. A descope note with no "+
+				"closing line is a ticket that reads as still open forever", rel)
+		}
+		// The four-field sentence in criterion 18 must carry its correction next
+		// to it, not be left standing alone.
+		c18 := regexp.MustCompile(`(?s)reason: string\}`)
+		if c18.MatchString(spec) && !regexp.MustCompile(`(?s)reason: string\}.{0,600}SWT-25`).MatchString(spec) {
+			t.Errorf("%s still states the four-field output contract with no pointer to SWT-25 beside it. "+
+				"The two statements must not coexist unqualified: whichever a reader finds first is the one "+
+				"they will believe", rel)
+		}
+	})
+}
+
+// ---- SWT-25 criterion 27: the runbook's Links section --------------------------
+
+// A test on prose, and it earns it the same way TestRunbook_LocalClassifier does.
+// Every rule here is one a future session would "clean up": zero candidates looks
+// like a bug, `img src` refusal looks like an oversight, and the backfill command
+// is the only thing standing between "links work" and "links work for mail that
+// arrives from now on".
+func TestRunbook_DocumentsLinkPreservation(t *testing.T) {
+	doc := strings.ToLower(csRepoFile(t, "docs/runbooks/local-classifier.md"))
+
+	if !strings.Contains(doc, "link_index") {
+		t.Errorf("the runbook never mentions link_index. Criterion 27: the Links section explains why the " +
+			"model returns an INDEX and never a URL — the one thing a reader must not 'improve' into a " +
+			"string field")
+	}
+	if !strings.Contains(doc, "img") {
+		t.Errorf("the runbook does not say that `img src` is never extracted and never followed. Name the " +
+			"/wf/open SendGrid pixel: without the example the rule reads as fussiness, and the next person " +
+			"widening the extractor 'to catch the Pines link' adds a tracking beacon to a task")
+	}
+	if !strings.Contains(doc, "normalize-only") {
+		t.Errorf("the runbook does not give the backfill command (`--normalize-only --all`). The historical " +
+			"corpus is the point: without the backfill only mail that arrives after the deploy has links, " +
+			"and the eval re-run measures the wrong thing")
+	}
+	idempotent := regexp.MustCompile(`idempotent|raw_source_item_id|upsert`)
+	if !idempotent.MatchString(doc) {
+		t.Errorf("the runbook does not say the backfill is IDEMPOTENT (the upsert keys on " +
+			"raw_source_item_id, so message ids — and therefore capture_decisions, ai_extractions and the " +
+			"eval labels — survive it). An operator who does not know that will not run it")
+	}
+	null := regexp.MustCompile(`null[^.\n]{0,80}(ordinary|normal|common|expected)|` +
+		`(ordinary|normal|common|expected)[^.\n]{0,80}null`)
+	if !null.MatchString(doc) {
+		t.Errorf("the runbook does not say that link_index: null is ORDINARY. The two HOA First Notices " +
+			"have no usable link at all — only the tracking pixel — and a reader who reads null as a " +
+			"failure will go looking for a broken extractor")
+	}
+	if !regexp.MustCompile(`links\.go|drop.?list`).MatchString(doc) {
+		t.Errorf("the runbook does not say how to add a drop-list entry (edit the list in links.go, re-run " +
+			"--normalize-only --all, re-run the eval). The lists live in Go rather than a table precisely " +
+			"because that loop is the workflow")
+	}
+	if !regexp.MustCompile(`body_text|normalize time`).MatchString(doc) {
+		t.Errorf("the runbook does not say where links come from (normalize time, raw -> the links column) " +
+			"and why NOT from body_text. body_text carries no URL at all in 837 of 1,613 personal messages: " +
+			"that measurement is the reason this ticket exists and it belongs in the runbook")
+	}
+}
+
+// ---- SWT-25 criterion 28: the institutional-knowledge entry --------------------
+
+// This file is what the next session reads instead of re-deriving the landmines.
+// The entry is short by design; the test pins the four facts that cost something
+// to rediscover.
+func TestInstitutionalKnowledge_RecordsLinkPreservation(t *testing.T) {
+	doc := csRepoFile(t, ".claude/INSTITUTIONAL_KNOWLEDGE.md")
+	lower := strings.ToLower(doc)
+
+	if !strings.Contains(doc, "SWT-25") {
+		t.Fatalf(".claude/INSTITUTIONAL_KNOWLEDGE.md has no SWT-25 entry. Criterion 28 asks for a short " +
+			"'Link preservation (SWT-25)' section: agents read this file at session start instead of " +
+			"re-deriving what it holds")
+	}
+	for _, want := range []struct{ token, why string }{
+		{"links", "the column, on normalized_messages"},
+		{"position", "the array POSITION is the identity — nothing may reorder it after write"},
+		{"link_index", "the index contract: the model answers with a number, the application resolves it"},
+		{"img", "the img-src refusal and why (the /wf/open tracking pixel)"},
+		{"normalize-only", "the backfill command, and that it is idempotent because the upsert keys on raw_source_item_id"},
+		{"body_text", "the standing rule: body_text must never change without checking confirmDeliveryByBodyPrefix"},
+	} {
+		if !strings.Contains(lower, strings.ToLower(want.token)) {
+			t.Errorf("the SWT-25 entry does not mention %q — %s", want.token, want.why)
+		}
+	}
+}
+
+// ---- SWT-25 criterion 25: the eval re-run is recorded as a SECOND ROW ----------
+
+// The eval RUN is a manual verification step (a live local model over 280
+// labels); what a test can hold is the RECORD. Criterion 25 asks for a second
+// row in the runbook's table beside the 2026-08-30 baseline of 0.83 / 0.58, and
+// a note saying what happened to the two content-behind-a-link false negatives
+// the runbook already names — 27871 and 84710 — INCLUDING if they did not move.
+//
+// "A drop in recall is a result, not a failure to hide": the candidate list is a
+// prompt change, and prompt changes have measured costs in this corpus.
+func TestRunbook_RecordsTheSWT25EvalRerun(t *testing.T) {
+	doc := csRepoFile(t, "docs/runbooks/local-classifier.md")
+
+	// Control: the baseline row must still be there. If it is gone, the "second
+	// row" assertion below would be satisfied by a rewritten table, which is
+	// exactly the thing that makes a before/after unreadable.
+	if !strings.Contains(doc, "2026-08-30") {
+		t.Fatalf("the 2026-08-30 baseline row (0.83 / 0.58) is missing from the runbook table. The new row " +
+			"goes ALONGSIDE it — the point of the table is the delta, and a table with one row measures " +
+			"nothing")
+	}
+	rows := regexp.MustCompile(`(?m)^\|\s*20\d\d-\d\d-\d\d\s*\|`).FindAllString(doc, -1)
+	if len(rows) < 2 {
+		t.Errorf("the runbook's score table has %d dated row(s), want at least 2: criterion 25 re-runs the "+
+			"SWT-22 eval UNCHANGED — same 280 labels, same file, same command — and records n / recall / "+
+			"precision / median latency / date as a second row", len(rows))
+	}
+	for _, id := range []string{"27871", "84710"} {
+		if !strings.Contains(doc, id) {
+			t.Errorf("the runbook does not mention message %s. Criterion 25: the note under the new row "+
+				"names what moved for the two content-behind-a-link false negatives — a doctor's-office "+
+				"portal message and a portal notice built from an unfilled template — and says plainly if "+
+				"they did NOT move. They are the two cases this ticket was supposed to help", id)
+		}
+	}
+	if !regexp.MustCompile(`(?i)drift`).MatchString(doc) {
+		t.Errorf("the runbook does not mention label drift for the re-run. Expected drift exclusions are " +
+			"ZERO, because re-normalization UPSERTS (ids and subjects are stable) — so any drift the " +
+			"harness prints is a finding to investigate, not a nuisance to re-hash")
 	}
 }

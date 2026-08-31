@@ -128,6 +128,42 @@ without opening psql.
 An all-skipped pass when the local box is down is expected. Falling back to a
 hosted provider is never the fix.
 
+## Links
+
+Where links come from: the google NORMALIZER extracts anchors from the raw
+message's text/html part at normalize time (`internal/connector/google/links.go`)
+into the `normalized_messages.links` column — NOT from `body_text`, which
+carries no URL at all in 837 of 1,613 personal messages because body selection
+keeps anchor text and drops hrefs. The array position is the identity.
+
+The model returns `link_index` — a 1-based number into that array, or null —
+and NEVER a URL. Ask a model for a URL and it invents a plausible one; a
+hallucinated portal link on a task about a fine is worse than no link at all.
+The index makes that structural: `ResolveLink` is the one conversion, an
+out-of-range index is recorded as rejected, and there is no string field to
+author a link into.
+
+**`link_index: null` is ORDINARY output, not a failure.** The two HOA First
+Notices have no usable link at all — their only URL is SendGrid's `/wf/open`
+open-tracking pixel inside an `<img>`. `img src` is never extracted and never
+followed: widening the extractor "to catch the Pines link" would put a tracking
+beacon on a task. The common case is zero candidates; the median message has
+two.
+
+Backfill (existing rows get links by re-normalizing from raw):
+
+```bash
+DATABASE_URL=... go run ./cmd/connectors/google --normalize-only --all
+```
+
+Idempotent: the upsert keys on `raw_source_item_id`, so message ids — and with
+them `capture_decisions`, `ai_extractions` and the eval labels — survive a full
+corpus rebuild. `body_text` comes out byte-identical (the golden test pins it;
+it feeds `confirmDeliveryByBodyPrefix` and google has no reconciler).
+
+To add a drop-list entry: edit the list in `links.go`, re-run
+`--normalize-only --all`, re-run the eval and record the new row above.
+
 ## The labelled set
 
 `docs/evals/personal-actionability.jsonl` — the only thing anyone is permitted to
@@ -140,6 +176,21 @@ file is safe to commit while the mail never leaves the machine.
 | date       | n   | actionable | recall | precision | median latency | model    |
 |------------|-----|-----------:|-------:|----------:|---------------:|----------|
 | 2026-08-30 | 280 | 35         | 0.83   | 0.58      | 6.3 s          | qwen3:8b |
+| 2026-08-31 | 280 | 35         | 0.94   | 0.50      | 7.2 s          | qwen3:8b |
+
+The 2026-08-31 row is the SWT-25 re-run: same 280 labels, same file, same
+command, after link candidates entered the prompt and the verdict gained
+`link_index`. Label drift exclusions: zero, as expected — the backfill upserts,
+so ids and subjects are stable. False negatives went 6 → 2. What moved:
+25541 and 27641 (appointment confirmations), 26018 (statement with a minimum
+payment) and 26919 (the empty view-your-message shell) are all caught now.
+What did NOT move, said plainly: 27871 (the doctor's-office portal message) and
+84710 (the unfilled-template portal notice) are still missed — each now carries
+its portal link and the model still reads them as informational, so the
+candidate list alone does not fix content-behind-a-login; that is prompt or
+second-pass territory, not extraction. Precision paid for the recall
+(0.58 → 0.50, 33 of 66 flagged) and the median rose ~1 s with the larger
+prompt — both acceptable trades while recall is the objective.
 
 The 280 ids are hand-checked, drawn from the `personal` population (1,624
 messages at draw time, 2026-08-29; the population grows daily): every Pines

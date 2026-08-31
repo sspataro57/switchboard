@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sspataro57/switchboard/internal/provider"
@@ -91,6 +92,12 @@ type PendingMessage struct {
 	ProjectSlug      string
 	ProjectLocalOnly bool
 	Attribution      provider.AttributionState
+	// Links is the candidate list the normalizer extracted from the message's
+	// HTML part (SWT-25), scanned from normalized_messages.links. POSITION IS
+	// THE IDENTITY: the prompt shows the TEXTS by number, the model answers
+	// with an index, and ResolveLink turns it back into one of THESE values —
+	// never a string the model produced.
+	Links []Link
 	// Neighbours are INBOUND thread neighbours only. Outbound messages can never
 	// carry a capture decision (the engine filters direction='inbound', which is
 	// invariant 5), so folding one would read "no decision" as "unclassified"
@@ -129,21 +136,31 @@ const (
 	attrProject   = provider.AttrProject
 )
 
-// Stats is the pass summary.
+// Stats is the pass summary. Linked and LinkRejected (SWT-25) count the two
+// link states an operator acts on: rejected is the one that says the model is
+// answering nonsense, and folded into "not linked" it would be invisible —
+// link_index:null is so common nobody would notice.
 type Stats struct {
-	Processed int `json:"processed"`
-	Flagged   int `json:"flagged"`
-	Skipped   int `json:"skipped"`
-	Errors    int `json:"errors"`
+	Processed    int `json:"processed"`
+	Flagged      int `json:"flagged"`
+	Skipped      int `json:"skipped"`
+	Errors       int `json:"errors"`
+	Linked       int `json:"linked"`
+	LinkRejected int `json:"link_rejected"`
 }
 
 // verdict is the model's structured answer. It mirrors VerdictSchema, and
 // carries no confidence field for the reason prompt.go states.
+//
+// LinkIndex is *int on purpose: a JSON null and an absent field both decode to
+// nil, and ResolveLink treats them identically (not_chosen / none_offered) —
+// one rejection path, no second contract invented at decode time.
 type verdict struct {
 	Actionable bool   `json:"actionable"`
 	Kind       string `json:"kind"`
 	Title      string `json:"title"`
 	Reason     string `json:"reason"`
+	LinkIndex  *int   `json:"link_index"`
 }
 
 // Run classifies one pass of the inbox.
@@ -279,7 +296,7 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 		// wanted them would have to join back to normalized_messages — and the
 		// verdict would then describe a message that may since have been
 		// re-normalised. What was classified is what should be shown.
-		fields, _ := json.Marshal(map[string]any{
+		fields := map[string]any{
 			"actionable":            v.Actionable,
 			"kind":                  v.Kind,
 			"title":                 v.Title,
@@ -289,8 +306,33 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 			"project_id":            m.ProjectID,
 			"project_slug":          m.ProjectSlug,
 			"normalized_message_id": m.MessageID,
-		})
-		if err := store.RecordExtraction(ctx, runID, m.RawSourceItemID, fields); err != nil {
+			// Recorded on EVERY verdict (SWT-25 criterion 21): without the
+			// count, "no candidates" and "the model declined" are the same row
+			// and the report cannot tell an operator which.
+			"link_candidates": len(m.Links),
+		}
+		// The four link states, never collapsed. link_url is a value the
+		// APPLICATION resolved against the message's own stored candidates —
+		// never a string the model produced.
+		chosen, linkStatus := ResolveLink(m.Links, v.LinkIndex)
+		switch linkStatus {
+		case LinkResolved:
+			fields["link_index"] = *v.LinkIndex
+			fields["link_url"] = chosen.URL
+			fields["link_text"] = chosen.Text
+			stats.Linked++
+		case LinkNotChosen:
+			// An explicit null: "the model declined" is a recorded answer,
+			// not an absent one.
+			fields["link_index"] = nil
+		case LinkRejected:
+			// Kept VERBATIM so a pattern of nonsense is visible in the
+			// report. Never an error, never a skip, never fails the message.
+			fields["link_index_rejected"] = *v.LinkIndex
+			stats.LinkRejected++
+		}
+		fieldsJSON, _ := json.Marshal(fields)
+		if err := store.RecordExtraction(ctx, runID, m.RawSourceItemID, fieldsJSON); err != nil {
 			return stats, fmt.Errorf("record extraction for message %d: %w", m.MessageID, err)
 		}
 
@@ -406,8 +448,24 @@ func renderUser(m PendingMessage) string {
 	if len(body) > maxBody {
 		body = body[:maxBody] + "\n…(truncated)"
 	}
-	return fmt.Sprintf("From: %s\nSubject: %s\nDate: %s\n\n%s",
+	base := fmt.Sprintf("From: %s\nSubject: %s\nDate: %s\n\n%s",
 		m.Sender, m.Subject, m.SentAt.UTC().Format(time.RFC3339), body)
+
+	// The candidate list (SWT-25 criterion 17): anchor TEXTS ONLY, 1-based, in
+	// document order, AFTER the body — the body is truncated above, so a list
+	// placed before it could be eaten by a long marketing mail. When there are
+	// no candidates, NOTHING is rendered: an empty heading is a question the
+	// model would try to answer, and the null case is ordinary.
+	if len(m.Links) == 0 {
+		return base
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString("\n\nNumbered links in this message (for link_index):\n")
+	for i, l := range m.Links {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, l.Text)
+	}
+	return b.String()
 }
 
 // runInput is the ai_runs.input bookkeeping: prompt version, ids, and the
