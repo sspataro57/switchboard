@@ -185,6 +185,35 @@ func TestClassifyResidue_Integration_DoesNotHideAMessageFromThePersonalLane(t *t
 	c := newCISuite(t, ctx)
 	st := classify.NewStore(c.pool)
 
+	// (0) The reverse direction FIRST, while the superseded message has no
+	// classify_residue extraction of its own: a PERSONAL extraction must not
+	// retire a message from the residue lane. This probe has to run before the
+	// residue pass below, because that pass legitimately classifies every
+	// latest-unmatched message — supersededID included — and its own lane's
+	// extraction would then mask what this assertion isolates.
+	var runID int64
+	if err := c.pool.QueryRow(ctx,
+		`INSERT INTO ai_runs (worker_type, provider, model, status) VALUES ('classify','fake',$1,'ok') RETURNING id`,
+		ciModel).Scan(&runID); err != nil {
+		t.Fatalf("insert classify run: %v", err)
+	}
+	var supersededRaw int64
+	if err := c.pool.QueryRow(ctx,
+		`SELECT raw_source_item_id FROM normalized_messages WHERE id=$1`, c.supersededID).Scan(&supersededRaw); err != nil {
+		t.Fatalf("read raw item of the superseded message: %v", err)
+	}
+	if _, err := c.pool.Exec(ctx,
+		`INSERT INTO ai_extractions (ai_run_id, raw_source_item_id, fields) VALUES ($1,$2,'{}')`,
+		runID, supersededRaw); err != nil {
+		t.Fatalf("insert classify extraction: %v", err)
+	}
+	if _, ok := ciPending(t, ctx, c, classify.LaneResidue)[c.supersededID]; !ok {
+		t.Errorf("message %d left the RESIDUE inbox because a row with worker_type='classify' exists for "+
+			"it. The residue lane's NOT EXISTS must key on 'classify_residue': this message was classified "+
+			"by the personal lane while it was attributed, and it is unmatched again now — a different "+
+			"question, a different prompt, a different verdict", c.supersededID)
+	}
+
 	// (1) A residue pass classifies it. The canned verdict is not-actionable —
 	// which is still a VERDICT, and the extraction it writes is what removes the
 	// message from the residue inbox.
@@ -226,30 +255,6 @@ func TestClassifyResidue_Integration_DoesNotHideAMessageFromThePersonalLane(t *t
 			"here. That is criterion 11's whole argument, and it is a defect, not tidiness", c.unmatchedID)
 	}
 
-	// And the reverse, so the separation is not accidental: a PERSONAL extraction
-	// does not retire a message from the residue lane either.
-	var runID int64
-	if err := c.pool.QueryRow(ctx,
-		`INSERT INTO ai_runs (worker_type, provider, model, status) VALUES ('classify','fake',$1,'ok') RETURNING id`,
-		ciModel).Scan(&runID); err != nil {
-		t.Fatalf("insert classify run: %v", err)
-	}
-	var supersededRaw int64
-	if err := c.pool.QueryRow(ctx,
-		`SELECT raw_source_item_id FROM normalized_messages WHERE id=$1`, c.supersededID).Scan(&supersededRaw); err != nil {
-		t.Fatalf("read raw item of the superseded message: %v", err)
-	}
-	if _, err := c.pool.Exec(ctx,
-		`INSERT INTO ai_extractions (ai_run_id, raw_source_item_id, fields) VALUES ($1,$2,'{}')`,
-		runID, supersededRaw); err != nil {
-		t.Fatalf("insert classify extraction: %v", err)
-	}
-	if _, ok := ciPending(t, ctx, c, classify.LaneResidue)[c.supersededID]; !ok {
-		t.Errorf("message %d left the RESIDUE inbox because a row with worker_type='classify' exists for "+
-			"it. The residue lane's NOT EXISTS must key on 'classify_residue': this message was classified "+
-			"by the personal lane while it was attributed, and it is unmatched again now — a different "+
-			"question, a different prompt, a different verdict", c.supersededID)
-	}
 }
 
 // ---- criterion 17: the eval loader has NO action and NO project predicate ----
