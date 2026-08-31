@@ -22,7 +22,6 @@ package google
 // Zero candidates is the CORRECT answer there, and it is the common case.
 
 import (
-	"html"
 	"strings"
 
 	xhtml "golang.org/x/net/html"
@@ -202,10 +201,12 @@ func ExtractLinks(htmlBody string) []Link {
 }
 
 // cleanLinkURL applies the URL-side filters: scheme allowlist (http/https only,
-// case-insensitive, after trimming and entity-decoding), the length ceiling,
-// the substring drop list, and the asset-host rule. Returns "" to drop.
+// case-insensitive, after trimming), the length ceiling, the substring drop
+// list, and the asset-host rule. Returns "" to drop. Entities are ALREADY
+// decoded: x/net/html's TagAttr unescapes attribute values, and decoding a
+// second time would resolve a literal &amp;amp; one level too far.
 func cleanLinkURL(href string) string {
-	u := strings.TrimSpace(html.UnescapeString(href))
+	u := strings.TrimSpace(href)
 	if u == "" || len(u) > maxLinkURLBytes {
 		return ""
 	}
