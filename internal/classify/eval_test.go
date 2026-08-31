@@ -12,7 +12,8 @@ package classify_test
 //	    SubjectSHA256 string `json:"subject_sha256"` // 16 hex of sha256(NormalizedPrefix(subject,120))
 //	    Note          string `json:"note,omitempty"`
 //	}
-//	func Eval(ctx context.Context, store Store, router *provider.Router, labels []Label, w io.Writer) error
+//	func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
+//	          labels []Label, w io.Writer) error   // cfg carries the LANE since SWT-23
 //
 // Why the two tests here are the ones worth having: the labelled set is the ONLY
 // thing anyone is allowed to tune against (the SPEC's goal 4), and this fixture
@@ -104,7 +105,7 @@ func TestEval_RefusesWhenRouteDoesNotReturnTheLocalLane(t *testing.T) {
 		local := &evClient{flagIf: "payment"}
 		var out bytes.Buffer
 		if err := classify.Eval(context.Background(), &cfStore{pending: msgs},
-			provider.NewRouter(cfHosted(), local, time.Minute), labels, &out); err != nil {
+			provider.NewRouter(cfHosted(), local, time.Minute), stCfg(classify.LanePersonal), labels, &out); err != nil {
 			t.Fatalf("Eval on the local lane returned %v. Without a control the refusal below is satisfied "+
 				"by an Eval that never works at all", err)
 		}
@@ -120,7 +121,7 @@ func TestEval_RefusesWhenRouteDoesNotReturnTheLocalLane(t *testing.T) {
 		general := cfHosted()
 		var out bytes.Buffer
 		err := classify.Eval(context.Background(), &cfStore{pending: msgs},
-			provider.NewRouter(general, nil, time.Minute), labels, &out)
+			provider.NewRouter(general, nil, time.Minute), stCfg(classify.LanePersonal), labels, &out)
 		if err == nil {
 			t.Errorf("Eval succeeded with no local lane. Criterion 22: it must REFUSE (non-zero exit, " +
 				"nothing sent) — an eval on the hosted lane is both a leak of the whole labelled corpus and " +
@@ -164,7 +165,7 @@ func TestEval_ReportsAndExcludesLabelDrift(t *testing.T) {
 	local := &evClient{flagIf: "payment"}
 	var out bytes.Buffer
 	if err := classify.Eval(context.Background(), &cfStore{pending: msgs},
-		provider.NewRouter(nil, local, time.Minute), labels, &out); err != nil {
+		provider.NewRouter(nil, local, time.Minute), stCfg(classify.LanePersonal), labels, &out); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 
@@ -215,7 +216,7 @@ func TestEval_PrintsRecallPrecisionAndEveryFalseNegativeByID(t *testing.T) {
 	local := &evClient{flagIf: "payment"}
 	var out bytes.Buffer
 	if err := classify.Eval(context.Background(), &cfStore{pending: msgs},
-		provider.NewRouter(nil, local, time.Minute), labels, &out); err != nil {
+		provider.NewRouter(nil, local, time.Minute), stCfg(classify.LanePersonal), labels, &out); err != nil {
 		t.Fatalf("Eval: %v", err)
 	}
 	text := out.String()

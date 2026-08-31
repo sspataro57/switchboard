@@ -712,7 +712,7 @@ func TestCaptureRules_Integration_ReportSections(t *testing.T) {
 	if _, err := capture.EvaluateRules(ctx, s.pool, s.ex, capture.RulesConfig{Mode: "shadow"}); err != nil {
 		t.Fatalf("EvaluateRules(shadow): %v", err)
 	}
-	report, err := capture.Report(ctx, s.pool, time.Time{})
+	report, err := capture.Report(ctx, s.pool, time.Time{}, "")
 	if err != nil {
 		t.Fatalf("Report: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestCaptureRules_Integration_ReportSections(t *testing.T) {
 		t.Fatalf("--all in shadow did not re-evaluate (message has %d decision rows); the de-duplication "+
 			"assertion below would then prove nothing", got)
 	}
-	again, err := capture.Report(ctx, s.pool, time.Time{})
+	again, err := capture.Report(ctx, s.pool, time.Time{}, "")
 	if err != nil {
 		t.Fatalf("Report (after re-run): %v", err)
 	}
@@ -798,7 +798,7 @@ func TestCaptureRules_Integration_ReportSections(t *testing.T) {
 	}
 
 	// --since bounds the window: a report from the future contains none of it.
-	future, err := capture.Report(ctx, s.pool, time.Now().Add(time.Hour))
+	future, err := capture.Report(ctx, s.pool, time.Now().Add(time.Hour), "")
 	if err != nil {
 		t.Fatalf("Report (future window): %v", err)
 	}

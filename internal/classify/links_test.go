@@ -114,7 +114,7 @@ func lkTwoLinks() []classify.Link {
 func lkRun(t *testing.T, store *cfStore, local *lkClient) classify.Stats {
 	t.Helper()
 	stats, err := classify.Run(context.Background(), store,
-		provider.NewRouter(cfHosted(), local, time.Minute), classify.Config{Model: "qwen3:8b", MaxTokens: 512})
+		provider.NewRouter(cfHosted(), local, time.Minute), classify.Config{Model: "qwen3:8b", MaxTokens: 512, Lane: classify.LanePersonal})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestClassify_ZeroCandidates_IsOrdinaryOutput(t *testing.T) {
 	local := lkLocal(lkVerdict("null"))
 
 	stats, err := classify.Run(context.Background(), store,
-		provider.NewRouter(cfHosted(), local, time.Minute), classify.Config{Model: "qwen3:8b", MaxTokens: 512})
+		provider.NewRouter(cfHosted(), local, time.Minute), classify.Config{Model: "qwen3:8b", MaxTokens: 512, Lane: classify.LanePersonal})
 	if err != nil {
 		t.Fatalf("Run returned an error for a message with no link candidates: %v. NO CANDIDATES IS THE "+
 			"COMMON CASE — the median personal message has two, and the two HOA First Notices have none at "+

@@ -75,6 +75,30 @@ func csGoCode(t *testing.T, rel string) string {
 	return buf.String()
 }
 
+// csComments returns every COMMENT in a package's non-test files, joined. The
+// mirror image of csGoCode: where that strips comments so a banned-token scan
+// cannot trip on prose, this keeps only the prose, so a REQUIRED sentence cannot
+// be satisfied by an identifier that happens to contain the word.
+func csComments(t *testing.T, pkg string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, rel := range csSources(t, pkg) {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, filepath.Join("..", "..", rel), nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parse %s: %v", rel, err)
+		}
+		for _, cg := range f.Comments {
+			b.WriteString(cg.Text())
+			b.WriteString("\n")
+		}
+	}
+	if b.Len() < 200 {
+		t.Fatalf("%s yielded %d characters of comments; the scan below would pass vacuously", pkg, b.Len())
+	}
+	return b.String()
+}
+
 // csSources lists the non-test .go files of a package, relative to the repo
 // root, and FAILS when there are none.
 func csSources(t *testing.T, pkg string) []string {
@@ -508,6 +532,45 @@ func TestPackage_CarriesTheHonestyLabel(t *testing.T) {
 			"by criterion 14's zero-hosted-calls test. A label that only says 'this is inert' invites " +
 			"someone to delete the fold")
 	}
+
+	// SWT-23 criterion 15: the label is RE-STATED, not inherited. SWT-22's
+	// sentence — "every message this worker sees is ClassRestricted by
+	// construction BECAUSE the inbox filter selects local_only projects" —
+	// becomes FALSE for the residue lane while its conclusion stays true, and a
+	// comment that states the opposite of its code is this repo's named landmine
+	// (SWT-21 shipped two, in a boundary file, where the comment is what the next
+	// reader trusts). Two reasons, one outcome, and neither is the class fold
+	// acting as a guard.
+	// Scanned over COMMENT TEXT ONLY. Over the whole file, `residue` and
+	// `AttrProject` are satisfied by the identifiers LaneResidue and
+	// provider.AttrProject — so the label would read as present the moment the
+	// lane exists, which is exactly the state criterion 15 says is not enough.
+	// The label is prose or it is nothing.
+	comments := strings.ToLower(csComments(t, "internal/classify"))
+	if !strings.Contains(comments, "residue") {
+		t.Errorf("no comment in internal/classify mentions the RESIDUE lane. Criterion 15: the honesty " +
+			"label must give BOTH reasons — the personal lane is restricted because of the project's " +
+			"ai_locality, the residue lane because ClassOf maps every non-AttrProject state to restricted " +
+			"(provider/locality.go:195-198). Left as it is, the label says the inbox selects local_only " +
+			"projects, which is now false for half the messages this package reads")
+	}
+	if !regexp.MustCompile(`attrunmatched|non-?attrproject|not attrproject|attrproject`).MatchString(comments) {
+		t.Errorf("the honesty label does not name the MECHANISM that restricts the residue lane: ClassOf " +
+			"maps every state that is not AttrProject to ClassRestricted. That is not an accident of the " +
+			"fold — it is SWT-21's deliberate choice (locality.go:186-194) so that rule completeness is " +
+			"never load-bearing for a security property, and the residue lane inherits it with zero new code")
+	}
+	if !regexp.MustCompile(`rule completeness|completeness`).MatchString(comments) {
+		t.Errorf("the honesty label does not say WHY unmatched is restricted rather than general: so that " +
+			"rule completeness is never load-bearing for containment. Without that sentence the next " +
+			"reader sees a pile of marketing mail and 'fixes' the class to general to save GPU time")
+	}
+	if !regexp.MustCompile(`ai_classify`).MatchString(comments) {
+		t.Errorf("nothing in internal/classify explains ai_classify. Criterion 27: inboxWhere's comment " +
+			"says ai_locality is 'THE DISCRIMINATOR, and the only column here with two values in " +
+			"production'; with ai_classify added it is one of two, and they answer DIFFERENT questions — " +
+			"where a message may be sent, and whether it is worth classifying")
+	}
 }
 
 // ---- criterion 10: the advisory-lock key has no collision ---------------------
@@ -586,67 +649,149 @@ func TestReports_ShareTheNoFallbackNote(t *testing.T) {
 
 // ---- criteria 21 and 24: the labelled set --------------------------------------
 
+// GENERALISED BY SWT-23 criterion 26: a TABLE over both files, not a copy. The
+// shared assertions (no content keys, unique positive ids, a valid label, a
+// 16-hex subject hash, no unexpected keys) are the same rules for both sets; the
+// per-file parts are the minimum counts and the `stratum` key, which is REQUIRED
+// on every residue line and FORBIDDEN in the personal file.
+//
+// Why stratum is forbidden there rather than merely absent: the personal file is
+// what produced 0.94 / 0.50 on 2026-08-31, and criterion 20 requires that a
+// strata-less set still prints today's output byte-for-byte. A stray stratum key
+// in that file would silently switch it onto the three-line breakdown, computing
+// a "precision (uniform stratum only)" over whichever handful of lines happened
+// to carry the key.
 func TestLabelsFile_IsIdsAndLabelsOnly(t *testing.T) {
-	const rel = "docs/evals/personal-actionability.jsonl"
-	raw := csRepoFile(t, rel)
-
-	hex16 := regexp.MustCompile(`^[0-9a-f]{16}$`)
-	seen := map[float64]bool{}
-	lines := 0
-
-	for i, line := range strings.Split(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		lines++
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(line), &obj); err != nil {
-			t.Errorf("%s:%d does not parse as one JSON object: %v", rel, i+1, err)
-			continue
-		}
-		for _, banned := range []string{"subject", "body", "sender", "from", "text", "snippet"} {
-			if _, ok := obj[banned]; ok {
-				t.Errorf("%s:%d carries a %q key. THE FILE CARRIES NO MESSAGE CONTENT — not a subject, not "+
-					"a body, not a sender. It is committed to a git repo; the whole reason this classifier "+
-					"is local is that this mail must not be copied around", rel, i+1, banned)
-			}
-		}
-		id, ok := obj["message_id"].(float64)
-		if !ok || id <= 0 {
-			t.Errorf("%s:%d has no positive numeric message_id: %v", rel, i+1, obj["message_id"])
-		} else if seen[id] {
-			t.Errorf("%s:%d repeats message_id %.0f; a duplicated id weights one message twice in the score",
-				rel, i+1, id)
-		} else {
-			seen[id] = true
-		}
-		switch obj["label"] {
-		case "actionable", "not":
-		default:
-			t.Errorf("%s:%d label = %v, want \"actionable\" or \"not\"", rel, i+1, obj["label"])
-		}
-		h, _ := obj["subject_sha256"].(string)
-		if !hex16.MatchString(h) {
-			t.Errorf("%s:%d subject_sha256 = %q, want 16 lowercase hex characters. It is what makes a "+
-				"re-pointed id VISIBLE (criterion 23) — the labels are the fixture and this fixture has "+
-				"already been wrong once", rel, i+1, h)
-		}
-		for k := range obj {
-			switch k {
-			case "message_id", "label", "subject_sha256", "note":
-			default:
-				t.Errorf("%s:%d has an unexpected key %q; the record is ids + labels + a subject hash + an "+
-					"optional note, and nothing else", rel, i+1, k)
-			}
-		}
+	files := []struct {
+		rel      string
+		min      int
+		strata   bool           // stratum REQUIRED on every line
+		perStrat map[string]int // minimum per stratum
+		why      string
+	}{
+		{
+			rel: "docs/evals/personal-actionability.jsonl", min: 100,
+			why: "SWT-22 criterion 24's minimum to merge is 100 HAND-CHECKED messages drawn from the " +
+				"personal population, including the Pines announcements-vs-violations pairs",
+		},
+		{
+			rel: "docs/evals/residue-actionability.jsonl", min: 300, strata: true,
+			perStrat: map[string]int{"uniform": 200, "enriched": 100},
+			why: "SWT-23 criteria 18-19: the residue set is drawn FRESH and STRATIFIED — the personal " +
+				"set does not transfer, and neither do the spike's numbers. uniform >= 200 (the only " +
+				"stratum a base rate or an honest precision can come from), enriched >= 100 (the recall " +
+				"denominator: a uniform 200 at a ~2% base rate yields four positives and a recall that " +
+				"is noise), plus the domain_gate samples of criterion 6",
+		},
 	}
 
-	if lines < 100 {
-		t.Errorf("%s has %d labelled messages; criterion 24's minimum to merge is 100 HAND-CHECKED messages "+
-			"drawn from the personal population, including the Pines announcements-vs-violations pairs. The "+
-			"spike's labels do not carry over: they were regex-generated and scored every model 0.10-0.27 "+
-			"because the FIXTURE was wrong, not the models", rel, lines)
+	hex16 := regexp.MustCompile(`^[0-9a-f]{16}$`)
+	strata := map[string]bool{"uniform": true, "enriched": true, "domain_gate": true}
+
+	for _, f := range files {
+		t.Run(filepath.Base(f.rel), func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("..", "..", f.rel))
+			if err != nil {
+				t.Fatalf("read %s: %v\n%s", f.rel, err, f.why)
+			}
+
+			seen := map[float64]bool{}
+			lines := 0
+			perStratum := map[string]int{}
+
+			for i, line := range strings.Split(string(raw), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				lines++
+				var obj map[string]any
+				if err := json.Unmarshal([]byte(line), &obj); err != nil {
+					t.Errorf("%s:%d does not parse as one JSON object: %v", f.rel, i+1, err)
+					continue
+				}
+				for _, banned := range []string{"subject", "body", "sender", "from", "text", "snippet"} {
+					if _, ok := obj[banned]; ok {
+						t.Errorf("%s:%d carries a %q key. THE FILE CARRIES NO MESSAGE CONTENT — not a "+
+							"subject, not a body, not a sender. It is committed to a git repo; the whole "+
+							"reason this classifier is local is that this mail must not be copied around",
+							f.rel, i+1, banned)
+					}
+				}
+				id, ok := obj["message_id"].(float64)
+				if !ok || id <= 0 {
+					t.Errorf("%s:%d has no positive numeric message_id: %v", f.rel, i+1, obj["message_id"])
+				} else if seen[id] {
+					t.Errorf("%s:%d repeats message_id %.0f; a duplicated id weights one message twice in "+
+						"the score", f.rel, i+1, id)
+				} else {
+					seen[id] = true
+				}
+				switch obj["label"] {
+				case "actionable", "not":
+				default:
+					t.Errorf("%s:%d label = %v, want \"actionable\" or \"not\"", f.rel, i+1, obj["label"])
+				}
+				h, _ := obj["subject_sha256"].(string)
+				if !hex16.MatchString(h) {
+					t.Errorf("%s:%d subject_sha256 = %q, want 16 lowercase hex characters. It is what makes "+
+						"a re-pointed id VISIBLE — the labels are the fixture and this fixture has already "+
+						"been wrong once", f.rel, i+1, h)
+				}
+
+				stratum, hasStratum := obj["stratum"].(string)
+				switch {
+				case f.strata && !hasStratum:
+					t.Errorf("%s:%d has no `stratum`. It is REQUIRED on every residue line and must be one "+
+						"of uniform | enriched | domain_gate (criterion 18). Without it the eval cannot "+
+						"tell an honest precision from one computed over a sample deliberately enriched "+
+						"with positives — and that number WILL be quoted as if it described production",
+						f.rel, i+1)
+				case f.strata && !strata[stratum]:
+					t.Errorf("%s:%d stratum = %q, want uniform | enriched | domain_gate", f.rel, i+1, stratum)
+				case !f.strata && hasStratum:
+					t.Errorf("%s:%d carries a `stratum` key. The personal file has no strata and must keep "+
+						"none: criterion 20 requires a strata-less set to print today's output "+
+						"byte-for-byte, and one stray key switches the whole file onto the three-line "+
+						"breakdown", f.rel, i+1)
+				}
+				if hasStratum {
+					perStratum[stratum]++
+				}
+
+				for k := range obj {
+					switch k {
+					case "message_id", "label", "subject_sha256", "note":
+					case "stratum":
+						if !f.strata {
+							t.Errorf("%s:%d has an unexpected key %q", f.rel, i+1, k)
+						}
+					default:
+						t.Errorf("%s:%d has an unexpected key %q; the record is ids + labels + a subject "+
+							"hash + an optional note (+ a stratum, in the residue file) and nothing else",
+							f.rel, i+1, k)
+					}
+				}
+			}
+
+			if lines < f.min {
+				t.Errorf("%s has %d labelled messages, want at least %d. %s. Regex-generated labels are "+
+					"REFUSED: the spike's first eval scored every model 0.10-0.27 recall because the "+
+					"FIXTURE was wrong and the models were right", f.rel, lines, f.min, f.why)
+			}
+			for stratum, min := range f.perStrat {
+				if perStratum[stratum] < min {
+					t.Errorf("%s has %d %q labels, want at least %d. %s",
+						f.rel, perStratum[stratum], stratum, min, f.why)
+				}
+			}
+			if f.strata && perStratum["domain_gate"] == 0 {
+				t.Errorf("%s has no domain_gate labels. Criterion 6's claim gate is a hand-checked sample "+
+					"of >= 20 messages per domain containing ZERO actionable ones, and criterion 19 says "+
+					"those rows JOIN the labelled set — the gate and the eval are the same work done once, "+
+					"and recording them is what makes the gate auditable", f.rel)
+			}
+		})
 	}
 }
 
@@ -689,6 +834,42 @@ func TestRunbook_LocalClassifier(t *testing.T) {
 			"(criterion 25). That difference is criterion 17's whole point and it is the thing an operator " +
 			"has to read off a report without opening psql")
 	}
+
+	// ---- SWT-23 criterion 28: the Residue lane section ----------------------
+	for _, want := range []struct{ token, why string }{
+		{"--lane residue", "the command itself; without it the section is prose about a flag nobody can spell"},
+		{"classify_residue", "the worker_type, and criterion 11's reason it is a separate value: a shared " +
+			"one makes a message classified by one lane permanently invisible to the other"},
+		{"unmatched", "what the residue inbox IS — the latest capture decision, not a project"},
+	} {
+		if !strings.Contains(doc, want.token) {
+			t.Errorf("the runbook never mentions %q — %s (criterion 28)", want.token, want.why)
+		}
+	}
+	// The required --since rule, WITH its arithmetic. A rule stated without its
+	// number is a rule the next operator argues with.
+	since := regexp.MustCompile(`(?s)--since.{0,400}(required|mandatory)|(required|mandatory).{0,400}--since`)
+	if !since.MatchString(doc) {
+		t.Errorf("the runbook does not state that --since is REQUIRED on the residue lane (criterion 28). " +
+			"It is not a silent default because a default is a 29-hour GPU job one typo away")
+	}
+	if !strings.Contains(doc, "7.2") {
+		t.Errorf("the runbook does not carry the measured 7.2 s median latency. That number IS the " +
+			"argument: 14,737 x 7.2 s = ~29.5 GPU-hours, where the estimate that said ~60 minutes was " +
+			"14,737 x 0.25 s — a warm micro-benchmark of a ten-word prompt, never measured on this " +
+			"workload. The two differ by 25-29x and only one of them measured this classifier")
+	}
+	if !regexp.MustCompile(`(?i)base rate`).MatchString(doc) {
+		t.Errorf("the runbook records no BASE RATE for the residue lane (criterion 28). It is the number " +
+			"that decides the lane's future: if the residue is 0.5%% actionable after the rules, the honest " +
+			"description is 'a daily filter', not 'a classifier over the residue' — and the runbook must " +
+			"say so with the measured figure rather than as a hedge")
+	}
+	if !regexp.MustCompile(`(?i)uniform`).MatchString(doc) {
+		t.Errorf("the runbook does not explain the strata, or why precision is quoted from the UNIFORM " +
+			"stratum only (criterion 28). Quoted without that sentence, a precision measured over a " +
+			"deliberately enriched sample reads as production precision")
+	}
 }
 
 // ---- criterion 26: the old runbook, corrected ---------------------------------
@@ -729,47 +910,120 @@ func TestRunbook_ProviderLocalityUpdatedForSWT22(t *testing.T) {
 	}
 }
 
-// ---- data model: SWT-25 adds exactly ONE migration, 0017 ----------------------
+// ---- data model: SWT-23 adds exactly ONE migration, 0018 ----------------------
 
-// REPLACES SWT-22's TestNoMigrationWasAdded, which asserted the highest
-// migration stays 0016. That guard was CORRECT for SWT-22 and is wrong for
-// SWT-25, and criterion 26 says what to do about it: rewrite it to the new
-// truth, do NOT delete it. A guard that becomes wrong and gets deleted is how
-// the next ticket adds a migration nobody notices — and the migrate runner keys
-// on schema_migrations.version with NO checksum, so a stray or edited file is
-// skipped silently and the schema diverges with no error anywhere.
-func TestMigration0017_IsTheOnlyOneThisTicketAdds(t *testing.T) {
-	// Control first: 0016 must be there, or a glob returning nothing below would
-	// prove only that the directory moved.
-	if _, err := os.Stat(filepath.Join("..", "..", "migrations", "0016_provider_locality.sql")); err != nil {
-		t.Fatalf("migrations/0016_provider_locality.sql is missing: %v", err)
+// REPLACES TestMigration0017_IsTheOnlyOneThisTicketAdds, which itself replaced
+// SWT-22's TestNoMigrationWasAdded. Each was CORRECT for its ticket and wrong
+// for the next one, and the rule (SWT-25 criterion 26, SWT-23 criterion 25) is
+// the same every time: rewrite the guard to the new truth, do NOT delete it. A
+// guard that becomes wrong and gets deleted is how the next ticket adds a
+// migration nobody notices — and the migrate runner keys on
+// schema_migrations.version with NO checksum, so a stray or edited file is
+// skipped SILENTLY and the schema diverges with no error anywhere.
+func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
+	// Control first: 0017 must still be there, or a glob returning nothing below
+	// would prove only that the directory moved.
+	if _, err := os.Stat(filepath.Join("..", "..", "migrations", "0017_normalized_message_links.sql")); err != nil {
+		t.Fatalf("migrations/0017_normalized_message_links.sql is missing: %v", err)
 	}
 
-	const rel = "migrations/0017_normalized_message_links.sql"
-	if _, err := os.Stat(filepath.Join("..", "..", rel)); err != nil {
-		t.Fatalf("%s does not exist: %v. SWT-25 criterion 12 adds exactly one forward-only migration, and "+
-			"0017 is its number (0016_provider_locality.sql is the current highest). Merging a migration is "+
-			"not applying it — check `SELECT max(version) FROM schema_migrations` before deploying", rel, err)
+	matches, err := filepath.Glob(filepath.Join("..", "..", "migrations", "0018_*.sql"))
+	if err != nil {
+		t.Fatalf("glob migrations/0018_*.sql: %v", err)
 	}
+	if len(matches) != 1 {
+		t.Fatalf("found %d migrations/0018_*.sql file(s), want exactly 1 "+
+			"(the SPEC names 0018_bulk_project_and_classify_flag.sql). 0017 is the current highest, and "+
+			"SWT-23's data-model section is ONE migration: the ai_classify column and the bulk project, "+
+			"in that order. Merging a migration is not applying it — check "+
+			"`SELECT max(version) FROM schema_migrations` before deploying", len(matches))
+	}
+	rel := filepath.Join("migrations", filepath.Base(matches[0]))
 	sql := strings.ToLower(csRepoFile(t, rel))
-	if !regexp.MustCompile(`(?s)alter\s+table\s+normalized_messages.{0,120}add\s+column\s+links`).MatchString(sql) {
-		t.Errorf("%s does not ALTER TABLE normalized_messages ADD COLUMN links. The links belong on the "+
-			"canonical normalized_messages row (invariant 2: no new table, no new vocabulary) — "+
-			"normalized_events.attendees JSONB NOT NULL DEFAULT '[]' is the precedent", rel)
+
+	// (1) the ALTER — fail-closed default.
+	alter := regexp.MustCompile(`(?s)alter\s+table\s+projects.{0,200}add\s+column\s+ai_classify`)
+	if !alter.MatchString(sql) {
+		t.Errorf("%s does not ALTER TABLE projects ADD COLUMN ai_classify. ai_classify is a real COLUMN, "+
+			"not a key in projects.policies: 0016 set that precedent with ai_locality, and an untyped "+
+			"predicate over jsonb is exactly the thing this repo keeps paying for", rel)
 	}
-	if !strings.Contains(sql, "jsonb") || !strings.Contains(sql, "default '[]'") {
-		t.Errorf("%s does not declare the column JSONB NOT NULL DEFAULT '[]'::jsonb. The default is what "+
-			"keeps the upwork / jira / slackweb inserts — which name no links column — working", rel)
+	if !regexp.MustCompile(`boolean`).MatchString(sql) || !regexp.MustCompile(`default\s+false`).MatchString(sql) {
+		t.Errorf("%s does not declare ai_classify BOOLEAN NOT NULL DEFAULT false. DEFAULT FALSE is the "+
+			"FAIL-CLOSED side: not classifying is a stall (one UPDATE to fix, and visible as an empty "+
+			"lane), classifying by accident costs GPU-hours and pollutes a report. Same asymmetry 0016 "+
+			"used for ai_locality, opposite polarity, same reasoning", rel)
 	}
-	if !strings.Contains(sql, "jsonb_typeof(links) = 'array'") {
-		t.Errorf("%s has no CHECK (jsonb_typeof(links) = 'array'). The model answers with a 1-based "+
-			"POSITION into this value; something that is not an array has no positions", rel)
+	if !regexp.MustCompile(`not\s+null`).MatchString(sql) {
+		t.Errorf("%s does not declare ai_classify NOT NULL; a nullable boolean makes `AND p.ai_classify` "+
+			"silently exclude every row where nobody set it", rel)
 	}
+
+	// (2) the UPDATE — preserve SWT-22's lane exactly.
+	update := regexp.MustCompile(`(?s)update\s+projects\s+set\s+ai_classify\s*=\s*true.{0,80}'personal'`)
+	if !update.MatchString(sql) {
+		t.Errorf("%s does not UPDATE projects SET ai_classify = true WHERE slug = 'personal'. Without it "+
+			"the fail-closed default silently EMPTIES the personal lane the day this migration runs — the "+
+			"pass reports processed:0 and nothing distinguishes that from an empty inbox", rel)
+	}
+
+	// (3) the INSERT — the bulk project, explicitly excluded.
+	insert := regexp.MustCompile(`(?s)insert\s+into\s+projects.{0,400}'bulk'`)
+	if !insert.MatchString(sql) {
+		t.Errorf("%s does not INSERT the `bulk` project. Premise 7: no non-test code creates a project, so "+
+			"the project is a MIGRATION and the rules that point at it are `opsctl capture-rules add` — "+
+			"0016 made exactly that split and said why ('routing is configuration with an enabled flag and "+
+			"an audit trail')", rel)
+	}
+	if !strings.Contains(sql, "local_only") {
+		t.Errorf("%s does not give bulk ai_locality='local_only'. 0016's reasoning applies unchanged: a "+
+			"rule one character too wide would otherwise downgrade real personal mail to hosted-eligible, "+
+			"and 'a leak is irreversible, a stall is one UPDATE'", rel)
+	}
+	if !regexp.MustCompile(`on\s+conflict\s*\(\s*slug\s*\)\s*do\s+nothing`).MatchString(sql) {
+		t.Errorf("%s does not use ON CONFLICT (slug) DO NOTHING. DO NOTHING, not DO UPDATE: re-running a "+
+			"migration must not overwrite a value an operator has deliberately changed since (0016's "+
+			"words)", rel)
+	}
+	if !regexp.MustCompile(`(?s)insert\s+into\s+projects.{0,400}null`).MatchString(sql) {
+		t.Errorf("%s does not give bulk a NULL client. It is LOAD-BEARING for the same reason it is on "+
+			"`personal` (0016:57-62): task_get_next's `p.client = $1` is what excludes these projects from "+
+			"every worker queue, and giving the row a client name would silently make that guard necessary "+
+			"after all", rel)
+	}
+
+	// STATEMENT ORDER IS LOAD-BEARING (0016's lesson, restated by the SPEC's own
+	// data-model block): ALTER, then UPDATE, then INSERT. Reordered, the UPDATE
+	// runs before the column exists or the INSERT lands before the default does.
+	iAlter := alter.FindStringIndex(sql)
+	iUpdate := update.FindStringIndex(sql)
+	iInsert := insert.FindStringIndex(sql)
+	if iAlter != nil && iUpdate != nil && iInsert != nil {
+		if !(iAlter[0] < iUpdate[0] && iUpdate[0] < iInsert[0]) {
+			t.Errorf("%s runs its statements out of order (ALTER at %d, UPDATE at %d, INSERT at %d). The "+
+				"order is ALTER (fail-closed default) -> UPDATE (preserve SWT-22's lane) -> INSERT (the "+
+				"bulk project, explicitly excluded), and 0016 says out loud that it is load-bearing",
+				rel, iAlter[0], iUpdate[0], iInsert[0])
+		}
+	}
+
 	if strings.Contains(sql, "drop column") || regexp.MustCompile(`(?s)--\s*down`).MatchString(sql) {
 		t.Errorf("%s looks like it carries a down migration. Migrations here are FORWARD-ONLY, no exceptions", rel)
 	}
+	if regexp.MustCompile(`create\s+index`).MatchString(sql) {
+		t.Errorf("%s creates an index. NO INDEX, deliberately: every read reaches `projects` by primary "+
+			"key already and the table holds tens of rows. 0016 says this at length after its first cut "+
+			"added one anyway — an index nothing uses is a permanent claim that some query needs it, which "+
+			"the next reader has to disprove", rel)
+	}
+	if regexp.MustCompile(`insert\s+into\s+capture_rules`).MatchString(sql) {
+		t.Errorf("%s inserts into capture_rules. Invariant 3 and premise 7: every rule this ticket adds "+
+			"goes through the `capture_rule_add` executor tool (humanOnly, off the MCP surface). A rule "+
+			"inserted around the tool has no audit row and no pattern validation, and the tool is the only "+
+			"place the regex is compiled before it is stored", rel)
+	}
 
-	// And nothing ABOVE 0017: one new file, exactly.
+	// And nothing ABOVE 0018: one new file, exactly.
 	entries, err := os.ReadDir(filepath.Join("..", "..", "migrations"))
 	if err != nil {
 		t.Fatalf("read migrations/: %v", err)
@@ -783,8 +1037,8 @@ func TestMigration0017_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		}
 		seenAny = true
 		n, _ := strconv.Atoi(m[1])
-		if n > 17 {
-			t.Errorf("migrations/%s exists. SWT-25's data-model section is ONE migration: 0017. `ls "+
+		if n > 18 {
+			t.Errorf("migrations/%s exists. SWT-23's data-model section is ONE migration: 0018. `ls "+
 				"migrations/` must show exactly one new file against main", e.Name())
 		}
 	}
@@ -850,6 +1104,70 @@ func TestContradictions_AreFixedInTheSameChange(t *testing.T) {
 			t.Errorf("internal/classify/prompt.go does not note that link_index is an INDEX into " +
 				"normalized_messages.links and never a URL. That one line is the whole architectural claim " +
 				"of this ticket, sitting where someone editing the schema will read it")
+		}
+	})
+
+	// ---- SWT-23 criterion 27 -------------------------------------------------
+
+	t.Run("store.go no longer calls ai_locality the only two-valued column", func(t *testing.T) {
+		const rel = "internal/classify/store.go"
+		src := csRepoFile(t, rel)
+		lower := strings.ToLower(src)
+		collapsed := regexp.MustCompile(`\s+`).ReplaceAllString(lower, " ")
+		// Whitespace-COLLAPSED before matching, because the sentence wraps across
+		// comment lines. TestRunbook_ProviderLocalityUpdatedForSWT22 records why:
+		// a guard that cannot match its own target is worse than no guard, and
+		// this repo has already shipped one that reported prose as corrected while
+		// the sentence sat in the file untouched.
+		if strings.Contains(collapsed, "the only column here with two values in production") {
+			t.Errorf("%s still says ai_locality is \"THE DISCRIMINATOR, and the only column here with two "+
+				"values in production\". With ai_classify added it is ONE OF TWO, and the two answer "+
+				"different questions: ai_locality is the BOUNDARY (where a message may be sent, a leak is "+
+				"irreversible) and ai_classify is a WORKLOAD flag (whether it is worth 7.2 s of GPU, a "+
+				"stall is one UPDATE). Collapsing them would make the boundary depend on a workload "+
+				"decision", rel)
+		}
+		if !strings.Contains(lower, "ai_classify") {
+			t.Errorf("%s never mentions ai_classify. The personal lane's filter keeps BOTH clauses — "+
+				"`p.ai_locality = 'local_only' AND p.ai_classify` — and the comment above the query is "+
+				"where the next reader decides whether the second one is doing anything", rel)
+		}
+	})
+
+	t.Run("the SWT-22 SPEC criterion 11 carries a dated SWT-23 pointer", func(t *testing.T) {
+		const rel = "docs/tickets/local-classifier_SPEC.md"
+		spec := csRepoFile(t, rel)
+		i := strings.Index(spec, "11. **The inbox**")
+		if i < 0 {
+			t.Fatalf("%s no longer contains criterion 11's opening; the scan has nothing to scan", rel)
+		}
+		window := spec[i:min(i+1200, len(spec))]
+		if !strings.Contains(window, "SWT-23") {
+			t.Errorf("%s criterion 11 states the inbox filter as `action='attributed'` AND "+
+				"`ai_locality='local_only'` with no pointer to SWT-23 beside it. It is amended IN PLACE "+
+				"with a dated pointer — exactly as SWT-25 amended criterion 18 — because the filter now "+
+				"also requires ai_classify, and whichever statement a reader finds first is the one they "+
+				"will believe. (Re-sync the SWT-22 Jira description afterwards: it carries the SPEC.)", rel)
+		}
+		if !regexp.MustCompile(`(?s)SWT-23.{0,200}20\d\d-\d\d-\d\d|20\d\d-\d\d-\d\d.{0,200}SWT-23`).MatchString(window) {
+			t.Errorf("%s criterion 11's SWT-23 pointer carries no DATE. An undated amendment cannot be "+
+				"ordered against the sentence it corrects", rel)
+		}
+	})
+
+	t.Run("the local-classifier runbook opens on two lanes", func(t *testing.T) {
+		const rel = "docs/runbooks/local-classifier.md"
+		doc := csRepoFile(t, rel)
+		head := doc
+		if len(head) > 900 {
+			head = head[:900]
+		}
+		lower := strings.ToLower(head)
+		if !strings.Contains(lower, "residue") {
+			t.Errorf("%s opens with \"`classify` reads personal mail — the messages the capture rules "+
+				"attributed to the `personal` project\" and never mentions the residue. That sentence is "+
+				"now false for half of what this binary does, and it is the first thing an operator reads "+
+				"(criterion 27)", rel)
 		}
 	})
 
@@ -994,5 +1312,47 @@ func TestRunbook_RecordsTheSWT25EvalRerun(t *testing.T) {
 		t.Errorf("the runbook does not mention label drift for the re-run. Expected drift exclusions are " +
 			"ZERO, because re-normalization UPSERTS (ids and subjects are stable) — so any drift the " +
 			"harness prints is a finding to investigate, not a nuisance to re-hash")
+	}
+}
+
+// ---- SWT-23 criterion 30: the institutional-knowledge entry -------------------
+
+// This file is what the next session reads instead of re-deriving the landmines.
+// The entry is short by design; the test pins the facts that cost something to
+// rediscover — most of all the cost estimate, because "a number quoted out of
+// the context that produced it" is a mistake this ticket made about ITSELF and
+// the entry exists so it is not made a third time.
+func TestInstitutionalKnowledge_RecordsTheResidueLane(t *testing.T) {
+	doc := csRepoFile(t, ".claude/INSTITUTIONAL_KNOWLEDGE.md")
+	lower := strings.ToLower(doc)
+
+	if !strings.Contains(doc, "SWT-23") {
+		t.Fatalf(".claude/INSTITUTIONAL_KNOWLEDGE.md has no SWT-23 entry. Criterion 30 asks for a short " +
+			"'Residue lane (SWT-23)' section: agents read this file at session start instead of " +
+			"re-deriving what it holds")
+	}
+	for _, want := range []struct{ token, why string }{
+		{"classify_residue", "the two lanes' worker_type values, and WHY they differ: both inboxes' NOT " +
+			"EXISTS key on worker_type, so one shared value makes a message classified by one lane " +
+			"permanently invisible to the other"},
+		{"ai_classify", "the flag's meaning — mail attributed to this project gets an actionability " +
+			"verdict from the personal lane. A workload flag, not a boundary flag; ai_locality remains " +
+			"the boundary"},
+		{"unmatched", "the residue inbox cannot join projects: 0015's CHECK makes " +
+			"(action='unmatched') = (project_id IS NULL), so every query the SWT-22 lane uses returns " +
+			"exactly zero residue rows and none of them errors"},
+		{"7.2", "the measured per-message latency, and that the 0.25 s warm benchmark must NEVER be used " +
+			"to size a pass again — the two differ by 25-29x"},
+		{"slack", "a bare-name sender means slack or upwork, never gmail (google writes the raw From " +
+			"header; slackweb writes message.Author and upworkcrm the CRM's sender column)"},
+	} {
+		if !strings.Contains(lower, strings.ToLower(want.token)) {
+			t.Errorf("the SWT-23 entry does not mention %q — %s", want.token, want.why)
+		}
+	}
+	if !regexp.MustCompile(`normalize\.go|rfc822\.go`).MatchString(lower) {
+		t.Errorf("the SWT-23 entry gives no connector line reference for the bare-name-sender fact. It is " +
+			"a CODE-ESTABLISHED fact, not a hypothesis, and the reference is what stops the next session " +
+			"re-deriving it from the data")
 	}
 }

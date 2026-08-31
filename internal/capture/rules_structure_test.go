@@ -141,3 +141,100 @@ func TestRunbook_DocumentsCaptureBeforeTriage(t *testing.T) {
 			"messages fall through both capture and triage). An unexplained ordering is one someone reorders")
 	}
 }
+
+// ---- SWT-23 criterion 29: the "Reading the residue" section --------------------
+
+// A test on prose, and it earns it the same way TestRunbook_DocumentsCaptureBeforeTriage
+// does: every rule here is one a future session would "clean up". A refused
+// domain looks like an oversight ("455 github notifications and no rule?"), and
+// an attribution-only rule looks like a half-finished one ("it has no
+// external_system — should it not create a task?"). Both readings are wrong, and
+// both are one edit away from taking work out of triage's inbox and giving it
+// nothing.
+func TestRunbook_DocumentsReadingTheResidue(t *testing.T) {
+	doc := mustReadRepoFile(t, "docs/runbooks/capture-rules.md")
+	lower := strings.ToLower(doc)
+
+	if !strings.Contains(lower, "residue") {
+		t.Fatalf("docs/runbooks/capture-rules.md has no residue section. SWT-23 criterion 29: the domain " +
+			"census command, the claim gate, the refusal list with reasons, the exact " +
+			"`opsctl capture-rules add` lines for every rule this ticket seeded, and the recorded " +
+			"before/after coverage")
+	}
+
+	// THE REFUSAL LIST, and github.com by name. It is the one entry a reader is
+	// most likely to undo: 455 unmatched messages from one domain looks exactly
+	// like a missing rule. It is not — it is unrouted WORK for a project no
+	// capture rule names (measured 2026-08-31: predominantly
+	// Foundry-Underwriting/Foundry-RAVE CI failures plus OSS threads), and
+	// sweeping it into a noise project takes it out of triage's inbox without
+	// giving it a task.
+	if !strings.Contains(lower, "github.com") {
+		t.Errorf("the residue section does not name github.com in the refusal list. Criterion 7 refuses " +
+			"it explicitly, with its reason: what is left unmatched is notifications for repos no rule " +
+			"names, and a 'noise' rule over them removes work from triage's inbox and gives it nothing")
+	}
+	refusal := regexp.MustCompile(`(?s)(refus|not claimed|do not claim)`)
+	if !refusal.MatchString(lower) {
+		t.Errorf("the residue section lists domains but never says which are REFUSED. The refusal list is " +
+			"part of the deliverable (criterion 7) — without it, the next reader sees the census, sees the " +
+			"gaps, and closes them")
+	}
+
+	// ATTRIBUTION-ONLY, in any mode. This is the property that makes it safe to
+	// add a dozen routing rules while capture is still in shadow: external_system
+	// NULL means the engine cannot create a task on that rule, live or not
+	// (cmd/opsctl/main.go:456-457 prints it as such).
+	attribOnly := regexp.MustCompile(`(?s)attribution[- ]only`)
+	if !attribOnly.MatchString(lower) {
+		t.Errorf("the residue section never uses the phrase \"attribution only\". Every rule this ticket " +
+			"adds is --external-system-less, and `opsctl capture-rules list` prints exactly " +
+			"'-> attribution only (no external_system, so no task)'")
+	}
+	noTask := regexp.MustCompile(`(?s)(no external_system|attribution[- ]only)[^.\n]{0,160}(no task|cannot create|never creates)|` +
+		`(no task|cannot create|never creates)[^.\n]{0,160}(no external_system|attribution[- ]only)`)
+	if !noTask.MatchString(lower) {
+		t.Errorf("the residue section does not state that an attribution-only rule creates NO TASK IN ANY " +
+			"MODE. That sentence is why these rules are safe to seed before capture's go-live checklist " +
+			"has been worked — their live behaviour is identical to their shadow behaviour — and without " +
+			"it the rules look like a live change waiting to happen")
+	}
+
+	// The claim gate, so "this domain is noise" is a measurement rather than a
+	// judgement, and the same reading the labelled set needs anyway.
+	gate := regexp.MustCompile(`(?s)(zero|no) actionable|claim gate|20 messages|>= ?20|at least 20`)
+	if !gate.MatchString(lower) {
+		t.Errorf("the residue section does not state the claim gate (criterion 6): >= 100 residue " +
+			"messages, a hand-checked sample of >= 20 containing ZERO actionable ones, and not on the " +
+			"refusal list. It costs nothing extra — those rows join the labelled set as stratum " +
+			"'domain_gate' — and it leaves an audit trail for why a domain was called noise")
+	}
+
+	// A rule that matched zero messages is disabled and recorded. The runbook's
+	// own go-live rule already says an unmatched rule is untested; this is the
+	// same rule applied to this ticket's own additions.
+	zero := regexp.MustCompile(`(?s)(never matched|matched zero|zero messages)`)
+	if !zero.MatchString(lower) {
+		t.Errorf("the residue section does not say what happens to a rule that matched ZERO messages " +
+			"(criterion 9: disabled and recorded, not left in place). The file's own go-live checklist " +
+			"already says a rule that has never matched is not ready — it is untested")
+	}
+
+	// The before/after, as a measured number rather than a plan.
+	coverage := regexp.MustCompile(`(?s)(before|after)[^.\n]{0,120}(residue|unmatched)|` +
+		`(residue|unmatched)[^.\n]{0,120}(before|after)`)
+	if !coverage.MatchString(lower) {
+		t.Errorf("the residue section records no before/after coverage (criterion 9). 'Triage's inbox is " +
+			"measurably smaller by a recorded percentage' is one of the five things this ticket claims to " +
+			"deliver, and a plan is not a measurement")
+	}
+
+	// And the census commands, so re-measuring is a command rather than an
+	// afternoon (the SPEC's stated reason for criteria 1-4).
+	if !strings.Contains(lower, "--domain") {
+		t.Errorf("the residue section does not show `opsctl capture-rules report --domain <d>`. That is " +
+			"the Phase-0 blocker: the rule set may not be written until it has been run and its output " +
+			"recorded here — it is what turned sspataro.com (518) from a suspicion into test@sspataro.com " +
+			"session notifications, and upwork.com (106) into 'Invitation to Interview'")
+	}
+}
