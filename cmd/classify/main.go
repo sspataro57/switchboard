@@ -1,9 +1,15 @@
 // classify is the LOCAL actionability classifier for personal mail (SWT-22),
 // SHADOW MODE: it records verdicts and creates nothing.
 //
-//	classify run    [--limit N] [--since 720h]
-//	classify report [--since 720h]
-//	classify eval   --labels docs/evals/personal-actionability.jsonl
+//	classify run    [--lane personal|residue] [--limit N] [--since 720h]
+//	classify report [--lane personal|residue] [--since 720h]
+//	classify eval   [--lane personal|residue] [--labels <file>]
+//
+// --lane defaults to personal (SWT-22's lane, unchanged). The residue lane
+// (SWT-23) REQUIRES --since on `run`: ~14,737 messages at the measured 7.2 s
+// median is ~29.5 GPU-hours, and an unbounded pass must be chosen, not typo'd.
+// `eval` defaults --labels to the lane's own fixture, so the residue is never
+// scored against the personal labels by omission.
 //
 //	DATABASE_URL           ops db, required
 //	OPS_LOCAL_PROVIDER_URL local ollama base URL, no /v1
@@ -106,9 +112,14 @@ func buildRouter() (*provider.Router, string) {
 
 func runCmd(argv []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue")
 	limit := fs.Int("limit", 0, "max messages this run (0 = all pending)")
-	since := fs.Duration("since", 0, "only messages with sent_at within this window (0 = all)")
+	since := fs.Duration("since", 0, "only messages with sent_at within this window (0 = all; REQUIRED on the residue lane)")
 	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	lane, err := classify.LaneByName(*laneName)
+	if err != nil {
 		return err
 	}
 
@@ -133,7 +144,7 @@ func runCmd(argv []string) error {
 
 	router, model := buildRouter()
 	stats, runErr := classify.Run(ctx, st, router, classify.Config{
-		Model: model, MaxTokens: 512, Limit: *limit, Since: *since,
+		Model: model, MaxTokens: 512, Limit: *limit, Since: *since, Lane: lane,
 	})
 	out, _ := json.Marshal(stats)
 	fmt.Println(string(out))
@@ -142,8 +153,13 @@ func runCmd(argv []string) error {
 
 func reportCmd(argv []string) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
+	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue")
 	since := fs.Duration("since", 0, "only runs within this window (0 = all)")
 	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	lane, err := classify.LaneByName(*laneName)
+	if err != nil {
 		return err
 	}
 
@@ -156,15 +172,25 @@ func reportCmd(argv []string) error {
 	}
 	defer pool.Close()
 
-	return classify.Report(ctx, pool, os.Stdout, *since)
+	return classify.ReportForWorker(ctx, pool, os.Stdout, *since, lane.WorkerType)
 }
 
 func evalCmd(argv []string) error {
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
-	labelsPath := fs.String("labels", "docs/evals/personal-actionability.jsonl",
-		"the hand-checked labelled set")
+	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue")
+	labelsPath := fs.String("labels", "",
+		"the hand-checked labelled set (default: the lane's own fixture)")
 	if err := fs.Parse(argv); err != nil {
 		return err
+	}
+	lane, err := classify.LaneByName(*laneName)
+	if err != nil {
+		return err
+	}
+	if *labelsPath == "" {
+		// The lane's own fixture, so the residue is never scored against the
+		// personal labels by a forgotten flag.
+		*labelsPath = lane.LabelsPath
 	}
 
 	labels, err := loadLabels(*labelsPath)
@@ -185,8 +211,9 @@ func evalCmd(argv []string) error {
 	// `run` cannot score and classify different models — see the CLASSIFY_MODEL
 	// note there. Eval prints the model the server reports, which is the truthful
 	// answer to "what was this number measured on".
-	router, _ := buildRouter()
-	return classify.Eval(ctx, classify.NewStore(pool), router, labels, os.Stdout)
+	router, model := buildRouter()
+	return classify.Eval(ctx, classify.NewStore(pool), router,
+		classify.Config{Model: model, MaxTokens: 512, Lane: lane}, labels, os.Stdout)
 }
 
 // loadLabels reads the JSONL fixture. It refuses a line carrying message

@@ -561,6 +561,7 @@ func captureRulesConfig(live bool, since time.Duration, limit int, all bool) cap
 func runCaptureRulesReport(argv []string) error {
 	fs := flag.NewFlagSet("capture-rules report", flag.ContinueOnError)
 	since := fs.Duration("since", 0, "report on decisions from the last N (Go duration); 0 means all of them")
+	domain := fs.String("domain", "", "append the domain-detail investigation for one sender domain (SWT-23)")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -578,7 +579,7 @@ func runCaptureRulesReport(argv []string) error {
 	if *since > 0 {
 		from = time.Now().Add(-*since)
 	}
-	out, err := capture.Report(ctx, pool, from)
+	out, err := capture.Report(ctx, pool, from, *domain)
 	if err != nil {
 		return fmt.Errorf("capture rules report: %w", err)
 	}

@@ -16,13 +16,21 @@ import (
 // classifier flagged and what it skipped. Deterministic — no LLM, no network
 // beyond Postgres.
 func Report(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Duration) error {
+	return ReportForWorker(ctx, pool, w, since, LanePersonal.WorkerType)
+}
+
+// ReportForWorker renders the report for ONE lane's worker_type — "classify"
+// (personal) or "classify_residue" (SWT-23). The two lanes' verdicts share the
+// tables and are discriminated exactly here; a report that merged them would
+// mix a measured prompt's numbers with an unmeasured one's.
+func ReportForWorker(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Duration, workerType string) error {
 	q := `SELECT e.fields, r.created_at
 	      FROM ai_extractions e
-	      JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type='classify' AND r.status='ok'`
-	args := []any{}
+	      JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type=$1 AND r.status='ok'`
+	args := []any{workerType}
 	if since > 0 {
 		args = append(args, since.String())
-		q += ` WHERE r.created_at >= now() - $1::interval`
+		q += ` WHERE r.created_at >= now() - $2::interval`
 	}
 	q += ` ORDER BY r.created_at DESC`
 
@@ -112,7 +120,7 @@ func Report(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Dur
 	}
 	fmt.Fprintln(w)
 
-	if err := reportSkipped(ctx, pool, w, since); err != nil {
+	if err := reportSkipped(ctx, pool, w, since, workerType); err != nil {
 		return err
 	}
 
@@ -132,12 +140,12 @@ func Report(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Dur
 // found nothing". The cost is that without this section a fully-skipped pass
 // renders as `classified: 0`, which is indistinguishable from an empty inbox or
 // a dead poller.
-func reportSkipped(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Duration) error {
-	q := `SELECT input FROM ai_runs WHERE worker_type='classify' AND status='skipped'`
-	args := []any{}
+func reportSkipped(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Duration, workerType string) error {
+	q := `SELECT input FROM ai_runs WHERE worker_type=$1 AND status='skipped'`
+	args := []any{workerType}
 	if since > 0 {
 		args = append(args, since.String())
-		q += ` AND created_at >= now() - $1::interval`
+		q += ` AND created_at >= now() - $2::interval`
 	}
 	q += ` ORDER BY created_at`
 

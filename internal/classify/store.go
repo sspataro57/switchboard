@@ -7,6 +7,8 @@ import (
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/provider"
 )
 
 // PGStore is the Postgres side. It reads capture decisions and writes ai_runs /
@@ -46,10 +48,18 @@ func NewStore(pool *pgxpool.Pool) *PGStore { return &PGStore{pool: pool} }
 //     `external_system` and its messages start arriving as 'task'. The
 //     integration suite pins it with a 'task' fixture, added after mutation
 //     testing showed the clause was untested.
-//   - `p.ai_locality = 'local_only'`. THE DISCRIMINATOR, and the only column
-//     here with two values in production. Drop this join and the worker starts
-//     classifying client work; the integration test's ai_locality='any' case is
-//     the assertion that goes red, and it is the only one that can.
+//   - `p.ai_locality = 'local_only'`. THE BOUNDARY: where a message may be
+//     sent, and a leak is irreversible. Drop this join and the worker starts
+//     classifying client work; the integration test's ai_locality='any' case
+//     is the assertion that goes red.
+//   - `p.ai_classify` (SWT-23). THE WORKLOAD FLAG: whether mail attributed
+//     here is worth an actionability verdict at 7.2 s of GPU each — a stall is
+//     one UPDATE. The two clauses answer DIFFERENT questions and both stay:
+//     collapsing them would make the boundary depend on a workload decision.
+//     The `bulk` project is local_only + ai_classify=false, which is what
+//     keeps ~5,700 claimed marketing messages out of this lane — and the
+//     local_only+false control fixture is the assertion that keeps this
+//     clause from going inert.
 //
 // The NOT EXISTS keys on worker_type='classify', so this worker's extractions
 // and triage's cannot hide each other's messages.
@@ -63,21 +73,51 @@ const inboxWhere = `
 	 WHERE nm.direction = 'inbound'
 	   AND latest.action = 'attributed'
 	   AND p.ai_locality = 'local_only'
+	   AND p.ai_classify
 	   AND NOT EXISTS (
 	         SELECT 1 FROM ai_extractions e
 	           JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type = 'classify'
+	          WHERE e.raw_source_item_id = nm.raw_source_item_id)`
+
+// inboxWhereResidue is the RESIDUE lane's filter (SWT-23): the unmatched pile,
+// which is triage's inbox in name and nothing's in practice. LEFT JOINs,
+// because an unmatched decision has no project to join to (0015's CHECK makes
+// (action='unmatched') = (project_id IS NULL) a schema fact) — an inner join
+// here would silently empty the lane. `latest.action = 'unmatched'` is spelled
+// as the positive on purpose: action has exactly four values and no "ignore"
+// verb, so `<> 'attributed'` would catch 'task'/'task_log' by accident. The
+// NOT EXISTS keys on worker_type='classify_residue' so this lane's verdicts
+// and the personal lane's cannot hide each other's messages, and rows scanned
+// from this filter carry Attribution = AttrUnmatched — which is what makes
+// ClassOf restrict them through the non-AttrProject branch.
+const inboxWhereResidue = `
+	  FROM normalized_messages nm
+	  JOIN LATERAL (SELECT cd.action, cd.project_id
+	                  FROM capture_decisions cd
+	                 WHERE cd.message_id = nm.id
+	                 ORDER BY cd.id DESC LIMIT 1) latest ON true
+	  LEFT JOIN projects p ON p.id = latest.project_id
+	 WHERE nm.direction = 'inbound'
+	   AND latest.action = 'unmatched'
+	   AND NOT EXISTS (
+	         SELECT 1 FROM ai_extractions e
+	           JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type = 'classify_residue'
 	          WHERE e.raw_source_item_id = nm.raw_source_item_id)`
 
 const inboxSelect = `
 	SELECT nm.id, nm.raw_source_item_id, COALESCE(nm.thread_id, 0),
 	       COALESCE(nm.sent_at, now()), COALESCE(nm.sender,''), COALESCE(nm.subject,''),
 	       COALESCE(nm.channel,''), COALESCE(nm.body_text,''), COALESCE(nm.direction,''),
-	       p.id, p.slug, (p.ai_locality = 'local_only'),
+	       COALESCE(p.id, 0), COALESCE(p.slug, ''), COALESCE(p.ai_locality = 'local_only', false),
 	       COALESCE(nm.links, '[]'::jsonb)`
 
-// PendingMessages returns one pass of the inbox, oldest first.
+// PendingMessages returns one pass of the lane's inbox, oldest first.
 func (s *PGStore) PendingMessages(ctx context.Context, cfg Config) ([]PendingMessage, error) {
-	q := inboxSelect + inboxWhere
+	where, attr := inboxWhere, attrProject
+	if cfg.Lane.Name == LaneResidue.Name {
+		where, attr = inboxWhereResidue, attrUnmatched
+	}
+	q := inboxSelect + where
 	args := []any{}
 	if cfg.Since > 0 {
 		args = append(args, cfg.Since.String())
@@ -87,16 +127,50 @@ func (s *PGStore) PendingMessages(ctx context.Context, cfg Config) ([]PendingMes
 	if cfg.Limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", cfg.Limit)
 	}
-	return s.scanMessages(ctx, q, args...)
+	return s.scanMessages(ctx, attr, q, args...)
 }
 
 // MessagesByID loads labelled messages for the eval harness. It deliberately
 // does NOT apply the inbox filter: a labelled message that has already been
 // classified must still be scoreable, or the eval set decays every time a pass
 // runs.
-func (s *PGStore) MessagesByID(ctx context.Context, ids []int64) ([]PendingMessage, error) {
+//
+// The RESIDUE loader (SWT-23 criterion 17) goes further: NO action and NO
+// project predicate at all. Phase 1 exists to move messages out of the
+// residue, so a loader that required `unmatched` would make the labelled set
+// silently shrink every time a rule is added — label drift by another
+// mechanism. Loading without the predicate is safe because Eval refuses any
+// lane but the local one before it reads anything. Rows whose latest decision
+// is no longer 'unmatched' come back with Attribution = AttrProject so the
+// harness can SAY a rule has claimed them.
+func (s *PGStore) MessagesByID(ctx context.Context, cfg Config, ids []int64) ([]PendingMessage, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+	if cfg.Lane.Name == LaneResidue.Name {
+		q := inboxSelect + `
+	  FROM normalized_messages nm
+	  LEFT JOIN LATERAL (SELECT cd.action, cd.project_id
+	                  FROM capture_decisions cd
+	                 WHERE cd.message_id = nm.id
+	                 ORDER BY cd.id DESC LIMIT 1) latest ON true
+	  LEFT JOIN projects p ON p.id = latest.project_id
+	 WHERE nm.id = ANY($1)
+	 ORDER BY nm.id`
+		msgs, err := s.scanMessages(ctx, attrUnmatched, q, ids)
+		if err != nil {
+			return nil, err
+		}
+		claimed, err := s.claimedSince(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for i := range msgs {
+			if claimed[msgs[i].MessageID] {
+				msgs[i].Attribution = attrProject
+			}
+		}
+		return msgs, nil
 	}
 	q := inboxSelect + `
 	  FROM normalized_messages nm
@@ -108,10 +182,34 @@ func (s *PGStore) MessagesByID(ctx context.Context, ids []int64) ([]PendingMessa
 	 WHERE nm.id = ANY($1)
 	   AND p.ai_locality = 'local_only'
 	 ORDER BY nm.id`
-	return s.scanMessages(ctx, q, ids)
+	return s.scanMessages(ctx, attrProject, q, ids)
 }
 
-func (s *PGStore) scanMessages(ctx context.Context, q string, args ...any) ([]PendingMessage, error) {
+// claimedSince names the labelled messages whose LATEST decision is no longer
+// 'unmatched' — a rule has claimed them since the label was written.
+func (s *PGStore) claimedSince(ctx context.Context, ids []int64) (map[int64]bool, error) {
+	rows, err := s.pool.Query(ctx, `
+	SELECT nm.id
+	  FROM normalized_messages nm
+	  JOIN LATERAL (SELECT cd.action FROM capture_decisions cd
+	                 WHERE cd.message_id = nm.id ORDER BY cd.id DESC LIMIT 1) latest ON true
+	 WHERE nm.id = ANY($1) AND latest.action <> 'unmatched'`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("select claimed labelled messages: %w", err)
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan claimed labelled message: %w", err)
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+func (s *PGStore) scanMessages(ctx context.Context, attr provider.AttributionState, q string, args ...any) ([]PendingMessage, error) {
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("select classify inbox: %w", err)
@@ -133,10 +231,11 @@ func (s *PGStore) scanMessages(ctx context.Context, q string, args ...any) ([]Pe
 		if err := json.Unmarshal(linksRaw, &m.Links); err != nil {
 			return nil, fmt.Errorf("parse links for message %d: %w", m.MessageID, err)
 		}
-		// Attribution is AttrProject by construction: the filter above requires a
-		// latest decision of 'attributed' with a project. Set explicitly rather
-		// than left at the zero value, which is AttrUnseen.
-		m.Attribution = attrProject
+		// Attribution is the LANE'S: AttrProject for the personal inbox (its
+		// filter requires an 'attributed' decision) and AttrUnmatched for the
+		// residue — which is what routes it through ClassOf's non-AttrProject
+		// branch. Set explicitly rather than left at the zero value (AttrUnseen).
+		m.Attribution = attr
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {

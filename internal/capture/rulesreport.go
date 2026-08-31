@@ -41,11 +41,14 @@ WITH latest AS (
 )`
 
 // Report renders the shadow diff for decisions made at or after `since`; a zero
-// `since` means the whole history.
+// `since` means the whole history. A non-empty `domain` appends the targeted
+// domain-detail investigation (SWT-23 criterion 4) — a census that printed
+// 14,737 subjects by default is one nobody reads, so the detail renders ONLY
+// when asked for.
 //
 // Returns the rendered text rather than writing it, so a caller can print it,
 // mail it, or assert on it.
-func Report(ctx context.Context, pool *pgxpool.Pool, since time.Time) (string, error) {
+func Report(ctx context.Context, pool *pgxpool.Pool, since time.Time, domain string) (string, error) {
 	if pool == nil {
 		return "", fmt.Errorf("capture rules report: nil database pool")
 	}
@@ -68,6 +71,11 @@ func Report(ctx context.Context, pool *pgxpool.Pool, since time.Time) (string, e
 		reportProjects,
 		reportProposedTasks,
 		reportAmbiguous,
+		// SWT-23 criterion 1: the DOMAIN table renders before the full-From
+		// table — it is the one a reader acts on, and the sender table is the
+		// detail underneath it. Both stay.
+		reportUnmatchedSenderDomains,
+		reportUnmatchedChannels,
 		reportUnmatchedSenders,
 		reportUnmatchedThreadPrefixes,
 	} {
@@ -76,7 +84,175 @@ func Report(ctx context.Context, pool *pgxpool.Pool, since time.Time) (string, e
 		}
 		b.WriteString("\n")
 	}
+	if domain != "" {
+		if err := reportUnmatchedDomainDetail(ctx, pool, window, &b, domain); err != nil {
+			return "", err
+		}
+		b.WriteString("\n")
+	}
 	return b.String(), nil
+}
+
+// unmatchedSenderCounts returns every unmatched sender with its message count —
+// unbounded, because the domain fold happens in Go and a SQL LIMIT would drop
+// the long tail the cumulative column exists to measure.
+func unmatchedSenderCounts(ctx context.Context, pool *pgxpool.Pool, window *time.Time) (map[string]int, error) {
+	rows, err := pool.Query(ctx, latestDecisions+`
+	  SELECT COALESCE(m.sender,''), count(*)
+	    FROM latest l JOIN normalized_messages m ON m.id = l.message_id
+	   WHERE l.action = 'unmatched'
+	   GROUP BY 1`, window)
+	if err != nil {
+		return nil, fmt.Errorf("select unmatched sender counts: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var sender string
+		var n int
+		if err := rows.Scan(&sender, &n); err != nil {
+			return nil, fmt.Errorf("scan unmatched sender count: %w", err)
+		}
+		out[sender] += n
+	}
+	return out, rows.Err()
+}
+
+// reportUnmatchedSenderDomains is SWT-23 criterion 1: the residue at the
+// granularity a rule is actually written at — sender DOMAIN — with share and
+// CUMULATIVE share. The cumulative column is the point: "the top 20 cover 43%"
+// is the one number that decides whether rules or a classifier is the cheaper
+// answer, and before this section it was not printable. The domain is parsed in
+// GO (senderDomain), never in SQL: split_part(sender,'@',2) on `Name <a@b.com>`
+// yields `b.com>`, which matches no rule and silently splits one domain into
+// two rows.
+func reportUnmatchedSenderDomains(ctx context.Context, pool *pgxpool.Pool, window *time.Time, b *strings.Builder) error {
+	senders, err := unmatchedSenderCounts(ctx, pool, window)
+	if err != nil {
+		return err
+	}
+	counts := map[string]int{}
+	total := 0
+	for sender, n := range senders {
+		counts[senderDomain(sender)] += n
+		total += n
+	}
+
+	b.WriteString("TOP UNMATCHED SENDER DOMAINS\n")
+	if total == 0 {
+		b.WriteString("  (none — every evaluated message matched a rule)\n")
+		return nil
+	}
+	cumulative := 0.0
+	for _, e := range topCounts(counts, 40) {
+		share := float64(e.count) * 100 / float64(total)
+		cumulative += share
+		fmt.Fprintf(b, "  %8d  %6.2f%%  %7.2f%%  %s\n", e.count, share, cumulative, e.key)
+	}
+	return nil
+}
+
+// reportUnmatchedChannels is SWT-23 criterion 3: the residue by channel, and
+// within it the count of senders carrying NO '@' at all. That single column is
+// the work-vs-noise discriminator: a bare display name is slack or upwork,
+// never gmail — google writes the raw From header, which always carries an
+// address (connector/google/rfc822.go, normalize.go), while slackweb writes
+// message.Author and upworkcrm the CRM's sender column, both display names.
+// Measured 2026-08-31: 1,287 address-less residue messages, every one of them
+// channel='upwork' — work conversations sitting unmatched.
+func reportUnmatchedChannels(ctx context.Context, pool *pgxpool.Pool, window *time.Time, b *strings.Builder) error {
+	rows, err := pool.Query(ctx, latestDecisions+`
+	  SELECT COALESCE(m.channel,'(none)'), count(*),
+	         count(*) FILTER (WHERE m.sender NOT LIKE '%@%')
+	    FROM latest l JOIN normalized_messages m ON m.id = l.message_id
+	   WHERE l.action = 'unmatched'
+	   GROUP BY 1 ORDER BY 2 DESC, 1`, window)
+	if err != nil {
+		return fmt.Errorf("select unmatched channels: %w", err)
+	}
+	defer rows.Close()
+
+	b.WriteString("UNMATCHED BY CHANNEL\n")
+	b.WriteString("  channel        messages   senders with no '@'\n")
+	any := false
+	for rows.Next() {
+		var channel string
+		var n, noAt int
+		if err := rows.Scan(&channel, &n, &noAt); err != nil {
+			return fmt.Errorf("scan unmatched channel: %w", err)
+		}
+		fmt.Fprintf(b, "  %-12s %10d %14d\n", channel, n, noAt)
+		any = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate unmatched channels: %w", err)
+	}
+	if !any {
+		b.WriteString("  (none — every evaluated message matched a rule)\n")
+	}
+	return nil
+}
+
+// reportUnmatchedDomainDetail is SWT-23 criterion 4: the targeted
+// investigation. The top 20 FULL sender addresses with counts, and the newest
+// 10 subjects — the counts say how much, the subjects say what, and the claim
+// gate of criterion 6 needs both. It is the query that turned sspataro.com
+// (518) from a suspicion into test@sspataro.com session notifications, and
+// upwork.com (106) into "Invitation to Interview".
+func reportUnmatchedDomainDetail(ctx context.Context, pool *pgxpool.Pool, window *time.Time, b *strings.Builder, domain string) error {
+	senders, err := unmatchedSenderCounts(ctx, pool, window)
+	if err != nil {
+		return err
+	}
+	counts := map[string]int{}
+	for sender, n := range senders {
+		if senderDomain(sender) == domain {
+			counts[sender] += n
+		}
+	}
+
+	fmt.Fprintf(b, "DOMAIN DETAIL %s\n", domain)
+	if len(counts) == 0 {
+		b.WriteString("  (no unmatched messages for this domain in the window)\n")
+		return nil
+	}
+	b.WriteString("  senders:\n")
+	for _, e := range topCounts(counts, reportListLimit) {
+		fmt.Fprintf(b, "  %8d  %s\n", e.count, e.key)
+	}
+
+	// Newest subjects, streamed newest-first and cut off after ten matches —
+	// the domain cannot be expressed in SQL without re-spelling the Go parse.
+	rows, err := pool.Query(ctx, latestDecisions+`
+	  SELECT COALESCE(m.sender,''), COALESCE(m.subject,'')
+	    FROM latest l JOIN normalized_messages m ON m.id = l.message_id
+	   WHERE l.action = 'unmatched'
+	   ORDER BY m.sent_at DESC, m.id DESC`, window)
+	if err != nil {
+		return fmt.Errorf("select unmatched subjects: %w", err)
+	}
+	defer rows.Close()
+
+	b.WriteString("  newest subjects:\n")
+	shown := 0
+	for rows.Next() && shown < 10 {
+		var sender, subject string
+		if err := rows.Scan(&sender, &subject); err != nil {
+			return fmt.Errorf("scan unmatched subject: %w", err)
+		}
+		if senderDomain(sender) != domain {
+			continue
+		}
+		fmt.Fprintf(b, "    %s\n", subject)
+		shown++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate unmatched subjects: %w", err)
+	}
+	if shown == 0 {
+		b.WriteString("    (none)\n")
+	}
+	return nil
 }
 
 // reportTotals is the "did this run at all" line: a silent pass and a pass that

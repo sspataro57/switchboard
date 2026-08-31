@@ -4,16 +4,29 @@
 // deliberately has no task-write method; going live ADDS an executor create_task
 // call later, it does not remove a guard here.
 //
-// THE HONESTY LABEL (SWT-22 criterion 13), stated at the top because it governs
-// how this package must be read and tested.
+// THE HONESTY LABEL (SWT-22 criterion 13, RE-STATED for two lanes by SWT-23
+// criterion 15), at the top because it governs how this package must be read
+// and tested.
 //
-// The inbox filter selects only messages attributed to a project whose
-// ai_locality is 'local_only', so EVERY message this worker sees is
-// provider.ClassRestricted BY CONSTRUCTION. The class fold below therefore
-// cannot change an outcome here: it is not a guard, and a unit test that
-// supplied a class and then asserted on it would be proving its own fixture —
-// this repo's seventh instance of "a predicate whose discriminating column is a
-// constant in production".
+// EVERY message either lane sees is provider.ClassRestricted, and the two
+// lanes get there by DIFFERENT mechanisms — two reasons, one outcome:
+//
+//   - The PERSONAL lane's inbox selects messages attributed to a project whose
+//     ai_locality is 'local_only' (and whose ai_classify flag opts it into
+//     this workload — ai_classify is a workload flag, not a boundary flag),
+//     so its rows are restricted through the project column.
+//   - The RESIDUE lane's inbox is the unmatched pile, which has NO project at
+//     all (0015's CHECK), so the project column cannot restrict it. Its rows
+//     carry Attribution = AttrUnmatched, and ClassOf maps every state that is
+//     not AttrProject to ClassRestricted — SWT-21's deliberate choice, made so
+//     that rule completeness is never load-bearing for containment. Do not
+//     "fix" the residue's class to general to save GPU time: unclassified is
+//     not less sensitive, it is unclassified.
+//
+// The class fold below therefore cannot change an outcome on either lane: it
+// is not a guard, and a unit test that supplied a class and then asserted on
+// it would be proving its own fixture — this repo's seventh instance of "a
+// predicate whose discriminating column is a constant in production".
 //
 // Two things DO protect this worker, and both are pinned where they can fail:
 //   - the INBOX FILTER, in store_integration_test.go, where Postgres produces
@@ -60,11 +73,15 @@ const (
 )
 
 // Config is the per-run configuration. Model is per-worker, never global.
+// Lane is REQUIRED: the zero value is refused rather than defaulted, so a
+// caller that forgets it gets an error instead of the personal prompt over the
+// residue (SWT-23 criterion 10).
 type Config struct {
 	Model     string
 	MaxTokens int
 	Limit     int           // 0 = all pending
-	Since     time.Duration // 0 = no lower bound on sent_at
+	Since     time.Duration // 0 = no lower bound on sent_at (REQUIRED >0 on the residue lane)
+	Lane      Lane
 }
 
 // NeighbourClass is one thread neighbour's attribution, for the most-restrictive
@@ -123,7 +140,10 @@ type AIRun struct {
 // so nothing here can insert into tasks/task_events/deliveries/external_refs.
 type Store interface {
 	PendingMessages(ctx context.Context, cfg Config) ([]PendingMessage, error)
-	MessagesByID(ctx context.Context, ids []int64) ([]PendingMessage, error)
+	// MessagesByID takes the Config since SWT-23: the residue lane loads by id
+	// with NO action and NO project predicate (criterion 17), while the personal
+	// lane keeps its local_only join — the loader has to know which lane asks.
+	MessagesByID(ctx context.Context, cfg Config, ids []int64) ([]PendingMessage, error)
 	RecordRun(ctx context.Context, run AIRun) (aiRunID int64, err error)
 	RecordExtraction(ctx context.Context, aiRunID, rawSourceItemID int64, fields json.RawMessage) error
 }
@@ -163,8 +183,24 @@ type verdict struct {
 	LinkIndex  *int   `json:"link_index"`
 }
 
-// Run classifies one pass of the inbox.
+// Run classifies one pass of the lane's inbox.
 func Run(ctx context.Context, store Store, router *provider.Router, cfg Config) (Stats, error) {
+	// Configuration refusals FIRST, before any I/O.
+	if err := cfg.Lane.validate(); err != nil {
+		return Stats{}, err
+	}
+	// SWT-23 criterion 16: an unbounded residue pass is refused, with the
+	// arithmetic in the message — a refusal that does not show its working
+	// teaches the reader to pass --since 87600h to make it go away, so it shows
+	// its working instead. Not a silent default: a default would be a 29-hour
+	// job started by a typo. The personal lane keeps --since optional; its
+	// population is ~1,600 and bounded.
+	if cfg.Lane.Name == LaneResidue.Name && cfg.Since <= 0 {
+		return Stats{}, fmt.Errorf("the residue lane refuses an unbounded pass: ~14,737 unmatched " +
+			"messages x the measured 7.2 s median = ~29.5 GPU-hours (the 0.25 s warm benchmark was a " +
+			"ten-word prompt, not this workload). Pass --since (e.g. --since 720h for the last month), " +
+			"or --since 87600h deliberately if a full historical sweep is what you want")
+	}
 	pending, err := store.PendingMessages(ctx, cfg)
 	if err != nil {
 		return Stats{}, fmt.Errorf("list pending messages: %w", err)
@@ -213,12 +249,12 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 		}
 
 		user := renderUser(m)
-		input := runInput(m, user)
+		input := runInput(m, user, cfg.Lane.PromptVersion)
 		laneName := lane.Describe().Name
 
 		resp, callErr := lane.Complete(ctx, provider.Request{
 			Model:      cfg.Model,
-			System:     SystemPrompt,
+			System:     cfg.Lane.System,
 			User:       user,
 			SchemaName: SchemaName,
 			Schema:     VerdictSchema,
@@ -255,7 +291,7 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 					"error":                 parseErr.Error(),
 				})
 				if _, err := store.RecordRun(ctx, AIRun{
-					WorkerType: "classify", Provider: laneName, Model: cfg.Model, Status: "skipped",
+					WorkerType: cfg.Lane.WorkerType, Provider: laneName, Model: cfg.Model, Status: "skipped",
 					Input: payload, Output: safeJSON(resp.Raw),
 					PromptTokens: resp.PromptTokens, CompletionTokens: resp.CompletionTokens,
 					LatencyMS: resp.LatencyMS,
@@ -268,7 +304,7 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 			stats.Errors++
 			slog.Error("classify message failed", "message", m.MessageID, "err", parseErr)
 			if _, err := store.RecordRun(ctx, AIRun{
-				WorkerType: "classify", Provider: laneName, Model: cfg.Model, Status: "error",
+				WorkerType: cfg.Lane.WorkerType, Provider: laneName, Model: cfg.Model, Status: "error",
 				Input: input, Output: safeJSON(resp.Raw),
 				PromptTokens: resp.PromptTokens, CompletionTokens: resp.CompletionTokens,
 				LatencyMS: resp.LatencyMS,
@@ -279,7 +315,7 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 		}
 
 		runID, err := store.RecordRun(ctx, AIRun{
-			WorkerType: "classify", Provider: laneName, Model: cfg.Model, Status: "ok",
+			WorkerType: cfg.Lane.WorkerType, Provider: laneName, Model: cfg.Model, Status: "ok",
 			Input: input, Output: safeJSON(resp.Raw),
 			PromptTokens: resp.PromptTokens, CompletionTokens: resp.CompletionTokens,
 			LatencyMS: resp.LatencyMS,
@@ -413,7 +449,7 @@ func flushSkips(ctx context.Context, store Store, cfg Config, routeSkipped int,
 		"sampled":       len(sample) < routeSkipped,
 	})
 	if _, err := store.RecordRun(ctx, AIRun{
-		WorkerType: "classify", Provider: "local", Model: cfg.Model,
+		WorkerType: cfg.Lane.WorkerType, Provider: "local", Model: cfg.Model,
 		Status: "skipped", Input: payload,
 	}); err != nil {
 		return fmt.Errorf("record pass skip summary: %w", err)
@@ -469,10 +505,13 @@ func renderUser(m PendingMessage) string {
 }
 
 // runInput is the ai_runs.input bookkeeping: prompt version, ids, and the
-// rendered prompt, so a verdict can be reproduced.
-func runInput(m PendingMessage, user string) json.RawMessage {
+// rendered prompt, so a verdict can be reproduced. promptVersion comes from
+// cfg.Lane, not the package constant — with the personal stamp on a residue
+// verdict, two runs that disagree are indistinguishable from a model that
+// drifted (SWT-23 criterion 24).
+func runInput(m PendingMessage, user, promptVersion string) json.RawMessage {
 	raw, _ := json.Marshal(map[string]any{
-		"prompt_version":        PromptVersion,
+		"prompt_version":        promptVersion,
 		"normalized_message_id": m.MessageID,
 		"raw_source_item_id":    m.RawSourceItemID,
 		"thread_id":             m.ThreadID,

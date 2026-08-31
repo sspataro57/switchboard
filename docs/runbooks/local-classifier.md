@@ -1,5 +1,7 @@
 # Runbook — the local actionability classifier (SWT-22)
 
+`classify` runs TWO lanes since SWT-23: `--lane personal` (the SWT-22 lane — mail the capture rules attributed to the `personal` project) and `--lane residue` (the unmatched pile nothing has routed). One binary, one verdict contract, two inboxes and two prompts.
+
 `classify` reads personal mail — the messages the capture rules attributed to the
 `personal` project — and records a shadow verdict: is this something that has to
 be DONE, or is it information. It creates no tasks. It runs only against a model
@@ -163,6 +165,47 @@ it feeds `confirmDeliveryByBodyPrefix` and google has no reconciler).
 
 To add a drop-list entry: edit the list in `links.go`, re-run
 `--normalize-only --all`, re-run the eval and record the new row above.
+
+## The residue lane (SWT-23)
+
+The second inbox: messages whose LATEST capture decision is `unmatched` — no
+project, no rule, triage's inbox in name. Run it with:
+
+```bash
+DATABASE_URL=... go run ./cmd/classify run --lane residue --since 720h
+DATABASE_URL=... go run ./cmd/classify report --lane residue --since 24h
+DATABASE_URL=... go run ./cmd/classify eval --lane residue   # labels default to the residue fixture
+```
+
+Verdicts land under worker_type `classify_residue`, never `classify`: both
+inbox filters key their NOT EXISTS on worker_type, so a shared value would make
+a message classified by one lane permanently invisible to the other once a
+capture rule claims it.
+
+**`--since` is REQUIRED on a residue run** — an unbounded pass is refused, not
+defaulted. The arithmetic: ~14,700 unmatched messages x the measured **7.2 s**
+median (the table above; NOT the 0.25 s warm benchmark, which was a ten-word
+prompt and is wrong by 25-29x) = ~29.5 GPU-hours. A default would be a 29-hour
+job started by a typo; `--since 87600h` remains available when a full
+historical sweep is chosen deliberately. Evals are exempt — they are bounded by
+the label file.
+
+**The strata, and which number to quote.** The residue labels are stratified
+(`uniform` / `enriched` / `domain_gate`, recorded per line in the file):
+
+- recall is computed over ALL labels — the enriched stratum is the recall
+  denominator; a uniform 200 at a ~2% base rate yields four positives and a
+  recall that is noise;
+- precision is quoted from the **uniform** stratum ONLY — a precision measured
+  over a deliberately enriched sample is not production precision, and it will
+  be quoted as if it were unless the harness refuses;
+- the **base rate** (uniform stratum) is the number that decides this lane's
+  future: if the residue is well under 1% actionable after the rules, the
+  honest description of this lane is "a daily filter over new mail", never "a
+  classifier over history".
+
+Measured numbers for this lane are recorded in the score table above alongside
+the personal rows, with their date.
 
 ## The labelled set
 
