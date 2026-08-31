@@ -13,6 +13,12 @@ a new item in an existing category).
 
 ## Known landmines (verified bites)
 
+- **`cmd/classify` reads `DATABASE_URL`, not `OPS_DATABASE_URL`.** The shell
+  exports only `OPS_DATABASE_URL`; run it as
+  `DATABASE_URL="$OPS_DATABASE_URL" go run ./cmd/classify ...` (same pattern as
+  the google cmds). Bit on 2026-08-30: the first eval run exited 1 with
+  `classify: connect: DATABASE_URL is not set` after 0 messages.
+
 ### Inherited ANTHROPIC_API_KEY starves worker sessions
 **Location:** `internal/worker/loop.go` (CmdRunner env), bit 2026-07-11
 The claude subprocess inherits the wrapper's environment; a stray
@@ -401,6 +407,11 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 ---
 
 ## Environment facts
+
+- **ollama on the workstation is a systemd user service** (since 2026-08-31):
+  `~/.config/systemd/user/ollama.service`, `OLLAMA_VULKAN=1` (ROCm crashes on
+  this GPU), linger enabled so it survives logout. TEMPORARY until ollama moves
+  in-cluster behind a MetalLB `192.168.50.0/24` address; then disable the unit.
 
 - **Postgres:** `ops` db on pg-main (CNPG), `pg-main-rw.cnpg.svc:5432` in-cluster.
   The CNPG image already ships **pgvector** (confirmed 2026-07-11; `vector` was

@@ -78,6 +78,15 @@ export OPS_LOCAL_MODEL=qwen3:8b                        # required; no fallback
 OLLAMA_VULKAN=1 ollama serve                           # ROCm crashes on this GPU
 ```
 
+Since 2026-08-31 `ollama serve` runs as a systemd **user** service on the
+workstation (`~/.config/systemd/user/ollama.service`, linger enabled, carries
+`OLLAMA_VULKAN=1`) — `systemctl --user status ollama` to check,
+`ollama stop qwen3:8b` to evict the model from VRAM without stopping the
+daemon. **This deployment is TEMPORARY**: the end-state is ollama in-cluster
+behind a MetalLB address in `192.168.50.0/24` (the only in-cluster shape the
+locality boundary accepts — see the k8s constraint below). When that lands,
+`systemctl --user disable --now ollama` and delete the unit.
+
 `OPS_LOCAL_MODEL` is required once the URL is set. Missing it leaves the lane
 absent with one logged refusal — a skipped pass — rather than sending the hosted
 model name to ollama and getting a 404 per message.
