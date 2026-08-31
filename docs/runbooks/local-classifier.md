@@ -176,6 +176,21 @@ file is safe to commit while the mail never leaves the machine.
 | date       | n   | actionable | recall | precision | median latency | model    |
 |------------|-----|-----------:|-------:|----------:|---------------:|----------|
 | 2026-08-30 | 280 | 35         | 0.83   | 0.58      | 6.3 s          | qwen3:8b |
+| 2026-08-31 | 280 | 35         | 0.94   | 0.50      | 7.2 s          | qwen3:8b |
+
+The 2026-08-31 row is the SWT-25 re-run: same 280 labels, same file, same
+command, after link candidates entered the prompt and the verdict gained
+`link_index`. Label drift exclusions: zero, as expected — the backfill upserts,
+so ids and subjects are stable. False negatives went 6 → 2. What moved:
+25541 and 27641 (appointment confirmations), 26018 (statement with a minimum
+payment) and 26919 (the empty view-your-message shell) are all caught now.
+What did NOT move, said plainly: 27871 (the doctor's-office portal message) and
+84710 (the unfilled-template portal notice) are still missed — each now carries
+its portal link and the model still reads them as informational, so the
+candidate list alone does not fix content-behind-a-login; that is prompt or
+second-pass territory, not extraction. Precision paid for the recall
+(0.58 → 0.50, 33 of 66 flagged) and the median rose ~1 s with the larger
+prompt — both acceptable trades while recall is the objective.
 
 The 280 ids are hand-checked, drawn from the `personal` population (1,624
 messages at draw time, 2026-08-29; the population grows daily): every Pines
