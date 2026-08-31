@@ -111,7 +111,7 @@ func NormalizeRFC822(raw json.RawMessage, accountEmail string, ownEmails map[str
 	// parts — only attachments were left behind — so skipping extraction here
 	// would throw away the body of every large message, which is exactly the ask
 	// a client writes above a 3 MB PDF.
-	body := extractBodyText(rfc822Bytes)
+	body, htmlPart := extractBodyParts(rfc822Bytes)
 	if manifest := attachmentLine(env.Parts); manifest != "" {
 		if body != "" {
 			body += "\n\n"
@@ -134,6 +134,10 @@ func NormalizeRFC822(raw json.RawMessage, accountEmail string, ownEmails map[str
 		Sender:            toValidUTF8(sender),
 		BodyText:          toValidUTF8(body),
 		Channel:           Channel,
+		// Links come from the text/html part INDEPENDENTLY of which part won
+		// body_text (SWT-25 criterion 8) — the html alternative is where a
+		// templated notice keeps its hrefs, and body selection discards it.
+		Links: sanitizeLinks(ExtractLinks(htmlPart)),
 		// No Gmail ids exist over IMAP. Leaving these empty is deliberate: the
 		// gmail-msgid dedup index keys on external_message_id, not on these.
 	}, nil
@@ -214,20 +218,31 @@ func parseMailDate(v string) time.Time {
 	return time.Time{}
 }
 
-// extractBodyText walks the MIME tree for the first text/plain leaf, falling back
-// to a tag-stripped text/html leaf. Best-effort throughout: a body that cannot be
-// decoded degrades to whatever bytes are there rather than failing the message.
-func extractBodyText(rfc822Bytes []byte) string {
+// extractBodyParts walks the MIME tree once for the first text/plain leaf,
+// falling back to a tag-stripped text/html leaf — and ALSO returns the raw
+// text/html part (SWT-25). The body selection DISCARDS the html alternative
+// whenever text/plain is non-empty, which is the shape of every templated
+// notice; link extraction has to read the part that selection throws away, and
+// walking twice would parse every message a second time.
+//
+// The BODY half of this function is byte-for-byte the pre-SWT-25 behaviour
+// (criterion 10): body_text feeds confirmDeliveryByBodyPrefix, google has no
+// reconciler, and a body that shifts by one space leaves a delivery
+// permanently unconfirmable with no error anywhere.
+//
+// Best-effort throughout: a body that cannot be decoded degrades to whatever
+// bytes are there rather than failing the message.
+func extractBodyParts(rfc822Bytes []byte) (body, htmlPart string) {
 	msg, err := mail.ReadMessage(strings.NewReader(string(rfc822Bytes)))
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	plain, htmlBody := walkForText(msg.Header.Get("Content-Type"), msg.Header.Get("Content-Transfer-Encoding"), msg.Body, 0)
-	body := plain
+	body = plain
 	if body == "" && htmlBody != "" {
 		body = stripHTML(htmlBody)
 	}
-	return capBody(body)
+	return capBody(body), htmlBody
 }
 
 // walkForText returns (firstPlain, firstHTML) found at or below this part.

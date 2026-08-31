@@ -72,7 +72,8 @@ const inboxSelect = `
 	SELECT nm.id, nm.raw_source_item_id, COALESCE(nm.thread_id, 0),
 	       COALESCE(nm.sent_at, now()), COALESCE(nm.sender,''), COALESCE(nm.subject,''),
 	       COALESCE(nm.channel,''), COALESCE(nm.body_text,''), COALESCE(nm.direction,''),
-	       p.id, p.slug, (p.ai_locality = 'local_only')`
+	       p.id, p.slug, (p.ai_locality = 'local_only'),
+	       COALESCE(nm.links, '[]'::jsonb)`
 
 // PendingMessages returns one pass of the inbox, oldest first.
 func (s *PGStore) PendingMessages(ctx context.Context, cfg Config) ([]PendingMessage, error) {
@@ -120,10 +121,17 @@ func (s *PGStore) scanMessages(ctx context.Context, q string, args ...any) ([]Pe
 	var out []PendingMessage
 	for rows.Next() {
 		var m PendingMessage
+		var linksRaw []byte
 		if err := rows.Scan(&m.MessageID, &m.RawSourceItemID, &m.ThreadID, &m.SentAt,
 			&m.Sender, &m.Subject, &m.Channel, &m.BodyText, &m.Direction,
-			&m.ProjectID, &m.ProjectSlug, &m.ProjectLocalOnly); err != nil {
+			&m.ProjectID, &m.ProjectSlug, &m.ProjectLocalOnly, &linksRaw); err != nil {
 			return nil, fmt.Errorf("scan classify inbox row: %w", err)
+		}
+		// The links COLUMN is the contract with the normalizer (SWT-25): the
+		// element shape is {"text","url"} and the array position is the
+		// identity — the scan must not reorder it, and json.Unmarshal does not.
+		if err := json.Unmarshal(linksRaw, &m.Links); err != nil {
+			return nil, fmt.Errorf("parse links for message %d: %w", m.MessageID, err)
 		}
 		// Attribution is AttrProject by construction: the filter above requires a
 		// latest decision of 'attributed' with a project. Set explicitly rather

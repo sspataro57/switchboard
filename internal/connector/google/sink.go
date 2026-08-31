@@ -255,18 +255,30 @@ func (s *PGSink) upsertMessage(ctx context.Context, rawItemID int64, nm Normaliz
 		return false, fmt.Errorf("upsert thread %s: %w", nm.ThreadKey, err)
 	}
 
+	// links travels in the SAME statement as the body (SWT-25 criterion 11), in
+	// both the INSERT and the DO UPDATE list: one statement, so a re-normalize
+	// can never leave a row with a fresh body and stale links, and the
+	// `--normalize-only --all` backfill refreshes links with no new code path.
+	linksJSON := []byte("[]")
+	if len(nm.Links) > 0 {
+		b, err := json.Marshal(nm.Links)
+		if err != nil {
+			return false, fmt.Errorf("marshal links for raw item %d: %w", rawItemID, err)
+		}
+		linksJSON = b
+	}
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO normalized_messages
 		   (raw_source_item_id, thread_id, direction, external_message_id, sent_at,
-		    body_text, subject, sender, channel)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		    body_text, subject, sender, channel, links)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		 ON CONFLICT (raw_source_item_id) DO UPDATE SET
 		   thread_id=EXCLUDED.thread_id, direction=EXCLUDED.direction,
 		   external_message_id=EXCLUDED.external_message_id, sent_at=EXCLUDED.sent_at,
 		   body_text=EXCLUDED.body_text, subject=EXCLUDED.subject,
-		   sender=EXCLUDED.sender, channel=EXCLUDED.channel`,
+		   sender=EXCLUDED.sender, channel=EXCLUDED.channel, links=EXCLUDED.links`,
 		rawItemID, threadID, nm.Direction, nm.ExternalMessageID, nm.SentAt,
-		nm.BodyText, nm.Subject, nm.Sender, nm.Channel); err != nil {
+		nm.BodyText, nm.Subject, nm.Sender, nm.Channel, linksJSON); err != nil {
 		return false, fmt.Errorf("upsert message for raw item %d: %w", rawItemID, err)
 	}
 

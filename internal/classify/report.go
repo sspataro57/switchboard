@@ -33,6 +33,11 @@ func Report(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Dur
 	defer rows.Close()
 
 	var classified, flagged int
+	// The four link states of SWT-25 criterion 21, counted separately: a
+	// counter that cannot tell "nothing to offer" from "the model declined"
+	// from "the model answered nonsense" is an alarm nobody can read. Rows
+	// predating SWT-25 carry no link_candidates and are not counted at all.
+	var linkResolved, linkDeclined, linkNoneOffered, linkRejected int
 	byKind := map[string]int{}
 	var lines []string
 	for rows.Next() {
@@ -42,29 +47,53 @@ func Report(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Dur
 			return fmt.Errorf("scan verdict: %w", err)
 		}
 		var f struct {
-			Actionable bool   `json:"actionable"`
-			Kind       string `json:"kind"`
-			Title      string `json:"title"`
-			Reason     string `json:"reason"`
-			Sender     string `json:"sender"`
-			Subject    string `json:"subject"`
-			MessageID  int64  `json:"normalized_message_id"`
+			Actionable     bool     `json:"actionable"`
+			Kind           string   `json:"kind"`
+			Title          string   `json:"title"`
+			Reason         string   `json:"reason"`
+			Sender         string   `json:"sender"`
+			Subject        string   `json:"subject"`
+			MessageID      int64    `json:"normalized_message_id"`
+			LinkCandidates *int     `json:"link_candidates"`
+			LinkURL        *string  `json:"link_url"`
+			LinkRejectedAs *float64 `json:"link_index_rejected"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			continue
 		}
 		classified++
 		byKind[f.Kind]++
+		switch {
+		case f.LinkCandidates == nil:
+			// pre-SWT-25 verdict; nothing to count
+		case f.LinkURL != nil && *f.LinkURL != "":
+			linkResolved++
+		case f.LinkRejectedAs != nil:
+			linkRejected++
+		case *f.LinkCandidates == 0:
+			linkNoneOffered++
+		default:
+			linkDeclined++
+		}
 		if !f.Actionable {
 			continue
 		}
 		flagged++
+		// The resolved URL on every flagged line (SWT-25 criterion 22) — that
+		// is this ticket's usable-alone claim: a flagged notice is actionable
+		// from the report instead of sending the reader back to the mailbox.
+		// The placeholder matters too: an empty column reads as a rendering
+		// bug, and no-candidates is the COMMON case.
+		linkCol := "—"
+		if f.LinkURL != nil && *f.LinkURL != "" {
+			linkCol = *f.LinkURL
+		}
 		// Sender and subject as well as the verdict (criterion 20): the title is
 		// the model's summary, and an operator deciding whether to trust it needs
 		// to see what it was summarising.
-		lines = append(lines, fmt.Sprintf("  %s  #%-7d %-16s %-34s %-40s %s",
+		lines = append(lines, fmt.Sprintf("  %s  #%-7d %-16s %-34s %-40s %s  %s",
 			createdAt.Format("2006-01-02 15:04"), f.MessageID, f.Kind,
-			trunc(f.Sender, 34), trunc(f.Subject, 40), f.Title))
+			trunc(f.Sender, 34), trunc(f.Subject, 40), f.Title, linkCol))
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate verdicts: %w", err)
@@ -76,6 +105,10 @@ func Report(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since time.Dur
 		for _, k := range sortedKeys(byKind) {
 			fmt.Fprintf(w, "    by kind  %-18s %d\n", k, byKind[k])
 		}
+	}
+	if classified > 0 {
+		fmt.Fprintf(w, "  links  resolved: %d  declined (null): %d  none offered: %d  rejected: %d\n",
+			linkResolved, linkDeclined, linkNoneOffered, linkRejected)
 	}
 	fmt.Fprintln(w)
 

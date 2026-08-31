@@ -406,6 +406,24 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 
 ---
 
+
+### Link preservation (SWT-25)
+
+- `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written
+  by the google normalizer from the raw text/html part. **Array position is the
+  identity** — nothing may reorder it after write.
+- The classifier's `link_index` is a 1-based index into that array, integer or
+  null, resolved by `classify.ResolveLink` — the model never authors a URL, and
+  the schema has no string field it could author one into.
+- `img src` is never extracted and never followed: the only "link" in a Pines
+  First Notice is the SendGrid `/wf/open` tracking pixel.
+- Backfill = `go run ./cmd/connectors/google --normalize-only --all`.
+  Idempotent: the upsert keys on `raw_source_item_id`, so message ids and the
+  eval labels survive it.
+- STANDING RULE: `body_text` must never change without checking
+  `confirmDeliveryByBodyPrefix` — google has no reconciler, and a one-space
+  shift leaves a delivery permanently unconfirmable with no error anywhere.
+
 ## Environment facts
 
 - **ollama on the workstation is a systemd user service** (since 2026-08-31):

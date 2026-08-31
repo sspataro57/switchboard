@@ -27,8 +27,13 @@ type NormalizedMessage struct {
 	Sender            string
 	BodyText          string
 	Channel           string
-	GmailMessageID    string
-	GmailThreadID     string
+	// Links is the SWT-25 candidate list: anchors extracted from the text/html
+	// part at normalize time by ExtractLinks (filtered, deduped, capped at 8).
+	// Stored in normalized_messages.links, where the ARRAY POSITION IS THE
+	// IDENTITY — the classifier's link_index is a 1-based position into it.
+	Links          []Link
+	GmailMessageID string
+	GmailThreadID  string
 }
 
 type gmailHeader struct {
@@ -93,14 +98,19 @@ func NormalizeGmailMessage(raw json.RawMessage, accountEmail string, ownEmails m
 		direction = "outbound"
 	}
 
-	body := firstTextPlain(gmailPart{
+	root := gmailPart{
 		MimeType: m.Payload.MimeType,
 		Body:     m.Payload.Body,
 		Parts:    m.Payload.Parts,
-	})
+	}
+	body := firstTextPlain(root)
 	if body == "" {
 		body = m.Snippet
 	}
+	// Not the production path (production is imap), and wired anyway: leaving
+	// Links empty here would make a future MAIL_SOURCE flip a silent,
+	// error-free loss of every link (SWT-25 criterion 9).
+	links := sanitizeLinks(ExtractLinks(firstTextHTML(root)))
 
 	return NormalizedMessage{
 		ThreadKey:         "gmail:" + accountEmail + ":" + m.ThreadID,
@@ -111,6 +121,7 @@ func NormalizeGmailMessage(raw json.RawMessage, accountEmail string, ownEmails m
 		Sender:            headers["from"],
 		BodyText:          body,
 		Channel:           Channel,
+		Links:             links,
 		GmailMessageID:    m.ID,
 		GmailThreadID:     m.ThreadID,
 	}, nil
@@ -142,6 +153,33 @@ func firstTextPlain(p gmailPart) string {
 		}
 	}
 	return ""
+}
+
+// firstTextHTML is firstTextPlain's sibling for the text/html alternative —
+// the part link extraction reads (SWT-25 criterion 9).
+func firstTextHTML(p gmailPart) string {
+	if strings.HasPrefix(p.MimeType, "text/html") && p.Body.Data != "" {
+		if decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(p.Body.Data, "=")); err == nil {
+			return string(decoded)
+		}
+	}
+	for _, child := range p.Parts {
+		if body := firstTextHTML(child); body != "" {
+			return body
+		}
+	}
+	return ""
+}
+
+// sanitizeLinks forces every stored string to valid UTF-8 before it reaches a
+// TEXT/JSONB column — the same repair rule as every other field this package
+// writes (a latin-1 byte in an href must not abort a normalize pass).
+func sanitizeLinks(ls []Link) []Link {
+	for i := range ls {
+		ls[i].Text = toValidUTF8(ls[i].Text)
+		ls[i].URL = toValidUTF8(ls[i].URL)
+	}
+	return ls
 }
 
 // Attendee is one calendar attendee projection.

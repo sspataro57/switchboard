@@ -128,6 +128,42 @@ without opening psql.
 An all-skipped pass when the local box is down is expected. Falling back to a
 hosted provider is never the fix.
 
+## Links
+
+Where links come from: the google NORMALIZER extracts anchors from the raw
+message's text/html part at normalize time (`internal/connector/google/links.go`)
+into the `normalized_messages.links` column — NOT from `body_text`, which
+carries no URL at all in 837 of 1,613 personal messages because body selection
+keeps anchor text and drops hrefs. The array position is the identity.
+
+The model returns `link_index` — a 1-based number into that array, or null —
+and NEVER a URL. Ask a model for a URL and it invents a plausible one; a
+hallucinated portal link on a task about a fine is worse than no link at all.
+The index makes that structural: `ResolveLink` is the one conversion, an
+out-of-range index is recorded as rejected, and there is no string field to
+author a link into.
+
+**`link_index: null` is ORDINARY output, not a failure.** The two HOA First
+Notices have no usable link at all — their only URL is SendGrid's `/wf/open`
+open-tracking pixel inside an `<img>`. `img src` is never extracted and never
+followed: widening the extractor "to catch the Pines link" would put a tracking
+beacon on a task. The common case is zero candidates; the median message has
+two.
+
+Backfill (existing rows get links by re-normalizing from raw):
+
+```bash
+DATABASE_URL=... go run ./cmd/connectors/google --normalize-only --all
+```
+
+Idempotent: the upsert keys on `raw_source_item_id`, so message ids — and with
+them `capture_decisions`, `ai_extractions` and the eval labels — survive a full
+corpus rebuild. `body_text` comes out byte-identical (the golden test pins it;
+it feeds `confirmDeliveryByBodyPrefix` and google has no reconciler).
+
+To add a drop-list entry: edit the list in `links.go`, re-run
+`--normalize-only --all`, re-run the eval and record the new row above.
+
 ## The labelled set
 
 `docs/evals/personal-actionability.jsonl` — the only thing anyone is permitted to

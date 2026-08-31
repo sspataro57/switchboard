@@ -311,8 +311,8 @@ func TestGmailLinks_Integration_OtherConnectorsKeepAnEmptyArray(t *testing.T) {
 	// nothing.
 	if _, err := pool.Exec(ctx,
 		`UPDATE normalized_messages SET links = '{"a":1}'::jsonb WHERE id=$1`, msgID); err == nil {
-		t.Errorf("a JSON OBJECT was accepted into normalized_messages.links. Criterion 12 requires "+
-			"CHECK (jsonb_typeof(links) = 'array'): the contract downstream is a 1-based POSITION, and "+
+		t.Errorf("a JSON OBJECT was accepted into normalized_messages.links. Criterion 12 requires " +
+			"CHECK (jsonb_typeof(links) = 'array'): the contract downstream is a 1-based POSITION, and " +
 			"nothing that is not an array has positions")
 	}
 }
