@@ -180,8 +180,12 @@ type storedRule struct {
 type pendingMessage struct {
 	msg       Message
 	rawItemID *int64
-	channel   string
-	sentAt    time.Time
+	// threadID is the message's normalized_threads id — the provenance a
+	// live `task` decision records on the task it creates (SWT-20). NULL when
+	// the message has no thread; nothing is invented.
+	threadID *int64
+	channel  string
+	sentAt   time.Time
 }
 
 // ruleDecision is one capture_decisions row before it is written.
@@ -304,6 +308,16 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 			if err := linkRuleRef(ctx, ex, cfg.Actor, taskID, winner, *decision.extSystem, *decision.extKey); err != nil {
 				return stats, err
 			}
+			// SWT-20 criterion 19: record which conversation raised the task,
+			// through the executor, in the linkRuleRef shape — the error fails
+			// the pass rather than being logged. A version that logged and
+			// continued would leave a provenance-less task behind exactly once,
+			// silently: the live decision is spent, external_refs has taken the
+			// key forever, and draft_delivery then refuses the task for a fact
+			// nothing will ever write.
+			if err := setRuleProvenance(ctx, ex, cfg.Actor, taskID, pm); err != nil {
+				return stats, err
+			}
 			stats.TasksCreated++
 		case actionTaskLog:
 			if err := appendRuleLog(ctx, ex, cfg.Actor, pm, *decision.taskID, *decision.extSystem, *decision.extKey); err != nil {
@@ -410,7 +424,7 @@ func pendingMessages(ctx context.Context, pool *pgxpool.Pool, cfg RulesConfig) (
 		since = &t
 	}
 
-	q := `SELECT m.id, m.raw_source_item_id, COALESCE(sa.account_email,''),
+	q := `SELECT m.id, m.raw_source_item_id, m.thread_id, COALESCE(sa.account_email,''),
 	             COALESCE(nt.thread_key,''), COALESCE(m.sender,''), COALESCE(m.subject,''),
 	             COALESCE(m.body_text,''), COALESCE(m.external_message_id,''),
 	             COALESCE(nt.participants,'[]'::jsonb), COALESCE(m.channel,''),
@@ -476,7 +490,7 @@ func pendingMessages(ctx context.Context, pool *pgxpool.Pool, cfg RulesConfig) (
 	for rows.Next() {
 		var pm pendingMessage
 		var participants []byte
-		if err := rows.Scan(&pm.msg.ID, &pm.rawItemID, &pm.msg.Source, &pm.msg.ThreadKey,
+		if err := rows.Scan(&pm.msg.ID, &pm.rawItemID, &pm.threadID, &pm.msg.Source, &pm.msg.ThreadKey,
 			&pm.msg.Sender, &pm.msg.Subject, &pm.msg.BodyText, &pm.msg.ExternalMessageID,
 			&participants, &pm.channel, &pm.sentAt); err != nil {
 			return nil, fmt.Errorf("scan pending message: %w", err)
@@ -761,6 +775,35 @@ func linkRuleRef(ctx context.Context, ex *executor.Executor, actor string,
 		Tool: "link_external_ref", Actor: actor, Args: args, TaskID: &taskID,
 	}); err != nil {
 		return fmt.Errorf("link %s %s to task %d: %w", system, key, taskID, err)
+	}
+	return nil
+}
+
+// setRuleProvenance records the conversation that raised the task
+// (tasks.source_thread_id) via task_set_source_thread — the executor path, so
+// rules_structure_test.go's ban on touching tasks directly holds and "who
+// recorded this task's conversation" is answerable from audit_events.
+//
+// It fails loudly for the same reason linkRuleRef does: without the
+// provenance the task can never be delivered (draft_delivery refuses it), and
+// the failure is silent unless the pass stops. A message with no thread
+// records nothing — provenance is an observation, never an invention.
+func setRuleProvenance(ctx context.Context, ex *executor.Executor, actor string,
+	taskID int64, pm pendingMessage) error {
+	if pm.threadID == nil {
+		return nil
+	}
+	args, err := json.Marshal(map[string]any{
+		"task_id":   taskID,
+		"thread_id": *pm.threadID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal task_set_source_thread args for task %d: %w", taskID, err)
+	}
+	if _, err := ex.Execute(ctx, executor.Call{
+		Tool: "task_set_source_thread", Actor: actor, Args: args, TaskID: &taskID,
+	}); err != nil {
+		return fmt.Errorf("record source thread %d on task %d: %w", *pm.threadID, taskID, err)
 	}
 	return nil
 }

@@ -125,3 +125,89 @@ func TestSameConversation_IsASupersetOfExactKeyEquality(t *testing.T) {
 		}
 	}
 }
+
+// ---- SWT-20 criterion 16: the property the SQL shortlist is DERIVED from ------
+
+// THIS IS THE ONE ASSERTION THE WHOLE SHORTLIST OPTIMISATION RESTS ON.
+//
+// SWT-20 stops `confirmUpworkDelivery` locking every unresolved upwork delivery
+// in the database for every outbound message. Instead it SHORTLISTS by
+// `deliveries.target_client_ref = messageRef.ClientID` (an indexed equality),
+// then locks that id set, then runs the unchanged Go decision over it.
+//
+// That is only sound because the shortlist's predicate is IMPLIED BY the rule:
+// SameConversation returns false whenever the client ids differ, so no row the
+// shortlist drops could ever have been accepted. The narrowing is therefore
+// candidate-EQUIVALENT, not merely cheaper.
+//
+// If this test ever fails, the shortlist is UNSOUND and the failure mode is
+// silent: a delivery that should have confirmed simply does not, `sent_external_id`
+// stays NULL, and the only thing that surfaces it is upworkcrm/reconcile.go
+// ~45 minutes later. That is why the implication is pinned as a test rather than
+// asserted in a comment (SPEC §6, "a comment can be a defect").
+//
+// The client id is also the ONLY predicate that may ever be spelled in that SQL.
+// The room clause (`NOT (both roomed AND rooms differ)`) is the rule ITSELF, not
+// an implication of it, so writing it in SQL would be a second spelling of the
+// decision — SPEC D3, and the reason there is no target_room_ref column.
+//
+// Both key shapes, both argument orders: SameConversation is not symmetric in
+// general (the roomed/unroomed cells are not), so "different clients exclude"
+// has to be checked in both directions or the shortlist is only proved for the
+// direction the current caller happens to use.
+func TestSameConversation_DifferentClientsNeverMatch_ShortlistPremise(t *testing.T) {
+	const (
+		clientA = "aaaaaaaa-0000-0000-0000-00000000000a"
+		clientB = "bbbbbbbb-0000-0000-0000-00000000000b"
+		room1   = "room_9f45f6ecccffad7c804183574cba479f"
+		room2   = "room_6f162de2235e2b5cee735c8268fe30a0"
+	)
+	if clientA == clientB {
+		t.Fatalf("fixture invalid: the two client ids are the same string")
+	}
+
+	shapes := func(client string) map[string]ThreadRef {
+		return map[string]ThreadRef{
+			"legacy":       {ClientID: client, Channel: "upwork"},
+			"roomed/room1": {ClientID: client, RoomID: room1, Roomed: true},
+			"roomed/room2": {ClientID: client, RoomID: room2, Roomed: true},
+		}
+	}
+	as, bs := shapes(clientA), shapes(clientB)
+
+	for an, a := range as {
+		for bn, b := range bs {
+			an, a, bn, b := an, a, bn, b
+			t.Run(an+" vs "+bn, func(t *testing.T) {
+				// Both orders. The shortlist filters DELIVERIES by the MESSAGE's
+				// client, and the Go half is then called (message, delivery) — but
+				// nothing in the SQL knows which side it is narrowing, so the
+				// implication must hold either way round.
+				if SameConversation(a, b) {
+					t.Errorf("SameConversation(%+v, %+v) = true across DIFFERENT clients. The SWT-20 shortlist "+
+						"selects deliveries by target_client_ref = the message's client id and would DROP this "+
+						"pair before the Go half ever saw it — so the narrowing would no longer be "+
+						"candidate-equivalent, and a delivery that should confirm silently would not", a, b)
+				}
+				if SameConversation(b, a) {
+					t.Errorf("SameConversation(%+v, %+v) = true across DIFFERENT clients (reversed arguments)", b, a)
+				}
+			})
+		}
+	}
+
+	// Guard the guard: the same shapes WITHIN one client must still match, or the
+	// loop above would pass against a SameConversation that returns false for
+	// everything — which is the other way to make the shortlist "sound".
+	for an, a := range as {
+		for bn, b := range as {
+			if a.Roomed && b.Roomed && a.RoomID != b.RoomID {
+				continue // the one legitimate same-client exclusion
+			}
+			if !SameConversation(a, b) {
+				t.Fatalf("SameConversation(%s, %s) = false WITHIN one client; this test can no longer tell a "+
+					"client check from a function that excludes everything", an, bn)
+			}
+		}
+	}
+}

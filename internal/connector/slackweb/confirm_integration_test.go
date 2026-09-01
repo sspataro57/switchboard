@@ -447,10 +447,23 @@ func TestSlackConfirm_Integration_ReconcilerIgnoresConfirmedRows(t *testing.T) {
 		taskID, rcTarget, rcBody).Scan(&confirmed); err != nil {
 		t.Fatalf("seed confirmed delivery: %v", err)
 	}
+	// Post-0019 (SWT-20 criterion 13): an upwork_chat row must carry its
+	// identity, so the thread exists first and both columns are set.
+	var upThread int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_at)
-		 VALUES ($1,'upwork_chat','upwork_crm:itest-slack-confirm:upwork','x','sent', now() - interval '30 minutes')
-		 RETURNING id`, taskID).Scan(&upwork); err != nil {
+		`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
+		 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING
+		 RETURNING id`, "upwork_crm:itest-slack-confirm:upwork").Scan(&upThread); err != nil {
+		if err := pool.QueryRow(ctx,
+			`SELECT id FROM normalized_threads WHERE thread_key=$1`,
+			"upwork_crm:itest-slack-confirm:upwork").Scan(&upThread); err != nil {
+			t.Fatalf("seed upwork thread: %v", err)
+		}
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO deliveries (task_id, channel, target_ref, target_client_ref, thread_id, body, status, sent_at)
+		 VALUES ($1,'upwork_chat','upwork_crm:itest-slack-confirm:upwork','itest-slack-confirm',$2,'x','sent', now() - interval '30 minutes')
+		 RETURNING id`, taskID, upThread).Scan(&upwork); err != nil {
 		t.Fatalf("seed upwork delivery: %v", err)
 	}
 

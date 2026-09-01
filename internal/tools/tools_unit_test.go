@@ -81,6 +81,12 @@ var allToolNames = []string{
 	"record_pr_event",    // spine-facing: {task_id, action, pr, url}
 	"record_ci_event",    // spine-facing: {task_id, phase, conclusion?, run_id, run_url}
 	"task_pr_transition", // spine-facing: {task_id, to, reason?/summary?}
+	// SWT-20 provenance (criterion 2). Spine-facing: registered here so the write
+	// runs validate -> policy -> audit, and deliberately ABSENT from
+	// internal/mcpserver/schemas.go — an agent that could record a task's source
+	// conversation could aim that task's deliveries. The absence is asserted, not
+	// merely relied on: internal/mcpserver/adapter_test.go's spineTools.
+	"task_set_source_thread",
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {

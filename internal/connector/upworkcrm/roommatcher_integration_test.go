@@ -187,11 +187,47 @@ func rmSeedTask(t *testing.T, ctx context.Context, pool *pgxpool.Pool, slug stri
 // is what makes an inert time-floor clause look like a working fix.
 func rmSeedDelivery(t *testing.T, ctx context.Context, pool *pgxpool.Pool, taskID int64, targetRef, body string, sentAt time.Time) int64 {
 	t.Helper()
+	// Post-0019 fixture shape (SWT-20 criterion 13): the identity columns are
+	// derived from the SAME key the row targets, and the thread exists first —
+	// deliveries_upwork_identity_check refuses anything less.
+	ref, perr := upworkcrm.ParseThreadKey(targetRef)
+	if perr != nil {
+		t.Fatalf("fixture target %q does not parse: %v (seed an unparseable target with rmSeedDeliveryRaw)",
+			targetRef, perr)
+	}
+	thID := rmEnsureThread(t, ctx, pool, targetRef)
+	return rmSeedDeliveryRaw(t, ctx, pool, taskID, targetRef, ref.ClientID, thID, body, sentAt)
+}
+
+// rmEnsureThread seeds (or finds) a normalized_threads row for a key.
+func rmEnsureThread(t *testing.T, ctx context.Context, pool *pgxpool.Pool, key string) int64 {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
+		 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING`, key); err != nil {
+		t.Fatalf("seed thread %s: %v", key, err)
+	}
 	var id int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_external_id, sent_at)
-		 VALUES ($1,'upwork_chat',$2,$3,'sent',NULL,$4) RETURNING id`,
-		taskID, targetRef, body, sentAt).Scan(&id); err != nil {
+		`SELECT id FROM normalized_threads WHERE thread_key=$1`, key).Scan(&id); err != nil {
+		t.Fatalf("read thread id for %s: %v", key, err)
+	}
+	return id
+}
+
+// rmSeedDeliveryRaw inserts with EXPLICIT identity columns — for the one case
+// whose target_ref deliberately does not parse (such a row predates the
+// validator or was written by hand; post-0019 it still must carry identity, or
+// Postgres refuses it). Giving it the MESSAGE's client keeps it inside the
+// shortlist, so the matcher's Go-side parse rejection is what the test proves.
+func rmSeedDeliveryRaw(t *testing.T, ctx context.Context, pool *pgxpool.Pool, taskID int64,
+	targetRef, clientRef string, thID int64, body string, sentAt time.Time) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO deliveries (task_id, channel, target_ref, target_client_ref, thread_id, body, status, sent_external_id, sent_at)
+		 VALUES ($1,'upwork_chat',$2,$3,$4,$5,'sent',NULL,$6) RETURNING id`,
+		taskID, targetRef, clientRef, thID, body, sentAt).Scan(&id); err != nil {
 		t.Fatalf("seed delivery %s: %v", targetRef, err)
 	}
 	return id
@@ -456,7 +492,8 @@ func TestRoomMatcher_Integration_NeverCandidates(t *testing.T) {
 				// Written directly, bypassing draft_delivery's validator — which
 				// is exactly how such a row exists at all: it predates the
 				// validation, or a human wrote it.
-				bad := rmSeedDelivery(t, ctx, pool, taskID, "upwork_crm:"+c.client, rmBody, sentAt)
+				badThread := rmEnsureThread(t, ctx, pool, rmLegacyKey(c.client))
+				bad := rmSeedDeliveryRaw(t, ctx, pool, taskID, "upwork_crm:"+c.client, c.client, badThread, rmBody, sentAt)
 
 				rmSeedRaw(t, ctx, pool, acctID, c.comm, c.client, sh.room, sh.column, rmBody, c.extID, sentAt)
 				rmNormalize(t, ctx, pool)

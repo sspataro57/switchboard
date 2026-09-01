@@ -611,22 +611,21 @@ func TestSlackDelivery_Integration_MarkSentAcceptsDraftedOnlyForLeafToken(t *tes
 		}
 	})
 
-	t.Run("upwork_chat drafts are closed entirely, so leaf_token cannot reach them", func(t *testing.T) {
+	t.Run("an unprovenanced upwork draft is refused, so leaf_token cannot reach it", func(t *testing.T) {
 		// This subtest used to draft an upwork row and prove mark_delivery_sent
 		// refused it in 'drafted' even with leaf_gated set — i.e. that the
-		// leaf-token edge was slack-only. That property still holds, but it can
-		// no longer be demonstrated this way, because the upwork DRAFT is now
-		// refused at the door (SWT-19, fourth adversarial pass): a target_ref
-		// cannot be bound to the task's client until SWT-20's provenance exists.
-		//
-		// So the assertion moves up a level. The leaf-token edge being
-		// slack-only is now guaranteed structurally rather than behaviourally —
-		// there is no upwork row to try it on.
+		// leaf-token edge was slack-only. SWT-20 REOPENED the channel behind a
+		// server-side provenance binding, and this fixture's task records no
+		// source conversation (the state of every pre-SWT-20 task), so the
+		// draft is still refused — now by the binding, not by a closed door.
+		// The leaf-token edge stays slack-only for this fixture the same way:
+		// no upwork row exists to try it on. The open-channel matrix lives in
+		// delivery_upwork_binding_integration_test.go.
 		if _, err := s.ex.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: sdsActor,
 			Args: []byte(`{"task_id":` + itoa(s.taskID) + `,"channel":"upwork_chat","body":"thanks",` +
 				`"target_ref":"upwork_crm:itest-sds:upwork"}`)}); err == nil {
-			t.Fatal("draft_delivery accepted an upwork_chat draft; the channel is closed until SWT-20 " +
-				"because a supplied target_ref could name another client's thread")
+			t.Fatal("draft_delivery accepted an upwork_chat draft for a task with no recorded source " +
+				"conversation; the SWT-20 binding must refuse it")
 		}
 	})
 }
@@ -766,23 +765,36 @@ func TestSlackDelivery_Integration_MarkDeliveryFailed(t *testing.T) {
 	// which fires delivery_sent, which drives R8 to mark the work task delivered
 	// and CLOSE its Deliver task. delivery_failed has no orchestrator rule, so
 	// failing the delivery afterwards leaves a real non-delivery permanently
-	// recorded as delivered. Reverted; the compensating transition is SWT-20.
+	// recorded as delivered. Reverted; the compensating transition remains
+	// future work (SWT-20 deferred it).
 	//
 	// slack_reply is unaffected because it wedges at 'sending', where
 	// delivery_sent never fired and R8 never ran.
 	t.Run("refused on a non-slack channel", func(t *testing.T) {
+		// Post-0019 (SWT-20 criterion 13): identity columns are mandatory.
+		var upThread int64
+		if err := s.pool.QueryRow(ctx,
+			`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
+			 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING
+			 RETURNING id`, "upwork_crm:itest-sds:upwork").Scan(&upThread); err != nil {
+			if err := s.pool.QueryRow(ctx,
+				`SELECT id FROM normalized_threads WHERE thread_key=$1`,
+				"upwork_crm:itest-sds:upwork").Scan(&upThread); err != nil {
+				t.Fatalf("seed upwork thread: %v", err)
+			}
+		}
 		var id int64
 		if err := s.pool.QueryRow(ctx,
-			`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_at)
-			 VALUES ($1,'upwork_chat','upwork_crm:itest-sds:upwork','stuck','sent',now()) RETURNING id`,
-			s.taskID).Scan(&id); err != nil {
+			`INSERT INTO deliveries (task_id, channel, target_ref, target_client_ref, thread_id, body, status, sent_at)
+			 VALUES ($1,'upwork_chat','upwork_crm:itest-sds:upwork','itest-sds',$2,'stuck','sent',now()) RETURNING id`,
+			s.taskID, upThread).Scan(&id); err != nil {
 			t.Fatalf("seed upwork sent row: %v", err)
 		}
 		if err := s.tryCall(ctx, "mark_delivery_failed", id); err == nil {
 			t.Fatal("mark_delivery_failed accepted an upwork_chat row. R8 has already marked the work task " +
 				"delivered and closed its Deliver task off the back of delivery_sent, and delivery_failed has " +
 				"no orchestrator rule — so this transition would leave a non-delivery recorded as delivered, " +
-				"permanently and silently. Recovery needs the compensating transition in SWT-20")
+				"permanently and silently. Recovery needs a compensating transition, which remains future work")
 		}
 		if r := s.row(t, ctx, id); r.status != "sent" {
 			t.Errorf("status after refusal = %q, want sent — the refusal must not move the row", r.status)
