@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/sspataro57/switchboard/internal/provider"
 	"github.com/sspataro57/switchboard/internal/textmatch"
@@ -158,7 +159,7 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 	scoredModel := ""
 	var outcomes []outcome
 	for _, m := range scored {
-		resp, err := lane.Complete(ctx, provider.Request{
+		req := provider.Request{
 			// Empty: the adapter uses the model it was CONSTRUCTED with, which
 			// cmd/classify resolves once for both `run` and `eval`. Naming a model
 			// here would be a second source of truth for the same fact.
@@ -168,7 +169,21 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 			SchemaName: SchemaName,
 			Schema:     VerdictSchema,
 			MaxTokens:  512,
-		})
+		}
+		resp, err := lane.Complete(ctx, req)
+		if err != nil && ctx.Err() == nil {
+			// ONE bounded retry per message. An eval is a multi-hour batch with
+			// no checkpoint, and the 874-label residue run died 3h in on a
+			// single transient `context deadline exceeded` (GPU contention
+			// pushed one response past the client timeout; the message was 932
+			// bytes). One transient transport fault must not scrap the batch.
+			// One retry, not a loop: a hard-down provider should still fail
+			// fast, and the caller's fix (restart ollama, rerun) needs to see
+			// the error. The retried request is byte-identical, so verdict
+			// integrity is unchanged.
+			time.Sleep(15 * time.Second)
+			resp, err = lane.Complete(ctx, req)
+		}
 		if err != nil {
 			return fmt.Errorf("classify message %d: %w", m.MessageID, err)
 		}
