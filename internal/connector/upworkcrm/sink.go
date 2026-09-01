@@ -400,29 +400,63 @@ func (s *PGSink) confirmUpworkDelivery(ctx context.Context, nm NormalizedMessage
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// The query keeps only channel/status/NULL guards; ALL client and room
-	// scoping happens in Go below (SWT-19). Forced, not stylistic: "any roomed
-	// key of this client" cannot be expressed as an equality, and writing it as a
-	// LIKE or a split_part would put a second spelling of the key format in SQL —
-	// the failure this repo has now paid for four times, and which threadkey.go
-	// exists to prevent. A structural test fails any SQL that tries.
+	// SWT-20: SHORTLIST, then lock, then revalidate. The shortlist narrows by
+	// the persisted client identity (deliveries.target_client_ref, written in
+	// Go by the same ParseThreadKey call that produced the stored target_ref;
+	// the partial index deliveries_upwork_unconfirmed_idx serves it), so an
+	// outbound message locks only its OWN client's unresolved rows and the
+	// common case — a client with no open deliveries — locks nothing at all.
 	//
-	// The candidate set is every upwork delivery never confirmed, EVER — across
-	// all clients, locked FOR UPDATE by every outbound message. Zero rows in
-	// production today. Note what the reconciler does and does not do about
-	// growth: it ANNOTATES a stuck row, it does not resolve it, so a flagged row
-	// keeps status='sent' with sent_external_id NULL and stays in this set
-	// permanently. The alarm tells a human to act; only mark_delivery_sent or
-	// mark_delivery_failed removes the row from here.
+	// Why the narrowing cannot change the outcome: SameConversation returns
+	// false whenever the client ids differ, so the rows the shortlist excludes
+	// are exactly the rows the Go decision below would have excluded anyway —
+	// and deliveries_upwork_identity_check guarantees every upwork_chat row
+	// carries the client value that parser produced. A stale or wrong column
+	// can therefore only cause a MISS, never a wrong stamp, and a miss is what
+	// the reconciler exists to surface. The client-equality predicate is the
+	// ONLY one implied by SameConversation; the room clause is the rule itself
+	// and stays in Go (D3 — no room column, no second spelling).
 	//
-	// Two concurrent connector runs lock in the same id DESC order, so they block
-	// rather than deadlock.
-	rows, err := tx.Query(ctx,
-		`SELECT id, task_id, COALESCE(target_ref,''), COALESCE(body,'') FROM deliveries
+	// The reconciler still ANNOTATES a stuck row rather than resolving it, so a
+	// flagged row stays in its own client's set permanently — deliberately: it
+	// can legitimately confirm later. What changed is that it no longer blocks
+	// every other client's connector run.
+	var candidateIDs []int64
+	idRows, err := tx.Query(ctx,
+		`SELECT id FROM deliveries
 		  WHERE channel='upwork_chat' AND status='sent'
 		    AND sent_external_id IS NULL AND confirmed_at IS NULL
+		    AND target_client_ref = $1`, messageRef.ClientID)
+	if err != nil {
+		return fmt.Errorf("shortlist upwork deliveries to confirm: %w", err)
+	}
+	for idRows.Next() {
+		var id int64
+		if err := idRows.Scan(&id); err != nil {
+			idRows.Close()
+			return fmt.Errorf("scan upwork delivery shortlist: %w", err)
+		}
+		candidateIDs = append(candidateIDs, id)
+	}
+	idRows.Close()
+	if err := idRows.Err(); err != nil {
+		return fmt.Errorf("iterate upwork delivery shortlist: %w", err)
+	}
+	if len(candidateIDs) == 0 {
+		// Nothing to confirm for this client; nothing was locked.
+		return nil
+	}
+
+	// Lock ONLY the shortlisted ids, re-stating the unresolved guards so a row
+	// that resolved between the two statements drops out. Two concurrent
+	// connector runs still lock in the same id DESC order — which holds for
+	// overlapping SUBSETS too — so they block rather than deadlock.
+	rows, err := tx.Query(ctx,
+		`SELECT id, task_id, COALESCE(target_ref,''), COALESCE(body,'') FROM deliveries
+		  WHERE id = ANY($1)
+		    AND status='sent' AND sent_external_id IS NULL AND confirmed_at IS NULL
 		  ORDER BY id DESC
-		  FOR UPDATE`)
+		  FOR UPDATE`, candidateIDs)
 	if err != nil {
 		return fmt.Errorf("select upwork deliveries to confirm: %w", err)
 	}

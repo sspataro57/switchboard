@@ -11,6 +11,7 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/connector/upworkcrm"
 	"github.com/sspataro57/switchboard/internal/provider"
+	"github.com/sspataro57/switchboard/internal/store"
 )
 
 // PGStore resolves the Deliver-task queue deterministically: channel from
@@ -126,26 +127,45 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 // CRM-supplied free text, while the thread key is constructed by the connector
 // to a documented format.
 func (s *PGStore) resolve(ctx context.Context, dt *DeliverTask, channelCfg string, hasSendFrom bool) error {
+	// SWT-20: the upwork target is the TASK'S RECORDED SOURCE THREAD, read
+	// through the one shared resolver, and nothing else. The walk inside
+	// TaskSourceThread covers the Deliver child and its parent (premise 8), so
+	// calling it on the Deliver task reaches the work task's observation.
+	//
+	// An external_refs row WITHOUT provenance no longer produces an upwork
+	// channel: a ref is an agent-writable claim, not a recorded observation
+	// (SPEC D1), and criterion 8 routes that state to the "unresolvable — tell
+	// the human" log. The external_refs join below STAYS for gmail and jira —
+	// it is their only route and nothing about them changes in this ticket.
+	upworkKey := ""
+	prov, provFound, err := store.TaskSourceThread(ctx, s.pool, dt.DeliverTaskID)
+	if err != nil {
+		return err
+	}
+	if provFound {
+		// ParseThreadKey is the only reader of the upwork format; a prefix
+		// literal here would be a second spelling of it. A provenance that is
+		// not an upwork thread (a gmail-raised task) simply does not produce an
+		// upwork channel.
+		if _, perr := upworkcrm.ParseThreadKey(prov.ThreadKey); perr == nil {
+			upworkKey = prov.ThreadKey
+		}
+	}
+
 	threadID, threadKey, found, err := s.taskThread(ctx, dt.ParentTaskID, dt.DeliverTaskID)
 	if err != nil {
 		return err
 	}
 
-	// The channel the resolved conversation actually IS. Empty when no thread was
-	// found, or when it is a jira:/slack: thread — extending the draft worker to
-	// those targets is step-9 work and deliberately not bundled here.
+	// The channel the resolved conversation actually IS. Empty when nothing
+	// resolved, or when it is a jira:/slack: thread — extending the draft
+	// worker to those targets is step-9 work and deliberately not bundled here.
 	threadChannel := ""
-	if found {
-		switch {
-		case strings.HasPrefix(threadKey, gmailThreadKeyPrefix):
-			threadChannel = "gmail"
-		default:
-			// ParseThreadKey is the only reader of the upwork format; a prefix
-			// literal here would be a second spelling of it.
-			if _, perr := upworkcrm.ParseThreadKey(threadKey); perr == nil {
-				threadChannel = "upwork_chat"
-			}
-		}
+	switch {
+	case upworkKey != "":
+		threadChannel = "upwork_chat"
+	case found && strings.HasPrefix(threadKey, gmailThreadKeyPrefix):
+		threadChannel = "gmail"
 	}
 
 	channel := channelCfg
@@ -190,15 +210,14 @@ func (s *PGStore) resolve(ctx context.Context, dt *DeliverTask, channelCfg strin
 		id := threadID
 		dt.ThreadID = &id
 	case "upwork_chat":
-		target, err := s.upworkTarget(ctx, threadKey)
-		if err != nil {
-			return err
-		}
-		if target == "" {
-			dt.Channel = ""
-			return nil
-		}
-		dt.TargetRef = target
+		// The recorded conversation, verbatim. Roomed provenance names the
+		// exact room; LEGACY provenance names the legacy key — the truthful
+		// statement "this client's conversation, room not recorded by the
+		// source" (D6), which SameConversation's legacy tolerance keeps
+		// confirmable. "Never to the most recent room" is satisfied
+		// structurally: no code path in this package looks at any thread other
+		// than the recorded one any more.
+		dt.TargetRef = upworkKey
 	}
 	return s.loadThreadContext(ctx, dt)
 }
@@ -238,128 +257,6 @@ func (s *PGStore) taskThread(ctx context.Context, parentTaskID, deliverTaskID in
 		return id, key, true, nil
 	}
 	return 0, "", false, nil
-}
-
-// upworkTarget turns the resolved upwork thread into the delivery target,
-// preserving SWT-19's two load-bearing behaviours. Returns "" to REFUSE.
-//
-// SWT-19 had no task provenance at all: it found the client's threads by uuid
-// (via the person) and had to choose among them. Site B gives provenance, which
-// is the fix SWT-19's own comment named as "its own ticket" — but only where the
-// ref names a ROOM. Both cases are handled here rather than collapsed:
-//
-//   - A ROOMED ref names the room outright. Target it; nothing to choose.
-//   - A LEGACY ref (`upwork_crm:{client}:{channel}`) identifies the CLIENT and
-//     says nothing about which room. That is exactly SWT-19's situation, so
-//     SWT-19's rules still decide it, unchanged.
-//
-// Note where the client uuid comes from now: `ParseThreadKey` on the thread we
-// already resolved. That is honest — it is read out of the conversation the task
-// came from, not looked up through a person — so dropping `client_person_id`
-// costs this branch nothing.
-func (s *PGStore) upworkTarget(ctx context.Context, refKey string) (string, error) {
-	ref, err := upworkcrm.ParseThreadKey(refKey)
-	if err != nil {
-		return "", fmt.Errorf("parse resolved upwork thread key %q: %w", refKey, err)
-	}
-	if ref.Roomed {
-		return refKey, nil
-	}
-
-	// Prefer a ROOMED thread, deliberately (SWT-19). `ORDER BY id DESC` alone
-	// happened to do this after the re-key, because roomed threads are created
-	// later and so carry higher ids — but accidental correctness is not
-	// correctness, and it flips the first time a legacy thread is touched.
-	//
-	// The preference is computed in GO, not in SQL. An earlier cut of this
-	// ordered by a LIKE that concatenated the provider literal with the room tag
-	// inline. It worked, and it was wrong: it put a SECOND SPELLING of the key
-	// format in a query string, and the structural test caught it. The client
-	// filter below is a bind parameter built by ClientThreadPrefix, so no SQL
-	// here knows the format.
-	//
-	// Ordered by the thread's MOST RECENT MESSAGE, not by thread id. Id order is
-	// creation order, which during a --full --all re-key is raw external_id order
-	// — deterministic but meaningless, and it decides which room we reply into
-	// for the two production clients that have several. Since SWT-19 a delivery
-	// aimed at the wrong room can NEVER confirm (a room mismatch excludes) and
-	// only surfaces via the reconciler ~45 minutes later, so "arbitrary but
-	// stable" is not good enough here.
-	//
-	// Threads with no messages sort last (NULLs last) rather than winning on a
-	// NULL comparison — an empty legacy thread left behind by the re-key is
-	// exactly the shape that would otherwise be picked.
-	rows, err := s.pool.Query(ctx,
-		`SELECT t.thread_key
-		   FROM normalized_threads t
-		   LEFT JOIN normalized_messages m ON m.thread_id = t.id
-		  WHERE t.thread_key LIKE $1 || '%'
-		  GROUP BY t.id, t.thread_key
-		  ORDER BY max(m.sent_at) DESC NULLS LAST, t.id DESC`,
-		upworkcrm.ClientThreadPrefix(ref.ClientID))
-	if err != nil {
-		return "", fmt.Errorf("resolve upwork thread for client %q: %w", ref.ClientID, err)
-	}
-	var roomed string
-	roomedCount := 0
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			rows.Close()
-			return "", fmt.Errorf("scan upwork thread candidate: %w", err)
-		}
-		cand, err := upworkcrm.ParseThreadKey(key)
-		if err != nil || cand.ClientID != ref.ClientID {
-			// Not ours, or unreadable. The prefix LIKE can only over-match, never
-			// under-match, so re-checking the client id in Go is what makes it
-			// safe. Over-match is NOT "one client id is a prefix of another" —
-			// ClientThreadPrefix ends with ':', which rules that out. The real
-			// sources are LIKE metacharacters (the '_' in the provider literal
-			// matches any character, and a '%' or '_' inside a client id would
-			// too) and a colon-bearing client id.
-			continue
-		}
-		if !cand.Roomed {
-			continue
-		}
-		roomedCount++
-		if roomed == "" {
-			roomed = key
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("iterate upwork thread candidates for client %q: %w", ref.ClientID, err)
-	}
-
-	switch {
-	case roomedCount > 1:
-		// AMBIGUOUS: this client has several Upwork rooms and the ref this task
-		// carries names only the client. Picking the most recent is a GUESS, and
-		// since SWT-19 a guess is expensive in both directions — the reply may
-		// land in the wrong conversation, and the delivery can then never confirm,
-		// because a room mismatch excludes. The miss surfaces only via the
-		// reconciler, ~45 minutes later.
-		//
-		// So refuse to target it. The caller turns "" into an empty Channel, which
-		// routes to drafts.go's existing "unresolvable — tell the human on the
-		// Deliver task" path: reversible and audited, where a wrong-room send is
-		// neither. Two production clients are in this state (3 rooms and 2 rooms).
-		//
-		// This is SWT-20's shipped mitigation and it stays until a ROOM-level ref
-		// exists for the task — which is the branch above, not a re-guess here.
-		return "", nil
-	case roomed != "":
-		return roomed, nil
-	default:
-		// No roomed thread for this client: the legacy thread the task came from
-		// is the target. §4's mismatch-only-excludes rule keeps an unroomed target
-		// confirmable, and the pre-2026-07-21 corpus is most of the history.
-		//
-		// The ref itself, not the first legacy candidate the query returned: it is
-		// the conversation this task is recorded against.
-		return refKey, nil
-	}
 }
 
 func (s *PGStore) loadThreadContext(ctx context.Context, dt *DeliverTask) error {

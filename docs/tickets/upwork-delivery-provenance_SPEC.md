@@ -382,6 +382,11 @@ later. What changes is that they no longer block every other client's connector 
     `drafts:gpt` and for `mcp:*`, and accepted for `dashboard:`/`opsctl:`/`manual:`
     (finding 3's "explicit human choice"). The test comment states why this one
     distinction is actor-keyed and the client binding is not.
+    *Clarified at implementation (2026-08-31): `mcp:*` here means the AGENT
+    transport (`mcp:worker:`); `mcp:manual:` is a human — `policy.HumanActor`
+    strips one transport prefix (criterion 18), and reading it otherwise would
+    contradict that criterion. The gate calls `HumanActor`, never restates
+    prefixes.*
 13. Every `upwork_chat` row is structurally forced to carry its identity:
     `INSERT INTO deliveries (task_id, channel, target_ref, body, status)` with
     `channel='upwork_chat'` and no `target_client_ref`/`thread_id` FAILS on

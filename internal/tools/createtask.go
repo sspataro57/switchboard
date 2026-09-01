@@ -80,6 +80,12 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// redirect the funnel at itself. See internal/tools/capturerules.go.
 		{"capture_rule_add", validateCaptureRuleAdd, captureRuleAdd},
 		{"capture_rule_set_enabled", validateCaptureRuleSetEnabled, captureRuleSetEnabled},
+		// SWT-20 provenance. Spine-facing and deliberately NOT in
+		// internal/mcpserver/schemas.go: this writes the fact that decides where
+		// a task's deliveries may be aimed, so an agent with a transport to it
+		// could aim them itself. NOT humanOnly — the capture engine
+		// (capture:{connector}) is its main caller. See internal/tools/provenance.go.
+		{"task_set_source_thread", validateSetSourceThread, taskSetSourceThread},
 	} {
 		t := t
 		reg.Register(executor.Tool{

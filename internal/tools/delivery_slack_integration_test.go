@@ -771,11 +771,23 @@ func TestSlackDelivery_Integration_MarkDeliveryFailed(t *testing.T) {
 	// slack_reply is unaffected because it wedges at 'sending', where
 	// delivery_sent never fired and R8 never ran.
 	t.Run("refused on a non-slack channel", func(t *testing.T) {
+		// Post-0019 (SWT-20 criterion 13): identity columns are mandatory.
+		var upThread int64
+		if err := s.pool.QueryRow(ctx,
+			`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
+			 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING
+			 RETURNING id`, "upwork_crm:itest-sds:upwork").Scan(&upThread); err != nil {
+			if err := s.pool.QueryRow(ctx,
+				`SELECT id FROM normalized_threads WHERE thread_key=$1`,
+				"upwork_crm:itest-sds:upwork").Scan(&upThread); err != nil {
+				t.Fatalf("seed upwork thread: %v", err)
+			}
+		}
 		var id int64
 		if err := s.pool.QueryRow(ctx,
-			`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_at)
-			 VALUES ($1,'upwork_chat','upwork_crm:itest-sds:upwork','stuck','sent',now()) RETURNING id`,
-			s.taskID).Scan(&id); err != nil {
+			`INSERT INTO deliveries (task_id, channel, target_ref, target_client_ref, thread_id, body, status, sent_at)
+			 VALUES ($1,'upwork_chat','upwork_crm:itest-sds:upwork','itest-sds',$2,'stuck','sent',now()) RETURNING id`,
+			s.taskID, upThread).Scan(&id); err != nil {
 			t.Fatalf("seed upwork sent row: %v", err)
 		}
 		if err := s.tryCall(ctx, "mark_delivery_failed", id); err == nil {

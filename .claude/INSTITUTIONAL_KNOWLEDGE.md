@@ -1028,3 +1028,37 @@ When you discover a new landmine, fix a known one, or change a convention:
 - The phase runs only under `MAIL_SOURCE=imap` (`calendarPhaseRuns`) — bridge
   and gmail_api ingest calendar inline, and two passes race for the same
   cursor key. `--calendar-only` = calendar phase + normalize, nothing else.
+
+### Delivery provenance & the upwork shortlist (SWT-20)
+
+- **Provenance is a task column written by observers**:
+  `tasks.source_thread_id` (FK to normalized_threads), written ONLY by
+  `task_set_source_thread` — a spine tool registered on the executor and
+  deliberately absent from `internal/mcpserver/schemas.go` (the
+  `capture_rule_add` shape). It is NOT humanOnly: the capture engine is its
+  main caller. `external_refs` was rejected as the provenance store for three
+  reasons that keep coming back: `link_external_ref` is agent-facing free
+  text, the join key is a mutable thread_key (re-keyed once already), and
+  UNIQUE (system, external_key) allows one task per conversation forever.
+- **The upwork target is the recorded conversation, verbatim.**
+  `internal/drafts` resolves it through `store.TaskSourceThread` (the ONE
+  reader; a second spelling of the provenance query is how drafts and
+  draft_delivery come to disagree about a task's conversation). No provenance
+  → the unresolvable-tell-the-human path. The SWT-19 multi-room refusal
+  survives as that fallback, now firing for the stronger reason.
+- **The draft_delivery binding is unconditional; only room CHOICE is
+  actor-keyed.** Same client as provenance holds for every actor including
+  drafts:gpt; picking a different room of the bound client needs
+  `policy.HumanActor` (exported in SWT-20 — ONE definition, shared with
+  Decide's human_only gate; never restate the prefixes; `mcp:manual:` is a
+  human, one transport prefix stripped).
+- **The shortlist rule**: any SQL predicate on delivery identity must be
+  IMPLIED BY `SameConversation`, never a restatement of it. Client equality
+  is the only such predicate (`deliveries.target_client_ref`, written in Go by
+  the same ParseThreadKey call that produced target_ref); the room clause is
+  the rule itself and stays in Go. `deliveries_upwork_identity_check` is what
+  makes the shortlist sound — a row missing its identity is refused at INSERT
+  instead of silently shrinking the candidate set. Fixture consequence: every
+  upwork_chat test INSERT must carry target_client_ref + thread_id (thread
+  seeded first), and cleanups must delete tasks BEFORE normalized_threads
+  (tasks_source_thread_id_fkey is a new parent).

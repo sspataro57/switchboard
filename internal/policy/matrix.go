@@ -22,7 +22,7 @@ type Snapshot struct {
 
 // MCPTransportPrefix is the marker the MCP server puts in front of its worker
 // identity. Defined here, in the lowest layer that needs it, because two layers
-// do and they must not drift: humanActor strips it before the human check, and
+// do and they must not drift: HumanActor strips it before the human check, and
 // executor.ViaMCP tests for it so a handler can narrow what it will do over that
 // transport. Any future transport wrapper belongs here too.
 const MCPTransportPrefix = "mcp:"
@@ -70,7 +70,11 @@ var humanOnly = map[string]bool{
 // snapshotGated tools need the loader (channel/rate/freeze state).
 var snapshotGated = sendShaped
 
-func humanActor(actor string) bool {
+// HumanActor reports whether an actor string names a person rather than an
+// automated caller. EXPORTED since SWT-20 (criterion 18): draft_delivery's
+// room-choice gate asks the same question, and a handler that restated the
+// prefixes would drift from Decide's gate invisibly. ONE definition.
+func HumanActor(actor string) bool {
 	// The MCP adapter prefixes every call with its transport ("mcp:" + worker
 	// id), so an interactive session arrives as "mcp:manual:salvo" and would
 	// otherwise be refused alongside the workers this gate exists to stop.
@@ -90,7 +94,7 @@ func humanActor(actor string) bool {
 
 // Decide is the pure matrix core over the delivery-gated tools.
 func Decide(req Request, snap Snapshot) Decision {
-	if humanOnly[req.Tool] && !humanActor(req.Actor) {
+	if humanOnly[req.Tool] && !HumanActor(req.Actor) {
 		return Decision{Decision: "deny", Rule: "human_only",
 			Reason: fmt.Sprintf("%s requires a human actor (dashboard:/opsctl:/manual:); got %q", req.Tool, req.Actor)}
 	}
@@ -175,7 +179,7 @@ func NewMatrix(loader SnapshotLoader, fallback Checker) Checker {
 }
 
 func (m *matrix) Check(ctx context.Context, req Request) (Decision, error) {
-	if humanOnly[req.Tool] && !humanActor(req.Actor) {
+	if humanOnly[req.Tool] && !HumanActor(req.Actor) {
 		return Decide(req, Snapshot{}), nil
 	}
 	if !snapshotGated[req.Tool] {

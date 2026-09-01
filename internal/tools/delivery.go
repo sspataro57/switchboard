@@ -15,6 +15,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/connector/upworkcrm"
 	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/policy"
 	"github.com/sspataro57/switchboard/internal/store"
 )
 
@@ -187,6 +188,7 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 	}
 
 	var fromAccountID *int64
+	var targetClientRef *string
 	if a.Channel == "jira_comment" {
 		// From is resolved server-side: the target_ref's site_host must match a
 		// provider='jira' account's domain_default — never caller-chosen.
@@ -226,59 +228,70 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 			return nil, fmt.Errorf("invalid upwork_chat target_ref: %w", err)
 		}
 		a.TargetRef = upworkcrm.ThreadKey(ref.ClientID, ref.RoomID, ref.Channel)
-		// Parseable is NOT the same as real, and since SWT-19 the difference is
-		// dangerous. SameConversation treats an unroomed key as compatible with
-		// any room of that client, so a typo like upwork_crm:{real-client}:typo
-		// parses, canonicalizes, and then becomes a CLIENT-WIDE WILDCARD: the
-		// next outbound message from any room of that client can confirm it,
-		// burning that message's external id on a delivery that names a
-		// conversation which does not exist. Under the partial unique index the
-		// real delivery is then locked out of that id permanently.
-		//
-		// Requiring the target to name a thread we have actually ingested closes
-		// it. Legacy unroomed keys still pass — they are real threads — so this
-		// costs the tolerance nothing.
-		var exists bool
-		if err := pool.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM normalized_threads WHERE thread_key=$1)`,
-			a.TargetRef).Scan(&exists); err != nil {
-			return nil, fmt.Errorf("check upwork_chat target_ref: %w", err)
+		// SWT-20: the pass-four closure is replaced by a SERVER-SIDE BINDING.
+		// The target must belong to the conversation partner the task's recorded
+		// source thread names, and that binding is UNCONDITIONAL — every actor,
+		// drafts:gpt included (Q1 answered (a)). The one actor-keyed decision
+		// below is who may pick a DIFFERENT ROOM inside the already-bound
+		// client: it restricts nothing the binding has not already restricted,
+		// it only decides who may exercise a choice among conversations that
+		// are provably the same partner (finding 3's "explicit human choice").
+		// It uses policy.HumanActor — the same predicate Decide's human gate
+		// uses, so the two definitions cannot drift — and NOT executor.ViaMCP,
+		// which drafts:gpt correctly passes and which is therefore useless as a
+		// trust signal (the IK entry on actor prefixes; the counter-example is
+		// this very worker).
+		prov, found, err := store.TaskSourceThread(ctx, pool, a.TaskID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve task %d provenance: %w", a.TaskID, err)
 		}
-		if !exists {
-			return nil, fmt.Errorf("upwork_chat target_ref %q names no ingested thread; "+
-				"an unrecognized target would be confirmable by any message from that client", a.TargetRef)
+		if !found {
+			return nil, fmt.Errorf("task %d (and its parent) record no source conversation, so an "+
+				"upwork_chat target cannot be bound — any supplied target_ref could name another client's "+
+				"thread, which is the exposure the old closure existed for. Record which conversation "+
+				"raised the task with task_set_source_thread (spine-only), then retry", a.TaskID)
 		}
-		// STOP. Existence is not a tenant boundary, and the gate that used to sit
-		// here was not one either.
-		//
-		// This check proves the thread was ingested — NOT that it belongs to this
-		// task's client. Binding it needs a task-to-client relation, and the only
-		// one that exists today runs through projects.client_person_id, which
-		// SWT-17 deletes. So the binding waits for SWT-20's provenance.
-		//
-		// An earlier cut gated only `executor.ViaMCP(ctx)` and claimed the
-		// go-live gate could no longer be crossed by forgetting about it. That
-		// was FALSE, and the counter-example is in this repo: the drafts worker
-		// calls draft_delivery through the executor as actor "drafts:gpt", so
-		// ViaMCP is false and the gate did nothing for the one component that
-		// would create upwork drafts automatically. An actor-prefix check
-		// describes a transport, not a trust level; it cannot tell a deliberate
-		// human from a model-backed worker or an injected agent with direct call
-		// access.
-		//
-		// So the channel is closed outright until the provenance exists. That is
-		// the honest form of the gate: it cannot be bypassed by choosing a
-		// different caller, and it also closes the deferred stale-candidate
-		// problem, because no new upwork delivery row can be created to reach
-		// that state.
-		//
-		// Cost today: zero. Production has never had an upwork_chat delivery, the
-		// draft worker is undeployed, and the assisted tier was never operational.
-		// Reopening this is SWT-20's job, together with the binding that makes it
-		// safe.
-		return nil, fmt.Errorf("upwork_chat drafts are disabled: a target_ref cannot yet be bound to the " +
-			"task's client, so any supplied target could name another client's thread. SWT-20 adds the " +
-			"provenance that makes this safe; until then no surface may draft this channel")
+		provRef, err := upworkcrm.ParseThreadKey(prov.ThreadKey)
+		if err != nil {
+			return nil, fmt.Errorf("task %d's recorded source conversation %q is not an upwork thread; a "+
+				"task raised elsewhere cannot be delivered into upwork by naming a target", a.TaskID, prov.ThreadKey)
+		}
+
+		upworkThreadID := prov.ThreadID
+		if a.TargetRef != prov.ThreadKey {
+			// The caller chose a target other than the recorded conversation.
+			// It must (i) name an ingested thread — resolved to its id, whose
+			// FK subsumes the old EXISTS probe (D5) — (ii) belong to the SAME
+			// client as the provenance, and (iii) come from a human.
+			var candID int64
+			err := pool.QueryRow(ctx,
+				`SELECT id FROM normalized_threads WHERE thread_key=$1`, a.TargetRef).Scan(&candID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("upwork_chat target_ref %q names no ingested thread; "+
+					"an unrecognized target would be confirmable by any message from that client", a.TargetRef)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("check upwork_chat target_ref: %w", err)
+			}
+			if ref.ClientID != provRef.ClientID {
+				return nil, fmt.Errorf("target %q names a thread of client %s, but task %d's recorded "+
+					"conversation belongs to client %s. The client binding is unconditional for every "+
+					"actor (SWT-20 D8): nobody may draft into a different conversation partner",
+					a.TargetRef, ref.ClientID, a.TaskID, provRef.ClientID)
+			}
+			if !policy.HumanActor(executor.ActorFrom(ctx)) {
+				return nil, fmt.Errorf("target %q is a different room of the bound client than the "+
+					"recorded %q; choosing among a client's rooms is an explicit human decision "+
+					"(dashboard:/opsctl:/manual:), and the drafts worker's own resolution always "+
+					"produces the recorded key", a.TargetRef, prov.ThreadKey)
+			}
+			upworkThreadID = candID
+		}
+		// The delivery's identity, extracted by the SAME parse that produced
+		// the stored target_ref: what the shortlist selects on, and what the
+		// CHECK constraint forces every upwork_chat row to carry.
+		targetClientRef = &ref.ClientID
+		a.ThreadID = &upworkThreadID
 	}
 	if a.Channel == "gmail" {
 		// From is resolved server-side from the thread's mailbox segment
@@ -312,12 +325,12 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 	var deliveryID int64
 	err := pool.QueryRow(ctx,
 		`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
-		                         from_account_id, thread_id, created_by)
-		 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8)
+		                         from_account_id, thread_id, target_client_ref, created_by)
+		 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9)
 		 RETURNING id`,
 		a.TaskID, a.Channel, a.TargetRef,
 		google.ScrubAIAttribution(a.Body), google.ScrubAIAttribution(a.Subject),
-		fromAccountID, a.ThreadID, executor.ActorFrom(ctx)).Scan(&deliveryID)
+		fromAccountID, a.ThreadID, targetClientRef, executor.ActorFrom(ctx)).Scan(&deliveryID)
 	if err != nil {
 		return nil, fmt.Errorf("insert delivery: %w", err)
 	}

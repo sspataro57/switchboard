@@ -783,9 +783,12 @@ func TestMigration0017_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		}
 		seenAny = true
 		n, _ := strconv.Atoi(m[1])
-		if n > 17 {
-			t.Errorf("migrations/%s exists. SWT-25's data-model section is ONE migration: 0017. `ls "+
-				"migrations/` must show exactly one new file against main", e.Name())
+		// 0019 is SWT-20's (delivery provenance); 0018 is SWT-23's and arrives
+		// when ticket-local-classifier merges. Anything else above 0017 is a
+		// migration nobody's ticket owns.
+		if n > 17 && n != 18 && n != 19 {
+			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
+				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}
 	}
 	if !seenAny {
