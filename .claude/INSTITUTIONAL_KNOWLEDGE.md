@@ -117,8 +117,9 @@ upwork and had to revert it in the same ticket.
 **Rule: before allowing a status transition backwards, check which orchestrator
 rules the forward transition already fired.** A verb that "only moves a row away
 from the world" is still unsafe if something else acted on the row getting there.
-Recovery needs a compensating transition (reopen the work and its Deliver task),
-which is SWT-20.
+Recovery needs a compensating transition (reopen the work and its Deliver task) —
+FUTURE work: SWT-20 shipped provenance and the shortlist and explicitly deferred
+it (its "Future work" section; it needs the R8 lifecycle analysis).
 
 ### An alarm whose fire-once marker is never cleared goes permanently silent
 **Location:** `internal/connector/upworkcrm/reconcile.go` + `markDeliverySent`,

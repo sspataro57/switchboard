@@ -765,7 +765,8 @@ func TestSlackDelivery_Integration_MarkDeliveryFailed(t *testing.T) {
 	// which fires delivery_sent, which drives R8 to mark the work task delivered
 	// and CLOSE its Deliver task. delivery_failed has no orchestrator rule, so
 	// failing the delivery afterwards leaves a real non-delivery permanently
-	// recorded as delivered. Reverted; the compensating transition is SWT-20.
+	// recorded as delivered. Reverted; the compensating transition remains
+	// future work (SWT-20 deferred it).
 	//
 	// slack_reply is unaffected because it wedges at 'sending', where
 	// delivery_sent never fired and R8 never ran.
@@ -793,7 +794,7 @@ func TestSlackDelivery_Integration_MarkDeliveryFailed(t *testing.T) {
 			t.Fatal("mark_delivery_failed accepted an upwork_chat row. R8 has already marked the work task " +
 				"delivered and closed its Deliver task off the back of delivery_sent, and delivery_failed has " +
 				"no orchestrator rule — so this transition would leave a non-delivery recorded as delivered, " +
-				"permanently and silently. Recovery needs the compensating transition in SWT-20")
+				"permanently and silently. Recovery needs a compensating transition, which remains future work")
 		}
 		if r := s.row(t, ctx, id); r.status != "sent" {
 			t.Errorf("status after refusal = %q, want sent — the refusal must not move the row", r.status)
