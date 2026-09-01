@@ -15,8 +15,10 @@ outbound message re-enters through ingestion.
    is ever non-zero, STOP and re-spec the backfill; do not soften the CHECK
    to NOT VALID.
 2. **Image + tag bump** in the kube repo for `connector-upworkcrm` (and the
-   drafts worker whenever it deploys). Migrating is not applying; check
-   `SELECT max(version) FROM schema_migrations` against `ls migrations/`.
+   drafts worker whenever it deploys). Migrating is not applying; compare the version
+   SET, not the max: `SELECT version FROM schema_migrations ORDER BY version`
+   against `ls migrations/` — 0019 merged ahead of 0018 for a while, so a
+   max-only check reads fine on a database missing 0018.
 3. **Provenance must exist before a task can be drafted.** A task's upwork
    target comes only from `tasks.source_thread_id`. Capture (in live mode)
    records it for the tasks it creates; every pre-existing task records

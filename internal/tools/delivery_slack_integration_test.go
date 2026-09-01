@@ -611,22 +611,21 @@ func TestSlackDelivery_Integration_MarkSentAcceptsDraftedOnlyForLeafToken(t *tes
 		}
 	})
 
-	t.Run("upwork_chat drafts are closed entirely, so leaf_token cannot reach them", func(t *testing.T) {
+	t.Run("an unprovenanced upwork draft is refused, so leaf_token cannot reach it", func(t *testing.T) {
 		// This subtest used to draft an upwork row and prove mark_delivery_sent
 		// refused it in 'drafted' even with leaf_gated set — i.e. that the
-		// leaf-token edge was slack-only. That property still holds, but it can
-		// no longer be demonstrated this way, because the upwork DRAFT is now
-		// refused at the door (SWT-19, fourth adversarial pass): a target_ref
-		// cannot be bound to the task's client until SWT-20's provenance exists.
-		//
-		// So the assertion moves up a level. The leaf-token edge being
-		// slack-only is now guaranteed structurally rather than behaviourally —
-		// there is no upwork row to try it on.
+		// leaf-token edge was slack-only. SWT-20 REOPENED the channel behind a
+		// server-side provenance binding, and this fixture's task records no
+		// source conversation (the state of every pre-SWT-20 task), so the
+		// draft is still refused — now by the binding, not by a closed door.
+		// The leaf-token edge stays slack-only for this fixture the same way:
+		// no upwork row exists to try it on. The open-channel matrix lives in
+		// delivery_upwork_binding_integration_test.go.
 		if _, err := s.ex.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: sdsActor,
 			Args: []byte(`{"task_id":` + itoa(s.taskID) + `,"channel":"upwork_chat","body":"thanks",` +
 				`"target_ref":"upwork_crm:itest-sds:upwork"}`)}); err == nil {
-			t.Fatal("draft_delivery accepted an upwork_chat draft; the channel is closed until SWT-20 " +
-				"because a supplied target_ref could name another client's thread")
+			t.Fatal("draft_delivery accepted an upwork_chat draft for a task with no recorded source " +
+				"conversation; the SWT-20 binding must refuse it")
 		}
 	})
 }

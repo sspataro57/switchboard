@@ -486,16 +486,17 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 		`SELECT count(*) FROM audit_events WHERE actor=$1 AND tool='send_delivery' AND status='denied'`, delActor).Scan(&denied); err != nil {
 		t.Fatalf("count denied audit: %v", err)
 	}
-	// Two, not three, since SWT-19's fourth pass: rate_limit and kill_switch.
-	// The upwork_chat channel_assisted denial used to be the third, but that
-	// path can no longer be reached from here — the upwork DRAFT is refused at
-	// the door now, so there is never an approved upwork row to deny a send on.
-	// The policy branch itself is unchanged and still covered by the matrix unit
-	// tests; what is gone is this integration route to it.
+	// Two, not three: rate_limit and kill_switch. The upwork_chat
+	// channel_assisted denial used to be the third; since SWT-20 the draft is
+	// refused for THIS fixture's provenance-less task by the server-side
+	// binding, so there is still never an approved upwork row here to deny a
+	// send on. The policy branch itself is unchanged and covered by the matrix
+	// unit tests; the integration route to it needs a provenance-carrying task
+	// (delivery_upwork_binding_integration_test.go).
 	if denied < 2 {
 		t.Errorf("denied send_delivery audit rows = %d, want >= 2 (rate_limit, kill_switch). slack_reply is "+
-			"no longer assisted since SWT-12, and upwork_chat drafts are disabled entirely since SWT-19, so "+
-			"neither contributes a channel_assisted denial here", denied)
+			"no longer assisted since SWT-12, and this fixture's upwork draft is refused by the SWT-20 "+
+			"provenance binding, so neither contributes a channel_assisted denial here", denied)
 	}
 }
 

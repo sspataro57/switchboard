@@ -497,6 +497,36 @@ func TestUpworkBinding_Integration_OtherRoomOfTheSameClientIsHumanGated(t *testi
 	})
 }
 
+// ---- the canonicalization survives the reopened door (SWT-13's landmine) -------
+
+// The deleted SWT-19 storage test proved draft_delivery persists the CANONICAL
+// spelling; with the channel reopened the same rule must hold on the live
+// path, because the matcher parses target_ref and a stored non-canonical
+// spelling is permanently unconfirmable with no error anywhere.
+func TestUpworkBinding_Integration_NonCanonicalSpellingIsStoredCanonical(t *testing.T) {
+	ctx := context.Background()
+	pool, ex := upbOpen(t, ctx)
+	f := upbSeed(t, ctx, pool)
+
+	// Whitespace padding is the non-canonical variant that still parses; the
+	// handler must canonicalize BEFORE comparing against the provenance key,
+	// or the drafts worker's exact key would be refused whenever a human's
+	// copy-paste carried a stray space.
+	id, err := upbDraft(ctx, ex, "opsctl:itest-upb", f.task, "  "+f.provenanceKey+" ")
+	if err != nil {
+		t.Fatalf("draft_delivery refused a whitespace-padded spelling of the provenance key: %v — "+
+			"canonicalization must happen before the binding comparison", err)
+	}
+	var stored string
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(target_ref,'') FROM deliveries WHERE id=$1`, id).Scan(&stored); err != nil {
+		t.Fatalf("read delivery %d: %v", id, err)
+	}
+	if stored != f.provenanceKey {
+		t.Errorf("stored target_ref = %q, want the canonical %q — the matcher parses this string, and a "+
+			"non-canonical spelling never confirms (SWT-13)", stored, f.provenanceKey)
+	}
+}
+
 // ---- criterion 13: the CHECK constraint bites ----------------------------------
 
 // D4, and the reason this constraint ships at zero rows: a derived column that
