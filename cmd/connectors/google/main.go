@@ -2,7 +2,7 @@
 // performs Gmail + Calendar ingestion through the sibling local connector.
 // Without it, the existing database-token Gmail + Calendar path is unchanged.
 //
-//	google [--full] [--normalize-only] [--all] [--overlap 1h] [--backfill 2160h] [--account email]
+//	google [--full] [--normalize-only] [--all] [--calendar-only] [--overlap 1h] [--backfill 2160h] [--account email]
 //
 //	DATABASE_URL               ops db, required
 //	GMAIL_CONNECTOR_BRIDGE     optional absolute local bridge binary
@@ -33,13 +33,14 @@ import (
 )
 
 func main() {
-	full := flag.Bool("full", false, "rescan the backfill window (ignore gmail cursor, drop calendar sync token)")
+	full := flag.Bool("full", false, "rescan the backfill window: in gmail_api mode ignore the gmail cursor (imap keeps per-folder UID cursors and is unaffected); in the calendar phase (imap mode, or inline in gmail_api/bridge) drop the calendar sync token")
 	normalizeOnly := flag.Bool("normalize-only", false, "skip ingest; normalize from raw_source_items alone")
 	all := flag.Bool("all", false, "normalize every raw row, not only pending ones")
 	overlap := flag.Duration("overlap", google.DefaultOverlap, "gmail cursor re-read window")
 	backfill := flag.Duration("backfill", google.DefaultBackfill, "gmail initial backfill window")
 	account := flag.String("account", "", "limit to one account email")
 	watch := flag.Bool("watch", false, "stay resident: IMAP IDLE plus a periodic reconcile sweep")
+	calendarOnly := flag.Bool("calendar-only", false, "run only the calendar phase and normalize — no mail ingest, no outbound observation, no capture-rules pass (for a CronJob keeping availability fresh)")
 	flag.Parse()
 
 	if *watch {
@@ -49,7 +50,7 @@ func main() {
 		}
 		return
 	}
-	if err := run(*full, *normalizeOnly, *all, *overlap, *backfill, *account); err != nil {
+	if err := run(*full, *normalizeOnly, *all, *calendarOnly, *overlap, *backfill, *account); err != nil {
 		fmt.Fprintln(os.Stderr, "google:", err)
 		os.Exit(1)
 	}
@@ -71,7 +72,11 @@ func watchMain(backfill time.Duration, account string) error {
 	})
 }
 
-func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account string) error {
+func run(full, normalizeOnly, all, calendarOnly bool, overlap, backfill time.Duration, account string) error {
+	// calErr carries a calendar-phase failure to the END of the pass (SWT-24):
+	// the mail funnel (normalize, outbound observation, capture rules) always
+	// runs first, then the error surfaces in the exit code.
+	var calErr error
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -86,6 +91,24 @@ func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account
 		Full: full, All: all, Overlap: overlap, Backfill: backfill, AccountEmail: account,
 		MaxMessageBytes: google.MaxMessageBytes(),
 		Folders:         google.FoldersFromEnv(),
+	}
+
+	// SWT-24 criterion 20: --calendar-only is the calendar phase plus Normalize
+	// and NOTHING else. No mail ingest, no ObserveOutbound, no capture-rules
+	// pass — those belong to the mail funnel, and the watch loop already runs
+	// them. This is what a future CronJob calls to keep availability fresh.
+	if calendarOnly {
+		stats, err := runCalendarIngest(ctx, pool, sink, productionCalendarClientFactory(pool), cfg)
+		printStats("calendar", stats)
+		if err != nil {
+			return fmt.Errorf("calendar ingest: %w", err)
+		}
+		nstats, err := google.Normalize(ctx, sink, cfg)
+		printStats("normalize", nstats)
+		if err != nil {
+			return fmt.Errorf("normalize: %w", err)
+		}
+		return nil
 	}
 
 	if !normalizeOnly {
@@ -139,6 +162,20 @@ func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account
 		if err != nil {
 			return fmt.Errorf("ingest: %w", err)
 		}
+
+		// The calendar phase (SWT-24 criterion 17): imap mode only — bridge and
+		// gmail_api already ingest calendar inline, and a second pass would
+		// race the first for the same cursor key (criterion 18). Its error is
+		// HELD, not returned: a per-deployment calendar failure (an unset key,
+		// a revoked consent) must not stop mail normalization below, or the
+		// funnel stalls with only an exit code to say so. The pass still exits
+		// non-zero at the end, and the per-account sync_runs error rows keep
+		// propose_slots refusing honestly either way.
+		if calendarPhaseRuns(source) {
+			calStats, err := runCalendarIngest(ctx, pool, sink, productionCalendarClientFactory(pool), cfg)
+			printStats("calendar", calStats)
+			calErr = err
+		}
 	}
 
 	stats, err := google.Normalize(ctx, sink, cfg)
@@ -171,6 +208,9 @@ func run(full, normalizeOnly, all bool, overlap, backfill time.Duration, account
 	printCaptureRules(rulesCfg, rules)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
+	}
+	if calErr != nil {
+		return fmt.Errorf("calendar ingest: %w", calErr)
 	}
 	return nil
 }

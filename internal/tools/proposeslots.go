@@ -12,12 +12,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sspataro57/switchboard/internal/availability"
+	"github.com/sspataro57/switchboard/internal/connector/google"
 )
 
 // propose_slots — the deterministic availability tool (SPEC
 // 07-google-oauth-pollers, criterion 12). Read-only; the policy matrix pins
 // calendar blocks as "always via availability service propose_slots", so step
 // 8's write path consumes this existing audited surface.
+//
+// SWT-24: the tool FAILS CLOSED. availability.LoadBusy refuses — a typed error,
+// never {"slots":[]} — whenever any in-scope calendar lacks a fresh successful
+// sync, when no calendar is in scope at all, or when the requested window falls
+// outside the synced horizon. The refusal propagates unchanged, so
+// executor.Execute writes audit_events.status='error' with the reason. There is
+// no override: no force argument, no env bypass, no actor that gets slots from a
+// calendar nobody vouched for.
 
 type proposeSlotsArgs struct {
 	DurationMinutes int    `json:"duration_minutes"`
@@ -60,7 +69,10 @@ func proposeSlots(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		return nil, fmt.Errorf("parse args: %w", err)
 	}
 
-	cfg := availabilityConfig()
+	cfg, maxSyncAge, err := availabilityConfig()
+	if err != nil {
+		return nil, err
+	}
 	cfg.Duration = time.Duration(a.DurationMinutes) * time.Minute
 	cfg.Count = a.Count
 	if cfg.Count <= 0 {
@@ -81,11 +93,22 @@ func proposeSlots(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		cfg.WindowEnd = cfg.WindowStart.AddDate(0, 0, 7) // ~next 5 business days
 	}
 
-	events, err := availability.LoadEvents(ctx, pool, cfg.WindowStart, cfg.WindowEnd)
+	// The one database-backed door to free/busy (SWT-24 criterion 1). The
+	// horizon is the CONNECTOR'S constant pair, passed in rather than
+	// re-spelled here: the refusal must track what the poller actually fetches,
+	// or it silently certifies a span nothing fetches any more (criterion 7).
+	busy, err := availability.LoadBusy(ctx, pool, availability.Request{
+		WindowStart:   cfg.WindowStart,
+		WindowEnd:     cfg.WindowEnd,
+		Now:           now,
+		MaxSyncAge:    maxSyncAge,
+		HorizonPast:   google.CalendarWindowPast,
+		HorizonFuture: google.CalendarWindowFuture,
+	})
 	if err != nil {
 		return nil, err
 	}
-	slots := availability.ProposeSlots(availability.Busy(events), cfg)
+	slots := availability.ProposeSlots(busy, cfg)
 
 	out := make([]map[string]string, 0, len(slots))
 	for _, s := range slots {
@@ -98,8 +121,12 @@ func proposeSlots(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 }
 
 // availabilityConfig reads the working-hours env (defaults: Mon-Fri 09-18,
-// Europe/Rome). The pure functions never read env — only this wiring does.
-func availabilityConfig() availability.Config {
+// Europe/Rome) and AVAIL_MAX_SYNC_AGE (Go duration, default 1h — four missed
+// */15 polls before the service goes quiet). The pure functions never read env —
+// only this wiring does (SWT-24 criterion 11), and an unparseable value is an
+// ERROR returned to the caller, never a silent fallback: a typo must not widen
+// a safety window.
+func availabilityConfig() (availability.Config, time.Duration, error) {
 	cfg := availability.Config{WorkStart: 9, WorkEnd: 18,
 		Days: []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday}}
 
@@ -132,5 +159,17 @@ func availabilityConfig() availability.Config {
 			cfg.Days = days
 		}
 	}
-	return cfg
+
+	maxSyncAge := time.Hour
+	if v := os.Getenv("AVAIL_MAX_SYNC_AGE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return cfg, 0, fmt.Errorf("AVAIL_MAX_SYNC_AGE %q is not a Go duration (want e.g. 1h, 90m): %w", v, err)
+		}
+		if d <= 0 {
+			return cfg, 0, fmt.Errorf("AVAIL_MAX_SYNC_AGE %q must be positive", v)
+		}
+		maxSyncAge = d
+	}
+	return cfg, maxSyncAge, nil
 }

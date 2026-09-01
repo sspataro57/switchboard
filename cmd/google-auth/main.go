@@ -8,6 +8,7 @@
 //	google-auth add-app-password <email> [--imap-host H] [--imap-port P]
 //	                                     [--smtp-host H] [--smtp-port P]
 //	                                     [--no-availability]   (password on stdin)
+//	google-auth add-calendar <email> [--no-availability]   (calendar.readonly only)
 //	google-auth list
 //
 //	DATABASE_URL               ops db, required
@@ -31,9 +32,10 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: google-auth <add|add-app-password|list> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: google-auth <add|add-app-password|add-calendar|list> [flags]")
 		fmt.Fprintln(os.Stderr, "  add <email>                 OAuth loopback consent")
 		fmt.Fprintln(os.Stderr, "  add-app-password <email>    IMAP/SMTP app password, read from stdin")
+		fmt.Fprintln(os.Stderr, "  add-calendar <email>        OAuth consent for calendar.readonly ONLY; mail path untouched")
 		fmt.Fprintln(os.Stderr, "  list                        show accounts and their auth_type")
 		os.Exit(2)
 	}
@@ -43,6 +45,8 @@ func main() {
 		err = addCmd(os.Args[2:])
 	case "add-app-password":
 		err = addAppPasswordCmd(os.Args[2:])
+	case "add-calendar":
+		err = addCalendarCmd(os.Args[2:])
 	case "list":
 		err = listCmd()
 	default:
@@ -110,6 +114,75 @@ func addCmd(argv []string) error {
 		return err
 	}
 	fmt.Printf("authorized %s (account id %d, readonly scopes, send_enabled=false)\n", email, id)
+	return nil
+}
+
+// addCalendarCmd runs the loopback consent for CALENDAR ONLY (SWT-24). It asks
+// for calendar.readonly and nothing else — re-requesting the restricted Gmail
+// scopes would drag back the verification/CASA problem migration 0014 abandoned
+// OAuth over — and it leaves auth_type and app_password_encrypted untouched
+// (UpsertGoogleAccount never names them), so the row becomes legitimately
+// dual-auth: IMAP/SMTP for mail, OAuth for calendar. The live mail path is
+// unchanged.
+func addCalendarCmd(argv []string) error {
+	fs := flag.NewFlagSet("add-calendar", flag.ContinueOnError)
+	noAvail := fs.Bool("no-availability", false, "exclude this account's calendar from availability")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: google-auth add-calendar <email> [--no-availability]")
+	}
+	email := strings.ToLower(fs.Arg(0))
+
+	key := os.Getenv("OPS_TOKEN_KEY")
+	if key == "" {
+		return fmt.Errorf("OPS_TOKEN_KEY is not set (generate once: openssl rand -base64 32)")
+	}
+	secretFile := os.Getenv("GOOGLE_CLIENT_SECRET_FILE")
+	if secretFile == "" {
+		home, _ := os.UserHomeDir()
+		secretFile = filepath.Join(home, ".config", "switchboard", "google_client_secret.json")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cfg, err := google.LoadOAuthConfig(secretFile, "")
+	if err != nil {
+		return err
+	}
+	cfg.Scopes = google.CalendarScopes
+	tok, err := google.LoopbackFlow(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
+	// Verify the authorized identity before storing anything — five accounts in
+	// one browser is exactly where the wrong one gets clicked. addCmd uses
+	// GetProfile, which needs a Gmail scope this consent deliberately does not
+	// request; the primary calendar's id IS the account address (criterion 15).
+	hc := &http.Client{Transport: &tokenTransport{token: tok.AccessToken}}
+	cc := google.NewCalendarClient(hc, "")
+	got, err := cc.PrimaryCalendarID(ctx)
+	if err != nil {
+		return fmt.Errorf("verify authorized identity: %w", err)
+	}
+	if !strings.EqualFold(got, email) {
+		return fmt.Errorf("authorized account's primary calendar is %s, expected %s — nothing stored; retry and pick the right account", got, email)
+	}
+
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	id, err := google.UpsertGoogleAccount(ctx, pool, email, tok.RefreshToken, key, google.CalendarScopes, !*noAvail)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("calendar consent stored for %s (account id %d, calendar.readonly only; auth_type and app password untouched)\n", email, id)
 	return nil
 }
 
