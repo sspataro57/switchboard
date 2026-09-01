@@ -82,6 +82,10 @@ type Config struct {
 	Limit     int           // 0 = all pending
 	Since     time.Duration // 0 = no lower bound on sent_at (REQUIRED >0 on the residue lane)
 	Lane      Lane
+	// EvalCheckpoint, when non-empty, makes Eval append each verdict to this
+	// file and resume past finished ids on restart (removed on success). The
+	// worker's run path never reads it.
+	EvalCheckpoint string
 }
 
 // NeighbourClass is one thread neighbour's attribution, for the most-restrictive

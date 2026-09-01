@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sspataro57/switchboard/internal/provider"
@@ -152,13 +155,58 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 		actionable bool
 		latencyMS  int
 	}
+	// CHECKPOINT (added after the 874-label run died twice, hours in, on
+	// transient provider stalls that outlasted the retry). Every verdict is
+	// appended to cfg.EvalCheckpoint as it lands; on restart the finished ids
+	// are loaded and skipped, so a crash costs minutes, not the batch. The file
+	// is DELETED on success — a deliberate rerun must re-classify, never reuse
+	// stale verdicts. Empty path = disabled (the unit suites' path).
+	done := map[int64]outcome{}
+	ckptModel := ""
+	if cfg.EvalCheckpoint != "" {
+		if raw, err := os.ReadFile(cfg.EvalCheckpoint); err == nil {
+			for _, line := range strings.Split(string(raw), "\n") {
+				parts := strings.Split(line, "\t")
+				if len(parts) < 4 {
+					continue
+				}
+				id, err1 := strconv.ParseInt(parts[0], 10, 64)
+				act, err2 := strconv.ParseBool(parts[1])
+				ms, err3 := strconv.Atoi(parts[2])
+				if err1 != nil || err2 != nil || err3 != nil {
+					continue
+				}
+				done[id] = outcome{id: id, actionable: act, latencyMS: ms}
+				if ckptModel == "" {
+					ckptModel = parts[3]
+				}
+			}
+		}
+		if len(done) > 0 {
+			fmt.Fprintf(w, "resumed %d verdicts from checkpoint %s\n\n", len(done), cfg.EvalCheckpoint)
+		}
+	}
+	var ckpt *os.File
+	if cfg.EvalCheckpoint != "" {
+		f, err := os.OpenFile(cfg.EvalCheckpoint, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return fmt.Errorf("open eval checkpoint %s: %w", cfg.EvalCheckpoint, err)
+		}
+		ckpt = f
+		defer ckpt.Close()
+	}
 	// The model as the API REPORTED it, not as we asked for it. An eval whose
 	// output does not name what it scored is a number nobody can reproduce, and
 	// the server's own answer is the truthful source — it reflects what actually
 	// ran, including a `:latest` the caller did not spell out.
-	scoredModel := ""
+	scoredModel := ckptModel
 	var outcomes []outcome
 	for _, m := range scored {
+		if o, ok := done[m.MessageID]; ok {
+			// Scored before the crash; the request would be byte-identical.
+			outcomes = append(outcomes, o)
+			continue
+		}
 		req := provider.Request{
 			// Empty: the adapter uses the model it was CONSTRUCTED with, which
 			// cmd/classify resolves once for both `run` and `eval`. Naming a model
@@ -194,7 +242,21 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 		if scoredModel == "" {
 			scoredModel = resp.Model
 		}
-		outcomes = append(outcomes, outcome{id: m.MessageID, actionable: v.Actionable, latencyMS: resp.LatencyMS})
+		o := outcome{id: m.MessageID, actionable: v.Actionable, latencyMS: resp.LatencyMS}
+		outcomes = append(outcomes, o)
+		if ckpt != nil {
+			// One line per verdict, flushed by the unbuffered write: the whole
+			// point is surviving an abrupt death.
+			if _, err := fmt.Fprintf(ckpt, "%d\t%t\t%d\t%s\n", o.id, o.actionable, o.latencyMS, resp.Model); err != nil {
+				return fmt.Errorf("append eval checkpoint: %w", err)
+			}
+		}
+	}
+	if ckpt != nil {
+		_ = ckpt.Close()
+		if err := os.Remove(cfg.EvalCheckpoint); err != nil {
+			fmt.Fprintf(w, "note: could not remove checkpoint %s: %v\n", cfg.EvalCheckpoint, err)
+		}
 	}
 
 	var tp, fp, fn int

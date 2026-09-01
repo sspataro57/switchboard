@@ -3,7 +3,7 @@
 //
 //	classify run    [--lane personal|residue] [--limit N] [--since 720h]
 //	classify report [--lane personal|residue] [--since 720h]
-//	classify eval   [--lane personal|residue] [--labels <file>]
+//	classify eval   [--lane personal|residue] [--labels <file>] [--checkpoint <file>]
 //
 // --lane defaults to personal (SWT-22's lane, unchanged). The residue lane
 // (SWT-23) REQUIRES --since on `run`: ~14,737 messages at the measured 7.2 s
@@ -180,6 +180,8 @@ func evalCmd(argv []string) error {
 	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue")
 	labelsPath := fs.String("labels", "",
 		"the hand-checked labelled set (default: the lane's own fixture)")
+	ckptPath := fs.String("checkpoint", "",
+		"progress file: verdicts append here and a rerun resumes past them (default: <labels>.progress; removed on success)")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -197,8 +199,18 @@ func evalCmd(argv []string) error {
 	if err != nil {
 		return err
 	}
+	if *ckptPath == "" {
+		*ckptPath = *labelsPath + ".progress"
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	// Sized to the BATCH, not to a feeling. The original 2*time.Hour here
+	// killed the 874-label residue eval twice, hours in, and both deaths wore a
+	// provider costume — the in-flight HTTP call fails with "context deadline
+	// exceeded" when the run's own ctx expires, which reads exactly like a
+	// stalled ollama. Two minutes per label covers the measured worst case
+	// (~40s) five times over; the checkpoint makes even this ceiling cheap.
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(len(labels))*2*time.Minute+30*time.Minute)
 	defer cancel()
 
 	pool, err := store.NewPool(ctx)
@@ -213,7 +225,7 @@ func evalCmd(argv []string) error {
 	// answer to "what was this number measured on".
 	router, model := buildRouter()
 	return classify.Eval(ctx, classify.NewStore(pool), router,
-		classify.Config{Model: model, MaxTokens: 512, Lane: lane}, labels, os.Stdout)
+		classify.Config{Model: model, MaxTokens: 512, Lane: lane, EvalCheckpoint: *ckptPath}, labels, os.Stdout)
 }
 
 // loadLabels reads the JSONL fixture. It refuses a line carrying message
