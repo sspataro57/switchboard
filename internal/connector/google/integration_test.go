@@ -45,6 +45,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,9 +106,10 @@ func cleanupGoogleConn(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		`DELETE FROM normalized_threads  WHERE thread_key LIKE 'gmail:itest-google-conn-%'`,
 		`DELETE FROM raw_source_items    WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-conn-%')`,
 		`DELETE FROM sync_runs           WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-google-conn-%')`,
+		`DELETE FROM sync_runs           WHERE stats->>'itest' = 'google-conn-freshen'`,
 		`DELETE FROM source_accounts     WHERE provider='google' AND account_email LIKE 'itest-google-conn-%'`,
-		`DELETE FROM policy_decisions    WHERE audit_event_id IN (SELECT id FROM audit_events WHERE actor='itest-google')`,
-		`DELETE FROM audit_events        WHERE actor='itest-google'`,
+		`DELETE FROM policy_decisions    WHERE audit_event_id IN (SELECT id FROM audit_events WHERE actor LIKE 'itest-google%')`,
+		`DELETE FROM audit_events        WHERE actor LIKE 'itest-google%'`,
 	}
 	for _, s := range stmts {
 		if _, err := pool.Exec(ctx, s); err != nil {
@@ -161,8 +163,20 @@ func TestGoogle_Integration_EndToEnd(t *testing.T) {
 	fg.addGmail(connB, fakeGmailMsg{id: "b-only", threadID: "tb3", full: gmailFull("b-only", "tb3", msgidBonly, "client@beta.example", connB, dtBonly, "b only")})
 
 	// Calendar: one busy event per account (both in the availability window).
-	fg.addCalendar(connA, calFull("evt-a", "Standup A", "2026-07-13T09:00:00+02:00", "2026-07-13T09:30:00+02:00"))
-	fg.addCalendar(connB, calFull("evt-b", "Standup B", "2026-07-13T11:00:00+02:00", "2026-07-13T11:30:00+02:00"))
+	//
+	// SWT-24 criterion 7: the times are RELATIVE to the real clock, not the
+	// frozen 2026-07-13 this fixture used to hardcode. propose_slots now refuses
+	// a window outside [now-CalendarWindowPast, now+CalendarWindowFuture] —
+	// nothing was ever fetched there, so an empty busy set for such a window
+	// means "we never looked". A fixed date drifts out of the horizon and the
+	// refusal would fire for a reason the test is not about.
+	slotDay := nextBusyWeekday(t)
+	busyA0 := time.Date(slotDay.Year(), slotDay.Month(), slotDay.Day(), 9, 0, 0, 0, slotDay.Location())
+	busyA1 := busyA0.Add(30 * time.Minute)
+	busyB0 := time.Date(slotDay.Year(), slotDay.Month(), slotDay.Day(), 11, 0, 0, 0, slotDay.Location())
+	busyB1 := busyB0.Add(30 * time.Minute)
+	fg.addCalendar(connA, calFull("evt-a", "Standup A", busyA0.Format(time.RFC3339), busyA1.Format(time.RFC3339)))
+	fg.addCalendar(connB, calFull("evt-b", "Standup B", busyB0.Format(time.RFC3339), busyB1.Format(time.RFC3339)))
 
 	factory := func(_ context.Context, a google.Account) (google.Clients, error) {
 		return google.Clients{
@@ -287,11 +301,28 @@ func TestGoogle_Integration_EndToEnd(t *testing.T) {
 	}
 
 	// ---- propose_slots through the executor (criterion 12) -----------------
+	// Freshen every in-scope calendar this test does NOT own (same idiom as the
+	// SWT-24 availability suites): readiness scope is GLOBAL, so a leftover
+	// google account in a dirty compose db would refuse the "must answer" call
+	// below for reasons that have nothing to do with this test. The rows carry
+	// an itest marker and are removed by cleanupGoogleConn.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO sync_runs (source_account_id, started_at, finished_at, status, stats)
+		 SELECT id, now(), now(), 'ok', jsonb_build_object('phase','calendar','itest','google-conn-freshen')
+		   FROM source_accounts
+		  WHERE provider='google' AND calendar_in_availability
+		    AND account_email NOT LIKE 'itest-google-conn-%'`); err != nil {
+		t.Fatalf("freshen foreign calendars: %v", err)
+	}
+
 	reg := executor.NewRegistry()
 	tools.Register(reg, pool)
 	ex := executor.New(reg, policy.NewStatic(reg.Names()...), audit.NewPGStore(pool))
 
-	args := []byte(`{"duration_minutes":30,"window_start":"2026-07-13T09:00:00+02:00","window_end":"2026-07-13T12:00:00+02:00","count":3}`)
+	winStart := busyA0
+	winEnd := time.Date(slotDay.Year(), slotDay.Month(), slotDay.Day(), 12, 0, 0, 0, slotDay.Location())
+	args := []byte(`{"duration_minutes":30,"window_start":"` + winStart.Format(time.RFC3339) +
+		`","window_end":"` + winEnd.Format(time.RFC3339) + `","count":3}`)
 	res, err := ex.Execute(ctx, executor.Call{Tool: "propose_slots", Actor: "itest-google", Args: args})
 	if err != nil {
 		t.Fatalf("Execute propose_slots: %v", err)
@@ -310,10 +341,6 @@ func TestGoogle_Integration_EndToEnd(t *testing.T) {
 		t.Errorf("propose_slots returned no slots in a window with free time")
 	}
 	// The two busy events (09:00-09:30, 11:00-11:30 Rome) must be dodged.
-	busyA0, _ := time.Parse(time.RFC3339, "2026-07-13T09:00:00+02:00")
-	busyA1, _ := time.Parse(time.RFC3339, "2026-07-13T09:30:00+02:00")
-	busyB0, _ := time.Parse(time.RFC3339, "2026-07-13T11:00:00+02:00")
-	busyB1, _ := time.Parse(time.RFC3339, "2026-07-13T11:30:00+02:00")
 	for _, s := range out.Slots {
 		st, err1 := time.Parse(time.RFC3339, s.Start)
 		en, err2 := time.Parse(time.RFC3339, s.End)
@@ -334,6 +361,47 @@ func TestGoogle_Integration_EndToEnd(t *testing.T) {
 		t.Errorf("no ok audit_events row for propose_slots (invariant 3: every tool call is audited)")
 	}
 
+	// ---- SWT-24 criterion 12: the SAME call refuses without a fresh sync -----
+	//
+	// The ok answer above is not free any more: it holds because google.Run's
+	// calendar phase left a status='ok', stats->>'phase'='calendar' sync_runs
+	// row for BOTH accounts. That is the production precondition, and this
+	// fixture now has production's shape rather than the assertion's. Remove
+	// those rows — the state every google account is in today, where nothing has
+	// ever ingested a calendar — and propose_slots must FAIL, name the accounts,
+	// and leave audit_events.status='error'. Before this ticket the same call
+	// returned a week of free slots from an empty table.
+	if got := scanInt(t, ctx, pool,
+		`SELECT count(DISTINCT source_account_id) FROM sync_runs
+		  WHERE source_account_id IN ($1,$2) AND status='ok' AND stats->>'phase'='calendar'`,
+		aID, bID); got != 2 {
+		t.Fatalf("accounts with an ok calendar sync_run = %d, want 2 — the ingest pass is what makes the "+
+			"answer above legitimate (SWT-24 criterion 12)", got)
+	}
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM sync_runs WHERE source_account_id IN ($1,$2) AND stats->>'phase'='calendar'`, aID, bID); err != nil {
+		t.Fatalf("drop calendar sync runs: %v", err)
+	}
+
+	refused, rerr := ex.Execute(ctx, executor.Call{Tool: "propose_slots", Actor: "itest-google-refused", Args: args})
+	if rerr == nil {
+		t.Errorf("propose_slots ANSWERED (%s) with no successful calendar sync for either account. An empty "+
+			"busy set is \"I do not know\", not \"you are free\": that answer books over every real meeting "+
+			"in a calendar nothing has ever ingested (SWT-24 criteria 8 and 12)", refused.Output)
+	} else {
+		for _, want := range []string{connA, connB} {
+			if !strings.Contains(rerr.Error(), want) {
+				t.Errorf("the refusal does not name %s, so nobody reading it knows which calendar is missing: %v",
+					want, rerr)
+			}
+		}
+	}
+	if got := scanInt(t, ctx, pool,
+		`SELECT count(*) FROM audit_events WHERE tool='propose_slots' AND actor='itest-google-refused' AND status='error'`); got != 1 {
+		t.Errorf("audit_events rows with status='error' for the refused call = %d, want 1 (invariant 3: a "+
+			"refused call is audited exactly like an allowed one, with the reason in audit_events.error)", got)
+	}
+
 	// ---- Criterion 13: zero tasks, zero deliveries -------------------------
 	if got := scanInt(t, ctx, pool, `SELECT count(*) FROM tasks`); got != tasksBefore {
 		t.Errorf("tasks changed: before=%d after=%d (connector/propose_slots create zero tasks)", tasksBefore, got)
@@ -341,4 +409,21 @@ func TestGoogle_Integration_EndToEnd(t *testing.T) {
 	if got := scanInt(t, ctx, pool, `SELECT count(*) FROM deliveries`); got != deliveriesBefore {
 		t.Errorf("deliveries changed: before=%d after=%d", deliveriesBefore, got)
 	}
+}
+
+// nextBusyWeekday returns a weekday a few days ahead of now in Europe/Rome (the
+// availability service's default AVAIL_TZ), used to place this fixture's
+// calendar events and propose_slots window inside the synced horizon (SWT-24
+// criterion 7) instead of on a frozen date that ages out of it.
+func nextBusyWeekday(t *testing.T) time.Time {
+	t.Helper()
+	loc, err := time.LoadLocation("Europe/Rome")
+	if err != nil {
+		t.Fatalf("load Europe/Rome: %v", err)
+	}
+	day := time.Now().In(loc).AddDate(0, 0, 3)
+	for day.Weekday() == time.Saturday || day.Weekday() == time.Sunday {
+		day = day.AddDate(0, 0, 1)
+	}
+	return day
 }

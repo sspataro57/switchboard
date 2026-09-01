@@ -91,6 +91,7 @@ type fakeSink struct {
 	inserts      []rawWrite
 	updates      []rawWrite
 	savedCursors []google.Cursor
+	savedFields  []string
 	runs         []string // "start:phase" / "finish:status"
 	finishStatus string
 }
@@ -98,6 +99,19 @@ type fakeSink struct {
 func newFakeSink() *fakeSink { return &fakeSink{accountID: 42, stored: map[string]string{}} }
 
 func (s *fakeSink) Cursor(_ context.Context, _ int64) (google.Cursor, error) { return s.cursor, nil }
+
+// SaveCursorField mirrors the field-scoped write (SWT-24 criterion 19) onto
+// the in-memory cursor so existing token assertions keep reading s.cursor.
+func (s *fakeSink) SaveCursorField(_ context.Context, _ int64, field string, value any) error {
+	s.savedFields = append(s.savedFields, field)
+	if field == "calendar_sync_token" {
+		if tok, ok := value.(string); ok {
+			s.cursor.CalendarSyncToken = tok
+		}
+	}
+	s.savedCursors = append(s.savedCursors, s.cursor)
+	return nil
+}
 
 func (s *fakeSink) SaveCursor(_ context.Context, _ int64, c google.Cursor) error {
 	s.savedCursors = append(s.savedCursors, c)

@@ -16,9 +16,14 @@ const (
 	// DefaultBackfill is the initial gmail window on a fresh cursor.
 	DefaultBackfill = 90 * 24 * time.Hour
 
-	// Calendar initial-window bounds (the official sync recipe).
-	calWindowPast   = 30 * 24 * time.Hour
-	calWindowFuture = 90 * 24 * time.Hour
+	// CalendarWindowPast / CalendarWindowFuture bound the calendar initial
+	// window (the official sync recipe). EXPORTED (SWT-24 criterion 7): the
+	// availability wiring refuses a propose_slots window outside
+	// [now-Past, now+Future] against THESE constants — nothing was ever fetched
+	// beyond them, so an empty busy set there means "we never looked", and a
+	// re-spelled copy would silently drift the first time this window changes.
+	CalendarWindowPast   = 30 * 24 * time.Hour
+	CalendarWindowFuture = 90 * 24 * time.Hour
 )
 
 // Account is one provider='google' source_accounts row.
@@ -129,6 +134,11 @@ func (c Config) backfill() time.Duration {
 type Sink interface {
 	Cursor(ctx context.Context, accountID int64) (Cursor, error)
 	SaveCursor(ctx context.Context, accountID int64, c Cursor) error
+	// SaveCursorField writes ONE cursor key. The calendar phase uses it
+	// (SWT-24 criterion 19): SaveCursor replaces the whole blob, so a calendar
+	// save would clobber an IMAP folder position written between its read and
+	// its write — and a rolled-back UID position re-reads or SKIPS mail.
+	SaveCursorField(ctx context.Context, accountID int64, field string, value any) error
 	StartRun(ctx context.Context, accountID int64, phase string) (runID int64, err error)
 	FinishRun(ctx context.Context, runID int64, status string, stats Stats, errMsg string) error
 	RawHash(ctx context.Context, accountID int64, externalID string) (hash string, exists bool, err error)
@@ -240,8 +250,8 @@ func IngestCalendar(ctx context.Context, cc *CalendarClient, sink Sink, acct Acc
 	}
 
 	now := cfg.now()
-	timeMin := now.Add(-calWindowPast).Format(time.RFC3339)
-	timeMax := now.Add(calWindowFuture).Format(time.RFC3339)
+	timeMin := now.Add(-CalendarWindowPast).Format(time.RFC3339)
+	timeMax := now.Add(CalendarWindowFuture).Format(time.RFC3339)
 
 	syncToken := cur.CalendarSyncToken
 	if cfg.Full {
@@ -259,8 +269,13 @@ func IngestCalendar(ctx context.Context, cc *CalendarClient, sink Sink, acct Acc
 	stats.CalendarListed += n
 
 	if newToken != "" && newToken != cur.CalendarSyncToken {
-		cur.CalendarSyncToken = newToken
-		if err := sink.SaveCursor(ctx, acct.ID, cur); err != nil {
+		// Field-scoped, never the whole blob (SWT-24 criterion 19): between
+		// this pass's cursor read and now, the resident watch loop may have
+		// advanced imap_folders, and writing the stale snapshot back would
+		// roll the mail position under it — skipped mail is a delivery
+		// confirmation that never lands (invariant 5). Same guard the bridge
+		// path has carried since its calendar ingest shipped.
+		if err := sink.SaveCursorField(ctx, acct.ID, "calendar_sync_token", newToken); err != nil {
 			return fail(fmt.Errorf("save cursor: %w", err))
 		}
 	}
