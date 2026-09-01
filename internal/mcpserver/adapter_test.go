@@ -120,6 +120,15 @@ var wantAgentTools = []string{
 var spineTools = []string{
 	"task_release", "answer_feedback", "prefill_delivery",
 	"mark_delivery_failed",
+	// SWT-20 criterion 2, asserted deliberately rather than by omission.
+	// task_set_source_thread writes tasks.source_thread_id, which is the fact
+	// draft_delivery binds an upwork target to (SPEC §4). An agent that could
+	// write it could name any conversation and then aim a delivery there — the
+	// exposure the pass-four upwork_chat closure was written for, and the reason
+	// external_refs was rejected as the provenance store (D1: link_external_ref
+	// IS agent-facing, with a free-text external_key). Same shape as the capture
+	// rule tools: the transport, not an actor prefix, is the boundary.
+	"task_set_source_thread",
 }
 
 func TestDraftDeliverySchema_IncludesSlackReply(t *testing.T) {

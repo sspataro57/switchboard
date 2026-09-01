@@ -52,6 +52,10 @@ const (
 	dsClientTwoRooms   = "dddd3333-0000-0000-0000-00000000ds03"
 	dsRoomA            = "room_a1b2c3d4e5"
 	dsRoomB            = "room_f6e5d4c3b2"
+	// SWT-20 criterion 6 wants a client with THREE roomed threads — the shape of
+	// the worst production client as of 2026-08-27, and the shape SWT-19's
+	// mitigation had to refuse outright.
+	dsRoomC = "room_9d8c7b6a5f"
 
 	dsGmailThread = "gmail:itest-dstore:18f0dstore01"
 	dsJiraThread  = "jira:dstore.jira.com:WEB-4242"
@@ -71,6 +75,7 @@ func dsCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		dsLegacyKey(dsClientLegacyOnly),
 		dsLegacyKey(dsClientOneRoom), dsRoomedKey(dsClientOneRoom, dsRoomA),
 		dsLegacyKey(dsClientTwoRooms), dsRoomedKey(dsClientTwoRooms, dsRoomA), dsRoomedKey(dsClientTwoRooms, dsRoomB),
+		dsRoomedKey(dsClientTwoRooms, dsRoomC),
 	}
 	stmts := []struct {
 		sql  string
