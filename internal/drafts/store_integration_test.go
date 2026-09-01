@@ -52,6 +52,10 @@ const (
 	dsClientTwoRooms   = "dddd3333-0000-0000-0000-00000000ds03"
 	dsRoomA            = "room_a1b2c3d4e5"
 	dsRoomB            = "room_f6e5d4c3b2"
+	// SWT-20 criterion 6 wants a client with THREE roomed threads — the shape of
+	// the worst production client as of 2026-08-27, and the shape SWT-19's
+	// mitigation had to refuse outright.
+	dsRoomC = "room_9d8c7b6a5f"
 
 	dsGmailThread = "gmail:itest-dstore:18f0dstore01"
 	dsJiraThread  = "jira:dstore.jira.com:WEB-4242"
@@ -71,6 +75,7 @@ func dsCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		dsLegacyKey(dsClientLegacyOnly),
 		dsLegacyKey(dsClientOneRoom), dsRoomedKey(dsClientOneRoom, dsRoomA),
 		dsLegacyKey(dsClientTwoRooms), dsRoomedKey(dsClientTwoRooms, dsRoomA), dsRoomedKey(dsClientTwoRooms, dsRoomB),
+		dsRoomedKey(dsClientTwoRooms, dsRoomC),
 	}
 	stmts := []struct {
 		sql  string
@@ -309,82 +314,20 @@ func TestDraftsStore_Integration_RefOnTheDeliverTaskAlsoResolves(t *testing.T) {
 
 // ---- criterion 24: upwork, target_ref is the thread_key exactly ----------------
 
-func TestDraftsStore_Integration_UpworkTargetIsTheThreadKey(t *testing.T) {
-	ctx := context.Background()
-	f := newDSFixture(t, ctx)
-
-	key := dsLegacyKey(dsClientLegacyOnly)
-	f.thread(t, ctx, key, 30)
-	deliverID, _, _ := f.project(t, ctx, projectSpec{
-		name: "upwork", client: "Upwork Client",
-		refSystem: "upwork_crm", refKey: key,
-	})
-	assertNoPeopleFixture(t, ctx, f.pool)
-
-	dt := deliverTask(t, ctx, f.pool, deliverID)
-	if dt.Channel != "upwork_chat" {
-		t.Errorf("Channel = %q, want upwork_chat — derived from the resolved thread_key's PREFIX (§9 site D), "+
-			"not from normalized_messages.channel, which is CRM-supplied free text", dt.Channel)
-	}
-	if dt.TargetRef != key {
-		t.Errorf("TargetRef = %q, want exactly %q. An exact-string match is what confirms the delivery later; "+
-			"a non-canonical spelling is permanently unconfirmable with no error anywhere (SWT-13)", dt.TargetRef, key)
-	}
-	if dt.ThreadID != nil {
-		t.Logf("note: ThreadID is also set (%d) for an upwork target; the delivery keys on target_ref", *dt.ThreadID)
-	}
-}
-
-// ---- SWT-19 must survive the rework: roomed preference ------------------------
-
-// SWT-19 rewrote upwork target resolution inside this very function: prefer a
-// ROOMED thread over the client's legacy one, deliberately rather than by
-// `ORDER BY id DESC`. The reason is downstream: the matcher's room scoping only
-// tightens anything if deliveries are TARGETED at roomed threads where one exists.
-// A rework that resolves "the thread the ref names" and stops would target the
-// legacy key again, keep every new delivery client-wide, and make SWT-19 a no-op
-// that still passes its own unit tests — the SWT-18 mistake, one layer up.
+// Two SWT-19-era cases were REMOVED here by SWT-20 (criteria 7 and 8):
 //
-// The ref here names the LEGACY key on purpose: that is what a capture rule
-// writes for a client whose ingested history is pre-2026-07-21, and what
-// `clientIDFromThreadKey` would give back. The roomed thread is newer and carries
-// the recent traffic.
-func TestDraftsStore_Integration_UpworkPrefersTheRoomedThread(t *testing.T) {
-	ctx := context.Background()
-	f := newDSFixture(t, ctx)
-
-	legacy := dsLegacyKey(dsClientOneRoom)
-	roomed := dsRoomedKey(dsClientOneRoom, dsRoomA)
-	if legacy == roomed {
-		t.Fatalf("fixture invalid: the two keys are the same string (%q)", legacy)
-	}
-	legacyThread := f.thread(t, ctx, legacy, 600) // old traffic
-	roomedThread := f.thread(t, ctx, roomed, 20)  // current traffic
-	if legacyThread == roomedThread {
-		t.Fatalf("fixture invalid: both keys resolved to one thread row")
-	}
-	if !(legacyThread < roomedThread) {
-		t.Fatalf("fixture invalid: the legacy thread (%d) must be created BEFORE the roomed one (%d), so "+
-			"'prefer roomed' cannot coincide with 'newest row wins'", legacyThread, roomedThread)
-	}
-
-	deliverID, _, _ := f.project(t, ctx, projectSpec{
-		name: "upwork-roomed", client: "Roomed Client",
-		refSystem: "upwork_crm", refKey: legacy,
-	})
-
-	dt := deliverTask(t, ctx, f.pool, deliverID)
-	if dt.Channel != "upwork_chat" {
-		t.Fatalf("Channel = %q, want upwork_chat", dt.Channel)
-	}
-	if dt.TargetRef != roomed {
-		t.Errorf("TargetRef = %q, want the ROOMED key %q. SWT-19's roomed-thread preference must SURVIVE the "+
-			"§9 rework: a reply aimed at the legacy key is client-wide, and since SWT-19 the room scoping is "+
-			"the thing that stops a wrong-room bind", dt.TargetRef, roomed)
-	}
-}
-
-// ---- SWT-19 must survive the rework: the multi-room REFUSAL --------------------
+//   - TestDraftsStore_Integration_UpworkTargetIsTheThreadKey resolved a target
+//     from an external_refs row with no provenance; criterion 8 makes that
+//     state the refusal (a ref is an agent-writable claim, not a recorded
+//     observation — SPEC D1).
+//   - TestDraftsStore_Integration_UpworkPrefersTheRoomedThread asserted the
+//     roomed preference over a legacy ref; criterion 7 asserts the opposite
+//     (legacy provenance stays on the legacy key) and criterion 5 deletes the
+//     preference outright.
+//
+// Their replacements live in provenance_target_integration_test.go. The
+// multi-room refusal below SURVIVES: with no provenance recorded it now fires
+// for the stronger reason (no recorded conversation), not for the room count.
 
 // The refusal is SWT-20's shipped mitigation. Two production clients have several
 // rooms (3 and 2). Picking the most recent is a GUESS, and since SWT-19 a guess is

@@ -374,6 +374,13 @@ func TestCaptureRules_Integration_ShadowDecidesAndCreatesNothing(t *testing.T) {
 	refsBefore := s.scanInt(t, ctx, `SELECT count(*) FROM external_refs`)
 	eventsBefore := s.scanInt(t, ctx, `SELECT count(*) FROM task_events`)
 	deliveriesBefore := s.scanInt(t, ctx, `SELECT count(*) FROM deliveries`)
+	// SWT-20 criterion 19, shadow half. Provenance is written by a SECOND
+	// executor call after create_task (the linkRuleRef shape), and a second call
+	// is exactly the kind of thing a mode guard is added around later, or not at
+	// all. Counting tasks alone cannot see it — shadow creates no task, so the
+	// task count is unchanged whether or not the provenance write is
+	// mode-gated. This counts the COLUMN.
+	provenanceBefore := s.scanInt(t, ctx, `SELECT count(*) FROM tasks WHERE source_thread_id IS NOT NULL`)
 
 	if _, err := capture.EvaluateRules(ctx, s.pool, s.ex, capture.RulesConfig{Mode: "shadow"}); err != nil {
 		t.Fatalf("EvaluateRules(shadow): %v", err)
@@ -391,6 +398,12 @@ func TestCaptureRules_Integration_ShadowDecidesAndCreatesNothing(t *testing.T) {
 			t.Errorf("%s changed across a SHADOW run: before=%d after=%d (criterion 7: shadow creates zero rows "+
 				"in tasks, external_refs, task_events and deliveries)", c.table, c.before, got)
 		}
+	}
+	if got := s.scanInt(t, ctx, `SELECT count(*) FROM tasks WHERE source_thread_id IS NOT NULL`); got != provenanceBefore {
+		t.Errorf("tasks carrying source_thread_id changed across a SHADOW run: before=%d after=%d. SWT-20 "+
+			"criterion 19: shadow records the DECISION, never the effect — and provenance is an effect. It is "+
+			"also the one effect that would be invisible in the table counts above, because it is an UPDATE-"+
+			"shaped fact on a task shadow never creates", provenanceBefore, got)
 	}
 
 	// Criterion 6: exactly one decision row per evaluated message, unmatched

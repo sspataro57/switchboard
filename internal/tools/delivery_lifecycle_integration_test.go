@@ -399,34 +399,24 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 		"upwork_crm:itest-del:upwork"); err != nil {
 		t.Fatalf("seed upwork thread: %v", err)
 	}
-	// 7. upwork_chat assisted tier: the DRAFT itself is now refused (SWT-19,
-	//    fourth adversarial pass). The step used to run draft -> approve -> send
-	//    denied -> mark_delivery_sent, and every part of that still exists — but
-	//    it can no longer start, because the channel is closed at the door.
-	//
-	//    Why: an upwork target_ref cannot yet be bound to the task's client (the
-	//    only relation available runs through projects.client_person_id, which
-	//    SWT-17 deletes), so any supplied target could name another client's
-	//    thread. An earlier cut gated only calls arriving over MCP and claimed
-	//    that closed it; it did not — the drafts worker calls the executor
-	//    directly as "drafts:gpt", so the gate did nothing for the one component
-	//    that would create these automatically. An actor prefix describes a
-	//    transport, not a trust level.
-	//
-	//    Reopening the channel is SWT-20's job, with the provenance that makes it
-	//    safe. Production has never had an upwork_chat delivery, so nothing is
-	//    lost meanwhile.
+	// 7. upwork_chat assisted tier: SWT-20 lifted the blanket closure and
+	//    replaced it with a server-side binding to the task's recorded source
+	//    conversation. This fixture's task records NO provenance — the state of
+	//    every pre-SWT-20 task — so the draft is still refused, now for the
+	//    stronger reason, and the refusal names the remedy. The full binding
+	//    matrix (provenance target accepted, cross-client refused for everyone,
+	//    room choice human-gated) lives in
+	//    delivery_upwork_binding_integration_test.go.
 	_, upErr := ex.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: delActor,
 		Args: []byte(`{"task_id":` + itoa(fx.parentID) + `,"channel":"upwork_chat","body":"thanks, will do",` +
 			`"target_ref":"upwork_crm:itest-del:upwork"}`)})
 	if upErr == nil {
-		t.Fatal("draft_delivery accepted an upwork_chat draft. The target cannot be bound to the task's " +
-			"client, so a supplied target_ref could name another client's thread and a human could later " +
-			"approve and send it. The channel must stay closed until SWT-20's provenance exists")
+		t.Fatal("draft_delivery accepted an upwork_chat draft for a task that records no source " +
+			"conversation; without provenance a supplied target_ref could name another client's thread")
 	}
-	if !strings.Contains(upErr.Error(), "upwork_chat drafts are disabled") {
-		t.Errorf("draft_delivery refused with %q; the error should say the channel is disabled and point at "+
-			"SWT-20, not read as a validation problem with this particular target", upErr.Error())
+	if !strings.Contains(upErr.Error(), "task_set_source_thread") {
+		t.Errorf("draft_delivery refused with %q; the refusal should name task_set_source_thread so the "+
+			"reader knows the remedy", upErr.Error())
 	}
 
 	// 8. Slack: the assisted verbs SURVIVE the SWT-12 promotion. An approved
@@ -496,16 +486,17 @@ func TestDelivery_Integration_FullLifecycle(t *testing.T) {
 		`SELECT count(*) FROM audit_events WHERE actor=$1 AND tool='send_delivery' AND status='denied'`, delActor).Scan(&denied); err != nil {
 		t.Fatalf("count denied audit: %v", err)
 	}
-	// Two, not three, since SWT-19's fourth pass: rate_limit and kill_switch.
-	// The upwork_chat channel_assisted denial used to be the third, but that
-	// path can no longer be reached from here — the upwork DRAFT is refused at
-	// the door now, so there is never an approved upwork row to deny a send on.
-	// The policy branch itself is unchanged and still covered by the matrix unit
-	// tests; what is gone is this integration route to it.
+	// Two, not three: rate_limit and kill_switch. The upwork_chat
+	// channel_assisted denial used to be the third; since SWT-20 the draft is
+	// refused for THIS fixture's provenance-less task by the server-side
+	// binding, so there is still never an approved upwork row here to deny a
+	// send on. The policy branch itself is unchanged and covered by the matrix
+	// unit tests; the integration route to it needs a provenance-carrying task
+	// (delivery_upwork_binding_integration_test.go).
 	if denied < 2 {
 		t.Errorf("denied send_delivery audit rows = %d, want >= 2 (rate_limit, kill_switch). slack_reply is "+
-			"no longer assisted since SWT-12, and upwork_chat drafts are disabled entirely since SWT-19, so "+
-			"neither contributes a channel_assisted denial here", denied)
+			"no longer assisted since SWT-12, and this fixture's upwork draft is refused by the SWT-20 "+
+			"provenance binding, so neither contributes a channel_assisted denial here", denied)
 	}
 }
 

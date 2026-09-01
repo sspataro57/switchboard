@@ -309,11 +309,26 @@ func umhSeedProjectTask(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s
 // like a fix.
 func umhSeedDelivery(t *testing.T, ctx context.Context, pool *pgxpool.Pool, taskID int64, targetRef, body string, sentAt time.Time) int64 {
 	t.Helper()
+	// Post-0019 fixture shape (SWT-20 criterion 13).
+	ref, perr := upworkcrm.ParseThreadKey(targetRef)
+	if perr != nil {
+		t.Fatalf("fixture target %q does not parse: %v", targetRef, perr)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
+		 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING`, targetRef); err != nil {
+		t.Fatalf("seed thread %s: %v", targetRef, err)
+	}
+	var thID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM normalized_threads WHERE thread_key=$1`, targetRef).Scan(&thID); err != nil {
+		t.Fatalf("read thread id for %s: %v", targetRef, err)
+	}
 	var id int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_external_id, sent_at)
-		 VALUES ($1,'upwork_chat',$2,$3,'sent',NULL,$4) RETURNING id`,
-		taskID, targetRef, body, sentAt).Scan(&id); err != nil {
+		`INSERT INTO deliveries (task_id, channel, target_ref, target_client_ref, thread_id, body, status, sent_external_id, sent_at)
+		 VALUES ($1,'upwork_chat',$2,$3,$4,$5,'sent',NULL,$6) RETURNING id`,
+		taskID, targetRef, ref.ClientID, thID, body, sentAt).Scan(&id); err != nil {
 		t.Fatalf("seed delivery %s: %v", targetRef, err)
 	}
 	return id

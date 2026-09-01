@@ -152,13 +152,15 @@ func ReconcileUnconfirmed(ctx context.Context, sink *PGSink, passes int) (int, e
 		// nothing needs doing — the row is 'sent', which is true, and only the
 		// external-id link is missing. If it is NOT, the delivery must be redone,
 		// and that needs a new task rather than a status flip, because the work
-		// task is already closed out as delivered. A one-verb recovery arrives
-		// with SWT-20's compensating lifecycle transition.
+		// task is already closed out as delivered. A one-verb recovery is
+		// FUTURE work — SWT-20 shipped provenance and the shortlist and
+		// explicitly deferred the compensating lifecycle transition (its
+		// "Future work" section; it needs the R8 analysis in the IK entry).
 		note := fmt.Sprintf("%s %d sync passes with no matching Upwork message. "+
 			"Check the Upwork thread. If the message IS there, no action — only the external-id "+
 			"link is missing. If it is NOT there, the reply was never delivered: raise a new task "+
 			"to redo it (the work task is already closed as delivered, and no status flip fixes "+
-			"that until SWT-20)", unconfirmedNote, observed)
+			"that; a compensating transition is future work)", unconfirmedNote, observed)
 		// The candidate list was read before the pass counting above, so a
 		// concurrent normalize run may have CONFIRMED this row in the meantime.
 		// Guarding only on the marker would then append "unconfirmed after N

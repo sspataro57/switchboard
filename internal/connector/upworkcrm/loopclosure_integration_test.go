@@ -102,11 +102,25 @@ func TestUpwork_Integration_LoopClosure(t *testing.T) {
 		`INSERT INTO tasks (project_id, title, assignee_type, status) VALUES ($1,'ucl work','claude','delivered') RETURNING id`, projID).Scan(&taskID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
+	// Since 0019 an upwork_chat delivery is structurally forced to carry its
+	// identity (deliveries_upwork_identity_check), so the thread exists first
+	// and the row records target_client_ref + thread_id — the post-0019 fixture
+	// shape (SWT-20 criterion 13).
+	var thID int64
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
+		 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING`, uclThreadKey()); err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM normalized_threads WHERE thread_key=$1`, uclThreadKey()).Scan(&thID); err != nil {
+		t.Fatalf("read thread id: %v", err)
+	}
 	var deliveryID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_external_id, sent_at)
-		 VALUES ($1, 'upwork_chat', $2, $3, 'sent', NULL, now()) RETURNING id`,
-		taskID, uclThreadKey(), uclBody).Scan(&deliveryID); err != nil {
+		`INSERT INTO deliveries (task_id, channel, target_ref, target_client_ref, thread_id, body, status, sent_external_id, sent_at)
+		 VALUES ($1, 'upwork_chat', $2, $3, $4, $5, 'sent', NULL, now()) RETURNING id`,
+		taskID, uclThreadKey(), uclClientUUID, thID, uclBody).Scan(&deliveryID); err != nil {
 		t.Fatalf("seed delivery: %v", err)
 	}
 

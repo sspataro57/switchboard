@@ -64,6 +64,10 @@ func cleanupUpworkReconcile(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 		`DELETE FROM deliveries WHERE task_id IN (SELECT id FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug='` + rcSlug + `'))`,
 		`DELETE FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug='` + rcSlug + `')`,
 		`DELETE FROM projects WHERE slug='` + rcSlug + `'`,
+		// The SWT-20 fixture shape seeds the target thread (deliveries are
+		// already gone by this point, so the FK order holds). Exact key, built
+		// by the Go helper — never a LIKE over the key format.
+		`DELETE FROM normalized_threads WHERE thread_key='` + rcRoomedKey() + `'`,
 		`DELETE FROM sync_runs WHERE stats->>'itest_rc' IS NOT NULL`,
 	}
 	for _, s := range stmts {
@@ -163,11 +167,23 @@ func TestUpworkReconcile_Integration_FlagsOnceAfterThePassThreshold(t *testing.T
 			"pass count under test is not the one this suite seeded", n)
 	}
 
+	// Post-0019 fixture shape (SWT-20 criterion 13): the identity columns are
+	// mandatory for this channel, so the thread exists first.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO normalized_threads (thread_key, participants) VALUES ($1,'[]')
+		 ON CONFLICT (thread_key) WHERE thread_key IS NOT NULL DO NOTHING`, rcRoomedKey()); err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+	var rcThreadID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM normalized_threads WHERE thread_key=$1`, rcRoomedKey()).Scan(&rcThreadID); err != nil {
+		t.Fatalf("read thread id: %v", err)
+	}
 	var stuckID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_external_id, sent_at)
-		 VALUES ($1,'upwork_chat',$2,$3,'sent',NULL,$4) RETURNING id`,
-		taskID, rcRoomedKey(), rcBody, sentAt).Scan(&stuckID); err != nil {
+		`INSERT INTO deliveries (task_id, channel, target_ref, target_client_ref, thread_id, body, status, sent_external_id, sent_at)
+		 VALUES ($1,'upwork_chat',$2,$3,$4,$5,'sent',NULL,$6) RETURNING id`,
+		taskID, rcRoomedKey(), rcClient, rcThreadID, rcBody, sentAt).Scan(&stuckID); err != nil {
 		t.Fatalf("seed stuck delivery: %v", err)
 	}
 	// Out of scope, both ways: an already-confirmed upwork row and a row on
@@ -175,9 +191,9 @@ func TestUpworkReconcile_Integration_FlagsOnceAfterThePassThreshold(t *testing.T
 	// about deliveries that are fine.
 	var confirmedID, slackID int64
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, sent_external_id, sent_at, confirmed_at)
-		 VALUES ($1,'upwork_chat',$2,$3,'sent','story_itest_rc_confirmed',$4,$4) RETURNING id`,
-		taskID, rcRoomedKey(), rcBody, sentAt).Scan(&confirmedID); err != nil {
+		`INSERT INTO deliveries (task_id, channel, target_ref, target_client_ref, thread_id, body, status, sent_external_id, sent_at, confirmed_at)
+		 VALUES ($1,'upwork_chat',$2,$3,$4,$5,'sent','story_itest_rc_confirmed',$6,$6) RETURNING id`,
+		taskID, rcRoomedKey(), rcClient, rcThreadID, rcBody, sentAt).Scan(&confirmedID); err != nil {
 		t.Fatalf("seed confirmed delivery: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
