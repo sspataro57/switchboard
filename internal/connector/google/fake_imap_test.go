@@ -314,6 +314,20 @@ func (s *fakeIMAPSink) SaveCursor(_ context.Context, _ int64, c google.Cursor) e
 	return nil
 }
 
+// SaveCursorField mirrors the field-scoped write (SWT-24 criterion 19) onto
+// the in-memory cursor, recording it like SaveCursor so existing assertions
+// keep working.
+func (s *fakeIMAPSink) SaveCursorField(_ context.Context, _ int64, field string, value any) error {
+	if field == "calendar_sync_token" {
+		if tok, ok := value.(string); ok {
+			s.cursor.CalendarSyncToken = tok
+		}
+	}
+	s.savedCursors = append(s.savedCursors, s.cursor)
+	s.saveCursorAt = append(s.saveCursorAt, len(s.writes))
+	return nil
+}
+
 func (s *fakeIMAPSink) StartRun(_ context.Context, _ int64, phase string) (int64, error) {
 	s.runs = append(s.runs, "start:"+phase)
 	return int64(len(s.runs)), nil

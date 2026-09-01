@@ -31,6 +31,14 @@ var Scopes = []string{
 	"https://www.googleapis.com/auth/gmail.send",
 }
 
+// CalendarScopes is the consent `google-auth add-calendar` asks for: calendar
+// ONLY (SWT-24 criterion 14). Migration 0014 abandoned OAuth for mail because
+// the restricted Gmail scopes need Google verification and a CASA assessment
+// and can be blocked by a Workspace admin; re-requesting them to fix calendars
+// would drag that whole problem back in for no benefit — IMAP and SMTP already
+// work.
+var CalendarScopes = []string{"https://www.googleapis.com/auth/calendar.readonly"}
+
 // LoadOAuthConfig reads the Desktop-app client secret file ("installed" JSON
 // shape) and builds the oauth2 config for the loopback flow.
 func LoadOAuthConfig(path string, redirectURL string) (*oauth2.Config, error) {

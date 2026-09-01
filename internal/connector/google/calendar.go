@@ -26,6 +26,41 @@ func NewCalendarClient(hc *http.Client, baseURL string) *CalendarClient {
 	return &CalendarClient{hc: hc, baseURL: strings.TrimRight(baseURL, "/")}
 }
 
+// PrimaryCalendarID returns the primary calendar's id — for a Google account,
+// the account address. `google-auth add-calendar` verifies the authorized
+// identity with it (SWT-24 criterion 15), because addCmd's GetProfile needs a
+// Gmail scope this consent deliberately does not request. Read-only, like
+// everything in this file: the calendar channel is still channel_not_live.
+func (c *CalendarClient) PrimaryCalendarID(ctx context.Context) (string, error) {
+	u := c.baseURL + "/calendar/v3/calendars/primary"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", fmt.Errorf("build primary calendar request: %w", err)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("GET primary calendar: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("read primary calendar: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", &apiError{Status: resp.StatusCode, Body: string(body), Path: "/calendar/v3/calendars/primary"}
+	}
+	var cal struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &cal); err != nil {
+		return "", fmt.Errorf("parse primary calendar: %w", err)
+	}
+	if cal.ID == "" {
+		return "", fmt.Errorf("primary calendar response carried no id")
+	}
+	return cal.ID, nil
+}
+
 type calListPage struct {
 	Items         []json.RawMessage `json:"items"`
 	NextPageToken string            `json:"nextPageToken"`

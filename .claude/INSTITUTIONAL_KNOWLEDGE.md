@@ -997,3 +997,34 @@ When you discover a new landmine, fix a known one, or change a convention:
 1. Update this file.
 2. Mention "I updated INSTITUTIONAL_KNOWLEDGE.md" so the next session re-reads it.
 3. Don't touch agent prompts unless the change is structural.
+
+### Calendar & availability (SWT-24)
+
+- **Google CalDAV v2 rejects app passwords** (measured 2026-08-31): a PROPFIND
+  with a valid decrypted app password returns HTTP 401 byte-identical to a
+  garbage-password control; `/user/` gives 405. Calendar read is OAuth-only —
+  do not re-open CalDAV/ICS without new evidence. The consent
+  (`google-auth add-calendar`) asks for `calendar.readonly` ONLY; the
+  restricted Gmail scopes are what migration 0014 abandoned OAuth to avoid.
+- **The readiness contract**: `availability.LoadBusy` is the ONE
+  database-backed door to free/busy (`loadEvents` is unexported, and
+  `internal/availability/callsites_test.go` bans a second `normalized_events`
+  reader). READY = a `sync_runs` row with `status='ok'`,
+  `stats->>'phase'='calendar'`, `finished_at >= now - AVAIL_MAX_SYNC_AGE`
+  (default 1h) for EVERY `provider='google'` account with
+  `calendar_in_availability`. Freshness of the SYNC, never the count of
+  events — an empty week answers; an empty SCOPE refuses. The horizon refusal
+  keys on `google.CalendarWindowPast/Future` — never re-spell those durations.
+- **A google row can be dual-auth**: `auth_type='app_password'` names the MAIL
+  path and survives `add-calendar`; calendar selection is credential-gated
+  (`refresh_token_encrypted IS NOT NULL AND calendar.readonly = ANY(scopes)`,
+  `ListCalendarCredentialedAccounts`). Gating calendar on `auth_type='oauth'`
+  skips every production account forever.
+- **The calendar phase writes ONE cursor key** (`SaveCursorField`,
+  `calendar_sync_token`) because the resident watch loop moves `imap_folders`
+  under it; a whole-blob `SaveCursor` rolls the IMAP position back and skipped
+  mail is a delivery confirmation that never lands. The direct-path
+  `IngestCalendar` clobbered exactly this until SWT-24.
+- The phase runs only under `MAIL_SOURCE=imap` (`calendarPhaseRuns`) — bridge
+  and gmail_api ingest calendar inline, and two passes race for the same
+  cursor key. `--calendar-only` = calendar phase + normalize, nothing else.

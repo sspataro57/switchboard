@@ -17,6 +17,7 @@ package google_test
 //   GET  /gmail/v1/users/{user}/messages            (q, pageToken)
 //   GET  /gmail/v1/users/{user}/messages/{id}?format=full
 //   GET  /calendar/v3/calendars/primary/events      (syncToken|timeMin/timeMax/singleEvents/pageToken)
+//   GET  /calendar/v3/calendars/primary             (SWT-24: the identity check)
 //
 // Gmail identity is the {userId} path segment. Calendar has no per-user path
 // (always `primary`), so identity there rides on the OAuth-bearing *http.Client
@@ -69,6 +70,7 @@ type fakeGoogle struct {
 	listReqs    []recordedReq
 	getReqs     []recordedReq
 	calListReqs []recordedReq
+	calGetReqs  []recordedReq // calendars.get (primary) — the identity check
 }
 
 func newFakeGoogle() *fakeGoogle {
@@ -133,6 +135,19 @@ func (f *fakeGoogle) handle(w http.ResponseWriter, r *http.Request) {
 		user := strings.TrimSuffix(strings.TrimPrefix(path, "/gmail/v1/users/"), "/messages")
 		f.listReqs = append(f.listReqs, recordedReq{User: user, Q: q.Get("q"), PageToken: q.Get("pageToken")})
 		f.writeGmailList(w, user, q.Get("pageToken"))
+
+	case path == "/calendar/v3/calendars/primary":
+		// calendars.get on the primary calendar: the identity check
+		// add-calendar uses instead of gmail getProfile (SWT-24 criterion 15).
+		// The primary calendar's id IS the account address, so an unresolvable
+		// identity must be a 401 and never an empty-but-successful answer.
+		user := calendarUser(r)
+		f.calGetReqs = append(f.calGetReqs, recordedReq{User: user})
+		if user == "" {
+			writeJSON(w, 401, map[string]any{"error": map[string]any{"code": 401, "message": "Invalid Credentials"}})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"id": user, "summary": user, "timeZone": "Europe/Rome"})
 
 	case strings.HasPrefix(path, "/calendar/v3/calendars/") && strings.HasSuffix(path, "/events"):
 		user := calendarUser(r)

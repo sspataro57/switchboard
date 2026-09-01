@@ -57,9 +57,9 @@ func TestRunBridge_CalendarRunsAfterGmailAndPersistsExactRawBeforeCursor(t *test
 	if request.Account != "work-main" || request.SyncToken != "calendar-expired" || request.MaxEvents <= 0 {
 		t.Errorf("incremental calendar request = %+v", request)
 	}
-	if request.TimeMin != now.Add(-calWindowPast).Format(time.RFC3339) || request.TimeMax != now.Add(calWindowFuture).Format(time.RFC3339) {
+	if request.TimeMin != now.Add(-CalendarWindowPast).Format(time.RFC3339) || request.TimeMax != now.Add(CalendarWindowFuture).Format(time.RFC3339) {
 		t.Errorf("fallback window = %q..%q, want %q..%q", request.TimeMin, request.TimeMax,
-			now.Add(-calWindowPast).Format(time.RFC3339), now.Add(calWindowFuture).Format(time.RFC3339))
+			now.Add(-CalendarWindowPast).Format(time.RFC3339), now.Add(CalendarWindowFuture).Format(time.RFC3339))
 	}
 
 	for _, want := range []struct {
@@ -121,7 +121,7 @@ func TestRunBridge_CalendarWindowAndTokenRequests(t *testing.T) {
 			if request.SyncToken != tc.wantToken {
 				t.Errorf("sync_token = %q, want %q", request.SyncToken, tc.wantToken)
 			}
-			if request.TimeMin != now.Add(-calWindowPast).Format(time.RFC3339) || request.TimeMax != now.Add(calWindowFuture).Format(time.RFC3339) {
+			if request.TimeMin != now.Add(-CalendarWindowPast).Format(time.RFC3339) || request.TimeMax != now.Add(CalendarWindowFuture).Format(time.RFC3339) {
 				t.Errorf("request lacks bounded fallback window: %+v", request)
 			}
 			if request.MaxEvents <= 0 {

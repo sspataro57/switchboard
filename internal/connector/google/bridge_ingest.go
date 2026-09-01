@@ -220,8 +220,8 @@ func runBridgeCalendarAccount(ctx context.Context, source BridgeSource, sink Bri
 		return fail(fmt.Errorf("read Calendar bridge cursor: %w", err))
 	}
 	now := cfg.now()
-	timeMin := now.Add(-calWindowPast).Format(time.RFC3339)
-	timeMax := now.Add(calWindowFuture).Format(time.RFC3339)
+	timeMin := now.Add(-CalendarWindowPast).Format(time.RFC3339)
+	timeMax := now.Add(CalendarWindowFuture).Format(time.RFC3339)
 	syncToken := cursor.CalendarSyncToken
 	if cfg.Full {
 		syncToken = ""
@@ -278,7 +278,7 @@ func runBridgeCalendarAccount(ctx context.Context, source BridgeSource, sink Bri
 		// every event older than the 30-day past window on the first reset —
 		// their absence says nothing, they were never asked for.
 		superseded, err := sink.SupersedeAbsentCalendar(ctx, account.ID, present,
-			now.Add(-calWindowPast), now.Add(calWindowFuture))
+			now.Add(-CalendarWindowPast), now.Add(CalendarWindowFuture))
 		if err != nil {
 			return fail(fmt.Errorf("apply Calendar reset replacement: %w", err))
 		}
