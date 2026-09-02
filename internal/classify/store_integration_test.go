@@ -64,7 +64,9 @@ const (
 	ciProvider     = "itest-classify-src"
 	ciLocalProject = "itest-classify-local"
 	ciAnyProject   = "itest-classify-any"
-	ciModel        = "itest-classify-model"
+	// SWT-23: local_only, ai_classify=false — the `bulk` shape.
+	ciNoClassifyProject = "itest-classify-noai"
+	ciModel             = "itest-classify-model"
 )
 
 type ciCorpus struct {
@@ -74,14 +76,23 @@ type ciCorpus struct {
 
 	// criterion 12's four shapes, plus two more the SPEC's wording implies
 	unseenID     int64 // no capture_decisions row at all
-	unmatchedID  int64 // latest decision action='unmatched' — triage's inbox
+	unmatchedID  int64 // latest decision action='unmatched' — the RESIDUE (SWT-23)
 	anyAttrID    int64 // latest 'attributed' to an ai_locality='any' project
 	localAttrID  int64 // latest 'attributed' to ai_locality='local_only'  <- OURS
 	supersededID int64 // attributed to local_only, then re-evaluated unmatched
 	taskAttrID   int64 // latest decision 'task' on local_only — a rule that CREATES tasks
+	taskLogID    int64 // latest decision 'task_log' on local_only (SWT-23 criterion 13)
 	outboundID   int64 // our own send, re-entered through ingestion
 
-	localRaw int64
+	// SWT-23: ai_locality='local_only' AND ai_classify=false. The control for the
+	// personal lane's second clause, and the reason `bulk` has to exist at all —
+	// without a project carrying this combination the clause would be untested
+	// and inert, which is this repo's "constant discriminator" landmine.
+	noClassifyProject int64
+	noClassifyAttrID  int64
+
+	localRaw     int64
+	unmatchedRaw int64
 }
 
 func ciCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
@@ -142,10 +153,23 @@ func ciSeed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *ciCorpus {
 	// defaults the column to 'local_only', so a fixture that omits it makes its
 	// suite skip rather than fail (internal/provider/structure_test.go scans for
 	// this). Here it is more than hygiene: the 'any' project IS the control.
-	c.localProject = ins(`INSERT INTO projects (name, slug, client, execution, delivery, ai_locality)
-	                      VALUES ($1,$1,NULL,'manual','dashboard','local_only') RETURNING id`, ciLocalProject)
-	c.anyProject = ins(`INSERT INTO projects (name, slug, client, execution, delivery, ai_locality)
-	                    VALUES ($1,$1,'Acme','manual','dashboard','any') RETURNING id`, ciAnyProject)
+	//
+	// SWT-23 adds the SAME rule for ai_classify (migration 0018 defaults it to
+	// FALSE, fail-closed), and the SPEC names the consequence out loud: a fixture
+	// that omits it now gets `false`, so a suite exercising the personal lane
+	// would start SKIPPING rather than failing — passing while exercising
+	// nothing. 0016 hit exactly this with ai_locality and 23 fixtures.
+	c.localProject = ins(`INSERT INTO projects (name, slug, client, execution, delivery, ai_locality, ai_classify)
+	                      VALUES ($1,$1,NULL,'manual','dashboard','local_only',true) RETURNING id`, ciLocalProject)
+	c.anyProject = ins(`INSERT INTO projects (name, slug, client, execution, delivery, ai_locality, ai_classify)
+	                    VALUES ($1,$1,'Acme','manual','dashboard','any',false) RETURNING id`, ciAnyProject)
+	// local_only AND ai_classify=false — the `bulk` shape. ai_locality is the
+	// BOUNDARY (a leak is irreversible), ai_classify is the WORKLOAD flag (a
+	// stall is one UPDATE); they answer different questions and the personal
+	// lane's filter keeps BOTH clauses.
+	c.noClassifyProject = ins(`INSERT INTO projects (name, slug, client, execution, delivery, ai_locality, ai_classify)
+	                           VALUES ($1,$1,NULL,'manual','dashboard','local_only',false) RETURNING id`,
+		ciNoClassifyProject)
 
 	// One thread per message: the neighbour fold is not what this suite is about,
 	// and a shared thread would let a neighbour's class explain an outcome the
@@ -166,7 +190,7 @@ func ciSeed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *ciCorpus {
 
 	c.unseenID, _ = msg("unseen", "alerts@bank.example", "Your payment is due",
 		"the capture pass has not looked at this one yet", "inbound", 60)
-	c.unmatchedID, _ = msg("unmatched", "news@brand.example", "This week in widgets",
+	c.unmatchedID, c.unmatchedRaw = msg("unmatched", "News <news@brand.example>", "This week in widgets",
 		"no rule covers this chatter", "inbound", 50)
 	c.anyAttrID, _ = msg("anyattr", "client@acme.example", "Login broken on staging",
 		"please fix the login bug", "inbound", 40)
@@ -176,6 +200,10 @@ func ciSeed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *ciCorpus {
 		"attributed once, then the rule was narrowed", "inbound", 20)
 	c.taskAttrID, _ = msg("taskattr", "alerts@bank.example", "Your payment is due",
 		"a personal rule that was given an external_system, so the engine created a task", "inbound", 25)
+	c.taskLogID, _ = msg("tasklog", "alerts@bank.example", "Your payment is due",
+		"a follow-up on a thread that already produced a task", "inbound", 22)
+	c.noClassifyAttrID, _ = msg("noclassify", "deals@humblebundle.example", "Ends tonight: 90% off",
+		"a bulk-attributed message: local_only, but not worth a GPU-second", "inbound", 15)
 	c.outboundID, _ = msg("outbound", "me@sb.example", "re: Login broken on staging",
 		"we are on it", "outbound", 10)
 
@@ -207,6 +235,19 @@ func ciSeed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *ciCorpus {
 	     VALUES ($1,'shadow','task',$2,'gmail','itest-classify-task','itest-classify: rule with a system') RETURNING id`,
 		c.taskAttrID, c.localProject)
 
+	// action='task_log': the other half of criterion 13's fourth state. It names a
+	// project too, so like 'task' only the action clause drops it.
+	ins(`INSERT INTO capture_decisions (message_id, mode, action, project_id, external_system, external_key, reason)
+	     VALUES ($1,'shadow','task_log',$2,'gmail','itest-classify-task','itest-classify: append to the task') RETURNING id`,
+		c.taskLogID, c.localProject)
+	// Attributed to the local_only + ai_classify=FALSE project. SWT-23's control:
+	// it must be excluded from the PERSONAL lane's inbox, and the mutation that
+	// must turn that assertion red is dropping `AND p.ai_classify` from
+	// inboxWhere. If it stays green, the clause is inert.
+	ins(`INSERT INTO capture_decisions (message_id, mode, action, project_id, reason)
+	     VALUES ($1,'shadow','attributed',$2,'itest-classify: bulk rule') RETURNING id`,
+		c.noClassifyAttrID, c.noClassifyProject)
+
 	// The outbound message gets NO decision, and it never can: the capture engine
 	// reads direction='inbound' (that line IS invariant 5). See the note in the
 	// first test about what this fixture can and cannot prove.
@@ -233,9 +274,14 @@ func newCISuite(t *testing.T, ctx context.Context) *ciCorpus {
 	return ciSeed(t, ctx, pool)
 }
 
-func ciPending(t *testing.T, ctx context.Context, c *ciCorpus) map[int64]classify.PendingMessage {
+// ciPending reads one lane's inbox. The lane is an ARGUMENT rather than a
+// default: SWT-23 criterion 10 refuses a zero-value Config.Lane precisely so a
+// caller that forgets it gets an error instead of the personal filter over the
+// residue, and a helper that supplied one would hide that refusal from every
+// test in this package.
+func ciPending(t *testing.T, ctx context.Context, c *ciCorpus, lane classify.Lane) map[int64]classify.PendingMessage {
 	t.Helper()
-	rows, err := classify.NewStore(c.pool).PendingMessages(ctx, classify.Config{})
+	rows, err := classify.NewStore(c.pool).PendingMessages(ctx, classify.Config{Lane: lane, Since: 24 * time.Hour})
 	if err != nil {
 		t.Fatalf("PendingMessages: %v", err)
 	}
@@ -260,7 +306,7 @@ func ciCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, 
 func TestClassifyStore_Integration_InboxIsAttributedToALocalOnlyProject(t *testing.T) {
 	ctx := context.Background()
 	c := newCISuite(t, ctx)
-	got := ciPending(t, ctx, c)
+	got := ciPending(t, ctx, c, classify.LanePersonal)
 
 	// State 4 — attributed to a local_only project. OURS, and the only one.
 	m, ok := got[c.localAttrID]
@@ -377,7 +423,7 @@ func TestClassifyStore_Integration_ATriageExtractionDoesNotHideAMessage(t *testi
 	ctx := context.Background()
 	c := newCISuite(t, ctx)
 
-	if _, ok := ciPending(t, ctx, c)[c.localAttrID]; !ok {
+	if _, ok := ciPending(t, ctx, c, classify.LanePersonal)[c.localAttrID]; !ok {
 		t.Fatalf("control failed: message %d is not pending before any extraction exists", c.localAttrID)
 	}
 
@@ -393,7 +439,7 @@ func TestClassifyStore_Integration_ATriageExtractionDoesNotHideAMessage(t *testi
 		t.Fatalf("insert triage extraction: %v", err)
 	}
 
-	if _, ok := ciPending(t, ctx, c)[c.localAttrID]; !ok {
+	if _, ok := ciPending(t, ctx, c, classify.LanePersonal)[c.localAttrID]; !ok {
 		t.Errorf("message %d left this worker's inbox because TRIAGE extracted it. The NOT EXISTS must key "+
 			"on ai_runs.worker_type='classify': that column is the only thing keeping the three workers' "+
 			"rows from seeing each other (triage's own filter keys on 'triage', plan_import's on its own), "+
@@ -411,7 +457,7 @@ func TestClassifyStore_Integration_ATriageExtractionDoesNotHideAMessage(t *testi
 		classifyRun, c.localRaw); err != nil {
 		t.Fatalf("insert classify extraction: %v", err)
 	}
-	if _, ok := ciPending(t, ctx, c)[c.localAttrID]; ok {
+	if _, ok := ciPending(t, ctx, c, classify.LanePersonal)[c.localAttrID]; ok {
 		t.Errorf("message %d is still pending after a classify extraction was recorded for its raw item; "+
 			"the pass would reclassify the same 1,609 messages forever", c.localAttrID)
 	}
@@ -439,7 +485,7 @@ func TestClassify_Integration_SkippedStaysPending_ClassifiedLeaves(t *testing.T)
 		before[tbl] = ciCount(t, ctx, c.pool, fmt.Sprintf(`SELECT count(*) FROM %s`, tbl))
 	}
 
-	cfg := classify.Config{Model: ciModel, MaxTokens: 512}
+	cfg := classify.Config{Model: ciModel, MaxTokens: 512, Lane: classify.LanePersonal}
 	st := classify.NewStore(c.pool)
 
 	// ---- lane 1: no permitted provider looked --------------------------------
@@ -464,7 +510,7 @@ func TestClassify_Integration_SkippedStaysPending_ClassifiedLeaves(t *testing.T)
 		t.Errorf("a skipped message wrote %d ai_extractions row(s). No skip of any kind writes one — that "+
 			"is exactly what leaves the message in the inbox for the next pass", n)
 	}
-	if _, ok := ciPending(t, ctx, c)[c.localAttrID]; !ok {
+	if _, ok := ciPending(t, ctx, c, classify.LanePersonal)[c.localAttrID]; !ok {
 		t.Errorf("message %d left the inbox after a pass that never looked at it. 'Nothing looked' must "+
 			"leave the queue untouched, or an outage silently retires the mail it was supposed to read",
 			c.localAttrID)
@@ -492,7 +538,7 @@ func TestClassify_Integration_SkippedStaysPending_ClassifiedLeaves(t *testing.T)
 			"actionable=false is still a VERDICT: it is recorded, and it is what removes the message from "+
 			"the inbox", n)
 	}
-	if _, ok := ciPending(t, ctx, c)[c.localAttrID]; ok {
+	if _, ok := ciPending(t, ctx, c, classify.LanePersonal)[c.localAttrID]; ok {
 		t.Errorf("message %d is still pending after the classifier looked at it and answered. 'Looked and "+
 			"found nothing' must retire the message, or every pass reclassifies the whole corpus",
 			c.localAttrID)
@@ -505,5 +551,60 @@ func TestClassify_Integration_SkippedStaysPending_ClassifiedLeaves(t *testing.T)
 				"becomes a task it must go through the executor's create_task with a classify: actor "+
 				"(invariant 3), and nothing in this ticket may pre-empt that with a direct write", tbl, n, got)
 		}
+	}
+}
+
+// ---- SWT-23: the personal lane's SECOND clause, and its control --------------
+
+// `p.ai_locality = 'local_only' AND p.ai_classify` — two clauses that answer
+// DIFFERENT questions, and collapsing them would make the boundary depend on a
+// workload decision. ai_locality is where a message may be sent (a leak is
+// irreversible); ai_classify is whether it is worth a GPU-second (a stall is one
+// UPDATE, and it is visible as an empty lane).
+//
+// THE MUTATION THAT MUST TURN THIS RED, run it: drop `AND p.ai_classify` from
+// inboxWhere and the noClassify fixture appears in the personal inbox. If it
+// stays green you tested your fixture — which is exactly what happened to
+// drafts' ai_locality guard in SWT-21, where the column was never selected and
+// the unit test supplied the value it then asserted on.
+//
+// It is also the reason `bulk` has to exist in production. ai_classify will be
+// true on exactly one project and false on all others on day one; that is a real
+// discriminator only because a local_only project with ai_classify=false
+// actually exists. Without it the clause would be inert and untested.
+func TestClassifyStore_Integration_PersonalInboxRequiresAIClassify(t *testing.T) {
+	ctx := context.Background()
+	c := newCISuite(t, ctx)
+	got := ciPending(t, ctx, c, classify.LanePersonal)
+
+	// Control first: the local_only + ai_classify=TRUE fixture is in the inbox.
+	// Without it, "the other one is absent" is satisfied by an empty inbox — and
+	// an empty inbox is precisely what a forgotten ai_classify=true in a fixture
+	// produces once migration 0018 defaults the column to false.
+	if _, ok := got[c.localAttrID]; !ok {
+		t.Fatalf("control failed: message %d, attributed to a local_only project with ai_classify=true, is "+
+			"NOT pending. Every assertion below would then pass against nothing. Check that the fixture "+
+			"names ai_classify explicitly — 0018 defaults it to FALSE, fail-closed, and 0016 hit exactly "+
+			"this with ai_locality across 23 fixtures", c.localAttrID)
+	}
+
+	if _, ok := got[c.noClassifyAttrID]; ok {
+		t.Errorf("message %d is attributed to a project with ai_locality='local_only' AND "+
+			"ai_classify=false, and was returned as pending for the PERSONAL lane. That is the `bulk` "+
+			"shape: mail a capture rule claimed deterministically as noise, kept local_only because a rule "+
+			"one character too wide would otherwise downgrade real personal mail to hosted-eligible — but "+
+			"NOT worth 7.2 s of GPU each. If you are reading this after dropping `AND p.ai_classify`, good; "+
+			"that is the mutation the criterion names. Otherwise the clause was never added",
+			c.noClassifyAttrID)
+	}
+
+	// And the column is really coming from Postgres: the value the query filtered
+	// on is read back independently, so a green result cannot mean "the fixture
+	// was never written".
+	if n := ciCount(t, ctx, c.pool,
+		`SELECT count(*) FROM projects WHERE slug=$1 AND ai_locality='local_only' AND ai_classify = false`,
+		ciNoClassifyProject); n != 1 {
+		t.Fatalf("the ai_classify=false fixture project is not in the database as described (%d rows); the "+
+			"exclusion above then proves nothing", n)
 	}
 }

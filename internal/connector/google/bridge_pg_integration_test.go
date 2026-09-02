@@ -5,6 +5,7 @@ package google_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -261,8 +262,19 @@ func TestGmailBridge_PostgresSupersedeAndRevive(t *testing.T) {
 		t.Fatalf("EnsureBridgeAccount: %v", err)
 	}
 
-	kept := json.RawMessage(`{"id":"kept","status":"confirmed","start":{"dateTime":"2026-08-01T10:00:00Z"},"end":{"dateTime":"2026-08-01T11:00:00Z"}}`)
-	gone := json.RawMessage(`{"id":"gone","status":"confirmed","start":{"dateTime":"2026-08-02T10:00:00Z"},"end":{"dateTime":"2026-08-02T11:00:00Z"}}`)
+	// Event times are RELATIVE to now: the supersede window below is
+	// time.Now()-30d, and a frozen date rots out of it — this exact fixture
+	// failed on 2026-09-02 when its hardcoded 2026-08-02 event aged past the
+	// 30-day boundary overnight (the SWT-24 e2e fixtures were fixed for the
+	// same class of rot).
+	evt := func(id string, daysAgo int) json.RawMessage {
+		start := time.Now().AddDate(0, 0, -daysAgo).Truncate(time.Hour)
+		return json.RawMessage(fmt.Sprintf(
+			`{"id":%q,"status":"confirmed","start":{"dateTime":%q},"end":{"dateTime":%q}}`,
+			id, start.UTC().Format(time.RFC3339), start.Add(time.Hour).UTC().Format(time.RFC3339)))
+	}
+	kept := evt("kept", 1)
+	gone := evt("gone", 2)
 	if err := sink.InsertRaw(ctx, account.ID, "calendar:kept", kept, "hash-kept"); err != nil {
 		t.Fatalf("InsertRaw kept: %v", err)
 	}
@@ -305,7 +317,7 @@ func TestGmailBridge_PostgresSupersedeAndRevive(t *testing.T) {
 	}
 
 	// The event comes back with the SAME id — the upsert must revive it.
-	revived := json.RawMessage(`{"id":"gone","status":"confirmed","start":{"dateTime":"2026-09-09T10:00:00Z"},"end":{"dateTime":"2026-09-09T11:00:00Z"}}`)
+	revived := evt("gone", -8) // ~a week out; relative for the same anti-rot reason
 	if err := sink.InsertRaw(ctx, account.ID, "calendar:gone", revived, "hash-revived"); err != nil {
 		t.Fatalf("InsertRaw revived (upsert over a superseded row): %v", err)
 	}

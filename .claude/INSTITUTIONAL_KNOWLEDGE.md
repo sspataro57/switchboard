@@ -408,6 +408,33 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 ---
 
 
+### Residue lane (SWT-23)
+
+- `classify` has TWO lanes: `--lane personal` (worker_type `classify`) and
+  `--lane residue` (worker_type `classify_residue`). The worker_type values
+  differ because both inbox filters key their NOT EXISTS on it — one shared
+  value would make a message classified by one lane permanently invisible to
+  the other after a capture rule claims it.
+- The residue inbox is latest-decision `unmatched`, which CANNOT join
+  `projects`: 0015's CHECK makes `(action='unmatched') = (project_id IS NULL)`
+  a schema fact. Every query the personal lane uses inner-joins projects and
+  therefore returns exactly zero residue rows without erroring.
+- `projects.ai_classify` (0018): a WORKLOAD flag — "mail attributed here gets
+  an actionability verdict from the personal lane". ai_locality remains the
+  boundary; the personal filter keeps BOTH clauses. `bulk` is local_only +
+  ai_classify=false. Fixtures that INSERT projects without naming ai_classify
+  get false and their suites start SKIPPING, not failing (0016's ai_locality
+  trap, again).
+- COST: the measured per-message median is **7.2 s** through the real prompt
+  path (runbook table). NEVER size a pass with the 0.25 s warm benchmark — the
+  two differ by 25-29x, and the wrong one turned a 29.5-GPU-hour sweep into a
+  "60-minute" estimate. `--since` is required on residue runs for this reason.
+- A bare-name sender (no `@`) is never gmail: google writes the raw From
+  header (connector/google/rfc822.go, normalize.go), while slackweb writes
+  message.Author and upworkcrm the CRM sender column — both display names, so
+  those rows are Slack/Upwork WORK sitting unmatched (measured 2026-08-31:
+  1,287, all channel='upwork').
+
 ### Link preservation (SWT-25)
 
 - `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written

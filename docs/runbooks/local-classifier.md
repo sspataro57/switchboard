@@ -1,5 +1,7 @@
 # Runbook — the local actionability classifier (SWT-22)
 
+`classify` runs TWO lanes since SWT-23: `--lane personal` (the SWT-22 lane — mail the capture rules attributed to the `personal` project) and `--lane residue` (the unmatched pile nothing has routed). One binary, one verdict contract, two inboxes and two prompts.
+
 `classify` reads personal mail — the messages the capture rules attributed to the
 `personal` project — and records a shadow verdict: is this something that has to
 be DONE, or is it information. It creates no tasks. It runs only against a model
@@ -164,6 +166,47 @@ it feeds `confirmDeliveryByBodyPrefix` and google has no reconciler).
 To add a drop-list entry: edit the list in `links.go`, re-run
 `--normalize-only --all`, re-run the eval and record the new row above.
 
+## The residue lane (SWT-23)
+
+The second inbox: messages whose LATEST capture decision is `unmatched` — no
+project, no rule, triage's inbox in name. Run it with:
+
+```bash
+DATABASE_URL=... go run ./cmd/classify run --lane residue --since 720h
+DATABASE_URL=... go run ./cmd/classify report --lane residue --since 24h
+DATABASE_URL=... go run ./cmd/classify eval --lane residue   # labels default to the residue fixture
+```
+
+Verdicts land under worker_type `classify_residue`, never `classify`: both
+inbox filters key their NOT EXISTS on worker_type, so a shared value would make
+a message classified by one lane permanently invisible to the other once a
+capture rule claims it.
+
+**`--since` is REQUIRED on a residue run** — an unbounded pass is refused, not
+defaulted. The arithmetic: ~8,800 unmatched messages (post-rules; 14,737 before the SWT-23 bulk rules) x the measured **7.2 s**
+median (the table above; NOT the 0.25 s warm benchmark, which was a ten-word
+prompt and is wrong by 25-29x) = ~17.6 GPU-hours. A default would be a 17-hour
+job started by a typo; `--since 87600h` remains available when a full
+historical sweep is chosen deliberately. Evals are exempt — they are bounded by
+the label file.
+
+**The strata, and which number to quote.** The residue labels are stratified
+(`uniform` / `enriched` / `domain_gate`, recorded per line in the file):
+
+- recall is computed over ALL labels — the enriched stratum is the recall
+  denominator; a uniform 200 at a ~2% base rate yields four positives and a
+  recall that is noise;
+- precision is quoted from the **uniform** stratum ONLY — a precision measured
+  over a deliberately enriched sample is not production precision, and it will
+  be quoted as if it were unless the harness refuses;
+- the **base rate** (uniform stratum) is the number that decides this lane's
+  future: if the residue is well under 1% actionable after the rules, the
+  honest description of this lane is "a daily filter over new mail", never "a
+  classifier over history".
+
+Measured numbers for this lane are recorded in the score table above alongside
+the personal rows, with their date.
+
 ## The labelled set
 
 `docs/evals/personal-actionability.jsonl` — the only thing anyone is permitted to
@@ -177,6 +220,23 @@ file is safe to commit while the mail never leaves the machine.
 |------------|-----|-----------:|-------:|----------:|---------------:|----------|
 | 2026-08-30 | 280 | 35         | 0.83   | 0.58      | 6.3 s          | qwen3:8b |
 | 2026-08-31 | 280 | 35         | 0.94   | 0.50      | 7.2 s          | qwen3:8b |
+| 2026-09-02 | 874 | 34         | 0.59   | 0.28      | 11.9 s         | qwen3:8b |
+
+The 2026-09-02 row is the RESIDUE lane (SWT-23), scored over the stratified
+874-label set — read it with the strata semantics, not like the personal rows
+above: recall is over all strata (actionable-shaped mail over-represented by
+design), precision and the base rate come from the uniform stratum only
+(8 of 29 flagged actionable; 22 of 220 uniform labels actionable, ~10%), and
+511 of the 874 labels had been claimed by the SWT-23 bulk rules between
+labelling and scoring (still scored — the label file is the population). The
+median latency is inflated by GPU contention during the run (the desktop held
+15% of the model on CPU); the personal-lane rows were measured on a quiet GPU.
+What the 14 false negatives actually are matters more than the 0.59: most are
+WORK-shaped — GAV approval threads, milestone assignments, an NDA
+confirmation, meeting invites — i.e. unrouted client asks that belong to
+capture rules and attribution, not to this recall-first safety net. The
+residue lane's job (don't lose a personal fine/payment notice hiding in the
+unmatched pile) is served; the misses argue for more rules, not more prompt.
 
 The 2026-08-31 row is the SWT-25 re-run: same 280 labels, same file, same
 command, after link candidates entered the prompt and the verdict gained

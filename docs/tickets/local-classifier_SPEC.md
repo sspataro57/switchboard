@@ -278,6 +278,8 @@ Numbered and testable. 1-8 are unit tests with `httptest` — never a live model
     (google `bridgeAccountLockNS`, and drafts per SPEC 08), `0x51570015`
     (capture) are taken.
 11. **The inbox** is inbound `normalized_messages` whose LATEST
+    *Amended 2026-08-31 (SWT-23): the personal filter now also requires `p.ai_classify` — the workload flag migration 0018 added so the `bulk` project (local_only, ai_classify=false) stays out of this lane. Both clauses stay: ai_locality is the boundary, ai_classify the workload. See docs/tickets/residue-classifier_SPEC.md.*
+
     `capture_decisions` row has `action='attributed'` **and** whose project has
     `ai_locality='local_only'`, with no `ai_extractions` row reachable through an
     `ai_runs` row of `worker_type='classify'`. Ordered oldest-first, `--limit` and

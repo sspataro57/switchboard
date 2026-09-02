@@ -143,7 +143,7 @@ func TestClassifyLinks_Integration_TheColumnFeedsTheRenderedPrompt(t *testing.T)
 	//     it on PendingMessage.Links. Criterion 15 puts it in the ONE constant
 	//     shared by PendingMessages and MessagesByID, so `eval` scores what `run`
 	//     classifies.
-	got := ciPending(t, ctx, c)
+	got := ciPending(t, ctx, c, classify.LanePersonal)
 	m, ok := got[msgID]
 	if !ok {
 		t.Fatalf("the seeded linked message %d is not in the inbox at all", msgID)
@@ -165,7 +165,8 @@ func TestClassifyLinks_Integration_TheColumnFeedsTheRenderedPrompt(t *testing.T)
 	// (b) MessagesByID sees the same thing, because it shares inboxSelect. A
 	//     second spelling here is how `eval` and `run` start scoring different
 	//     prompts.
-	byID, err := classify.NewStore(c.pool).MessagesByID(ctx, []int64{msgID})
+	byID, err := classify.NewStore(c.pool).MessagesByID(ctx,
+		classify.Config{Lane: classify.LanePersonal}, []int64{msgID})
 	if err != nil {
 		t.Fatalf("MessagesByID: %v", err)
 	}
@@ -178,7 +179,7 @@ func TestClassifyLinks_Integration_TheColumnFeedsTheRenderedPrompt(t *testing.T)
 	// (c) the prompt: the anchor TEXTS reach the model, sourced from the column.
 	local := cfLocal()
 	if _, err := classify.Run(ctx, classify.NewStore(c.pool),
-		provider.NewRouter(nil, local, time.Minute), classify.Config{Model: ciModel, MaxTokens: 512}); err != nil {
+		provider.NewRouter(nil, local, time.Minute), classify.Config{Model: ciModel, MaxTokens: 512, Lane: classify.LanePersonal}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if local.calls == 0 {
@@ -278,7 +279,8 @@ func TestClassifyLinks_Integration_SeamFromTheGoogleNormalizer(t *testing.T) {
 	}
 
 	// The half that reads. Different package, different struct, one column.
-	rows, err := classify.NewStore(c.pool).MessagesByID(ctx, []int64{msgID})
+	rows, err := classify.NewStore(c.pool).MessagesByID(ctx,
+		classify.Config{Lane: classify.LanePersonal}, []int64{msgID})
 	if err != nil {
 		t.Fatalf("MessagesByID: %v", err)
 	}

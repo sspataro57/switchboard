@@ -58,7 +58,7 @@ package classify_test
 //	// SHADOW GUARANTEE: no task-write method (criterion 15).
 //	type Store interface {
 //	    PendingMessages(ctx context.Context, cfg Config) ([]PendingMessage, error)
-//	    MessagesByID(ctx context.Context, ids []int64) ([]PendingMessage, error)
+//	    MessagesByID(ctx context.Context, cfg Config, ids []int64) ([]PendingMessage, error)  // cfg: SWT-23
 //	    RecordRun(ctx context.Context, run AIRun) (aiRunID int64, err error)
 //	    RecordExtraction(ctx context.Context, aiRunID, rawSourceItemID int64, fields json.RawMessage) error
 //	}
@@ -170,7 +170,10 @@ func (s *cfStore) PendingMessages(_ context.Context, cfg classify.Config) ([]cla
 	return s.pending, nil
 }
 
-func (s *cfStore) MessagesByID(_ context.Context, ids []int64) ([]classify.PendingMessage, error) {
+// MessagesByID takes the Config since SWT-23: the residue lane loads by id with
+// NO action and NO project predicate (criterion 17), while the personal lane
+// keeps its local_only join, so the loader has to know which lane is asking.
+func (s *cfStore) MessagesByID(_ context.Context, _ classify.Config, ids []int64) ([]classify.PendingMessage, error) {
 	byID := map[int64]classify.PendingMessage{}
 	for _, m := range s.pending {
 		byID[m.MessageID] = m
@@ -232,8 +235,12 @@ func cfMessages(n int) []classify.PendingMessage {
 	return out
 }
 
+// cfCfg is the PERSONAL lane's config. The lane is named explicitly because
+// SWT-23 criterion 10 refuses a zero-value Config.Lane rather than defaulting
+// it — a helper that left it unset would make every test in this file assert
+// against whatever the default happened to be.
 func cfCfg() classify.Config {
-	return classify.Config{Model: "qwen3:8b", MaxTokens: 512}
+	return classify.Config{Model: "qwen3:8b", MaxTokens: 512, Lane: classify.LanePersonal}
 }
 
 func cfDecode(t *testing.T, raw json.RawMessage) map[string]any {
