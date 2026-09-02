@@ -685,6 +685,16 @@ gives the residue a different reader), `internal/provider/*` (the adapter,
 the report file changes), `internal/connector/*`,
 `docs/evals/personal-actionability.jsonl`.
 
+*Amended 2026-09-02 (measured-run robustness, found the hard way): the 874-label
+eval run added three pieces of supporting surface not listed above —
+`Config.EvalCheckpoint` + `cmd/classify --checkpoint` (each verdict appends to
+a progress file, a rerun resumes past finished ids and refuses a model change,
+the file is removed on success), a batch-sized eval context deadline in
+`cmd/classify` (the original constant 2h ceiling killed two full runs with an
+error wearing a provider costume), and one bounded per-message retry. They are
+verification-infrastructure for step 12 at 874 labels, not features; contract
+pinned by `internal/classify/evalresume_test.go`.*
+
 ## In scope / Out of scope
 
 **In scope**

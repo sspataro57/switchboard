@@ -183,9 +183,9 @@ a message classified by one lane permanently invisible to the other once a
 capture rule claims it.
 
 **`--since` is REQUIRED on a residue run** — an unbounded pass is refused, not
-defaulted. The arithmetic: ~14,700 unmatched messages x the measured **7.2 s**
+defaulted. The arithmetic: ~8,800 unmatched messages (post-rules; 14,737 before the SWT-23 bulk rules) x the measured **7.2 s**
 median (the table above; NOT the 0.25 s warm benchmark, which was a ten-word
-prompt and is wrong by 25-29x) = ~29.5 GPU-hours. A default would be a 29-hour
+prompt and is wrong by 25-29x) = ~17.6 GPU-hours. A default would be a 17-hour
 job started by a typo; `--since 87600h` remains available when a full
 historical sweep is chosen deliberately. Evals are exempt — they are bounded by
 the label file.

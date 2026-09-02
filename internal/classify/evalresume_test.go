@@ -118,3 +118,57 @@ func TestEval_CheckpointResumesPastACrash(t *testing.T) {
 			"re-classify, never reuse stale verdicts", serr)
 	}
 }
+
+// otherModelClient answers like evClient but reports a different model — the
+// CLASSIFY_MODEL-changed-between-runs shape.
+type otherModelClient struct{ evClient }
+
+func (c *otherModelClient) Complete(ctx context.Context, req provider.Request) (provider.Response, error) {
+	resp, err := c.evClient.Complete(ctx, req)
+	resp.Model = "other-model:1b"
+	return resp, err
+}
+
+func TestEval_CheckpointRefusesAModelChange(t *testing.T) {
+	const s1 = "Your payment is due"
+	const s2 = "Second payment reminder"
+	msgs := []classify.PendingMessage{
+		evMessage(31, s1, "minimum payment $35 due 2026-09-03"),
+		evMessage(32, s2, "final payment reminder before the late fee"),
+	}
+	labels := []classify.Label{
+		{MessageID: 31, Label: "actionable", SubjectSHA256: evSubjectHash(s1)},
+		{MessageID: 32, Label: "actionable", SubjectSHA256: evSubjectHash(s2)},
+	}
+	ckpt := filepath.Join(t.TempDir(), "eval.progress")
+	cfg := stCfg(classify.LanePersonal)
+	cfg.EvalCheckpoint = ckpt
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := &crashClient{evClient: evClient{flagIf: "payment"}, failAfter: 1, cancel: cancel}
+	var out1 bytes.Buffer
+	if err := classify.Eval(ctx, &cfStore{pending: msgs},
+		provider.NewRouter(nil, first, time.Minute), cfg, labels, &out1); err == nil {
+		t.Fatalf("Eval survived the crash the fixture arranged")
+	}
+
+	second := &otherModelClient{evClient{flagIf: "payment"}}
+	var out2 bytes.Buffer
+	err := classify.Eval(context.Background(), &cfStore{pending: msgs},
+		provider.NewRouter(nil, second, time.Minute), cfg, labels, &out2)
+	if err == nil {
+		t.Fatalf("Eval merged a checkpoint from qwen3:8b with verdicts from other-model:1b — a resume "+
+			"after a model change must REFUSE, or the header lies about what the number was measured on\n%s",
+			out2.String())
+	}
+	for _, want := range []string{"qwen3:8b", "other-model:1b"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+	if _, serr := os.Stat(ckpt); serr != nil {
+		t.Errorf("the checkpoint was removed by a REFUSED run (%v); the verdicts it holds are still the "+
+			"only record of the first model's work", serr)
+	}
+}

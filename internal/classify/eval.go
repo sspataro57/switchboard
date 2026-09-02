@@ -239,6 +239,15 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 		if err := json.Unmarshal(resp.Raw, &v); err != nil {
 			return fmt.Errorf("parse verdict for message %d: %w", m.MessageID, err)
 		}
+		// A checkpoint from ANOTHER model must refuse, not merge: the header's
+		// whole purpose is "what was this number measured on", and a resume
+		// after a CLASSIFY_MODEL change would silently blend two models into
+		// one score.
+		if ckptModel != "" && resp.Model != ckptModel {
+			return fmt.Errorf("checkpoint %s holds verdicts from model %s but the server reports %s; "+
+				"delete the checkpoint (rescoring everything) or restore the model",
+				cfg.EvalCheckpoint, ckptModel, resp.Model)
+		}
 		if scoredModel == "" {
 			scoredModel = resp.Model
 		}

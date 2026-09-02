@@ -200,9 +200,10 @@ func Run(ctx context.Context, store Store, router *provider.Router, cfg Config) 
 	// job started by a typo. The personal lane keeps --since optional; its
 	// population is ~1,600 and bounded.
 	if cfg.Lane.Name == LaneResidue.Name && cfg.Since <= 0 {
-		return Stats{}, fmt.Errorf("the residue lane refuses an unbounded pass: ~14,737 unmatched " +
-			"messages x the measured 7.2 s median = ~29.5 GPU-hours (the 0.25 s warm benchmark was a " +
-			"ten-word prompt, not this workload). Pass --since (e.g. --since 720h for the last month), " +
+		return Stats{}, fmt.Errorf("the residue lane refuses an unbounded pass: ~8,800 unmatched " +
+			"messages x the measured 7.2 s median = ~17.6 GPU-hours (14,737 and ~29.5 GPU-hours before " +
+			"the SWT-23 bulk rules; the 0.25 s warm benchmark was a ten-word prompt, not this workload). " +
+			"Pass --since (e.g. --since 720h for the last month), " +
 			"or --since 87600h deliberately if a full historical sweep is what you want")
 	}
 	pending, err := store.PendingMessages(ctx, cfg)

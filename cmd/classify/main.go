@@ -123,6 +123,12 @@ func runCmd(argv []string) error {
 		return err
 	}
 
+	// 6h is DELIBERATE here, unlike evalCmd's old 2h (which killed two full
+	// eval runs wearing a provider costume): every run verdict is already an
+	// ai_extractions row, so an expired pass resumes naturally on rerun — the
+	// worker's extraction dedup skips finished messages. The ceiling bounds a
+	// wedged pass, it cannot lose work. A full --since 87600h sweep needs
+	// more than one invocation by design.
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
 	defer cancel()
 

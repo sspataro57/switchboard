@@ -194,6 +194,11 @@ zero messages would have been disabled and recorded here, not left in place —
 the go-live checklist's own rule, applied to this ticket's additions. Tasks
 and external_refs counts were unchanged by the pass (20 / 0).
 
+`sspataro.com` (518) was investigated, then CLAIMED — `--domain` showed it is
+`test@sspataro.com` machine notifications; the investigation, not the count, is
+what earned the rule. It is listed here, above the refusals, so the two do not
+read as one list.
+
 **The refusal list** — domains deliberately NOT claimed, with reasons:
 
 - `github.com` (455) — unrouted WORK, not noise: predominantly
@@ -201,9 +206,6 @@ and external_refs counts were unchanged by the pass (20 / 0).
   would take work out of triage's inbox and give it nothing.
 - `upwork.com` (106) — platform mail including "Invitation to Interview";
   actionable work.
-- `sspataro.com`... claimed, but only after `--domain` showed it is
-  `test@sspataro.com` machine notifications — the investigation, not the
-  count, is what earned the rule.
 - `google.com` (239) — mixed: security alerts (the most actionable mail in
   the corpus) and marketing under one domain.
 - `browardschools.com` (293), `rocketmoney.com` (174) — school deadlines and

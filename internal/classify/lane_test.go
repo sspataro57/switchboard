@@ -325,8 +325,8 @@ func TestRun_ResidueLane_RefusesAnUnboundedPass(t *testing.T) {
 				"lane and the refusal is the only thing between a typo and a 29-hour GPU job")
 		}
 		msg := err.Error()
-		if !regexp.MustCompile(`\d{2},?\d{3}`).MatchString(msg) {
-			t.Errorf("the refusal does not name the COUNT of the residue (~14,737 messages): %q\n"+
+		if !regexp.MustCompile(`\d{1,2},?\d{3}`).MatchString(msg) {
+			t.Errorf("the refusal does not name the COUNT of the residue (~8,800 today): %q\n"+
 				"Criterion 16 wants the arithmetic in the message, because a refusal that does not show "+
 				"its working teaches the reader to pass --since 87600h to make it go away", msg)
 		}
