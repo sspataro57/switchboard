@@ -99,6 +99,57 @@ Keeping it fresh is a scheduling question for the kube repo (a CronJob
 calling `--calendar-only` at least every ~25 minutes for the default 1h
 freshness window). Until that exists, `propose_slots` refuses honestly.
 
+## The Pipedream transport (SWT-27) — the default going forward
+
+`CAL_SOURCE=pipedream` swaps the calendar TRANSPORT: a Pipedream workflow
+holds the Google OAuth grants and manages refresh; the cluster keeps no
+Google calendar credential (`--calendar-only` then needs neither
+`OPS_TOKEN_KEY` nor a client secret file). Everything else — fail-closed
+readiness, raw-first, the horizon, normalize — is unchanged; `CAL_SOURCE`
+unset (or `oauth`) is byte-for-byte SWT-24 and is the way back with no code
+change. The OAuth path stays in the tree, dormant.
+
+**The workflow shape** (create once at pipedream.com):
+- HTTP trigger with a **custom response**; require
+  `Authorization: Bearer <shared secret>` (generate ≥32 chars; refuse others).
+- Connect the three Google accounts (read scope where offered).
+- On each request: parse `{schema_version, time_min, time_max, calendars[]}`;
+  for each requested calendar call `calendar.events.list` with
+  `singleEvents=true`, `timeMin`/`timeMax` from the request, paging to
+  completion; respond
+  `{schema_version:1, time_min, time_max (echoed VERBATIM — the connector
+  refuses a mismatch), calendars:[{calendar_id, status:"ok",
+  event_count:<len>, events:[...]}, …]}`; a per-calendar failure becomes
+  `{calendar_id, status:"error", error:"…"}`.
+- `curl` it once and time it — that timing is part of the human step.
+
+**Config**: `PIPEDREAM_CALENDAR_URL` + `PIPEDREAM_CALENDAR_TOKEN_FILE`
+(preferred, mountable; `PIPEDREAM_CALENDAR_TOKEN` fallback). Env only —
+never a DB row, never a flag, never printed; errors withhold the endpoint
+(the URL is the token's neighbour). A misconfiguration fails before any
+`sync_runs` row exists; a transport failure writes per-account `error` runs,
+so an outage keeps `propose_slots` refusing by name.
+
+**Semantics worth knowing**: every poll is a full snapshot applied as a
+windowed replacement (deletions supersede on the next poll); a VERIFIED empty
+snapshot finishes `ok`, keeps the stale events (over-busy — the direction
+that cannot book over a meeting; self-heals on the first non-empty poll) and
+counts `calendar_empty_snapshot`; `stats->>'calendar_source'` says which
+transport produced a run — diagnostic only, nothing branches on it. Full
+event objects (titles, attendees, locations) transit Pipedream and are
+visible in its execution logs under its retention — chosen deliberately
+(2026-09-05) to keep the morning-brief door open; the intervals-only
+alternative remains a workflow edit away.
+
+**Kube handoff** (the kube session's job, sibling repo): CronJob
+`connector-gcal`, args `[--calendar-only]`, env `CAL_SOURCE=pipedream` +
+`DATABASE_URL` + the `switchboard-pipedream` secret (`--from-file`, per the
+recorded landmine), schedule `*/20` — the poll period must stay under half
+`AVAIL_MAX_SYNC_AGE` (1h default), and check Pipedream's free-tier invocation
+allowance (~72/day at `*/20`) before scheduling. Don't ALSO run the mail
+one-shot with `CAL_SOURCE=pipedream` or invocations double; production mail
+runs in the watch loop, which has no calendar phase.
+
 ## If a Workspace admin blocks the consent
 
 Two of the three mailboxes are Workspace orgs Salvador does not administer;

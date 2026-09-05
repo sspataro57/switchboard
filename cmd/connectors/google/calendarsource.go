@@ -138,3 +138,71 @@ func productionCalendarClientFactory(pool *pgxpool.Pool) calendarClientFactory {
 		return google.NewCalendarClient(hc, ""), nil
 	}
 }
+
+// calendarSource is which transport the calendar phase uses (SWT-27).
+type calendarSource string
+
+const (
+	calendarSourceOAuth     calendarSource = "oauth"
+	calendarSourcePipedream calendarSource = "pipedream"
+)
+
+// selectCalendarSource resolves CAL_SOURCE into a transport. The
+// selectMailSource shape and its argument verbatim: unset preserves SWT-24's
+// behaviour byte for byte, and an unknown value is an ERROR naming the
+// accepted values — a fallback would turn CAL_SOURCE=pipdream into a connector
+// that silently keeps doing the old thing and reports success.
+func selectCalendarSource(calSourceEnv string) (calendarSource, error) {
+	switch calSourceEnv {
+	case "", string(calendarSourceOAuth):
+		return calendarSourceOAuth, nil
+	case string(calendarSourcePipedream):
+		return calendarSourcePipedream, nil
+	default:
+		return "", fmt.Errorf("unknown CAL_SOURCE %q (want oauth or pipedream)", calSourceEnv)
+	}
+}
+
+// runCalendarPhase is the ONE dispatch both calendar call sites go through
+// (SWT-27 criterion 19), so they can never disagree about which transport ran.
+func runCalendarPhase(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink,
+	source calendarSource, cfg google.Config) (google.Stats, error) {
+	switch source {
+	case calendarSourcePipedream:
+		return runPipedreamCalendarIngest(ctx, pool, sink, cfg)
+	default:
+		return runCalendarIngest(ctx, pool, sink, productionCalendarClientFactory(pool), cfg)
+	}
+}
+
+// runPipedreamCalendarIngest is the Pipedream transport's per-pass driver:
+// construct the client from the ENVIRONMENT (a configuration error fails here,
+// before any sync_runs row exists — a missing secret is not a calendar fact),
+// select the availability scope, and hand off to RunPipedreamCalendar. It
+// needs neither OPS_TOKEN_KEY nor GOOGLE_CLIENT_SECRET_FILE: this path
+// decrypts nothing.
+func runPipedreamCalendarIngest(ctx context.Context, pool *pgxpool.Pool,
+	sink *google.PGSink, cfg google.Config) (google.Stats, error) {
+	var total google.Stats
+
+	token, err := google.PipedreamTokenFromEnv()
+	if err != nil {
+		return total, err
+	}
+	client, err := google.NewPipedreamCalendarClient(os.Getenv("PIPEDREAM_CALENDAR_URL"), token, nil)
+	if err != nil {
+		return total, err
+	}
+
+	accounts, err := google.ListAvailabilityScopeAccounts(ctx, pool, cfg.AccountEmail)
+	if err != nil {
+		return total, err
+	}
+	if len(accounts) == 0 {
+		// A zero-work pass must never look like a working one — and must not
+		// burn a Pipedream invocation to learn nothing.
+		fmt.Printf("calendar: no google accounts in availability scope (calendar_in_availability)\n")
+		return total, nil
+	}
+	return google.RunPipedreamCalendar(ctx, client, sink, accounts, cfg)
+}

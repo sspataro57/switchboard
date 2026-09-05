@@ -78,6 +78,15 @@ type Stats struct {
 	CalendarSuperseded int `json:"calendar_superseded"`
 	// AccountsBusy counts accounts skipped because another pass held the lock.
 	AccountsBusy int `json:"accounts_busy"`
+	// CalendarSource and CalendarEmptySnapshot are DIAGNOSTIC ONLY (SWT-27):
+	// an operator can tell from sync_runs.stats which transport produced a run
+	// and whether a verified empty snapshot kept stale events. NOTHING may
+	// branch on either — readiness keys on status and stats->>'phase' alone,
+	// and discriminating run kinds by a stats payload is a recorded landmine
+	// (IK: "One upworkcrm invocation writes TWO sync_runs rows"). omitempty on
+	// both so other transports' runs do not grow present-and-zero keys.
+	CalendarSource        string `json:"calendar_source,omitempty"`
+	CalendarEmptySnapshot int    `json:"calendar_empty_snapshot,omitempty"`
 	// IMAPFetched counts messages pulled from IMAP; IMAPTruncated how many of
 	// those exceeded the size cap and were captured with headers and text only, attachments skipped. Truncation is
 	// lossy, so it is counted rather than left silent.
