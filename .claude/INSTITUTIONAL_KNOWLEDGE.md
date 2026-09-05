@@ -1105,7 +1105,11 @@ When you discover a new landmine, fix a known one, or change a convention:
   SupersedeAbsentCalendar with the SAME bounds the request used. The window
   ECHO check is what keeps that from destroying data — a workflow answering a
   narrower window than asked would cancel everything outside it. A count
-  mismatch taints the WHOLE poll (transit is shared); status/absence/
+  mismatch on a CLAIMED entry taints the WHOLE poll (transit is shared) —
+  blast radius: one miscounted calendar errors every account's run and, after
+  AVAIL_MAX_SYNC_AGE, propose_slots refuses for everyone (fail-closed on
+  purpose); a stranger calendar's bad count is ignored with the stranger.
+  Status/absence/
   recurrence/parse failures fail only their account. Every event validates
   through NormalizeCalendarEvent BEFORE any raw write — one bad stored item
   stalls Normalize and with it mail, outbound observation and capture.

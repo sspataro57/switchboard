@@ -1206,3 +1206,40 @@ func TestRunPipedreamCalendar_FailsThePassOnlyWhenNoAccountSucceeded(t *testing.
 		}
 	})
 }
+
+// A malformed entry for a calendar NO in-scope account claims must not take
+// the real calendars down: criterion 7 says strangers are ignored, and the
+// whole-poll count escalation is scoped to CLAIMED entries only. (The
+// escalation itself is pinned by TestRunPipedreamCalendar_EventCountMismatchIsARefusal;
+// this is its boundary.)
+func TestRunPipedreamCalendar_AStrangersBadCountDoesNotRefuseThePoll(t *testing.T) {
+	cfg := pipedreamCfg()
+	sink := newPipedreamSink(t)
+	nine := 9
+	source := &fakePipedreamSource{echoRequest: true, resp: okResponse(
+		entry("a@example.com", pipedreamEvent("a-1", 23)),
+		entry("b@example.com", pipedreamEvent("b-1", 23)),
+		entry("c@example.com", pipedreamEvent("c-1", 23)),
+		PipedreamCalendarEntry{
+			CalendarID: "stranger@example.org", Status: "ok",
+			EventCount: &nine, // lies about its count — but it is nobody's calendar
+			Events:     []json.RawMessage{pipedreamEvent("not-ours", 23)},
+		},
+	)}
+
+	if _, err := RunPipedreamCalendar(context.Background(), source, sink, pipedreamAccounts(), cfg); err != nil {
+		t.Fatalf("a stranger calendar's bad count refused the whole poll: %v — the escalation is scoped to "+
+			"claimed entries, and a workflow mis-wired to an extra account must not take the three real "+
+			"calendars down with it", err)
+	}
+	for _, acct := range pipedreamAccounts() {
+		if run := sink.runFor(t, acct.ID); run.status != "ok" {
+			t.Errorf("account %s finished %q, want ok", acct.Email, run.status)
+		}
+	}
+	for key := range sink.raw {
+		if strings.Contains(key, "not-ours") {
+			t.Errorf("the stranger's event was written: %q", key)
+		}
+	}
+}

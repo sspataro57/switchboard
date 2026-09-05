@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -84,14 +85,27 @@ func RunPipedreamCalendar(ctx context.Context, source PipedreamCalendarSource,
 		wholePollErr = fmt.Errorf("pipedream calendar response echoed window %s..%s, want the requested %s..%s; "+
 			"refusing before any replacement is applied", resp.TimeMin, resp.TimeMax, req.TimeMin, req.TimeMax)
 	}
+	claimed := make(map[string]bool, len(accounts))
+	for _, acct := range accounts {
+		claimed[strings.ToLower(acct.Email)] = true
+	}
 	if wholePollErr == nil {
 		// A declared count that disagrees with its array is evidence of loss
 		// IN TRANSIT — and transit is shared by every entry in the response,
 		// so the whole snapshot is suspect: no account may be replaced from
 		// it. (The other per-entry failures — a status=error, an absent
 		// account, a recurrence rule — are per-calendar facts and fail only
-		// their own account.)
+		// their own account.) Blast radius, stated because someone will hit
+		// it at 9am: one miscounted CLAIMED entry errors every account's run,
+		// and after AVAIL_MAX_SYNC_AGE propose_slots refuses for everyone —
+		// fail-closed on purpose. Entries for calendars no in-scope account
+		// claims are EXCLUDED from this scan (criterion 7 says strangers are
+		// ignored); a stranger's malformed bookkeeping must not take the real
+		// calendars down with it.
 		for _, entry := range resp.Calendars {
+			if !claimed[strings.ToLower(entry.CalendarID)] {
+				continue
+			}
 			if entry.Status == "ok" && entry.EventCount != nil && *entry.EventCount != len(entry.Events) {
 				wholePollErr = fmt.Errorf("pipedream entry for %s declares %d events but carries %d; a "+
 					"snapshot shorter than its own count lost events in transit, and transit is shared — "+
@@ -113,12 +127,8 @@ func RunPipedreamCalendar(ctx context.Context, source PipedreamCalendarSource,
 	// in-scope list. A calendar no account claims is ignored (and named): it
 	// means the workflow is wired to an account switchboard does not know.
 	entries := make(map[string]PipedreamCalendarEntry, len(resp.Calendars))
-	claimed := make(map[string]bool, len(resp.Calendars))
 	for _, entry := range resp.Calendars {
 		entries[strings.ToLower(entry.CalendarID)] = entry
-	}
-	for _, acct := range accounts {
-		claimed[strings.ToLower(acct.Email)] = true
 	}
 	var unclaimed []string
 	for key, entry := range entries {
@@ -126,6 +136,7 @@ func RunPipedreamCalendar(ctx context.Context, source PipedreamCalendarSource,
 			unclaimed = append(unclaimed, entry.CalendarID)
 		}
 	}
+	sort.Strings(unclaimed)
 	if len(unclaimed) > 0 {
 		fmt.Printf("calendar: pipedream response carried %d calendar(s) no in-scope account claims: %s\n",
 			len(unclaimed), strings.Join(unclaimed, ", "))
@@ -214,6 +225,12 @@ func pipedreamAccountPass(ctx context.Context, sink CalendarSnapshotSink, acct A
 			"snapshot, and with zero events it would pass as a verified empty calendar", acct.Email))
 	}
 	if *entry.EventCount != len(entry.Events) {
+		// DEFENCE IN DEPTH, normally unreachable: a mismatch on a CLAIMED ok
+		// entry is escalated to a whole-poll refusal before this loop runs
+		// (transit is shared). This restatement exists so the per-account path
+		// stays safe if that escalation is ever narrowed — do not read it as
+		// the live guard, and do not delete the escalation believing this
+		// holds the line alone.
 		return fail(fmt.Errorf("pipedream entry for %s declares %d events but carries %d; a snapshot shorter "+
 			"than its own count lost events in transit, and applying it would supersede every one of them",
 			acct.Email, *entry.EventCount, len(entry.Events)))
@@ -273,11 +290,8 @@ func pipedreamAccountPass(ctx context.Context, sink CalendarSnapshotSink, acct A
 		// busy time: over-busy, the conservative direction, self-healing on
 		// the first non-empty snapshot. Counted and printed, never silent.
 		stats.CalendarEmptySnapshot = 1
-		live := 0
-		for range items { // items is empty; the live count is informational only
-		}
-		fmt.Printf("calendar: %s returned a verified EMPTY snapshot; keeping existing in-window observations "+
-			"(stale events stay busy until the first non-empty poll; live=%d)\n", acct.Email, live)
+		fmt.Printf("calendar: %s returned a verified EMPTY snapshot; keeping whatever in-window observations "+
+			"are already stored — stale events stay busy until the first non-empty poll\n", acct.Email)
 	} else {
 		superseded, err := sink.SupersedeAbsentCalendar(ctx, acct.ID, present2, windowFrom, windowTo)
 		if err != nil {
