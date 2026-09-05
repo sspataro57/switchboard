@@ -1090,3 +1090,35 @@ When you discover a new landmine, fix a known one, or change a convention:
   upwork_chat test INSERT must carry target_client_ref + thread_id (thread
   seeded first), and cleanups must delete tasks BEFORE normalized_threads
   (tasks_source_thread_id_fkey is a new parent).
+
+### The Pipedream calendar transport (SWT-27)
+
+- `CAL_SOURCE=oauth|pipedream` (unset = oauth, byte-for-byte SWT-24; unknown
+  value errors). ONE dispatch (`runCalendarPhase`) at both call sites. The
+  transport is a deployment property — never a source_accounts column.
+- **Selection is the availability scope** (`ListAvailabilityScopeAccounts`:
+  provider='google' AND calendar_in_availability) so the polled set IS the
+  demanded set — proven equal by an integration test over the columns, not a
+  shared constant (the provider half lives inside accountSelect's WHERE; a
+  half-restated "shared" predicate is the recurring defect).
+- **Every poll is a full snapshot = a windowed REPLACEMENT** via
+  SupersedeAbsentCalendar with the SAME bounds the request used. The window
+  ECHO check is what keeps that from destroying data — a workflow answering a
+  narrower window than asked would cancel everything outside it. A count
+  mismatch on a CLAIMED entry taints the WHOLE poll (transit is shared) —
+  blast radius: one miscounted calendar errors every account's run and, after
+  AVAIL_MAX_SYNC_AGE, propose_slots refuses for everyone (fail-closed on
+  purpose); a stranger calendar's bad count is ignored with the stranger.
+  Status/absence/recurrence/parse failures fail only their account. Every event validates
+  through NormalizeCalendarEvent BEFORE any raw write — one bad stored item
+  stalls Normalize and with it mail, outbound observation and capture.
+- **Empty verified snapshot** → ok run + stale events kept +
+  calendar_empty_snapshot counter (never call the supersede with empty keep —
+  the sink refuses by design). Over-busy, self-healing, deliberate.
+- The Pipedream path writes **no cursor at all** and decrypts nothing
+  (no OPS_TOKEN_KEY, no client secret). Secrets env-only
+  (PIPEDREAM_CALENDAR_URL, *_TOKEN_FILE preferred); errors withhold the
+  endpoint — the URL is the token's neighbour, and Go's *url.Error/*net
+  errors embed it, so transport errors are CLASSIFIED, never %w-wrapped.
+- stats->>'calendar_source' / calendar_empty_snapshot are DIAGNOSTIC ONLY —
+  nothing may branch on a stats payload (the upworkcrm two-rows landmine).

@@ -8,6 +8,9 @@
 //	GMAIL_CONNECTOR_BRIDGE     optional absolute local bridge binary
 //	OPS_TOKEN_KEY              required for direct mode unless --normalize-only
 //	GOOGLE_CLIENT_SECRET_FILE  default ~/.config/switchboard/google_client_secret.json
+//	CAL_SOURCE                 calendar transport: oauth (default) | pipedream
+//	PIPEDREAM_CALENDAR_URL     the workflow endpoint (CAL_SOURCE=pipedream)
+//	PIPEDREAM_CALENDAR_TOKEN_FILE / _TOKEN   its bearer secret (file preferred)
 //	CAPTURE_RULES_MODE         shadow (default) | live
 //	CAPTURE_RULES_SINCE        Go duration bounding the capture-rules pass
 package main
@@ -98,7 +101,11 @@ func run(full, normalizeOnly, all, calendarOnly bool, overlap, backfill time.Dur
 	// pass — those belong to the mail funnel, and the watch loop already runs
 	// them. This is what a future CronJob calls to keep availability fresh.
 	if calendarOnly {
-		stats, err := runCalendarIngest(ctx, pool, sink, productionCalendarClientFactory(pool), cfg)
+		calSource, err := selectCalendarSource(os.Getenv("CAL_SOURCE"))
+		if err != nil {
+			return err
+		}
+		stats, err := runCalendarPhase(ctx, pool, sink, calSource, cfg)
 		printStats("calendar", stats)
 		if err != nil {
 			return fmt.Errorf("calendar ingest: %w", err)
@@ -172,7 +179,11 @@ func run(full, normalizeOnly, all, calendarOnly bool, overlap, backfill time.Dur
 		// non-zero at the end, and the per-account sync_runs error rows keep
 		// propose_slots refusing honestly either way.
 		if calendarPhaseRuns(source) {
-			calStats, err := runCalendarIngest(ctx, pool, sink, productionCalendarClientFactory(pool), cfg)
+			calSource, srcErr := selectCalendarSource(os.Getenv("CAL_SOURCE"))
+			if srcErr != nil {
+				return srcErr
+			}
+			calStats, err := runCalendarPhase(ctx, pool, sink, calSource, cfg)
 			printStats("calendar", calStats)
 			calErr = err
 		}
