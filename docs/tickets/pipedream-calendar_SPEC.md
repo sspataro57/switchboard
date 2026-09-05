@@ -1,4 +1,4 @@
-> Jira: PENDING-SYNC
+> Jira: SWT-27
 
 # pipedream-calendar — replace the calendar ingestion TRANSPORT with a polled Pipedream endpoint, keeping everything SWT-24 shipped
 
