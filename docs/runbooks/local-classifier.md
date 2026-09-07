@@ -35,7 +35,7 @@ well-formed envelope — **the failure is invisible unless you read the raw
 response**, which is why this runbook shows you how:
 
 ```bash
-curl -s http://127.0.0.1:11434/api/chat -d '{
+curl -s http://192.168.50.55:11434/api/chat -d '{
   "model":"qwen3:8b","think":true,"stream":false,
   "options":{"num_predict":200},
   "messages":[{"role":"user","content":"Subject: payment due. Actionable?"}]}' \
@@ -75,7 +75,11 @@ and fines), and a fact belongs in a column, editable and visible in the report.
 ## Configuration
 
 ```bash
-export OPS_LOCAL_PROVIDER_URL=http://127.0.0.1:11434   # NO /v1 — native API
+export OPS_LOCAL_PROVIDER_URL=http://192.168.50.55:11434   # NO /v1 — native API
+# 192.168.50.55 is the z4's dedicated GPU (2026-09-06; measured median 4.1s
+# per verdict vs 7.2s on the workstation's shared card). The workstation's own
+# ollama systemd service is retired; an IP literal is required — the locality
+# boundary does no DNS, so a hostname classifies as remote and skips everything.
 export OPS_LOCAL_MODEL=qwen3:8b                        # required; no fallback
 OLLAMA_VULKAN=1 ollama serve                           # ROCm crashes on this GPU
 ```

@@ -79,7 +79,7 @@ func buildRouter() (*provider.Router, string) {
 	if base == "" {
 		slog.Warn("OPS_LOCAL_PROVIDER_URL is not set; every message will be skipped",
 			"why", "personal mail is only ever classified locally",
-			"fix", "export OPS_LOCAL_PROVIDER_URL=http://127.0.0.1:11434")
+			"fix", "export OPS_LOCAL_PROVIDER_URL=http://192.168.50.55:11434 (the z4; any RFC1918 IP literal)")
 		return provider.NewRouter(nil, nil, 0), ""
 	}
 	model := os.Getenv("OPS_LOCAL_MODEL")

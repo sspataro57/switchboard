@@ -41,7 +41,7 @@ client. Keep it that way.
 
 | variable | lane | meaning |
 |---|---|---|
-| `OPS_LOCAL_PROVIDER_URL` | local | base URL of the local **ollama** server — `http://127.0.0.1:11434`, with **no `/v1`** |
+| `OPS_LOCAL_PROVIDER_URL` | local | base URL of the local **ollama** server — `http://192.168.50.55:11434` (the z4; any loopback or RFC1918 address qualifies), with **no `/v1`** |
 | `OPS_LOCAL_MODEL` | local | model name on that server, e.g. `qwen3:8b`. **Required** once the URL is set |
 | `OPENAI_API_KEY` | general | **no longer required to start** — a pass that never touches the hosted lane is now normal |
 | `OPENAI_BASE_URL` | general | optional override |

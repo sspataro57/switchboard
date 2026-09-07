@@ -1122,3 +1122,15 @@ When you discover a new landmine, fix a known one, or change a convention:
   errors embed it, so transport errors are CLASSIFIED, never %w-wrapped.
 - stats->>'calendar_source' / calendar_empty_snapshot are DIAGNOSTIC ONLY —
   nothing may branch on a stats payload (the upworkcrm two-rows landmine).
+
+### The local classify lane runs on the z4 (2026-09-06)
+
+`OPS_LOCAL_PROVIDER_URL=http://192.168.50.55:11434`, `OPS_LOCAL_MODEL=qwen3:8b`
+(both in ~/.bashrc). The z4's Polaris card runs ollama under Vulkan, 100% GPU,
+one model at a time (qwen3:8b holds 5.6 of 8 GB); measured through the classify
+harness: median 4.1s/verdict vs 7.2s on the workstation's shared card. The
+workstation's own ollama systemd user service (the one marked temporary) is
+STOPPED AND DISABLED — do not resurrect it for a "quick run"; point at the z4.
+Always the IP literal: the locality boundary does no DNS, a hostname is
+LocalityRemote and every message gets skipped. Requests queue serially — fine
+for CronJobs and evals, not for anything interactive.
