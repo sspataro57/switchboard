@@ -259,7 +259,7 @@ func runBridgeCalendarAccount(ctx context.Context, source BridgeSource, sink Bri
 		if strings.TrimSpace(meta.ID) == "" {
 			return fail(fmt.Errorf("Gmail bridge Calendar event has no id"))
 		}
-		externalID := "calendar:" + meta.ID
+		externalID := CalendarExternalID(meta.ID)
 		present = append(present, externalID)
 		if err := upsertRaw(ctx, sink, account.ID, externalID, raw, &stats); err != nil {
 			return fail(err)

@@ -320,7 +320,7 @@ func TestDecide_MarkDeliveryFailed_HumanOnlyAndNotFreezeGated(t *testing.T) {
 // SWT-9: jira_comment graduated OUT of channel_not_live (see
 // TestDecide_JiraCommentSend_LiveLikeGmail). Only calendar + github_review remain.
 func TestDecide_NotLiveChannels_DeniedNotLive(t *testing.T) {
-	for _, ch := range []string{"calendar", "github_review"} {
+	for _, ch := range []string{"github_review"} { // SWT-28 graduated calendar (criterion 14), as SWT-9 graduated jira
 		t.Run(ch, func(t *testing.T) {
 			snap := policy.Snapshot{SentLastHour: map[string]int{}, Channel: ch, HourlyLimit: 10}
 			d := policy.Decide(policy.Request{Tool: "send_delivery", Actor: humanActor}, snap)

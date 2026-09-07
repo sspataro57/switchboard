@@ -77,6 +77,22 @@ func run() error {
 		slog.Info("slack bridge draft+send adapters wired")
 	}
 
+	// SWT-28: the Pipedream calendar write route, so the dashboard's Send
+	// button works on calendar rows (the human two-step). Absent configuration
+	// leaves the seam nil and booking refused by name.
+	if pdURL := os.Getenv("PIPEDREAM_CALENDAR_URL"); pdURL != "" {
+		token, err := google.PipedreamTokenFromEnv()
+		if err != nil {
+			return fmt.Errorf("configure calendar booker: %w", err)
+		}
+		booker, err := google.NewPipedreamCalendarClient(pdURL, token, nil)
+		if err != nil {
+			return fmt.Errorf("configure calendar booker: %w", err)
+		}
+		tools.SetCalendarBooker(booker)
+		slog.Info("pipedream calendar booking adapter wired")
+	}
+
 	auth, err := dashboard.NewAuth(ctx,
 		os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_CLIENT_ID"),
 		os.Getenv("OIDC_CLIENT_SECRET"), os.Getenv("OIDC_REDIRECT_URL"))

@@ -309,7 +309,7 @@ func drainCalendar(ctx context.Context, cc *CalendarClient, sink Sink, acct Acco
 				return "", listed, fmt.Errorf("calendar item missing id: %.100s", item)
 			}
 			listed++
-			if err := upsertRaw(ctx, sink, acct.ID, "calendar:"+meta.ID, item, stats); err != nil {
+			if err := upsertRaw(ctx, sink, acct.ID, CalendarExternalID(meta.ID), item, stats); err != nil {
 				return "", listed, err
 			}
 		}

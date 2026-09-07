@@ -86,6 +86,10 @@ type draftDeliveryArgs struct {
 	Subject   string `json:"subject,omitempty"`
 	ThreadID  *int64 `json:"thread_id,omitempty"`
 	TargetRef string `json:"target_ref,omitempty"`
+	// Start/End are the calendar channel's interval (SWT-28 criterion 10),
+	// RFC3339. Calendar-only: they add no rule to any other channel.
+	Start string `json:"start,omitempty"`
+	End   string `json:"end,omitempty"`
 }
 
 func validateDraftDelivery(args []byte) error {
@@ -97,9 +101,43 @@ func validateDraftDelivery(args []byte) error {
 		return errors.New("missing task_id")
 	}
 	switch a.Channel {
-	case "gmail", "upwork_chat", "jira_comment", "slack_reply":
+	case "gmail", "upwork_chat", "jira_comment", "slack_reply", "calendar":
 	default:
-		return fmt.Errorf("channel %q: must be gmail, upwork_chat, jira_comment, or slack_reply", a.Channel)
+		return fmt.Errorf("channel %q: must be gmail, upwork_chat, jira_comment, slack_reply, or calendar", a.Channel)
+	}
+	if a.Channel == "calendar" {
+		// SWT-28 criterion 10: a calendar row's interval IS its identity —
+		// migration 0020's CHECK refuses the row without it, and the send path
+		// books exactly [starts_at, ends_at).
+		if a.TargetRef == "" {
+			return errors.New("calendar drafts require target_ref (the account email of the calendar to book)")
+		}
+		if a.Subject == "" {
+			return errors.New("calendar drafts require subject (it becomes the event summary)")
+		}
+		if a.Start == "" {
+			return errors.New("calendar drafts require start (RFC3339)")
+		}
+		if a.End == "" {
+			return errors.New("calendar drafts require end (RFC3339)")
+		}
+		s, err := time.Parse(time.RFC3339, a.Start)
+		if err != nil {
+			return fmt.Errorf("start: %w", err)
+		}
+		e, err := time.Parse(time.RFC3339, a.End)
+		if err != nil {
+			return fmt.Errorf("end: %w", err)
+		}
+		if !e.After(s) {
+			return errors.New("end must be after start")
+		}
+		// The fat-finger guard (<= 12h; exactly 12 is legal): a typo'd end
+		// DATE would blanket the calendar and make propose_slots refuse
+		// everything downstream.
+		if e.Sub(s) > 12*time.Hour {
+			return fmt.Errorf("block is %s long; a calendar block is capped at 12 hours (a typo'd end date would blanket the calendar)", e.Sub(s))
+		}
 	}
 	if a.Body == "" {
 		return errors.New("missing body")
@@ -189,6 +227,45 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 
 	var fromAccountID *int64
 	var targetClientRef *string
+	var startsAt, endsAt *time.Time
+	if a.Channel == "calendar" {
+		// SWT-28 criteria 11-12: the account is resolved SERVER-SIDE from
+		// target_ref (never caller-chosen), matched case-insensitively, and
+		// target_ref is stored as the account_email READ BACK from the row —
+		// the database's spelling (the SWT-13 canonicalization rule). The
+		// three refusal causes are distinguished by name. Requiring
+		// calendar_in_availability is load-bearing: LoadBusy only reads
+		// in-scope calendars, so booking onto an out-of-scope one is booking
+		// blind.
+		var acctID int64
+		var canonical string
+		var inScope, writeEnabled bool
+		err := pool.QueryRow(ctx,
+			`SELECT id, account_email, calendar_in_availability, calendar_write_enabled
+			   FROM source_accounts
+			  WHERE provider='google' AND lower(account_email)=lower($1)
+			  ORDER BY id LIMIT 1`, strings.TrimSpace(a.TargetRef)).
+			Scan(&acctID, &canonical, &inScope, &writeEnabled)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("no google account for calendar %q", a.TargetRef)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve calendar account: %w", err)
+		}
+		if !inScope {
+			return nil, fmt.Errorf("account %s is not in availability scope (calendar_in_availability=false); "+
+				"LoadBusy only reads in-scope calendars, so booking onto it would be booking blind", canonical)
+		}
+		if !writeEnabled {
+			return nil, fmt.Errorf("account %s is not calendar_write_enabled; the per-account go-live gate "+
+				"is flipped by hand (see the calendar-availability runbook)", canonical)
+		}
+		fromAccountID = &acctID
+		a.TargetRef = canonical
+		s, _ := time.Parse(time.RFC3339, a.Start) // validated above
+		e, _ := time.Parse(time.RFC3339, a.End)
+		startsAt, endsAt = &s, &e
+	}
 	if a.Channel == "jira_comment" {
 		// From is resolved server-side: the target_ref's site_host must match a
 		// provider='jira' account's domain_default — never caller-chosen.
@@ -325,12 +402,14 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 	var deliveryID int64
 	err := pool.QueryRow(ctx,
 		`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
-		                         from_account_id, thread_id, target_client_ref, created_by)
-		 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9)
+		                         from_account_id, thread_id, target_client_ref, created_by,
+		                         starts_at, ends_at)
+		 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9, $10, $11)
 		 RETURNING id`,
 		a.TaskID, a.Channel, a.TargetRef,
 		google.ScrubAIAttribution(a.Body), google.ScrubAIAttribution(a.Subject),
-		fromAccountID, a.ThreadID, targetClientRef, executor.ActorFrom(ctx)).Scan(&deliveryID)
+		fromAccountID, a.ThreadID, targetClientRef, executor.ActorFrom(ctx),
+		startsAt, endsAt).Scan(&deliveryID)
 	if err != nil {
 		return nil, fmt.Errorf("insert delivery: %w", err)
 	}
@@ -483,6 +562,11 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 	}
 	if channel == "slack_reply" {
 		return sendSlackReply(ctx, pool, a.DeliveryID)
+	}
+	if channel == "calendar" {
+		// SWT-28 criterion 17: the human two-step routes to the SAME send half
+		// the auto verb uses — one code path to the write route.
+		return sendCalendarBlock(ctx, pool, a.DeliveryID)
 	}
 	if gmailSender == nil {
 		return nil, fmt.Errorf("no gmail send adapter wired (SetGmailSender)")

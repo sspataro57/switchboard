@@ -32,6 +32,11 @@ type CalendarSnapshotSink interface {
 	LockAccount(ctx context.Context, accountID int64) (release func(), ok bool, err error)
 	SupersedeAbsentCalendar(ctx context.Context, accountID int64, keep []string,
 		windowFrom, windowTo time.Time) (int, error)
+	// ConfirmObservedCalendarDeliveries closes the loop for booked blocks the
+	// verified snapshot carries (SWT-28 criterion 26): a send-time-recorded
+	// block short-circuits on content_hash, so Normalize's confirm hook never
+	// sees it — the poll's observation is the evidence.
+	ConfirmObservedCalendarDeliveries(ctx context.Context, accountID int64, present []string) error
 }
 
 // pipedreamEventMeta is the slice of an event this layer itself inspects; the
@@ -267,7 +272,7 @@ func pipedreamAccountPass(ctx context.Context, sink CalendarSnapshotSink, acct A
 		if strings.TrimSpace(meta.ID) == "" {
 			return fail(fmt.Errorf("pipedream entry for %s: event %d has no id", acct.Email, i))
 		}
-		items = append(items, validated{externalID: "calendar:" + meta.ID, raw: raw})
+		items = append(items, validated{externalID: CalendarExternalID(meta.ID), raw: raw})
 	}
 
 	// Raw-first: provider JSON verbatim, content_hash, before anything
@@ -298,6 +303,12 @@ func pipedreamAccountPass(ctx context.Context, sink CalendarSnapshotSink, acct A
 			return fail(fmt.Errorf("apply pipedream snapshot replacement for %s: %w", acct.Email, err))
 		}
 		stats.CalendarSuperseded = superseded
+		// SWT-28 criterion 26: confirm every booked block this verified
+		// snapshot observed (see the sink method's comment for why Normalize's
+		// hook alone cannot — the send-time record short-circuits the hash).
+		if err := sink.ConfirmObservedCalendarDeliveries(ctx, acct.ID, present2); err != nil {
+			return fail(fmt.Errorf("confirm observed calendar deliveries for %s: %w", acct.Email, err))
+		}
 	}
 
 	if err := sink.FinishRun(ctx, runID, "ok", stats, ""); err != nil {

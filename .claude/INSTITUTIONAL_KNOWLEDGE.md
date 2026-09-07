@@ -1123,6 +1123,39 @@ When you discover a new landmine, fix a known one, or change a convention:
 - stats->>'calendar_source' / calendar_empty_snapshot are DIAGNOSTIC ONLY —
   nothing may branch on a stats payload (the upworkcrm two-rows landmine).
 
+### Calendar booking — the write route (SWT-28)
+
+- The same workflow serves reads AND writes, branching on `action`: absent =
+  the untouched read poll (its wire bytes are pinned byte-identical by a unit
+  test), `create_event` = `events.insert` with a CLIENT-SUPPLIED id
+  (`CalendarEventID`: base32hex `[0-9a-v]` — Google's id alphabet; anything
+  else is rejected and reserves nothing). 409 → `events.get` + `created:false`
+  is what makes the transport retry (exactly ONCE, only on a transport error,
+  NEVER on any HTTP response) safe.
+- `channel='calendar'` is the FIRST auto-tier channel: `book_calendar_block`
+  approves + sends in one audited call and is deliberately NOT in
+  `policy.humanOnly`. The gates that replace the human: `channel_mismatch`
+  (denied by name on every other channel, BEFORE the channel switch — once a
+  verb is sendShaped, any live branch allows it), the kill switch +
+  10/h rate limit (it is sendShaped AND freezeGated), per-account
+  `calendar_write_enabled` re-checked at SEND, and the pre-flight
+  `availability.LoadBusy` refusal (verbatim propose_slots semantics).
+- `calendar:{event_id}` has ONE spelling — `google.CalendarExternalID` — used
+  by the send path and all three calendar ingest sites; a structural test
+  bans the raw literal. The send-time raw row and the next poll's raw row
+  must hash identically or the snapshot replacement supersedes our own block.
+- R8 skips `channel=="calendar"` entirely (no mark, no close, and crucially
+  no `record_orchestration` — firing it would burn the task's one-shot
+  `delivery_lifecycle` dedup key and silently dedupe the task's later REAL
+  delivery).
+- A failed booking keeps `sent_external_id` (unlike gmail's definite-reject
+  reopen): reopening would trust a human-edited third-party workflow's 409
+  handling. Recovery = read poll or a new draft.
+- The busy set learns about a booked block IMMEDIATELY
+  (`PGSink.RecordOwnCalendarEvent`, best-effort) — without it propose_slots
+  re-offers the just-booked slot for up to 20 minutes and the auto tier
+  double-books itself.
+
 ### The local classify lane runs on the z4 (2026-09-06)
 
 `OPS_LOCAL_PROVIDER_URL=http://192.168.50.55:11434`, `OPS_LOCAL_MODEL=qwen3:8b`

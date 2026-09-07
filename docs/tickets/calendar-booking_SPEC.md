@@ -415,6 +415,16 @@ Numbered; each is testable.
     the `confirmDelivery` shape (`sink.go:312-343`), including the
     `confirmed_at IS NULL` guard plus a `RowsAffected` check so a
     `--normalize-only --all` replay emits no second event.
+    **Amendment (2026-09-07, found by the live smoke):** the normalize hook
+    alone never fires for our own blocks — criterion 22's send-time record
+    stamps `normalized_at`, so the next poll's `content_hash` short-circuit
+    means Normalize never revisits the row. The poll OBSERVING the event id is
+    the loop-closure evidence, so `CalendarSnapshotSink` gains
+    `ConfirmObservedCalendarDeliveries(ctx, accountID, present)` and
+    `RunPipedreamCalendar` calls it with each verified snapshot's `present`
+    set (idempotent via `confirmed_at IS NULL`; account-scoped). The
+    normalize hook stays for the changed-bytes case. Verified live: one
+    `delivery_confirmed` after the first poll, none after the second.
 27. Confirmation stamps `confirmed_at` ONLY — never a status promotion. A
     calendar row is already `sent`; the lifecycle transition belongs to the path
     that owns it (the comment at `sink.go:605-611` states the rule).

@@ -256,6 +256,13 @@ func (s *pipedreamFixtureSink) LockAccount(_ context.Context, accountID int64) (
 	return func() { s.event(fmt.Sprintf("unlock:%d", accountID)) }, true, nil
 }
 
+// ConfirmObservedCalendarDeliveries is a recording no-op for the fixture:
+// loop closure runs against the real PGSink (SWT-28; the live smoke and the
+// tools integration suite exercise it).
+func (s *pipedreamFixtureSink) ConfirmObservedCalendarDeliveries(_ context.Context, _ int64, _ []string) error {
+	return nil
+}
+
 func (s *pipedreamFixtureSink) SupersedeAbsentCalendar(_ context.Context, accountID int64, keep []string, from, to time.Time) (int, error) {
 	s.event(fmt.Sprintf("supersede:%d", accountID))
 	s.sups = append(s.sups, pipedreamSupersede{accountID: accountID, keep: slices.Clone(keep), from: from, to: to})

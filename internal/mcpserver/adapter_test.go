@@ -96,6 +96,11 @@ var wantAgentTools = []string{
 	// what stands between an autonomous worker and a send.
 	"approve_delivery",
 	"send_delivery",
+	// SWT-28 criterion 25: the calendar auto tier's verb, agent-facing where
+	// send_delivery is not — a worker books its own focus time with no human
+	// in the loop. The matrix (channel_mismatch, kill switch, rate limit) and
+	// the handler's LoadBusy refusal are the gates, not the actor.
+	"book_calendar_block",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.

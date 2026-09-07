@@ -30,7 +30,12 @@ const MCPTransportPrefix = "mcp:"
 // sendShaped tools transition a delivery toward the outside world, so they need
 // the channel/rate snapshot. Both belong here; they differ only in whether the
 // kill switch can stop them — see freezeGated.
-var sendShaped = map[string]bool{"send_delivery": true, "mark_delivery_sent": true}
+var sendShaped = map[string]bool{"send_delivery": true, "mark_delivery_sent": true,
+	// SWT-28 (Q1 = b): the calendar auto tier's verb. sendShaped so it
+	// consumes the channel's hourly allowance and reaches the channel branch —
+	// an allow before the switch would be an allow with no rate limit and no
+	// kill switch, which is the auto tier with both of its brakes missing.
+	"book_calendar_block": true}
 
 // freezeGated is the subset the kill switch can actually prevent: an actual
 // send. The switch is for switchboard — it governs what switchboard itself puts
@@ -44,7 +49,11 @@ var sendShaped = map[string]bool{"send_delivery": true, "mark_delivery_sent": tr
 // from sendShaped would ALSO drop its rate limit and its whole channel branch
 // (this function returns early for anything not sendShaped), widening the tool
 // while appearing to narrow it. matrix_test.go pins that corner.
-var freezeGated = map[string]bool{"send_delivery": true}
+var freezeGated = map[string]bool{"send_delivery": true,
+	// book_calendar_block actually sends (SWT-28). With no human gate on the
+	// auto tier, set_sending_frozen is the ONLY thing that can halt a worker
+	// that has decided to book — the operator's stop button.
+	"book_calendar_block": true}
 
 // humanOnly tools require a human actor prefix.
 var humanOnly = map[string]bool{
@@ -97,6 +106,16 @@ func Decide(req Request, snap Snapshot) Decision {
 	if humanOnly[req.Tool] && !HumanActor(req.Actor) {
 		return Decision{Decision: "deny", Rule: "human_only",
 			Reason: fmt.Sprintf("%s requires a human actor (dashboard:/opsctl:/manual:); got %q", req.Tool, req.Actor)}
+	}
+	// book_calendar_block is denied BY NAME on every channel but calendar,
+	// BEFORE the channel switch (SWT-28 criterion 15). Once the verb is
+	// sendShaped, any live branch would allow it — and it approves AND sends
+	// in one call, so an allow on a gmail row is an agent sending an
+	// unapproved client email. Its own rule string on purpose: audits and
+	// operators must tell it apart from channel_assisted and channel_not_live.
+	if req.Tool == "book_calendar_block" && snap.Channel != "calendar" {
+		return Decision{Decision: "deny", Rule: "channel_mismatch",
+			Reason: fmt.Sprintf("book_calendar_block only acts on a calendar delivery; this delivery's channel is %q", snap.Channel)}
 	}
 	if !sendShaped[req.Tool] {
 		return Decision{Decision: "allow", Rule: "matrix-human", Reason: "human delivery action"}
@@ -156,6 +175,27 @@ func Decide(req Request, snap Snapshot) Decision {
 			return Decision{Decision: "allow", Rule: "matrix-send", Reason: "manual confirmation"}
 		}
 		return Decision{Decision: "allow", Rule: "matrix-send", Reason: "slack reply within limits"}
+	case "calendar":
+		// SWT-28 (Q1 = b): the auto tier. send_delivery (the human two-step)
+		// and book_calendar_block (agent-callable) are both live, rate-limited
+		// like gmail/jira. mark_delivery_sent stays refused: this channel has
+		// a real send path and a reservable id, so it has neither an assisted
+		// tier nor a click-may-have-landed window — and that verb is not
+		// freeze-gated, so allowing it here would be a route around the auto
+		// tier's stop button.
+		if req.Tool == "mark_delivery_sent" {
+			return Decision{Decision: "deny", Rule: "channel_no_assisted_tier",
+				Reason: "calendar has a real send path and a reservable event id; there is nothing to manually confirm"}
+		}
+		limit := snap.HourlyLimit
+		if limit <= 0 {
+			limit = 10
+		}
+		if snap.SentLastHour[snap.Channel] >= limit {
+			return Decision{Decision: "deny", Rule: "rate_limit",
+				Reason: fmt.Sprintf("channel %s hit the hourly send limit (%d)", snap.Channel, limit)}
+		}
+		return Decision{Decision: "allow", Rule: "matrix-send", Reason: "calendar booking within limits"}
 	default:
 		return Decision{Decision: "deny", Rule: "channel_not_live",
 			Reason: fmt.Sprintf("channel %q has no live send adapter yet", snap.Channel)}

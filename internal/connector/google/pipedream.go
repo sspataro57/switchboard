@@ -48,10 +48,15 @@ const (
 // PipedreamCalendarRequest is the poll envelope. It carries NO switchboard
 // data beyond the in-scope account emails and the shared horizon window.
 type PipedreamCalendarRequest struct {
-	SchemaVersion int      `json:"schema_version"`
-	TimeMin       string   `json:"time_min"`
-	TimeMax       string   `json:"time_max"`
-	Calendars     []string `json:"calendars"`
+	SchemaVersion int `json:"schema_version"`
+	// Action is EMPTY on a read poll — omitempty keeps the read's wire bytes
+	// byte-identical to pre-SWT-28, because the live workflow branches on this
+	// key and the read path's code is not to be edited at all (criterion 1).
+	// The write route uses its own CreateEventRequest envelope.
+	Action    string   `json:"action,omitempty"`
+	TimeMin   string   `json:"time_min"`
+	TimeMax   string   `json:"time_max"`
+	Calendars []string `json:"calendars"`
 }
 
 // PipedreamCalendarEntry is one calendar's slice of the response.

@@ -51,12 +51,13 @@
   </p>
 
   <table>
-    <tr><th>#</th><th>Task</th><th>Channel</th><th>Status</th><th>Draft</th><th>Actions</th></tr>
+    <tr><th>#</th><th>Task</th><th>Channel</th><th>When</th><th>Status</th><th>Draft</th><th>Actions</th></tr>
     {{range .Deliveries}}
     <tr>
       <td>{{.ID}}</td>
       <td>#{{.TaskID}} {{.TaskTitle}}<div class="muted">by {{.CreatedBy}}</div></td>
       <td>{{.Channel}}</td>
+      <td>{{if .StartsAt}}{{.StartsAt}} → {{.EndsAt}}{{end}}</td>
       <td class="status-{{.Status}}">{{.Status}}
         {{if .SentAt}}<div class="muted">sent {{.SentAt}}</div>{{end}}
         {{if .ConfirmedAt}}<div class="muted">confirmed {{.ConfirmedAt}}</div>{{end}}
@@ -81,6 +82,9 @@
         {{if eq .Status "approved"}}
           {{if eq .Channel "gmail"}}
           <form class="inline" method="post" action="/deliveries/{{.ID}}/send"><button>Send</button></form>
+          {{end}}
+          {{if eq .Channel "calendar"}}
+          <form class="inline" method="post" action="/deliveries/{{.ID}}/send"><button>Book</button></form>
           {{end}}
           {{if eq .Channel "slack_reply"}}
           <form class="inline" method="post" action="/deliveries/{{.ID}}/send"><button>Send</button></form>

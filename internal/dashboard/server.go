@@ -89,6 +89,11 @@ type deliveryRow struct {
 	SentAt      string
 	ConfirmedAt string
 	Error       string
+	// StartsAt/EndsAt are the booked interval, calendar rows only (SWT-28).
+	// Under the auto tier the dashboard is the review surface: a human
+	// checking what was booked must see WHEN.
+	StartsAt string
+	EndsAt   string
 }
 
 type pageData struct {
@@ -102,7 +107,8 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	q := `SELECT d.id, d.task_id, COALESCE(t.title,''), d.channel, d.status,
 	             COALESCE(d.subject,''), COALESCE(d.body,''), COALESCE(d.created_by,''),
-	             COALESCE(d.sent_at::text,''), COALESCE(d.confirmed_at::text,''), COALESCE(d.error,'')
+	             COALESCE(d.sent_at::text,''), COALESCE(d.confirmed_at::text,''), COALESCE(d.error,''),
+	             COALESCE(d.starts_at::text,''), COALESCE(d.ends_at::text,'')
 	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id`
 	args := []any{}
 	if status != "" {
@@ -122,7 +128,8 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var d deliveryRow
 		if err := rows.Scan(&d.ID, &d.TaskID, &d.TaskTitle, &d.Channel, &d.Status,
-			&d.Subject, &d.Body, &d.CreatedBy, &d.SentAt, &d.ConfirmedAt, &d.Error); err != nil {
+			&d.Subject, &d.Body, &d.CreatedBy, &d.SentAt, &d.ConfirmedAt, &d.Error,
+			&d.StartsAt, &d.EndsAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

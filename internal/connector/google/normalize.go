@@ -334,6 +334,11 @@ func Normalize(ctx context.Context, sink *PGSink, cfg Config) (Stats, error) {
 			if err := sink.upsertEvent(ctx, it.id, ne); err != nil {
 				return stats, fmt.Errorf("apply %s: %w", it.externalID, err)
 			}
+			// SWT-28 criterion 26: a block switchboard itself booked re-enters
+			// here; match it back to its delivery row by exact external id.
+			if err := sink.confirmCalendarDelivery(ctx, it.id, it.externalID); err != nil {
+				return stats, fmt.Errorf("confirm %s: %w", it.externalID, err)
+			}
 		default:
 			return stats, fmt.Errorf("raw item %d has unknown external_id shape %q", it.id, it.externalID)
 		}
