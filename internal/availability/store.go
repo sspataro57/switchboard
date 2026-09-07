@@ -60,7 +60,48 @@ func LoadBusy(ctx context.Context, pool *pgxpool.Pool, req Request) ([]Interval,
 	if err != nil {
 		return nil, err
 	}
-	return Merge(Busy(events)), nil
+	reserved, err := loadReservations(ctx, pool, req.WindowStart, req.WindowEnd)
+	if err != nil {
+		return nil, err
+	}
+	return Merge(append(Busy(events), reserved...)), nil
+}
+
+// loadReservations treats an UNCONFIRMED calendar booking as busy (SWT-28,
+// codex finding 2026-09-07): between reserving its event id and the first
+// poll that OBSERVES the created event, a booked block may exist on the
+// calendar while nothing in normalized_events says so — a stale snapshot can
+// even supersede the send-time record. The delivery row itself is therefore
+// the reservation: sending (mid-flight), sent (live, awaiting observation)
+// and failed-with-id (the send MAY have landed — over-busy, the direction
+// that cannot double-book) all hold their interval until confirmed_at, when
+// the observed event takes over. Confirmed rows drop out so a block deleted
+// by hand frees its slot at the next poll, exactly as before.
+func loadReservations(ctx context.Context, pool *pgxpool.Pool, windowStart, windowEnd time.Time) ([]Interval, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT d.starts_at, d.ends_at
+		   FROM deliveries d
+		   JOIN source_accounts a ON a.id = d.from_account_id
+		  WHERE d.channel = 'calendar'
+		    AND d.sent_external_id IS NOT NULL
+		    AND d.confirmed_at IS NULL
+		    AND d.status IN ('sending','sent','failed')
+		    AND a.provider = 'google' AND a.calendar_in_availability
+		    AND d.ends_at > $1 AND d.starts_at < $2`,
+		windowStart, windowEnd)
+	if err != nil {
+		return nil, fmt.Errorf("select calendar reservations: %w", err)
+	}
+	defer rows.Close()
+	var out []Interval
+	for rows.Next() {
+		var iv Interval
+		if err := rows.Scan(&iv.Start, &iv.End); err != nil {
+			return nil, fmt.Errorf("scan calendar reservation: %w", err)
+		}
+		out = append(out, iv)
+	}
+	return out, rows.Err()
 }
 
 // loadAccountStates is the SQL half of the readiness check: the in-scope rows

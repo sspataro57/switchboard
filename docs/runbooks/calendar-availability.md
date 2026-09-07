@@ -161,6 +161,73 @@ allowance (~72/day at `*/20`) before scheduling. Don't ALSO run the mail
 one-shot with `CAL_SOURCE=pipedream` or invocations double; production mail
 runs in the watch loop, which has no calendar phase.
 
+## Booking an own block (SWT-28)
+
+The write half of the Pipedream transport: `channel='calendar'` is a live
+delivery channel at the **auto tier**. Two verbs, one send path:
+
+- `book_calendar_block {delivery_id}` — agent-callable (MCP-listed, NOT
+  human-only): approves a drafted calendar row and books it in one audited
+  call. The gates are the policy matrix (`channel_mismatch` on any
+  non-calendar row, the kill switch, the 10/hour channel limit), the
+  per-account `calendar_write_enabled` column re-checked at SEND, and the
+  pre-flight `LoadBusy` refusal (stale sync / empty scope / horizon / overlap
+  — byte-identical to a `propose_slots` refusal, because it is the same one).
+- `send_delivery` on a calendar row — the human two-step (draft → approve →
+  send), unchanged and still human-only.
+
+**The workflow side went live 2026-09-07 (v16)**: the trigger branches on
+`action` — absent/empty is the untouched read poll; `action:"create_event"`
+calls `events.insert` with the CLIENT-SUPPLIED id (`sendUpdates=none`, no
+attendees, ever), resolves a 409 duplicate with `events.get` + `created:false`
+(what makes a retried timeout safe), and echoes the created resource verbatim.
+Measured write latency: **1.8 s**.
+
+**Go-live is per account and by hand**:
+```sql
+UPDATE source_accounts SET calendar_write_enabled=true
+ WHERE provider='google' AND account_email='<email>';
+```
+Default false everywhere — under the auto tier this column is the only
+per-account consent an unattended booking has. Revoking it bites at the next
+send, even for already-drafted rows.
+
+**Reading a refusal**: a booking refusal in `audit_events.error` /
+`deliveries.error` reads exactly like a `propose_slots` refusal (see "Reading
+a refusal" above) — same fail-closed door, same wording. A `channel_mismatch`
+policy deny means someone aimed `book_calendar_block` at a non-calendar row.
+
+**A failed booking keeps its `sent_external_id`** — deliberately, unlike
+gmail's definite-rejection path: the send may have landed, and reopening the
+row would trust the third-party workflow's 409 handling. The row goes
+`failed`; recovery is the next read poll (which confirms the block if it
+landed) or a NEW draft. The delivery row is the audit trail; don't recycle it.
+Note the interaction with reservations (next section): a failed-with-id row
+RESERVES its interval, so a new draft for the SAME slot is refused with the
+overlap message until a poll settles the row or you stamp it with the escape
+below. An operator stamp stays distinguishable from a real observation in
+the audit trail: a poll-confirmed delivery has a `delivery_confirmed`
+task_event, a hand-stamped one has none.
+
+**Concurrency (post-codex, 2026-09-07)**: slot allocation is serialized under
+a global advisory lock and an UNCONFIRMED booking is itself part of the busy
+set (a reservation on the `deliveries` row: sending, sent, or failed with an
+id — lifted when a poll observes the event and stamps `confirmed_at`). A
+stale poll can no longer supersede an unconfirmed block. Two residual quirks:
+the hourly limit can overshoot by the number of bookings in flight, and a
+block deleted by hand BEFORE any poll observed it keeps its slot reserved —
+if that ever happens, stamp the row by hand:
+`UPDATE deliveries SET confirmed_at=now() WHERE id=<D>` (it will then free at
+the next poll like any deleted event). If the busy-set record fails after a
+successful send, the handler emits a `log` task_event and returns
+`busy_set_pending: true`; the reservation still holds the slot, and the next
+poll heals the record.
+
+**Stopping an unattended booker**: `opsctl call --tool set_sending_frozen
+--args '{"frozen":true}'` — the kill switch is the ONE brake that reaches the
+auto verb (it is not behind a human gate). Undoing a booked block is a
+browser click in Google Calendar plus the next poll's snapshot replacement.
+
 ## If a Workspace admin blocks the consent
 
 Two of the three mailboxes are Workspace orgs Salvador does not administer;

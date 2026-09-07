@@ -58,6 +58,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"update_delivery", validateUpdateDelivery, updateDelivery},
 		{"approve_delivery", validateDeliveryIDOnly, approveDelivery},
 		{"send_delivery", validateDeliveryIDOnly, sendDelivery},
+		// SWT-28: the calendar auto tier's verb — approve + send a drafted
+		// calendar row in one audited call. NOT human-only (Q1 = b); the gates
+		// are the policy matrix (channel_mismatch, kill switch, rate limit)
+		// and the handler's LoadBusy refusal. See delivery_calendar.go.
+		{"book_calendar_block", validateDeliveryIDOnly, bookCalendarBlock},
 		{"mark_delivery_sent", validateDeliveryIDOnly, markDeliverySent},
 		{"mark_delivery_failed", validateDeliveryIDOnly, markDeliveryFailed},
 		{"prefill_delivery", validateDeliveryIDOnly, prefillDelivery},

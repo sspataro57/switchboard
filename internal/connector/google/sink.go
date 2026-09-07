@@ -342,6 +342,120 @@ func (s *PGSink) confirmDelivery(ctx context.Context, messageID string) (bool, e
 	return true, nil
 }
 
+// RecordOwnCalendarEvent stores a block switchboard itself just booked
+// (SWT-28 criterion 22): the Google Event resource VERBATIM through the same
+// raw-first pipeline the read poll uses — validate via NormalizeCalendarEvent,
+// upsertRaw under CalendarExternalID(id) (content hash first), upsertEvent,
+// markNormalized. Without this the block is invisible to propose_slots for up
+// to 20 minutes and switchboard can propose — and book — the same slot twice.
+// The next read poll re-upserts the same external id and the content_hash
+// short-circuit makes it free.
+func (s *PGSink) RecordOwnCalendarEvent(ctx context.Context, accountID int64, raw json.RawMessage) error {
+	var meta struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil || strings.TrimSpace(meta.ID) == "" {
+		return fmt.Errorf("own calendar event resource has no id")
+	}
+	ne, err := NormalizeCalendarEvent(raw)
+	if err != nil {
+		return fmt.Errorf("own calendar event would stall Normalize: %w", err)
+	}
+	externalID := CalendarExternalID(meta.ID)
+	var stats Stats
+	if err := upsertRaw(ctx, s, accountID, externalID, raw, &stats); err != nil {
+		return err
+	}
+	var rawID int64
+	if err := s.pool.QueryRow(ctx,
+		`SELECT id FROM raw_source_items WHERE source_account_id=$1 AND external_id=$2`,
+		accountID, externalID).Scan(&rawID); err != nil {
+		return fmt.Errorf("locate own calendar raw row %s: %w", externalID, err)
+	}
+	if err := s.upsertEvent(ctx, rawID, ne); err != nil {
+		return err
+	}
+	return s.markNormalized(ctx, rawID)
+}
+
+// ConfirmObservedCalendarDeliveries closes the loop for booked blocks whose
+// event ids a VERIFIED snapshot just carried (SWT-28 criterion 26, the
+// unchanged-hash half): a block switchboard itself booked was already raw +
+// normalized at SEND time (RecordOwnCalendarEvent), so the next poll's
+// content_hash short-circuit means Normalize never revisits it and the
+// confirm hook there never fires. The poll OBSERVING the event id is the
+// loop-closure evidence. Idempotent via confirmed_at IS NULL — a later poll
+// carrying the same id confirms nothing and emits nothing.
+func (s *PGSink) ConfirmObservedCalendarDeliveries(ctx context.Context, accountID int64, present []string) error {
+	if len(present) == 0 {
+		return nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`UPDATE deliveries SET confirmed_at=now(), updated_at=now()
+		  WHERE channel='calendar' AND confirmed_at IS NULL
+		    AND from_account_id=$1 AND sent_external_id = ANY($2)
+		 RETURNING id, task_id, sent_external_id`, accountID, present)
+	if err != nil {
+		return fmt.Errorf("confirm observed calendar deliveries: %w", err)
+	}
+	type hit struct {
+		deliveryID, taskID int64
+		extID              string
+	}
+	var hits []hit
+	for rows.Next() {
+		var h hit
+		if err := rows.Scan(&h.deliveryID, &h.taskID, &h.extID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan confirmed calendar delivery: %w", err)
+		}
+		hits = append(hits, h)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate confirmed calendar deliveries: %w", err)
+	}
+	for _, h := range hits {
+		payload, _ := json.Marshal(map[string]any{"delivery_id": h.deliveryID, "matched_event_id": h.extID})
+		if _, err := s.pool.Exec(ctx,
+			`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1, 'delivery_confirmed', $2)`,
+			h.taskID, payload); err != nil {
+			return fmt.Errorf("insert delivery_confirmed event: %w", err)
+		}
+	}
+	return nil
+}
+
+// confirmCalendarDelivery closes the loop for a booked block whose event just
+// re-entered via the read poll (SWT-28 criterion 26): exact external-id match
+// scoped to the delivery's own account, confirmed_at IS NULL as the idempotence
+// guard (a --normalize-only --all replay emits no second event), and
+// confirmed_at ONLY — never a status promotion (the rule at confirmDelivery's
+// gmail belt applies here verbatim: the lifecycle transition belongs to the
+// path that owns it).
+func (s *PGSink) confirmCalendarDelivery(ctx context.Context, rawItemID int64, externalID string) error {
+	var deliveryID, taskID int64
+	err := s.pool.QueryRow(ctx,
+		`UPDATE deliveries SET confirmed_at=now(), updated_at=now()
+		  WHERE channel='calendar' AND sent_external_id=$1 AND confirmed_at IS NULL
+		    AND from_account_id = (SELECT source_account_id FROM raw_source_items WHERE id=$2)
+		 RETURNING id, task_id`, externalID, rawItemID).Scan(&deliveryID, &taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Not ours, or ours and already confirmed. Either way: nothing to add.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("confirm calendar delivery for %s: %w", externalID, err)
+	}
+	payload, _ := json.Marshal(map[string]any{"delivery_id": deliveryID, "matched_event_id": externalID})
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1, 'delivery_confirmed', $2)`,
+		taskID, payload); err != nil {
+		return fmt.Errorf("insert delivery_confirmed event: %w", err)
+	}
+	return nil
+}
+
 // upsertEvent writes one normalized_events row (upsert on raw_source_item_id).
 func (s *PGSink) upsertEvent(ctx context.Context, rawItemID int64, ne NormalizedEvent) error {
 	attendees, err := json.Marshal(ne.Attendees)
@@ -481,6 +595,14 @@ func (s *PGSink) SupersedeAbsentCalendar(ctx context.Context, accountID int64, k
 	// dateTime for timed events, date for all-day ones. Rows with neither are
 	// tombstones already and are left alone.
 	const startsAt = `COALESCE(NULLIF(raw_json->'start'->>'dateTime',''), NULLIF(raw_json->'start'->>'date',''))`
+	// The NOT EXISTS is the SWT-28 fence (codex finding, 2026-09-07): a poll
+	// whose snapshot was FETCHED before a booking landed would otherwise
+	// supersede the block's send-time record — and because the next snapshot
+	// carries identical bytes, the content_hash short-circuit would leave the
+	// event cancelled forever. An UNCONFIRMED booked block is never
+	// superseded; once a later snapshot observes it (confirmed_at set),
+	// normal replacement semantics resume, so a hand-deleted block still
+	// frees its slot.
 	tag, err := tx.Exec(ctx,
 		`UPDATE raw_source_items
 		    SET superseded_at = now()
@@ -488,6 +610,11 @@ func (s *PGSink) SupersedeAbsentCalendar(ctx context.Context, accountID int64, k
 		    AND external_id LIKE 'calendar:%'
 		    AND superseded_at IS NULL
 		    AND NOT (external_id = ANY($2::text[]))
+		    AND NOT EXISTS (SELECT 1 FROM deliveries d
+		                     WHERE d.channel = 'calendar'
+		                       AND d.from_account_id = $1
+		                       AND d.confirmed_at IS NULL
+		                       AND d.sent_external_id = raw_source_items.external_id)
 		    AND `+startsAt+` IS NOT NULL
 		    AND (`+startsAt+`)::timestamptz >= $3
 		    AND (`+startsAt+`)::timestamptz < $4`, accountID, keep, windowFrom, windowTo)

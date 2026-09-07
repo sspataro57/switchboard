@@ -63,6 +63,22 @@ func run() error {
 	if mailSender != nil {
 		tools.SetGmailSender(mailSender)
 	}
+	// SWT-28 criterion 24: ops-mcp MUST wire the booker — book_calendar_block
+	// is agent-facing and the auto tier is dead on arrival without it (every
+	// worker call would fail "no calendar booking adapter wired"). Absent
+	// configuration leaves the seam nil and booking refused by name.
+	if pdURL := os.Getenv("PIPEDREAM_CALENDAR_URL"); pdURL != "" {
+		token, err := google.PipedreamTokenFromEnv()
+		if err != nil {
+			return fmt.Errorf("configure calendar booker: %w", err)
+		}
+		booker, err := google.NewPipedreamCalendarClient(pdURL, token, nil)
+		if err != nil {
+			return fmt.Errorf("configure calendar booker: %w", err)
+		}
+		tools.SetCalendarBooker(booker)
+	}
+
 	adapter := mcpserver.New(ex, workerID)
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "ops-mcp", Version: "0.1.0"}, nil)

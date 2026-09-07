@@ -169,6 +169,21 @@ func run(toolName string, args json.RawMessage) error {
 		tools.SetSlackDrafter(bridge)
 		tools.SetSlackSender(bridge)
 	}
+	// SWT-28: the Pipedream calendar write route (book_calendar_block and
+	// send_delivery on calendar rows). Absent configuration leaves the seam
+	// nil and booking refused by name; a misconfiguration is fatal HERE,
+	// before any delivery row is touched (the NewDeliveryBridgeFromEnv shape).
+	if pdURL := os.Getenv("PIPEDREAM_CALENDAR_URL"); pdURL != "" {
+		token, err := google.PipedreamTokenFromEnv()
+		if err != nil {
+			return fmt.Errorf("configure calendar booker: %w", err)
+		}
+		booker, err := google.NewPipedreamCalendarClient(pdURL, token, nil)
+		if err != nil {
+			return fmt.Errorf("configure calendar booker: %w", err)
+		}
+		tools.SetCalendarBooker(booker)
+	}
 
 	res, err := ex.Execute(ctx, executor.Call{Tool: toolName, Actor: actor(), Args: args})
 	if err != nil {

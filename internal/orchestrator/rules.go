@@ -272,6 +272,17 @@ func ruleDeliveryTask(ev Event, f Facts) []Action {
 // flips done_locally -> delivered, R3's Deliver task is retired, and the
 // decision is recorded (the dedup key).
 func ruleDeliveryLifecycle(ev Event, f Facts) []Action {
+	// SWT-28 criterion 29 (Q2 = b): a calendar booking never advances a task's
+	// lifecycle — and, the sharp half, never writes the delivery_lifecycle
+	// dedup key. task_mark_delivered refuses a task that is not done_locally;
+	// the engine logs that failure and continues, and the record_orchestration
+	// that follows would land anyway, deduping the task's LATER real delivery
+	// into silence. So: zero actions, including no record. An ABSENT channel
+	// key takes the normal path — absent-because-unknown is not
+	// absent-because-calendar.
+	if payloadStr(ev.Payload, "channel") == "calendar" {
+		return nil
+	}
 	if orchestrated(f, "delivery_lifecycle", func(o Orchestration) bool { return o.TaskID == ev.TaskID }) {
 		return nil
 	}

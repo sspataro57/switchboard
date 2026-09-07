@@ -56,8 +56,8 @@ var agentTools = []Tool{
 	},
 	{
 		Name:        "draft_delivery",
-		Description: "Draft an outbound client communication as a delivery row (drafted; goes through approval before any send). THE only route for client-visible words.",
-		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat","jira_comment","slack_reply"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat, jira_comment, and slack_reply; Slack uses the exact conversation or thread URL"}},"required":["task_id","channel","body"]}`),
+		Description: "Draft an outbound client communication as a delivery row (drafted; goes through approval before any send). THE only route for client-visible words. For channel \"calendar\" (an own calendar block): target_ref is the account email, subject becomes the event summary, body the description, and start/end MUST come from propose_slots.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat","jira_comment","slack_reply","calendar"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat, jira_comment, slack_reply, and calendar; Slack uses the exact conversation or thread URL, calendar the account email"},"start":{"type":"string","description":"RFC3339; calendar only — block start, from propose_slots"},"end":{"type":"string","description":"RFC3339; calendar only — block end, at most 12h after start"}},"required":["task_id","channel","body"]}`),
 	},
 	{
 		Name:        "link_external_ref",
@@ -73,6 +73,21 @@ var agentTools = []Tool{
 		Name:        "mail_read_thread",
 		Description: "Read one ingested mail thread in order, oldest first. Served from the normalized store, not a live mailbox. Bodies are capped; give thread_id or thread_key.",
 		InputSchema: schema(`{"type":"object","properties":{"thread_id":{"type":"integer"},"thread_key":{"type":"string"},"limit":{"type":"integer","description":"max 50 messages"}}}`),
+	},
+	{
+		// SWT-28 (Q1 = b): agent-facing where send_delivery is not, because the
+		// auto tier's whole point is a worker booking with no human in the
+		// loop. What an INJECTED call can do: put a block on Salvador's OWN
+		// calendar, at a time provably free (the LoadBusy conflict/freshness/
+		// horizon refusal), on an account a human explicitly write-enabled
+		// (calendar_write_enabled, re-checked at send), at most ten per hour,
+		// every call audited, stoppable with set_sending_frozen. What it
+		// cannot do: choose a time, a calendar, a summary or an attendee — all
+		// fields come from the drafted row, and the write envelope has no
+		// attendees field at all.
+		Name:        "book_calendar_block",
+		Description: "Approve and book a DRAFTED calendar delivery (an own calendar block) in one audited call — the calendar channel's auto tier. Refuses any non-calendar delivery (channel_mismatch), a conflicted or stale-calendar slot (the propose_slots fail-closed rules, re-checked at send), a write-disabled account, and anything while the kill switch (set_sending_frozen) is on. Rate-limited per hour. The block's time, calendar and summary all come from the drafted row.",
+		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"}},"required":["delivery_id"]}`),
 	},
 	{
 		Name:        "approve_delivery",

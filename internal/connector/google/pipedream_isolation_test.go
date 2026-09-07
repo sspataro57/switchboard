@@ -82,11 +82,21 @@ func TestAvailabilityKnowsNothingAboutTheCalendarTransport(t *testing.T) {
 }
 
 // The same criterion at the level it is actually written in: git sees no change
-// under internal/availability on this branch. Two-dot against main deliberately,
-// so an UNCOMMITTED edit counts too — the scan above would miss a whitespace or
-// comment change, and criterion 20 says the file does not change at all. Skipped rather than failed where
-// git or the base ref is unavailable, because a source tarball is a legitimate
-// place to run go test — the scan above is the version that always runs.
+// under internal/availability on this branch — with ONE dated exception.
+// Two-dot against main deliberately, so an UNCOMMITTED edit counts too.
+// Skipped rather than failed where git or the base ref is unavailable, because
+// a source tarball is a legitimate place to run go test — the scan above is
+// the version that always runs.
+//
+// REWRITTEN FOR SWT-28 (2026-09-07), the migration-guard convention: the
+// original rule was "no file changes at all" (SWT-27 criterion 20 — a
+// transport swap must not touch the fail-closed reader). SWT-28's codex
+// amendment adds loadReservations to store.go: a SECOND BUSY INPUT (an
+// unconfirmed booked delivery reserves its slot), not a readiness change —
+// the refusal path, NotReady, the horizon and the one-normalized_events-reader
+// rule are untouched, and the transport-agnosticism scan above still holds.
+// So the seal narrows: store.go may differ; every OTHER file under
+// internal/availability still may not.
 func TestGitShowsNoChangeUnderInternalAvailability(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
@@ -99,9 +109,13 @@ func TestGitShowsNoChangeUnderInternalAvailability(t *testing.T) {
 	if err != nil {
 		t.Skipf("git diff failed: %v", err)
 	}
-	if changed := strings.TrimSpace(string(out)); changed != "" {
-		t.Errorf("this branch changes files under internal/availability:\n%s\nCriterion 20: it changes NONE. "+
-			"The readiness contract and its four SWT-24 suites are inherited untouched — a transport swap "+
-			"that edits the fail-closed reader is no longer a transport swap", changed)
+	for _, changed := range strings.Fields(strings.TrimSpace(string(out))) {
+		if changed == "internal/availability/store.go" {
+			continue // SWT-28's loadReservations amendment — see the comment above.
+		}
+		t.Errorf("this branch changes %s under internal/availability. Only store.go carries a recorded "+
+			"amendment (SWT-28 reservations); the readiness contract and its SWT-24 suites are inherited "+
+			"untouched — an edit anywhere else is a change to the fail-closed reader nobody has argued for",
+			changed)
 	}
 }
