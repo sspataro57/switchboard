@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -235,6 +236,27 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 			resp, err = lane.Complete(ctx, req)
 		}
 		if err != nil {
+			if errors.Is(err, provider.ErrIncomplete) {
+				// The model exhausted its whole generation budget without
+				// producing a verdict — with thinking on, this is a real
+				// failure mode of the CONFIGURATION UNDER TEST, so it is
+				// SCORED (as not-actionable: no verdict flags nothing, so a
+				// wanted-actionable label becomes a false negative) rather
+				// than aborting a multi-hour batch on one over-thinker.
+				o := outcome{id: m.MessageID, actionable: false, latencyMS: 0}
+				outcomes = append(outcomes, o)
+				if ckpt != nil {
+					model := scoredModel
+					if model == "" {
+						model = cfg.Model
+					}
+					if _, err := fmt.Fprintf(ckpt, "%d\t%t\t%d\t%s\n", o.id, o.actionable, o.latencyMS, model); err != nil {
+						return fmt.Errorf("append eval checkpoint: %w", err)
+					}
+				}
+				fmt.Fprintf(w, "note: message %d scored as a miss — %v\n", m.MessageID, err)
+				continue
+			}
 			return fmt.Errorf("classify message %d: %w", m.MessageID, err)
 		}
 		var v verdict

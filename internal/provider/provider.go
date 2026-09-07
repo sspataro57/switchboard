@@ -30,6 +30,14 @@ type Request struct {
 	NumCtx int
 }
 
+// ErrIncomplete marks a response the model FAILED TO FINISH — done_reason
+// "length" with empty content, i.e. the generation budget was exhausted
+// before any verdict was produced (with thinking on, the model can spend the
+// whole budget reasoning). Distinct from ErrUnavailable on purpose: the
+// server answered and worked; the MODEL produced nothing usable. The eval
+// harness scores it as a miss instead of aborting the batch.
+var ErrIncomplete = errors.New("generation incomplete")
+
 // Response is the provider-neutral result.
 type Response struct {
 	Raw              json.RawMessage // the message content — schema-shaped JSON

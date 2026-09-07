@@ -189,7 +189,7 @@ func evalCmd(argv []string) error {
 	ckptPath := fs.String("checkpoint", "",
 		"progress file: verdicts append here and a rerun resumes past them (default: <labels>.progress; removed on success)")
 	think := fs.Bool("think", false,
-		"A/B EXPERIMENT: enable model thinking (raises MaxTokens to 1536 and num_ctx to 8192; ~4-5x slower). "+
+		"A/B EXPERIMENT: enable model thinking (raises MaxTokens to 4096 and num_ctx to 8192; ~4-5x slower). "+
 			"Use a DEDICATED --checkpoint — resuming a think run from a non-think progress file mixes verdicts silently")
 	if err := fs.Parse(argv); err != nil {
 		return err
@@ -236,9 +236,12 @@ func evalCmd(argv []string) error {
 	cfg := classify.Config{Model: model, MaxTokens: 512, Lane: lane, EvalCheckpoint: *ckptPath}
 	if *think {
 		// The experiment shape: enough output budget that the answer survives
-		// the ~1k reasoning tokens (think at 512 reproduces the measured
-		// 0.00-score regression), and a window the reasoning cannot overflow.
-		cfg.Think, cfg.MaxTokens, cfg.NumCtx = true, 1536, 8192
+		// the reasoning (think at 512 reproduces the measured 0.00-score
+		// regression, and 1536 was exhausted by a real message on the first
+		// run — thinking length is unbounded), and a window the reasoning
+		// cannot overflow. A message that out-thinks even 4096 scores as a
+		// miss (provider.ErrIncomplete) instead of aborting the batch.
+		cfg.Think, cfg.MaxTokens, cfg.NumCtx = true, 4096, 8192
 	}
 	return classify.Eval(ctx, classify.NewStore(pool), router, cfg, labels, os.Stdout)
 }

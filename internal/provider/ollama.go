@@ -290,10 +290,10 @@ func (o *Ollama) Complete(ctx context.Context, req Request) (Response, error) {
 	// criterion 3's `"think": false` gets "cleaned up" by a later contributor.
 	if parsed.DoneReason != "" && parsed.DoneReason != "stop" {
 		return Response{}, fmt.Errorf(
-			"ollama returned done_reason %q with %d bytes of content: the generation did not finish. "+
+			"%w: ollama returned done_reason %q with %d bytes of content: the generation did not finish. "+
 				"done_reason %q with EMPTY content is the thinking regression — verify the request carried "+
 				`"think": false (an omitempty bool silently drops it), or raise MaxTokens`,
-			parsed.DoneReason, len(parsed.Message.Content), parsed.DoneReason)
+			ErrIncomplete, parsed.DoneReason, len(parsed.Message.Content), parsed.DoneReason)
 	}
 	if strings.TrimSpace(parsed.Message.Content) == "" {
 		return Response{}, fmt.Errorf(
