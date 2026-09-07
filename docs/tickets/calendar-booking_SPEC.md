@@ -356,6 +356,24 @@ Numbered; each is testable.
     because a retry after the conflict clears must remain possible. This is the
     backstop the auto tier rests on, and it is the same refusal for a worker and
     for Salvador.
+    **Amendment (2026-09-07, codex adversarial review — two high findings,
+    both fixed):** (a) the pre-flight alone was an unlocked snapshot: two
+    overlapping bookings could both see a free slot and both reserve. The
+    pre-flight and the phase-1 reserve now run in ONE transaction under a
+    global `pg_advisory_xact_lock` (allocation is serialized across the whole
+    availability scope — busy is merged across calendars, so a per-account
+    key would still double-book the human), and an UNCONFIRMED calendar
+    delivery (sending / sent / failed-with-id, `confirmed_at IS NULL`) is
+    itself LoadBusy-visible as a reservation (`availability.loadReservations`),
+    lifted at confirmation when the observed event takes over. (b) a poll
+    whose snapshot was fetched before a booking landed could supersede the
+    block's send-time record — and identical bytes on the next snapshot would
+    leave it cancelled forever; `SupersedeAbsentCalendar` now refuses to
+    supersede a raw row matching an unconfirmed calendar delivery of the same
+    account. Residual accepted risk: concurrent bookings can overshoot the
+    hourly rate limit by the number in flight (the limit is a volume brake,
+    not a quota), and a block hand-deleted before its first observing poll
+    stays reserved until an operator intervenes (over-busy direction).
 20. **Phase 1 (tx), the gmail shape verbatim.** Lock the row `FOR UPDATE`;
     refuse if `sent_external_id` is present ("never resend (invariant 4)"); refuse
     unless `status='approved'`; refuse unless `approval_source='switchboard'`;

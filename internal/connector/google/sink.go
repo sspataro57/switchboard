@@ -595,6 +595,14 @@ func (s *PGSink) SupersedeAbsentCalendar(ctx context.Context, accountID int64, k
 	// dateTime for timed events, date for all-day ones. Rows with neither are
 	// tombstones already and are left alone.
 	const startsAt = `COALESCE(NULLIF(raw_json->'start'->>'dateTime',''), NULLIF(raw_json->'start'->>'date',''))`
+	// The NOT EXISTS is the SWT-28 fence (codex finding, 2026-09-07): a poll
+	// whose snapshot was FETCHED before a booking landed would otherwise
+	// supersede the block's send-time record — and because the next snapshot
+	// carries identical bytes, the content_hash short-circuit would leave the
+	// event cancelled forever. An UNCONFIRMED booked block is never
+	// superseded; once a later snapshot observes it (confirmed_at set),
+	// normal replacement semantics resume, so a hand-deleted block still
+	// frees its slot.
 	tag, err := tx.Exec(ctx,
 		`UPDATE raw_source_items
 		    SET superseded_at = now()
@@ -602,6 +610,11 @@ func (s *PGSink) SupersedeAbsentCalendar(ctx context.Context, accountID int64, k
 		    AND external_id LIKE 'calendar:%'
 		    AND superseded_at IS NULL
 		    AND NOT (external_id = ANY($2::text[]))
+		    AND NOT EXISTS (SELECT 1 FROM deliveries d
+		                     WHERE d.channel = 'calendar'
+		                       AND d.from_account_id = $1
+		                       AND d.confirmed_at IS NULL
+		                       AND d.sent_external_id = raw_source_items.external_id)
 		    AND `+startsAt+` IS NOT NULL
 		    AND (`+startsAt+`)::timestamptz >= $3
 		    AND (`+startsAt+`)::timestamptz < $4`, accountID, keep, windowFrom, windowTo)

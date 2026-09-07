@@ -203,14 +203,19 @@ row would trust the third-party workflow's 409 handling. The row goes
 `failed`; recovery is the next read poll (which confirms the block if it
 landed) or a NEW draft. The delivery row is the audit trail; don't recycle it.
 
-**Two known transient windows, both self-healing at the next `*/20` poll**:
-(1) if the `delivery_sent` event insert fails right after a successful send,
-the handler has already recorded the block into the busy set — but if the
-BUSY-SET record itself fails, `propose_slots` can re-offer the just-booked
-slot until the next poll (the handler emits a `log` task_event and returns
-`busy_set_pending: true`); (2) a read poll whose snapshot was fetched
-*before* the booking landed will supersede the just-written raw row, dropping
-the block from the busy set until the following poll observes it.
+**Concurrency (post-codex, 2026-09-07)**: slot allocation is serialized under
+a global advisory lock and an UNCONFIRMED booking is itself part of the busy
+set (a reservation on the `deliveries` row: sending, sent, or failed with an
+id — lifted when a poll observes the event and stamps `confirmed_at`). A
+stale poll can no longer supersede an unconfirmed block. Two residual quirks:
+the hourly limit can overshoot by the number of bookings in flight, and a
+block deleted by hand BEFORE any poll observed it keeps its slot reserved —
+if that ever happens, stamp the row by hand:
+`UPDATE deliveries SET confirmed_at=now() WHERE id=<D>` (it will then free at
+the next poll like any deleted event). If the busy-set record fails after a
+successful send, the handler emits a `log` task_event and returns
+`busy_set_pending: true`; the reservation still holds the slot, and the next
+poll heals the record.
 
 **Stopping an unattended booker**: `opsctl call --tool set_sending_frozen
 --args '{"frozen":true}'` — the kill switch is the ONE brake that reaches the

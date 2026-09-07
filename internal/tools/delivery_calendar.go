@@ -42,6 +42,14 @@ type CalendarBooker interface {
 
 var calendarBooker CalendarBooker
 
+// calendarBookingLock serializes slot ALLOCATION across the whole
+// availability scope (codex finding, 2026-09-07). One global key, not
+// per-account: busy is MERGED across calendars, so two overlapping blocks on
+// two different accounts still double-book the same human. Bookings are rare
+// (10/hour cap) and the lock spans only the pre-flight + reserve transaction
+// — never the network call.
+const calendarBookingLock = int64(0x53575432380001)
+
 // SetCalendarBooker wires the Pipedream calendar write adapter (the
 // NewDeliveryBridgeFromEnv shape: a construction error is fatal at wiring
 // time, an absent configuration leaves this nil and booking refused by name).
@@ -159,38 +167,49 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 		return nil, fmt.Errorf("delivery %d is %s; only approved deliveries send", deliveryID, status)
 	}
 
-	// (1) Pre-flight: the backstop the auto tier rests on.
-	_, maxSyncAge, err := availabilityConfig()
-	if err != nil {
-		return nil, err
-	}
-	busy, err := availability.LoadBusy(ctx, pool, availability.Request{
-		WindowStart:   startsAt,
-		WindowEnd:     endsAt,
-		Now:           time.Now(),
-		MaxSyncAge:    maxSyncAge,
-		HorizonPast:   google.CalendarWindowPast,
-		HorizonFuture: google.CalendarWindowFuture,
-	})
-	if err != nil {
-		return nil, err // VERBATIM: it must read exactly like a propose_slots refusal
-	}
-	for _, iv := range busy {
-		if iv.Start.Before(endsAt) && iv.End.After(startsAt) {
-			return nil, fmt.Errorf(
-				"slot %s..%s conflicts with an existing busy interval %s..%s; re-run propose_slots and draft a free slot",
-				startsAt.Format(time.RFC3339), endsAt.Format(time.RFC3339),
-				iv.Start.Format(time.RFC3339), iv.End.Format(time.RFC3339))
-		}
-	}
-
-	// (2) Phase 1: reserve the id before the network call.
+	// (1)+(2) Pre-flight AND reservation, SERIALIZED in one transaction under
+	// a global advisory lock (codex finding, 2026-09-07): LoadBusy alone is an
+	// unlocked snapshot, so two overlapping bookings could both see a free
+	// slot and both reserve. Under the lock, allocation is one-at-a-time, and
+	// because an unconfirmed reservation is LoadBusy-visible
+	// (availability.loadReservations), the second booking SEES the first the
+	// moment its reserve commits. A pre-flight refusal rolls the whole
+	// transaction back, leaving the row approved and otherwise untouched
+	// (criterion 19) — and the LoadBusy error still propagates VERBATIM so it
+	// reads exactly like a propose_slots refusal.
 	var (
 		accountID int64
 		eventID   string
 		extID     string
 	)
 	err = inTx(ctx, pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, calendarBookingLock); err != nil {
+			return fmt.Errorf("acquire calendar booking lock: %w", err)
+		}
+		_, maxSyncAge, err := availabilityConfig()
+		if err != nil {
+			return err
+		}
+		busy, err := availability.LoadBusy(ctx, pool, availability.Request{
+			WindowStart:   startsAt,
+			WindowEnd:     endsAt,
+			Now:           time.Now(),
+			MaxSyncAge:    maxSyncAge,
+			HorizonPast:   google.CalendarWindowPast,
+			HorizonFuture: google.CalendarWindowFuture,
+		})
+		if err != nil {
+			return err // VERBATIM: it must read exactly like a propose_slots refusal
+		}
+		for _, iv := range busy {
+			if iv.Start.Before(endsAt) && iv.End.After(startsAt) {
+				return fmt.Errorf(
+					"slot %s..%s conflicts with an existing busy interval %s..%s; re-run propose_slots and draft a free slot",
+					startsAt.Format(time.RFC3339), endsAt.Format(time.RFC3339),
+					iv.Start.Format(time.RFC3339), iv.End.Format(time.RFC3339))
+			}
+		}
+
 		var txStatus string
 		var txExtID *string
 		var txApprovalSource *string
