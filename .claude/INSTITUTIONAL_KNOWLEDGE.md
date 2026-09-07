@@ -1182,3 +1182,12 @@ STOPPED AND DISABLED — do not resurrect it for a "quick run"; point at the z4.
 Always the IP literal: the locality boundary does no DNS, a hostname is
 LocalityRemote and every message gets skipped. Requests queue serially — fine
 for CronJobs and evals, not for anything interactive.
+
+Update 2026-09-07: the RX 570 hard-crashes the node under sustained STOCK
+power load (~3-minute windows; ground-bond and slot theories both dead —
+the Z4 won't POST without the P400, so the layout is fixed). **The 90 W
+power cap is the steady state** and has never failed (137 production
+verdicts + real-shaped soaks). Cost: ~10 s/verdict on production messages
+(9.3 s stock). If the endpoint connection-refuses mid-pass, timestamp it to
+the kube session — that is hardware, not software, and stock power is not
+to be re-enabled for a "quick run".
