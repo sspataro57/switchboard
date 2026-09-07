@@ -86,6 +86,11 @@ type Config struct {
 	// file and resume past finished ids on restart (removed on success). The
 	// worker's run path never reads it.
 	EvalCheckpoint string
+	// Think/NumCtx are the 2026-09-07 A/B experiment knob (default off; see
+	// provider.Request.Think). Set together with a raised MaxTokens — cmd's
+	// --think flag is the only place that does.
+	Think  bool
+	NumCtx int
 }
 
 // NeighbourClass is one thread neighbour's attribution, for the most-restrictive
@@ -264,6 +269,8 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 			SchemaName: SchemaName,
 			Schema:     VerdictSchema,
 			MaxTokens:  cfg.MaxTokens,
+			Think:      cfg.Think,
+			NumCtx:     cfg.NumCtx,
 		})
 
 		var v verdict

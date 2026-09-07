@@ -17,6 +17,17 @@ type Request struct {
 	SchemaName string          // json_schema name, e.g. "triage_extraction"
 	Schema     json.RawMessage // strict JSON Schema
 	MaxTokens  int
+	// Think is the 2026-09-07 A/B experiment knob: DEFAULT FALSE, and the
+	// zero value produces wire bytes identical to before the field existed
+	// (ollama's `think` key is not omitempty, so false is still sent
+	// explicitly). Enabling it without a raised MaxTokens reproduces the
+	// measured 0.00-score regression — see ollama.go's thinking note. Only
+	// the ollama adapter reads it; hosted adapters ignore it.
+	Think bool
+	// NumCtx overrides ollama's context window (0 = server default). Only
+	// meaningful with Think, whose ~1k reasoning tokens can push a long email
+	// past the default 4096 and silently truncate the prompt.
+	NumCtx int
 }
 
 // Response is the provider-neutral result.

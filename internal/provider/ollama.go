@@ -169,6 +169,10 @@ type olOptions struct {
 	// NOT omitempty: 0 is the value we mean, and omitempty would drop it and
 	// restore the 0.8 default with a struct that reads as if it pinned it.
 	Temperature float64 `json:"temperature"`
+	// NumCtx raises the context window for the Think experiment (omitempty:
+	// absent means the server's own default, which IS what non-think requests
+	// mean).
+	NumCtx int `json:"num_ctx,omitempty"`
 }
 
 // olRequest is the native /api/chat request.
@@ -220,10 +224,16 @@ func (o *Ollama) Complete(ctx context.Context, req Request) (Response, error) {
 		// envelope. The adapter does not own, rewrite or synthesize a schema;
 		// internal/classify does.
 		Format:    req.Schema,
-		Options:   olOptions{NumPredict: req.MaxTokens, Temperature: 0},
+		Options:   olOptions{NumPredict: req.MaxTokens, Temperature: 0, NumCtx: req.NumCtx},
 		KeepAlive: o.keepAlive,
-		Think:     false,
-		Stream:    false,
+		// Think comes from the request since the 2026-09-07 A/B knob, and its
+		// DEFAULT is still false: Request.Think zero-value + this field's
+		// non-omitempty tag keep the wire bytes byte-identical to the pinned
+		// behaviour. Nothing in production sets it — only `classify eval
+		// --think` does, with MaxTokens raised, because think:true at a 512
+		// budget reproduces the 0.00-score regression documented below.
+		Think:  req.Think,
+		Stream: false,
 	}
 
 	raw, err := json.Marshal(body)

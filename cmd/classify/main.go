@@ -188,6 +188,9 @@ func evalCmd(argv []string) error {
 		"the hand-checked labelled set (default: the lane's own fixture)")
 	ckptPath := fs.String("checkpoint", "",
 		"progress file: verdicts append here and a rerun resumes past them (default: <labels>.progress; removed on success)")
+	think := fs.Bool("think", false,
+		"A/B EXPERIMENT: enable model thinking (raises MaxTokens to 1536 and num_ctx to 8192; ~4-5x slower). "+
+			"Use a DEDICATED --checkpoint — resuming a think run from a non-think progress file mixes verdicts silently")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -230,8 +233,14 @@ func evalCmd(argv []string) error {
 	// note there. Eval prints the model the server reports, which is the truthful
 	// answer to "what was this number measured on".
 	router, model := buildRouter()
-	return classify.Eval(ctx, classify.NewStore(pool), router,
-		classify.Config{Model: model, MaxTokens: 512, Lane: lane, EvalCheckpoint: *ckptPath}, labels, os.Stdout)
+	cfg := classify.Config{Model: model, MaxTokens: 512, Lane: lane, EvalCheckpoint: *ckptPath}
+	if *think {
+		// The experiment shape: enough output budget that the answer survives
+		// the ~1k reasoning tokens (think at 512 reproduces the measured
+		// 0.00-score regression), and a window the reasoning cannot overflow.
+		cfg.Think, cfg.MaxTokens, cfg.NumCtx = true, 1536, 8192
+	}
+	return classify.Eval(ctx, classify.NewStore(pool), router, cfg, labels, os.Stdout)
 }
 
 // loadLabels reads the JSONL fixture. It refuses a line carrying message

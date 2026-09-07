@@ -240,6 +240,40 @@ func TestOllama_EveryRequestDisablesThinkingAndStreaming(t *testing.T) {
 	}
 }
 
+// The 2026-09-07 opt-in: Request.Think passes through, and NumCtx rides in
+// options. The DEFAULT stays pinned false by the test above (its fixture never
+// sets Think), so this pair of tests together says: false unless a caller
+// explicitly opts in, and the opt-in actually reaches the wire.
+func TestOllama_ThinkOptInPassesThrough(t *testing.T) {
+	rec := &olRecorder{models: []string{olModel}}
+	srv := httptest.NewServer(rec.handler())
+	defer srv.Close()
+
+	c := provider.NewOllama(srv.URL, olModel)
+	req := olRequest()
+	req.Think = true
+	req.NumCtx = 8192
+	if _, err := c.Complete(context.Background(), req); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	body := rec.lastBody(t)
+	var think bool
+	if err := json.Unmarshal(body["think"], &think); err != nil || !think {
+		t.Errorf("Request.Think=true did not reach the wire (think=%s): the A/B eval would silently "+
+			"measure think:false twice and report a no-difference result that means nothing", body["think"])
+	}
+	var opts struct {
+		NumCtx int `json:"num_ctx"`
+	}
+	if err := json.Unmarshal(body["options"], &opts); err != nil {
+		t.Fatalf("options: %v (%s)", err, body["options"])
+	}
+	if opts.NumCtx != 8192 {
+		t.Errorf("options.num_ctx = %d, want 8192: without it a long email plus ~1k reasoning tokens "+
+			"overflows the default 4096 window and the prompt is silently truncated", opts.NumCtx)
+	}
+}
+
 // ---- criterion 4: format, options, keep_alive -------------------------------
 
 func TestOllama_RequestCarriesSchemaOptionsAndKeepAlive(t *testing.T) {

@@ -216,7 +216,9 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 			User:       renderUser(m),
 			SchemaName: SchemaName,
 			Schema:     VerdictSchema,
-			MaxTokens:  512,
+			MaxTokens:  cfg.MaxTokens,
+			Think:      cfg.Think,
+			NumCtx:     cfg.NumCtx,
 		}
 		resp, err := lane.Complete(ctx, req)
 		if err != nil && ctx.Err() == nil {
