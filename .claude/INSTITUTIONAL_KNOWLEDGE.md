@@ -1183,6 +1183,14 @@ Always the IP literal: the locality boundary does no DNS, a hostname is
 LocalityRemote and every message gets skipped. Requests queue serially — fine
 for CronJobs and evals, not for anything interactive.
 
+Thinking measured 2026-09-07 (the A/B the eval harness exists for): qwen3:8b
+with think:true, 2048 budget, 8k ctx scored **recall 0.57 / precision 0.67 /
+31s median** on the personal labels vs 0.94 / 0.50 / ~10s at think:false —
+the model deliberates itself OUT of flagging Rx, appointment and fraud
+notices, and 4 of 280 messages exhausted the whole budget reasoning.
+`classify eval --think` stays available for future models; for qwen3:8b the
+question is CLOSED with data. Do not re-enable thinking without a new eval.
+
 Update 2026-09-07: the RX 570 hard-crashes the node under sustained STOCK
 power load (~3-minute windows; ground-bond and slot theories both dead —
 the Z4 won't POST without the P400, so the layout is fixed). **The 90 W

@@ -225,6 +225,19 @@ file is safe to commit while the mail never leaves the machine.
 | 2026-08-30 | 280 | 35         | 0.83   | 0.58      | 6.3 s          | qwen3:8b |
 | 2026-08-31 | 280 | 35         | 0.94   | 0.50      | 7.2 s          | qwen3:8b |
 | 2026-09-02 | 874 | 34         | 0.59   | 0.28      | 11.9 s         | qwen3:8b |
+| 2026-09-07 | 280 | 35         | 0.57   | 0.67      | 31.3 s         | qwen3:8b (think:true) |
+
+The 2026-09-07 row is the THINKING A/B (`eval --think`: think:true, 2048-token
+budget, 8k ctx — the knob exists exactly for this measurement) on the same 280
+personal labels as the 2026-08-31 baseline row above it. The verdict is
+decisive and closes the question for qwen3:8b: recall COLLAPSED 0.94 → 0.57 at
+3× the latency — the model deliberates itself out of flagging Rx refills,
+appointment reminders and fraud alerts, and 4 of 280 messages exhausted the
+entire 2048 budget reasoning and scored as forced misses (the harness records
+those as `ErrIncomplete`, latency 0, rather than aborting). Precision rose
+(0.50 → 0.67) because thinking flags less of everything — the wrong trade on a
+lane whose objective section above says recall, in bold. `think: false` stays;
+re-open only with a NEW model and a new eval, never by intuition.
 
 The 2026-09-02 row is the RESIDUE lane (SWT-23), scored over the stratified
 874-label set — read it with the strata semantics, not like the personal rows
