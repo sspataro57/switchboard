@@ -1155,6 +1155,14 @@ When you discover a new landmine, fix a known one, or change a convention:
   (`PGSink.RecordOwnCalendarEvent`, best-effort) — without it propose_slots
   re-offers the just-booked slot for up to 20 minutes and the auto tier
   double-books itself.
+- **Landmine (found by the live smoke, 2026-09-07): a hook on Normalize never
+  fires for our own writes.** The send-time record stamps `normalized_at`, so
+  the next poll's content_hash short-circuit means Normalize never revisits
+  the row — a confirm hook there is absent-because-impossible, with no error
+  anywhere. Loop closure for self-written rows must key on the poll's
+  OBSERVATION (`ConfirmObservedCalendarDeliveries`, called per verified
+  snapshot), not on re-normalization. Same family as the two recorded
+  absent-field traps: the quiet path is the one that never runs.
 
 ### The local classify lane runs on the z4 (2026-09-06)
 

@@ -570,6 +570,10 @@ Existing (paths verified):
   — show `starts_at`/`ends_at` for calendar rows, so a human reviewing what was
   booked can see WHEN. Minimal: one extra column, rendered only when non-null.
   Under the auto tier this is the review surface, not an approval surface.
+  *(Amended 2026-09-07: the template also gained a Book button on approved
+  calendar rows, posting to the existing `/deliveries/{id}/send` route — the
+  human two-step of criterion 17, still behind the human-only `send_delivery`
+  gate. Review flagged it as beyond this note; kept deliberately.)*
 - `migrations/0020_calendar_booking.sql` — **new**.
 - `docs/runbooks/calendar-availability.md` — a new section, "Booking an own
   block (SWT-28)": the workflow edit, the `calendar_write_enabled` flip, reading

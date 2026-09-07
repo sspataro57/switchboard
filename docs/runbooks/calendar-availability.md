@@ -203,6 +203,15 @@ row would trust the third-party workflow's 409 handling. The row goes
 `failed`; recovery is the next read poll (which confirms the block if it
 landed) or a NEW draft. The delivery row is the audit trail; don't recycle it.
 
+**Two known transient windows, both self-healing at the next `*/20` poll**:
+(1) if the `delivery_sent` event insert fails right after a successful send,
+the handler has already recorded the block into the busy set — but if the
+BUSY-SET record itself fails, `propose_slots` can re-offer the just-booked
+slot until the next poll (the handler emits a `log` task_event and returns
+`busy_set_pending: true`); (2) a read poll whose snapshot was fetched
+*before* the booking landed will supersede the just-written raw row, dropping
+the block from the busy set until the following poll observes it.
+
 **Stopping an unattended booker**: `opsctl call --tool set_sending_frozen
 --args '{"frozen":true}'` — the kill switch is the ONE brake that reaches the
 auto verb (it is not behind a human gate). Undoing a booked block is a

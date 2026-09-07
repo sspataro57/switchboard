@@ -193,15 +193,16 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 	err = inTx(ctx, pool, func(tx pgx.Tx) error {
 		var txStatus string
 		var txExtID *string
+		var txApprovalSource *string
 		var txFromAcct *int64
 		var writeEnabled *bool
 		var accountEmail string
 		if err := tx.QueryRow(ctx,
-			`SELECT d.status, d.sent_external_id, d.from_account_id, a.calendar_write_enabled,
-			        COALESCE(a.account_email,'')
+			`SELECT d.status, d.sent_external_id, d.approval_source, d.from_account_id,
+			        a.calendar_write_enabled, COALESCE(a.account_email,'')
 			   FROM deliveries d LEFT JOIN source_accounts a ON a.id = d.from_account_id
 			  WHERE d.id=$1 FOR UPDATE OF d`, deliveryID).
-			Scan(&txStatus, &txExtID, &txFromAcct, &writeEnabled, &accountEmail); err != nil {
+			Scan(&txStatus, &txExtID, &txApprovalSource, &txFromAcct, &writeEnabled, &accountEmail); err != nil {
 			return fmt.Errorf("lock delivery %d: %w", deliveryID, err)
 		}
 		if txExtID != nil {
@@ -209,6 +210,13 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 		}
 		if txStatus != "approved" {
 			return fmt.Errorf("delivery %d is %s; only approved deliveries send", deliveryID, txStatus)
+		}
+		if txApprovalSource == nil || *txApprovalSource != "switchboard" {
+			// Criterion 20: the write route is unreachable except from a row
+			// whose gate is KNOWN (sendSlackReply's rule) — today only two
+			// statements write 'approved' and both stamp 'switchboard', but
+			// that property must be checked here, not assumed.
+			return fmt.Errorf("delivery %d is approved but its approval_source is not 'switchboard'; refusing to send a row whose gate is unknown", deliveryID)
 		}
 		if txFromAcct == nil || accountEmail == "" {
 			return fmt.Errorf("delivery %d has no from account", deliveryID)
@@ -262,11 +270,6 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 		deliveryID); err != nil {
 		return nil, fmt.Errorf("finalize sent: %w", err)
 	}
-	// The channel key is LOAD-BEARING: R8's calendar skip (criterion 29) reads it.
-	if _, err := insertTaskEvent(ctx, pool, taskID, "delivery_sent",
-		map[string]any{"delivery_id": deliveryID, "channel": "calendar", "sent_external_id": extID}); err != nil {
-		return nil, err
-	}
 
 	// (4) The busy set learns about the block NOW, not at the next */20 poll
 	// (criterion 22) — without this, propose_slots keeps offering a slot
@@ -274,7 +277,9 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 	// double-booking loop. BEST-EFFORT (criterion 23): a failure here never
 	// changes the delivery's status and never touches deliveries.error (that
 	// column carries the reconcilers' fire-once markers); the next read poll
-	// heals it.
+	// heals it. Deliberately BEFORE the delivery_sent insert: if that insert
+	// errors, the handler returns — the busy set must already be current by
+	// then (go-reviewer finding, 2026-09-07).
 	busyPending := false
 	if err := google.NewPGSink(pool).RecordOwnCalendarEvent(ctx, accountID, resp.Event); err != nil {
 		busyPending = true
@@ -283,6 +288,12 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 			"message":     "calendar busy-set record failed; the block is live but invisible to propose_slots until the next read poll",
 			"error":       err.Error(),
 		})
+	}
+
+	// The channel key is LOAD-BEARING: R8's calendar skip (criterion 29) reads it.
+	if _, err := insertTaskEvent(ctx, pool, taskID, "delivery_sent",
+		map[string]any{"delivery_id": deliveryID, "channel": "calendar", "sent_external_id": extID}); err != nil {
+		return nil, err
 	}
 
 	result := map[string]any{"delivery_id": deliveryID, "status": "sent", "sent_external_id": extID}
