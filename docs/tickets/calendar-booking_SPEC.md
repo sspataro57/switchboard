@@ -372,8 +372,13 @@ Numbered; each is testable.
     supersede a raw row matching an unconfirmed calendar delivery of the same
     account. Residual accepted risk: concurrent bookings can overshoot the
     hourly rate limit by the number in flight (the limit is a volume brake,
-    not a quota), and a block hand-deleted before its first observing poll
-    stays reserved until an operator intervenes (over-busy direction).
+    not a quota); a block hand-deleted before its first observing poll
+    stays reserved until an operator intervenes (over-busy direction); and
+    the allocation transaction holds a pool connection plus the advisory
+    lock while LoadBusy acquires a second connection, so >= MaxConns
+    simultaneous bookings could stall — bounded by a 30-second deadline on
+    the whole send (a clean timeout that leaves the row approved and
+    retryable) rather than restructured (delta review F1, accepted).
 20. **Phase 1 (tx), the gmail shape verbatim.** Lock the row `FOR UPDATE`;
     refuse if `sent_external_id` is present ("never resend (invariant 4)"); refuse
     unless `status='approved'`; refuse unless `approval_source='switchboard'`;

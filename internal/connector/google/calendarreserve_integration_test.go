@@ -227,6 +227,52 @@ func TestLoadBusy_Integration_UnconfirmedBookingReservesItsSlot(t *testing.T) {
 			"first observing poll", deliveryID, busy)
 	}
 
+	// The NEGATIVE half (delta review F6): a draft with no reserved id must
+	// NOT hold its slot — a refused booking's own row would otherwise block
+	// its retry — and an out-of-scope account's booking must not reach
+	// availability at all.
+	draftStart := start.Add(3 * time.Hour)
+	draftEnd := draftStart.Add(15 * time.Minute)
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO deliveries (task_id, channel, target_ref, subject, body, status,
+		                          from_account_id, starts_at, ends_at, created_by)
+		 VALUES ($1,'calendar',$2,'Draft block','reserved','drafted',$3,$4,$5,'itest-calresv')`,
+		f.taskID, calResvAcct, f.accountID, draftStart, draftEnd); err != nil {
+		t.Fatalf("seed drafted delivery: %v", err)
+	}
+	var outAcct int64
+	if err := f.pool.QueryRow(ctx,
+		`INSERT INTO source_accounts (provider, account_email, calendar_in_availability, calendar_write_enabled)
+		 VALUES ('google', $1, false, true) RETURNING id`, "itest-calresv-out@example.com").Scan(&outAcct); err != nil {
+		t.Fatalf("seed out-of-scope account: %v", err)
+	}
+	outStart := start.Add(5 * time.Hour)
+	outEnd := outStart.Add(15 * time.Minute)
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO deliveries (task_id, channel, target_ref, subject, body, status, approval_source,
+		                          from_account_id, starts_at, ends_at, sent_external_id, sent_at, created_by)
+		 VALUES ($1,'calendar','itest-calresv-out@example.com','Out block','reserved','sent','switchboard',
+		         $2,$3,$4,$5, now(),'itest-calresv')`,
+		f.taskID, outAcct, outStart, outEnd, CalendarExternalID("itestcalresvout")); err != nil {
+		t.Fatalf("seed out-of-scope booked delivery: %v", err)
+	}
+	wideReq := req
+	wideReq.WindowEnd = outEnd.Add(time.Hour)
+	busy, err = availability.LoadBusy(ctx, f.pool, wideReq)
+	if err != nil {
+		t.Fatalf("LoadBusy (negatives): %v", err)
+	}
+	for _, iv := range busy {
+		if iv.Start.Before(draftEnd) && iv.End.After(draftStart) {
+			t.Fatalf("a DRAFTED calendar row with no sent_external_id reserves %s..%s — a refused booking "+
+				"would block its own retry", draftStart.Format(time.RFC3339), draftEnd.Format(time.RFC3339))
+		}
+		if iv.Start.Before(outEnd) && iv.End.After(outStart) {
+			t.Fatalf("an OUT-OF-SCOPE account's booking reserves %s..%s; loadReservations must join on "+
+				"calendar_in_availability", outStart.Format(time.RFC3339), outEnd.Format(time.RFC3339))
+		}
+	}
+
 	// Confirmed and still with no normalized event (the hand-deleted case):
 	// the reservation lifts and the slot frees.
 	if _, err := f.pool.Exec(ctx,

@@ -202,6 +202,12 @@ gmail's definite-rejection path: the send may have landed, and reopening the
 row would trust the third-party workflow's 409 handling. The row goes
 `failed`; recovery is the next read poll (which confirms the block if it
 landed) or a NEW draft. The delivery row is the audit trail; don't recycle it.
+Note the interaction with reservations (next section): a failed-with-id row
+RESERVES its interval, so a new draft for the SAME slot is refused with the
+overlap message until a poll settles the row or you stamp it with the escape
+below. An operator stamp stays distinguishable from a real observation in
+the audit trail: a poll-confirmed delivery has a `delivery_confirmed`
+task_event, a hand-stamped one has none.
 
 **Concurrency (post-codex, 2026-09-07)**: slot allocation is serialized under
 a global advisory lock and an UNCONFIRMED booking is itself part of the busy

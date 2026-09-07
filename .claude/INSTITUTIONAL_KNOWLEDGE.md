@@ -1155,6 +1155,13 @@ When you discover a new landmine, fix a known one, or change a convention:
   (`PGSink.RecordOwnCalendarEvent`, best-effort) — without it propose_slots
   re-offers the just-booked slot for up to 20 minutes and the auto tier
   double-books itself.
+- Latent trap (delta review F4): only the PIPEDREAM poll runs the
+  observation sweep. Under CAL_SOURCE=bridge/oauth a booked block can never
+  confirm (the send-time record short-circuits the content hash), so its
+  reservation and supersede fence become PERMANENT for that account. Fine
+  while the production calendar transport is pipedream; rolling the
+  transport back with calendar bookings outstanding needs the operator
+  confirmed_at stamp (runbook) or a sweep port first.
 - **Landmine (found by the live smoke, 2026-09-07): a hook on Normalize never
   fires for our own writes.** The send-time record stamps `normalized_at`, so
   the next poll's content_hash short-circuit means Normalize never revisits

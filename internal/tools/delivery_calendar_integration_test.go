@@ -49,6 +49,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,6 +92,12 @@ const (
 type fakeCalendarBooker struct {
 	pool *pgxpool.Pool
 
+	// mu keeps the recorded fields race-clean: the concurrent-booking test
+	// drives two goroutines, and although exactly one is supposed to reach
+	// the write route, a regression of that very property must fail with the
+	// crafted "want exactly 1" message — not a -race abort (delta review F5).
+	mu sync.Mutex
+
 	calls   int
 	lastReq google.CreateEventRequest
 
@@ -103,6 +110,8 @@ type fakeCalendarBooker struct {
 }
 
 func (f *fakeCalendarBooker) CreateEvent(ctx context.Context, req google.CreateEventRequest) (google.CreateEventResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
 	f.lastReq = req
 	_ = f.pool.QueryRow(ctx,

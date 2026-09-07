@@ -48,7 +48,11 @@ var calendarBooker CalendarBooker
 // two different accounts still double-book the same human. Bookings are rare
 // (10/hour cap) and the lock spans only the pre-flight + reserve transaction
 // — never the network call.
-const calendarBookingLock = int64(0x53575432380001)
+// A member of the repo's 0x5157_00NN advisory-key family; uniqueness is
+// enforced repo-wide by classify/structure_test.go's collision scan, which
+// greps for key SPELLINGS — which is why the other members are deliberately
+// not listed here.
+const calendarBookingLock = int64(0x5157_0028)
 
 // SetCalendarBooker wires the Pipedream calendar write adapter (the
 // NewDeliveryBridgeFromEnv shape: a construction error is fatal at wiring
@@ -138,6 +142,17 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 	if calendarBooker == nil {
 		return nil, fmt.Errorf("no calendar booking adapter wired (SetCalendarBooker; is PIPEDREAM_CALENDAR_URL configured?)")
 	}
+
+	// Bound the WHOLE booking (delta-review F1): the allocation transaction
+	// holds a pool connection plus the advisory lock while LoadBusy acquires
+	// a SECOND connection from the same pool — hold-one-acquire-another. With
+	// >= MaxConns simultaneous bookings the lock winner could stall waiting
+	// for a connection the blocked losers hold, and the ops-mcp path carries
+	// no per-call deadline of its own. This bound turns that stall into a
+	// clean timeout that leaves the row approved and retryable. Residual risk
+	// recorded in the SPEC's §E amendment.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 
 	// A plain read: nothing may be locked or mutated before the pre-flight.
 	var (
