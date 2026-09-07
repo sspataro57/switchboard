@@ -141,10 +141,16 @@ visible in its execution logs under its retention — chosen deliberately
 (2026-09-05) to keep the morning-brief door open; the intervals-only
 alternative remains a workflow edit away.
 
-**Kube handoff** (the kube session's job, sibling repo): CronJob
-`connector-gcal`, args `[--calendar-only]`, env `CAL_SOURCE=pipedream` +
-`DATABASE_URL` + the `switchboard-pipedream` secret (`--from-file`, per the
-recorded landmine), schedule `*/20` — the poll period must stay under half
+**Kube side (DEPLOYED 2026-09-06, suspended until the secret exists)**:
+CronJob `connector-gcal` in ops, image switchboard:0.7.0, args
+`[--calendar-only]`, `CAL_SOURCE=pipedream`, schedule `*/20`,
+`concurrencyPolicy: Forbid`. The secret it waits on is
+**`secret/switchboard-pipedream`** with two keys: `PIPEDREAM_CALENDAR_URL`
+(injected as the env var of the same name) and `calendar_token` (mounted
+read-only at `/etc/switchboard/pipedream/calendar_token`, pointed at by
+`PIPEDREAM_CALENDAR_TOKEN_FILE`). Create it with `--from-file` (per the
+recorded landmine), then `kubectl -n ops patch cronjob connector-gcal -p
+'{"spec":{"suspend":false}}'` — the poll period must stay under half
 `AVAIL_MAX_SYNC_AGE` (1h default), and check Pipedream's free-tier invocation
 allowance (~72/day at `*/20`) before scheduling. Don't ALSO run the mail
 one-shot with `CAL_SOURCE=pipedream` or invocations double; production mail
