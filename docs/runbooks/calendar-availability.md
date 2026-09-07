@@ -141,6 +141,11 @@ visible in its execution logs under its retention — chosen deliberately
 (2026-09-05) to keep the morning-brief door open; the intervals-only
 alternative remains a workflow edit away.
 
+**Status**: the workflow went live 2026-09-07 — `switchboard-calendar` v14 in
+project stealth-fun-natural, all three accounts connected, bad-token 401
+verified. First E2E from the workstation ingested 173 events across the three
+calendars and `propose_slots` answered for the first time.
+
 **Kube side (DEPLOYED 2026-09-06, suspended until the secret exists)**:
 CronJob `connector-gcal` in ops, image switchboard:0.7.0, args
 `[--calendar-only]`, `CAL_SOURCE=pipedream`, schedule `*/20`,
