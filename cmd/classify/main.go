@@ -189,7 +189,7 @@ func evalCmd(argv []string) error {
 	ckptPath := fs.String("checkpoint", "",
 		"progress file: verdicts append here and a rerun resumes past them (default: <labels>.progress; removed on success)")
 	think := fs.Bool("think", false,
-		"A/B EXPERIMENT: enable model thinking (raises MaxTokens to 4096 and num_ctx to 8192; ~4-5x slower). "+
+		"A/B EXPERIMENT: enable model thinking (raises MaxTokens to 2048 and num_ctx to 8192; ~4-5x slower). "+
 			"Use a DEDICATED --checkpoint — resuming a think run from a non-think progress file mixes verdicts silently")
 	if err := fs.Parse(argv); err != nil {
 		return err
@@ -235,13 +235,17 @@ func evalCmd(argv []string) error {
 	router, model := buildRouter()
 	cfg := classify.Config{Model: model, MaxTokens: 512, Lane: lane, EvalCheckpoint: *ckptPath}
 	if *think {
-		// The experiment shape: enough output budget that the answer survives
-		// the reasoning (think at 512 reproduces the measured 0.00-score
-		// regression, and 1536 was exhausted by a real message on the first
-		// run — thinking length is unbounded), and a window the reasoning
-		// cannot overflow. A message that out-thinks even 4096 scores as a
-		// miss (provider.ErrIncomplete) instead of aborting the batch.
-		cfg.Think, cfg.MaxTokens, cfg.NumCtx = true, 4096, 8192
+		// The experiment shape, sized by TWO ceilings. 512 reproduces the
+		// measured 0.00-score regression and 1536 was exhausted by a real
+		// message — thinking length is unbounded. But the budget must also
+		// finish inside the adapter's 120s client timeout (~40 gen tok/s at
+		// the z4's 90W cap): 4096 did not — the same message then died as a
+		// client timeout, which the eval treats as transport and aborts on.
+		// 2048 generates in ~70s worst case, safely inside the timeout, so an
+		// over-thinker hits num_predict, comes back as provider.ErrIncomplete,
+		// and SCORES as a miss — the honest outcome, since >2048 tokens of
+		// deliberation per email is not a viable production configuration.
+		cfg.Think, cfg.MaxTokens, cfg.NumCtx = true, 2048, 8192
 	}
 	return classify.Eval(ctx, classify.NewStore(pool), router, cfg, labels, os.Stdout)
 }
