@@ -130,9 +130,9 @@ func TestGitShowsNoChangeUnderInternalAvailability(t *testing.T) {
 			// demanded by calendarsyncstates_test.go's doc assertion.
 			continue
 		}
-		t.Errorf("this branch changes %s under internal/availability. Only store.go carries a recorded "+
-			"amendment (SWT-28 reservations); the readiness contract and its SWT-24 suites are inherited "+
-			"untouched — an edit anywhere else is a change to the fail-closed reader nobody has argued for",
-			changed)
+		t.Errorf("this branch changes %s under internal/availability. Only store.go and availability.go "+
+			"carry recorded amendments (SWT-28 reservations; SWT-29 export + doc), and _test.go files are "+
+			"assertions rather than contract; an edit anywhere else is a change to the fail-closed reader "+
+			"nobody has argued for", changed)
 	}
 }

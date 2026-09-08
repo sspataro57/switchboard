@@ -306,7 +306,7 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 			// renders a column of zeros, for the same reason fillDays renders
 			// empty days — absence is the signal (go-reviewer finding 3).
 			acctRows, err := s.pool.Query(ctx,
-				`SELECT account_email FROM source_accounts ORDER BY provider, account_email`)
+				`SELECT DISTINCT account_email FROM source_accounts ORDER BY account_email`)
 			if err != nil {
 				return fmt.Errorf("list intake accounts: %w", err)
 			}
