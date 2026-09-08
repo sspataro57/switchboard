@@ -157,7 +157,19 @@ read-only at `/etc/switchboard/pipedream/calendar_token`, pointed at by
 recorded landmine), then `kubectl -n ops patch cronjob connector-gcal -p
 '{"spec":{"suspend":false}}'` — the poll period must stay under half
 `AVAIL_MAX_SYNC_AGE` (1h default), and check Pipedream's free-tier invocation
-allowance (~72/day at `*/20`) before scheduling. Don't ALSO run the mail
+allowance (~72/day at `*/20`) before scheduling.
+
+**Quota incident (2026-09-08)**: the free tier ran dry mid-morning at `*/20`
+(~90 invocations/24h plus manual runs) — the workflow returns errors and
+`propose_slots` fail-closes until the quota resets, which is the designed
+behaviour, not an outage to debug. Decision (Salvador, no paid plan): cadence
+lowered to **hourly** (`0 * * * *`, 24/day) with `AVAIL_MAX_SYNC_AGE=150m`
+everywhere availability is served (cluster env + `~/.bashrc` for local
+opsctl) — the freshness gate must stay at least 2× the poll interval. Cost:
+calendar data and the busy set can be up to ~1h stale, and a booked block's
+loop closure waits up to an hour for its observing poll. Tighten back toward
+`*/30` only after reading the real credits-per-invocation off Pipedream's
+usage page. Don't ALSO run the mail
 one-shot with `CAL_SOURCE=pipedream` or invocations double; production mail
 runs in the watch loop, which has no calendar phase.
 
