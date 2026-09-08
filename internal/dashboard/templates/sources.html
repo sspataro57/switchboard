@@ -24,7 +24,7 @@
 </head>
 <body>
   <nav><a href="/tasks">Board</a> <a href="/plans">Plans</a> <a href="/briefs">Briefs</a>
-    <a href="/deliveries">Deliveries</a> <a href="/sources">Sources</a></nav>
+    <a href="/deliveries">Deliveries</a> <a href="/sources">Sources</a> <a href="/funnel">Funnel</a></nav>
 
   <h1>Ingestion</h1>
 
@@ -38,7 +38,6 @@
   <table>
     <tr>
       <th>Provider</th><th>Account</th><th>Auth</th><th>Send</th>
-      <th>Last run</th><th>Status</th>
       <th class="num">Raw</th><th class="num">Pending</th>
       <th class="num">Msgs</th><th class="num">In</th><th class="num">Out</th>
       <th>Newest</th><th class="num">Trunc</th>
@@ -49,14 +48,6 @@
       <td>{{.Email}}</td>
       <td>{{.AuthType}}</td>
       <td>{{if .Enabled}}yes{{else}}<span class="muted">no</span>{{end}}</td>
-      <td>{{if .LastRunAt}}{{.LastRunAt}}<br><span class="muted">{{with .LastRunPhase}}{{.}} · {{end}}{{.RunsTotal}} runs</span>
-          {{else}}<span class="muted">never</span>{{end}}</td>
-      <td>
-        {{if eq .LastRunStatus "ok"}}<span class="ok">ok</span>
-        {{else if .LastRunStatus}}<span class="bad">{{.LastRunStatus}}</span>
-          {{if .LastRunError}}<br><span class="muted">{{.LastRunError}}</span>{{end}}
-        {{else}}<span class="muted">—</span>{{end}}
-      </td>
       <td class="num">{{.RawItems}}</td>
       <td class="num">{{if gt .RawPending 0}}<span class="warn">{{.RawPending}}</span>{{else}}0{{end}}</td>
       <td class="num">{{.Messages}}</td>
@@ -66,10 +57,11 @@
       <td class="num">{{if gt .Truncated 0}}<span class="warn">{{.Truncated}}</span>{{else}}0{{end}}</td>
     </tr>
     {{else}}
-    <tr><td colspan="13" class="muted">No source accounts. Add one with
+    <tr><td colspan="11" class="muted">No source accounts. Add one with
       <code>google-auth add-app-password &lt;email&gt;</code>.</td></tr>
     {{end}}
   </table>
+  <p class="muted">Runs and freshness live on <a href="/funnel">/funnel</a>.</p>
   <p class="muted">
     Pending counts raw rows with no <code>normalized_at</code> — a number that keeps
     climbing means ingestion is succeeding while normalization fails, which no other

@@ -111,7 +111,17 @@ func TestGitShowsNoChangeUnderInternalAvailability(t *testing.T) {
 	}
 	for _, changed := range strings.Fields(strings.TrimSpace(string(out))) {
 		if changed == "internal/availability/store.go" {
-			continue // SWT-28's loadReservations amendment — see the comment above.
+			// SWT-28's loadReservations amendment, and SWT-29's export of the
+			// account-states loader as CalendarSyncStates (same body, new
+			// name) — both recorded in their SPECs; the readiness rule itself
+			// is untouched.
+			continue
+		}
+		if changed == "internal/availability/availability.go" {
+			// SWT-29: AccountState's doc comment now names the loader that
+			// actually exists (CalendarSyncStates). A comment-only change,
+			// demanded by calendarsyncstates_test.go's doc assertion.
+			continue
 		}
 		t.Errorf("this branch changes %s under internal/availability. Only store.go carries a recorded "+
 			"amendment (SWT-28 reservations); the readiness contract and its SWT-24 suites are inherited "+

@@ -169,7 +169,9 @@ opsctl) — the freshness gate must stay at least 2× the poll interval. Cost:
 calendar data and the busy set can be up to ~1h stale, and a booked block's
 loop closure waits up to an hour for its observing poll. Tighten back toward
 `*/30` only after reading the real credits-per-invocation off Pipedream's
-usage page. Don't ALSO run the mail
+usage page. The calendar sync age — judged with the SAME `AVAIL_MAX_SYNC_AGE`
+and readiness predicate `propose_slots` uses — is visible on the dashboard's
+`/funnel` page (SWT-29), alongside every other connector's freshness. Don't ALSO run the mail
 one-shot with `CAL_SOURCE=pipedream` or invocations double; production mail
 runs in the watch loop, which has no calendar phase.
 

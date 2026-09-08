@@ -95,7 +95,8 @@ which no rule waits on.
 ## 4. Verify
 
 ```sql
--- per-account ingest health (or just open the dashboard's /sources page)
+-- per-account ingest health (or open the dashboard: /sources for stored
+-- totals, /funnel for runs and freshness — SWT-29 moved the run columns there)
 SELECT account_email, auth_type,
        (SELECT count(*) FROM raw_source_items r WHERE r.source_account_id=a.id) AS raw,
        (SELECT max(started_at) FROM sync_runs s WHERE s.source_account_id=a.id) AS last_run
