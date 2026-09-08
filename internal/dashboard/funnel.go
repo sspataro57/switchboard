@@ -19,7 +19,6 @@ package dashboard
 import (
 	"fmt"
 	"net/http"
-	"sort"
 	"strconv"
 	"time"
 
@@ -174,7 +173,7 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 			page.MaxAge = maxAge.String()
 			states, err := availability.CalendarSyncStates(ctx, s.pool)
 			if err != nil {
-				return err
+				return fmt.Errorf("calendar sync states: %w", err)
 			}
 			inScope := map[string]bool{}
 			for _, st := range states {
@@ -198,7 +197,7 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				              GROUP BY 1,2) wnd ON wnd.source_account_id = a.id AND wnd.phase = p.phase
 				 ORDER BY a.provider, a.account_email, p.phase NULLS FIRST`, days)
 			if err != nil {
-				return err
+				return fmt.Errorf("health query: %w", err)
 			}
 			defer rows.Close()
 			for rows.Next() {
@@ -206,7 +205,7 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				var phase *string
 				var lastOK *time.Time
 				if err := rows.Scan(&h.Provider, &h.Email, &phase, &lastOK, &h.Runs); err != nil {
-					return err
+					return fmt.Errorf("scan health row: %w", err)
 				}
 				name := "(none)"
 				if phase != nil && *phase != "" {
@@ -256,25 +255,25 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				 WHERE r.ingested_at >= now() - make_interval(days => $1)
 				 GROUP BY 1, 2`, days)
 			if err != nil {
-				return err
+				return fmt.Errorf("intake raw query: %w", err)
 			}
-			accounts := map[string]bool{}
+
 			for rows.Next() {
 				var day time.Time
 				var email string
 				var n int
 				if err := rows.Scan(&day, &email, &n); err != nil {
 					rows.Close()
-					return err
+					return fmt.Errorf("scan intake raw day: %w", err)
 				}
 				d := get(day)
 				d.PerAccount[email] += n
 				d.RawTotal += n
-				accounts[email] = true
+
 			}
 			rows.Close()
 			if err := rows.Err(); err != nil {
-				return err
+				return fmt.Errorf("iterate intake raw days: %w", err)
 			}
 			msgRows, err := s.pool.Query(ctx, `
 				SELECT created_at::date, count(*)
@@ -282,33 +281,48 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				 WHERE created_at >= now() - make_interval(days => $1)
 				 GROUP BY 1`, days)
 			if err != nil {
-				return err
+				return fmt.Errorf("intake message query: %w", err)
 			}
 			for msgRows.Next() {
 				var day time.Time
 				var n int
 				if err := msgRows.Scan(&day, &n); err != nil {
 					msgRows.Close()
-					return err
+					return fmt.Errorf("scan intake message day: %w", err)
 				}
 				get(day).Messages += n
 			}
 			msgRows.Close()
 			if err := msgRows.Err(); err != nil {
-				return err
+				return fmt.Errorf("iterate intake message days: %w", err)
 			}
 			flat := make([]intakeDay, 0, len(byDay))
 			for _, d := range byDay {
 				flat = append(flat, *d)
 			}
 			page.Intake = fillDays(flat, now, days)
-			for email := range accounts {
+			// EVERY account gets a column (criterion 7), not only the ones that
+			// ingested something in the window: a connector that went quiet
+			// renders a column of zeros, for the same reason fillDays renders
+			// empty days — absence is the signal (go-reviewer finding 3).
+			acctRows, err := s.pool.Query(ctx,
+				`SELECT account_email FROM source_accounts ORDER BY provider, account_email`)
+			if err != nil {
+				return fmt.Errorf("list intake accounts: %w", err)
+			}
+			for acctRows.Next() {
+				var email string
+				if err := acctRows.Scan(&email); err != nil {
+					acctRows.Close()
+					return fmt.Errorf("scan intake account: %w", err)
+				}
 				page.Accounts = append(page.Accounts, email)
 			}
-			sort.Strings(page.Accounts)
-			return nil
+			acctRows.Close()
+			return acctRows.Err()
 		}},
 		{Name: "capture attribution", Load: func() error {
+			// The seams wrap their own errors; runSections adds the section name.
 			trend, err := capture.AttributionTrend(ctx, s.pool, days)
 			if err != nil {
 				return err

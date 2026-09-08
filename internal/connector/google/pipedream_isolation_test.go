@@ -110,6 +110,13 @@ func TestGitShowsNoChangeUnderInternalAvailability(t *testing.T) {
 		t.Skipf("git diff failed: %v", err)
 	}
 	for _, changed := range strings.Fields(strings.TrimSpace(string(out))) {
+		if strings.HasSuffix(changed, "_test.go") {
+			// Tests under internal/availability GUARD the readiness contract
+			// rather than being it (callsites_test.go is the enforcement, and
+			// SWT-29 added calendarsyncstates_test.go). The seal protects the
+			// non-test sources; a new assertion file is not a contract change.
+			continue
+		}
 		if changed == "internal/availability/store.go" {
 			// SWT-28's loadReservations amendment, and SWT-29's export of the
 			// account-states loader as CalendarSyncStates (same body, new

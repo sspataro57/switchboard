@@ -35,7 +35,11 @@ func ReportForWorker(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since
 	}
 
 	var lines []string
-	for _, f := range s.Flags {
+	// allFlags, not Flags: the report prints EVERY flagged line, exactly as it
+	// did before the refactor — the 50-row cap is the PAGE's (criterion 13),
+	// and a residue window carries a thousand-plus flagged lines that a silent
+	// truncation would eat (go-reviewer finding, 2026-09-08).
+	for _, f := range s.allFlags {
 		// The resolved URL on every flagged line (SWT-25 criterion 22) — that
 		// is this ticket's usable-alone claim: a flagged notice is actionable
 		// from the report instead of sending the reader back to the mailbox.

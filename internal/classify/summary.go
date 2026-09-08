@@ -33,7 +33,14 @@ type Summary struct {
 	Skipped             int
 	ByAvailReason       map[string]int
 	ByClassReason       map[string]int
-	Flags               []Flag // newest first, capped at summaryFlagCap
+	Flags               []Flag // newest first, capped at summaryFlagCap (the page's list)
+	// allFlags is EVERY flagged verdict, uncapped. The CLI report renders all
+	// of them — its text is byte-identical to the pre-refactor output
+	// (criterion 12), and a residue window can carry a thousand-plus flagged
+	// lines that a silent 50-row truncation would eat. Unexported on purpose:
+	// the dashboard gets the capped list, the in-package renderer gets the
+	// truth.
+	allFlags []Flag
 }
 
 // Flag is one flagged verdict. Sender and subject come from the STORED
@@ -118,15 +125,17 @@ func Summarize(ctx context.Context, pool *pgxpool.Pool, since time.Duration, wor
 			continue
 		}
 		s.Flagged++
+		link := ""
+		if f.LinkURL != nil {
+			link = *f.LinkURL
+		}
+		fl := Flag{
+			At: createdAt, MessageID: f.MessageID, Kind: f.Kind,
+			Sender: f.Sender, Subject: f.Subject, Title: f.Title, LinkURL: link,
+		}
+		s.allFlags = append(s.allFlags, fl)
 		if len(s.Flags) < summaryFlagCap {
-			link := ""
-			if f.LinkURL != nil {
-				link = *f.LinkURL
-			}
-			s.Flags = append(s.Flags, Flag{
-				At: createdAt, MessageID: f.MessageID, Kind: f.Kind,
-				Sender: f.Sender, Subject: f.Subject, Title: f.Title, LinkURL: link,
-			})
+			s.Flags = append(s.Flags, fl)
 		}
 	}
 	if err := rows.Err(); err != nil {
