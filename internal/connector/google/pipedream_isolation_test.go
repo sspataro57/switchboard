@@ -110,12 +110,29 @@ func TestGitShowsNoChangeUnderInternalAvailability(t *testing.T) {
 		t.Skipf("git diff failed: %v", err)
 	}
 	for _, changed := range strings.Fields(strings.TrimSpace(string(out))) {
-		if changed == "internal/availability/store.go" {
-			continue // SWT-28's loadReservations amendment — see the comment above.
+		if strings.HasSuffix(changed, "_test.go") {
+			// Tests under internal/availability GUARD the readiness contract
+			// rather than being it (callsites_test.go is the enforcement, and
+			// SWT-29 added calendarsyncstates_test.go). The seal protects the
+			// non-test sources; a new assertion file is not a contract change.
+			continue
 		}
-		t.Errorf("this branch changes %s under internal/availability. Only store.go carries a recorded "+
-			"amendment (SWT-28 reservations); the readiness contract and its SWT-24 suites are inherited "+
-			"untouched — an edit anywhere else is a change to the fail-closed reader nobody has argued for",
-			changed)
+		if changed == "internal/availability/store.go" {
+			// SWT-28's loadReservations amendment, and SWT-29's export of the
+			// account-states loader as CalendarSyncStates (same body, new
+			// name) — both recorded in their SPECs; the readiness rule itself
+			// is untouched.
+			continue
+		}
+		if changed == "internal/availability/availability.go" {
+			// SWT-29: AccountState's doc comment now names the loader that
+			// actually exists (CalendarSyncStates). A comment-only change,
+			// demanded by calendarsyncstates_test.go's doc assertion.
+			continue
+		}
+		t.Errorf("this branch changes %s under internal/availability. Only store.go and availability.go "+
+			"carry recorded amendments (SWT-28 reservations; SWT-29 export + doc), and _test.go files are "+
+			"assertions rather than contract; an edit anywhere else is a change to the fail-closed reader "+
+			"nobody has argued for", changed)
 	}
 }

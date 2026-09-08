@@ -147,7 +147,7 @@ func overlapsAny(busy []Interval, start, end time.Time) bool {
 // AccountState is one in-scope calendar account and the last time a calendar
 // sync SUCCEEDED for it. Scope is source_accounts rows with provider='google'
 // AND calendar_in_availability (SWT-24 criterion 3); the SQL that produces
-// these lives in store.go (LoadAccountStates).
+// these lives in store.go (CalendarSyncStates).
 type AccountState struct {
 	AccountID        int64
 	Email            string

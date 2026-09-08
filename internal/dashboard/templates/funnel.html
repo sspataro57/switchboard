@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>switchboard — funnel</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    h1 { font-size: 1.3rem; }
+    h2 { font-size: 1rem; margin: 1.6rem 0 .4rem; }
+    h3 { font-size: .9rem; margin: 1rem 0 .3rem; }
+    nav a { margin-right: .8rem; }
+    table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+    th, td { border: 1px solid #e2e2e2; padding: .35rem .5rem; text-align: left; vertical-align: top; }
+    th { background: #f7f7f7; }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { color: #777; font-size: .8rem; }
+    .ok { color: #146c2b; }
+    .bad { color: #b00020; font-weight: 600; }
+    .warn { color: #8a6100; font-weight: 600; }
+    .headline { display: flex; gap: 2rem; margin: .8rem 0 1.2rem; }
+    .headline div { background: #f7f7f7; border: 1px solid #e2e2e2; padding: .5rem .9rem; }
+    .headline strong { display: block; font-size: 1.4rem; font-variant-numeric: tabular-nums; }
+    code { background: #f7f7f7; padding: 0 .2rem; }
+    ul.reasons { margin: .2rem 0 .6rem 1.2rem; padding: 0; font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <nav><a href="/tasks">Board</a> <a href="/plans">Plans</a> <a href="/briefs">Briefs</a>
+    <a href="/deliveries">Deliveries</a> <a href="/sources">Sources</a> <a href="/funnel">Funnel</a></nav>
+
+  <h1>Funnel</h1>
+  <p class="muted">Window: last {{.Days}} day(s) (<code>?days=N</code>, 1–90). Generated {{.Generated}}.
+    Read-only: this page executes nothing.</p>
+
+  {{range .Errors}}
+  <p class="bad">section failed — {{.}}</p>
+  {{end}}
+
+  <h2>Connector health</h2>
+  <table>
+    <tr><th>Provider</th><th>Account</th><th>Phase</th><th>Last successful sync</th><th>Age</th>
+      <th class="num">Runs (window)</th><th>State</th></tr>
+    {{range .Health}}
+    <tr>
+      <td>{{.Provider}}</td>
+      <td>{{.Email}}</td>
+      <td>{{.Phase}}</td>
+      <td>{{if .LastOK}}{{.LastOK}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td>{{.Age}}</td>
+      <td class="num">{{.Runs}}</td>
+      <td>{{if eq .Verdict "ok"}}<span class="ok">ok</span>
+          {{else if eq .Verdict "stale"}}<span class="bad">stale</span>
+          {{else}}<span class="warn">never</span>{{end}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="7" class="muted">No source accounts.</td></tr>
+    {{end}}
+  </table>
+  <p class="muted">
+    Last <em>successful</em> sync per account and phase — a connector failing every attempt shows
+    <code>never</code>, not its newest failure. <code>calendar</code> rows are judged by the system's own
+    rule: <code>AVAIL_MAX_SYNC_AGE</code> (currently <code>{{.MaxAge}}</code>), and
+    <code>propose_slots</code> refuses while any in-scope calendar account is stale — this page will
+    never show green where the tool refuses. Every other phase uses a display-only <code>3h</code>
+    threshold that gates nothing. The <code>(none)</code> phase groups runs that record no phase key
+    (jira and upworkcrm write none), and upwork's run count is twice its invocations — each run
+    writes two rows (ingest + normalize).
+  </p>
+
+  <h2>Intake trend</h2>
+  <table>
+    <tr><th>Day</th>{{range .Accounts}}<th class="num">{{.}}</th>{{end}}
+      <th class="num">Raw total</th><th class="num">Messages</th></tr>
+    {{range $row := .Intake}}
+    <tr>
+      <td>{{$row.Day.Format "2006-01-02"}}</td>
+      {{range $acct := $.Accounts}}<td class="num">{{index $row.PerAccount $acct}}</td>{{end}}
+      <td class="num">{{$row.RawTotal}}</td>
+      <td class="num">{{$row.Messages}}</td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted">
+    Both axes use the pipeline clock — <code>raw_source_items.ingested_at</code> and
+    <code>normalized_messages.created_at</code> — never <code>sent_at</code>: that is the provider's
+    clock, it answers a different question (when the mail was written), and a backfill would scatter
+    it across years. Days with nothing arriving render as zeros on purpose.
+  </p>
+
+  <h2>Capture attribution</h2>
+  <table>
+    <tr><th>Day</th><th class="num">Matched</th><th class="num">Unmatched</th>
+      <th class="num">Not yet evaluated</th></tr>
+    {{range .Capture}}
+    <tr>
+      <td>{{.Day.Format "2006-01-02"}}</td>
+      <td class="num">{{.Matched}}</td>
+      <td class="num">{{.Unmatched}}</td>
+      <td class="num">{{.Unevaluated}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="4" class="muted">No inbound messages in the window.</td></tr>
+    {{end}}
+  </table>
+  <p class="muted">
+    Latest decision per message: <em>matched</em> (a rule routed it), <em>unmatched</em> (the
+    residue — triage's inbox), and <em>not yet evaluated</em> (no decision at all — the engine has
+    not looked; it is <strong>not</strong> the residue). Counts inbound messages only: capture
+    filters <code>direction='inbound'</code>, so an outbound message — our own send re-entering
+    through ingestion — can never carry a decision; its absence is not-applicable, never pending.
+  </p>
+
+  <h2>Classify shadow summary</h2>
+  {{range .Lanes}}
+  <h3>{{.Name}} lane</h3>
+  <div class="headline">
+    <div><strong>{{.Summary.Classified}}</strong> classified</div>
+    <div><strong>{{.Summary.Flagged}}</strong> flagged</div>
+    <div><strong>{{.Summary.Skipped}}</strong> skipped</div>
+  </div>
+  {{if .Summary.ByKind}}
+  <ul class="reasons">
+    {{range $k, $v := .Summary.ByKind}}<li>{{$k}} — {{$v}}</li>{{end}}
+  </ul>
+  {{end}}
+  {{if .Summary.Classified}}
+  <p class="muted">links — resolved {{.Summary.LinkResolved}}, declined {{.Summary.LinkDeclined}},
+    none offered {{.Summary.LinkNoneOffered}}, rejected {{.Summary.LinkRejected}}</p>
+  {{end}}
+  {{if .Summary.Skipped}}
+  <ul class="reasons">
+    {{range $k, $v := .Summary.ByAvailReason}}<li>lane refused: <code>{{$k}}</code> — {{$v}}</li>{{end}}
+    {{range $k, $v := .Summary.ByClassReason}}<li>restricted: <code>{{$k}}</code> — {{$v}}</li>{{end}}
+  </ul>
+  <p class="muted">An all-skipped pass is expected when the local model is not running; personal
+    mail is only ever classified locally.</p>
+  {{end}}
+  {{if .Summary.Flags}}
+  <table>
+    <tr><th>When</th><th>Msg</th><th>Kind</th><th>Sender</th><th>Subject</th><th>Title</th><th>Link</th></tr>
+    {{range .Summary.Flags}}
+    <tr>
+      <td>{{.At.Format "2006-01-02 15:04"}}</td>
+      <td>#{{.MessageID}}</td>
+      <td>{{.Kind}}</td>
+      <td>{{.Sender}}</td>
+      <td>{{.Subject}}</td>
+      <td>{{.Title}}</td>
+      <td>{{if .LinkURL}}<a href="{{.LinkURL}}">link</a>{{else}}—{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+  {{else}}
+  <p class="muted">No lane data.</p>
+  {{end}}
+  <p class="muted">Shadow mode: verdicts only, nothing is created. Flags are capped at 50 per lane,
+    newest first; the counts are never capped. The same numbers come from
+    <code>classify report --lane &lt;name&gt;</code> for the same window.</p>
+</body>
+</html>

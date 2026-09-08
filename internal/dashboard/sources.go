@@ -26,12 +26,6 @@ type sourceRow struct {
 	// read and one switchboard can also answer from.
 	Enabled bool
 
-	LastRunAt     string
-	LastRunPhase  string
-	LastRunStatus string
-	LastRunError  string
-	RunsTotal     int
-
 	RawItems      int
 	RawNormalized int
 	// RawPending is raw rows that have not been normalized yet. A number that
@@ -77,16 +71,6 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 	// see.
 	rows, err := s.pool.Query(ctx, `
 		SELECT a.id, a.provider, a.account_email, COALESCE(a.auth_type,'oauth'), a.send_enabled,
-		       COALESCE((SELECT to_char(max(started_at),'YYYY-MM-DD HH24:MI') FROM sync_runs sr WHERE sr.source_account_id=a.id), ''),
-		       -- phase is a key inside stats, not a column: connectors record it
-		       -- via jsonb_build_object('phase', ...) when the run starts.
-		       COALESCE((SELECT sr.stats->>'phase' FROM sync_runs sr WHERE sr.source_account_id=a.id
-		                  ORDER BY sr.started_at DESC LIMIT 1), ''),
-		       COALESCE((SELECT sr.status FROM sync_runs sr WHERE sr.source_account_id=a.id
-		                  ORDER BY sr.started_at DESC LIMIT 1), ''),
-		       COALESCE((SELECT left(COALESCE(sr.error,''),200) FROM sync_runs sr WHERE sr.source_account_id=a.id
-		                  ORDER BY sr.started_at DESC LIMIT 1), ''),
-		       (SELECT count(*) FROM sync_runs sr WHERE sr.source_account_id=a.id),
 		       (SELECT count(*) FROM raw_source_items ri WHERE ri.source_account_id=a.id),
 		       (SELECT count(*) FROM raw_source_items ri WHERE ri.source_account_id=a.id AND ri.normalized_at IS NOT NULL),
 		       (SELECT count(*) FROM raw_source_items ri WHERE ri.source_account_id=a.id AND ri.normalized_at IS NULL),
@@ -114,7 +98,6 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var x sourceRow
 		if err := rows.Scan(&x.ID, &x.Provider, &x.Email, &x.AuthType, &x.Enabled,
-			&x.LastRunAt, &x.LastRunPhase, &x.LastRunStatus, &x.LastRunError, &x.RunsTotal,
 			&x.RawItems, &x.RawNormalized, &x.RawPending,
 			&x.Messages, &x.Inbound, &x.Outbound, &x.NewestMsg,
 			&x.Truncated, &x.Attachment); err != nil {

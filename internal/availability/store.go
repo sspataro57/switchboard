@@ -45,7 +45,7 @@ func LoadBusy(ctx context.Context, pool *pgxpool.Pool, req Request) ([]Interval,
 			req.HorizonPast, req.HorizonFuture)
 	}
 
-	states, err := loadAccountStates(ctx, pool)
+	states, err := CalendarSyncStates(ctx, pool)
 	if err != nil {
 		return nil, err
 	}
@@ -104,12 +104,18 @@ func loadReservations(ctx context.Context, pool *pgxpool.Pool, windowStart, wind
 	return out, rows.Err()
 }
 
-// loadAccountStates is the SQL half of the readiness check: the in-scope rows
+// CalendarSyncStates is the SQL half of the readiness check: the in-scope rows
 // (provider='google' AND calendar_in_availability — the same two predicates
 // loadEvents applies, criterion 3) with each one's last SUCCESSFUL calendar
 // sync. The discriminators live in Postgres columns on purpose; the decision
 // over the result is the pure NotReady.
-func loadAccountStates(ctx context.Context, pool *pgxpool.Pool) ([]AccountState, error) {
+//
+// EXPORTED since SWT-29: the /funnel page judges calendar rows with the same
+// rows and the same NotReady predicate propose_slots uses, so the page cannot
+// say green while the tool refuses. This is NOT the door SWT-24 closed — it
+// reads sync_runs only and produces no free/busy answer; loadEvents stays
+// unexported and LoadBusy stays the one entry to the busy set.
+func CalendarSyncStates(ctx context.Context, pool *pgxpool.Pool) ([]AccountState, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT a.id, a.account_email, MAX(r.finished_at)
 		   FROM source_accounts a

@@ -160,16 +160,32 @@ func availabilityConfig() (availability.Config, time.Duration, error) {
 		}
 	}
 
+	maxSyncAge, err := MaxCalendarSyncAge()
+	if err != nil {
+		return cfg, 0, err
+	}
+	return cfg, maxSyncAge, nil
+}
+
+// MaxCalendarSyncAge is the ONE parse of AVAIL_MAX_SYNC_AGE (SWT-29): the
+// /funnel page and propose_slots read one value through one parse, so the page
+// can never say green while the tool refuses. Extracted from availabilityConfig
+// with the behaviour and error strings unchanged — an unparseable or
+// non-positive value is an ERROR returned to the caller, never a silent
+// fallback: a typo must not widen a safety window (and on the page, must not
+// turn a refusing calendar green). Default 1h — four missed */15 polls before
+// the service goes quiet.
+func MaxCalendarSyncAge() (time.Duration, error) {
 	maxSyncAge := time.Hour
 	if v := os.Getenv("AVAIL_MAX_SYNC_AGE"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return cfg, 0, fmt.Errorf("AVAIL_MAX_SYNC_AGE %q is not a Go duration (want e.g. 1h, 90m): %w", v, err)
+			return 0, fmt.Errorf("AVAIL_MAX_SYNC_AGE %q is not a Go duration (want e.g. 1h, 90m): %w", v, err)
 		}
 		if d <= 0 {
-			return cfg, 0, fmt.Errorf("AVAIL_MAX_SYNC_AGE %q must be positive", v)
+			return 0, fmt.Errorf("AVAIL_MAX_SYNC_AGE %q must be positive", v)
 		}
 		maxSyncAge = d
 	}
-	return cfg, maxSyncAge, nil
+	return maxSyncAge, nil
 }
