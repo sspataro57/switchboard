@@ -24,6 +24,11 @@ type createTaskArgs struct {
 	Priority     *int   `json:"priority,omitempty"`
 	Subproject   string `json:"subproject,omitempty"`
 	ParentID     *int64 `json:"parent_id,omitempty"` // orchestrator lifecycle tasks link to their source
+	// Status is ready (default) or holding (SWT-30: the review lane is a
+	// holding task; 06-gpt-triage reserved this parameter for exactly that).
+	// Deliberately NOT in internal/mcpserver/schemas.go — agents keep the
+	// ready-only surface, and holding is strictly less privileged anyway.
+	Status string `json:"status,omitempty"`
 }
 
 // Register wires every internal tool into the registry. The registry is the
@@ -111,6 +116,11 @@ func parseCreateTask(args []byte) (createTaskArgs, error) {
 	if a.AssigneeType == "" {
 		a.AssigneeType = "human"
 	}
+	if a.Status == "" {
+		// The default lives HERE, beside AssigneeType's, so "what did this call
+		// mean" is a property of the parsed args, not of one SQL literal.
+		a.Status = "ready"
+	}
 	return a, nil
 }
 
@@ -128,12 +138,19 @@ func validateCreateTask(args []byte) error {
 	if a.AssigneeType != "human" && a.AssigneeType != "claude" {
 		return fmt.Errorf("assignee_type %q: must be human or claude", a.AssigneeType)
 	}
+	if a.Status != "ready" && a.Status != "holding" {
+		// By name, both ways: anything else is either a lifecycle transition
+		// that belongs to the orchestrator's tools, or a typo that would
+		// silently create the wrong thing.
+		return fmt.Errorf("status %q: must be ready or holding", a.Status)
+	}
 	return nil
 }
 
-// createTask resolves the project slug and inserts one tasks row with status
-// `ready` (a human deliberately creating a task means it is ready to route;
-// `holding` is triage's parking lane).
+// createTask resolves the project slug and inserts one tasks row with the
+// parsed status: `ready` by default (a deliberately created task is ready to
+// route), or `holding` — the review/parking lane (SWT-30's promoter and,
+// eventually, triage's live slice).
 func createTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, error) {
 	a, err := parseCreateTask(args)
 	if err != nil {
@@ -157,8 +174,8 @@ func createTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, e
 	var taskID int64
 	err = pool.QueryRow(ctx,
 		`INSERT INTO tasks (project_id, subproject, title, body, assignee_type, status, priority, parent_id)
-		 VALUES ($1, NULLIF($2, ''), $3, NULLIF($4, ''), $5, 'ready', $6, $7) RETURNING id`,
-		projectID, a.Subproject, a.Title, a.Body, a.AssigneeType, priority, a.ParentID).Scan(&taskID)
+		 VALUES ($1, NULLIF($2, ''), $3, NULLIF($4, ''), $5, $6, $7, $8) RETURNING id`,
+		projectID, a.Subproject, a.Title, a.Body, a.AssigneeType, a.Status, priority, a.ParentID).Scan(&taskID)
 	if err != nil {
 		return nil, fmt.Errorf("insert task: %w", err)
 	}

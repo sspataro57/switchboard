@@ -157,5 +157,18 @@
   <p class="muted">Shadow mode: verdicts only, nothing is created. Flags are capped at 50 per lane,
     newest first; the counts are never capped. The same numbers come from
     <code>classify report --lane &lt;name&gt;</code> for the same window.</p>
+
+  <h2>Classify promotion</h2>
+  {{if .Promotions}}
+  <ul class="reasons">
+    {{range .Promotions}}
+    <li><code>{{.Lane}}</code> — created {{.Created}}, attached {{.Attached}}, review {{.Review}}</li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="muted">No promotions in the window. Promotion is off until a project has
+    <code>classify_promote_after</code> set; only whitelisted kinds (payment_due, deadline)
+    auto-create live tasks, everything else parks in the holding lane.</p>
+  {{end}}
 </body>
 </html>

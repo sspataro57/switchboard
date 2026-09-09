@@ -417,7 +417,11 @@ inherits a leak — say so in the institutional-knowledge entry.
    `capture_decisions` → `normalized_messages` → `normalized_threads` →
    `ai_extractions` → `ai_runs` → `raw_source_items` → `source_accounts` →
    `projects`), scoped by a test-owned slug, and join the mutual-cleanup pact if
-   it asserts any global count.
+   it asserts any global count. AMENDED during test authoring (2026-09-09): the
+   order above omits `audit_events` / `policy_decisions` — `audit_events.task_id`
+   FKs `tasks` (delete them, and `policy_decisions` first, before `tasks`), and
+   the create_task audit row is written BEFORE the task exists so it carries no
+   task_id: sweep by actor `promote:%` as well as by task.
 3. Migration check before anything against production:
    `psql -h 192.168.50.49 -U ops -d ops -tAc "SELECT max(version) FROM
    schema_migrations"` vs `ls migrations/` — merging a migration is not applying

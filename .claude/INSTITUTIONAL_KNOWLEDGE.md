@@ -1199,3 +1199,44 @@ verdicts + real-shaped soaks). Cost: ~10 s/verdict on production messages
 (9.3 s stock). If the endpoint connection-refuses mid-pass, timestamp it to
 the kube session — that is hardware, not software, and stock power is not
 to be re-enabled for a "quick run".
+
+### Classify promotion (SWT-30)
+
+The personal lane's exit from shadow. `internal/promote` reads stored
+`ai_extractions` verdicts and creates tasks through the executor — never a
+model call, and that is STRUCTURAL: the package cannot import
+`internal/provider` (a transitive-reachability test in
+`internal/promote/structure_test.go` walks the import graph, so importing
+`internal/classify` doesn't dodge it either).
+
+- **The cutover is a COLUMN**: `projects.classify_promote_after TIMESTAMPTZ`
+  (0021), NULL = off, no default, no backfill — armed only by a hand-run
+  UPDATE (see the runbook's Promotion section). Forward-only on the VERDICT
+  clock (`ai_runs.created_at`), Q2's answer: lowering it does not backfill.
+- **The residue lane is excluded twice**, and one bar is free:
+  `worker_type='classify'` by name, plus the inner join to the attributed
+  project — 0015's CHECK makes `(action='unmatched') = (project_id IS NULL)` a
+  schema fact. Fixtures isolate EACH bar (residue-over-attributed, and
+  personal-over-unmatched); dropping either goes red.
+- **Promotion dedup key**: `classify_promotions.normalized_message_id` has a
+  TOTAL unique index; the claim is `ON CONFLICT DO NOTHING RETURNING id`,
+  inserted BEFORE the executor call (claim-before-act, capture's ordering). A
+  row with `task_id IS NULL` is a crash artifact — visible, inert, never
+  completed by a later pass.
+- **`classify eval` writes NO ai_runs/ai_extractions rows** (verified
+  2026-09-09: it calls `lane.Complete` directly and scores in memory). That is
+  the ONLY reason an eval over the committed labelled set — all historical
+  personal mail — cannot inject fresh-timestamped verdicts into the promoter's
+  inbox. If `Eval` ever gains a store write, the cutover gains an eval-shaped
+  hole. Say so in any ticket that touches eval persistence.
+- **Boundary restated** (SWT-21's): promoted tasks carry restricted personal
+  content into `tasks`. Safe today because drafts skips `local_only` projects
+  and `task_get_next` filters `p.client = $1` while personal has `client IS
+  NULL`. Any future reader of `tasks` without one of those clauses inherits a
+  leak.
+- **`create_task` grew `status` (`ready|holding`)** — deliberately NOT added to
+  the MCP schema; a guard test pins that. The review lane is
+  `/tasks?project=personal&status=holding`, a filter, not a table.
+- Advisory lock `0x5157_0021`; losing it is an ERROR (classify's policy, not
+  capture's log-and-skip) — a solo pass that silently no-ops looks like an
+  empty inbox.

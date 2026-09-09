@@ -1,9 +1,18 @@
 // classify is the LOCAL actionability classifier for personal mail (SWT-22),
 // SHADOW MODE: it records verdicts and creates nothing.
 //
-//	classify run    [--lane personal|residue] [--limit N] [--since 720h]
-//	classify report [--lane personal|residue] [--since 720h]
-//	classify eval   [--lane personal|residue] [--labels <file>] [--checkpoint <file>]
+//	classify run     [--lane personal|residue] [--limit N] [--since 720h]
+//	classify report  [--lane personal|residue] [--since 720h]
+//	classify eval    [--lane personal|residue] [--labels <file>] [--checkpoint <file>]
+//	classify promote [--dry-run] [--limit N]
+//
+// `promote` (SWT-30) is the one deliberate exit from shadow: it turns stored
+// PERSONAL-lane verdicts into tasks — whitelisted kinds (payment_due,
+// deadline) as live `ready` tasks, everything else parked `holding` — forward
+// only from projects.classify_promote_after, deduped per message, everything
+// through the executor. It never calls a model (internal/promote cannot even
+// import a provider) and takes no cutover flag: the bound is the stored
+// column, so eligibility is answerable from the database after the fact.
 //
 // --lane defaults to personal (SWT-22's lane, unchanged). The residue lane
 // (SWT-23) REQUIRES --since on `run`: ~14,737 messages at the measured 7.2 s
@@ -37,14 +46,64 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/classify"
+	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/policy"
+	"github.com/sspataro57/switchboard/internal/promote"
 	"github.com/sspataro57/switchboard/internal/provider"
 	"github.com/sspataro57/switchboard/internal/store"
+	"github.com/sspataro57/switchboard/internal/tools"
 )
+
+// promoteCmd drives one promotion pass (SWT-30). No --since and no cutover
+// flag on purpose: the bound is the stored projects.classify_promote_after.
+func promoteCmd(argv []string) error {
+	fs := flag.NewFlagSet("promote", flag.ContinueOnError)
+	dryRun := fs.Bool("dry-run", false, "read the same rows, take the same decisions, write NOTHING; print the plan")
+	limit := fs.Int("limit", 0, "max verdicts this pass (0 = all eligible)")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	// The full executor stack (orchestratord's wiring): validate -> policy ->
+	// audit -> handler. Invariant 3 — the promoter reaches tasks, task_events
+	// and provenance only through create_task / task_append_log /
+	// task_set_source_thread on this executor, as promote:classify.
+	reg := executor.NewRegistry()
+	tools.Register(reg, pool)
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	ex := executor.New(reg, checker, audit.NewPGStore(pool))
+
+	stats, err := promote.Run(ctx, pool, ex, promote.Config{DryRun: *dryRun, Limit: *limit})
+	if err != nil {
+		return err
+	}
+	mode := "live"
+	if *dryRun {
+		mode = "dry-run"
+	}
+	out, err := json.Marshal(map[string]any{
+		"mode": mode, "considered": stats.Considered, "created": stats.Created,
+		"review": stats.Review, "attached": stats.Attached, "lost_claims": stats.Lost,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal stats: %w", err)
+	}
+	fmt.Printf("promote: %s\n", out)
+	return nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: classify <run|report|eval> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: classify <run|report|eval|promote> [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -55,6 +114,8 @@ func main() {
 		err = reportCmd(os.Args[2:])
 	case "eval":
 		err = evalCmd(os.Args[2:])
+	case "promote":
+		err = promoteCmd(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}

@@ -318,3 +318,47 @@ the portal requires a login. "HOA violation notice — open the attachment" is t
 honest best; the prompt is told never to guess an amount or a date it was not
 given. Note the wrinkle: the HOA template says "please see attachment" on
 messages that carry **no attachment at all** — the detail is in the body.
+
+## Promotion (SWT-30)
+
+The one deliberate exit from shadow: `classify promote` turns stored
+PERSONAL-lane verdicts into tasks on the board. Whitelisted kinds —
+`payment_due` and `deadline`, a Go constant in `internal/promote`, not
+configuration — become live `ready` tasks; every other flagged kind parks as a
+`holding` task (the review lane is `/tasks?project=personal&status=holding`).
+A follow-up on a thread that already carries an OPEN task attaches as a log
+event instead of creating a duplicate; a thread whose task is already
+closed/delivered gets a NEW task (a re-raised obligation stays visible).
+
+**Arming it.** Promotion is OFF until a human sets the cutover — there is no
+flag, no default, and no deploy side effect:
+
+```sql
+UPDATE projects SET classify_promote_after = now() WHERE slug = 'personal';
+```
+
+**Forward-only, on the verdict clock.** Only verdicts *recorded*
+(`ai_runs.created_at`) after the cutover promote. Lowering the timestamp does
+NOT backfill: an already-classified old message never re-enters the classify
+inbox (its `NOT EXISTS` excludes it), so its verdict's timestamp never moves.
+The residue backlog and every pre-cutover personal flag stay unpromoted,
+forever, by design.
+
+**The residue lane cannot promote, twice over.** `worker_type='classify'`
+excludes `classify_residue` by name, and the inner join to the message's
+attributed project excludes it structurally — an unmatched message has
+`project_id NULL` by 0015's CHECK. Both bars are load-bearing and both are
+pinned by fixtures.
+
+**Sequence for going live.** Dry-run first, always:
+
+```
+classify promote --dry-run     # prints the plan, writes nothing at all
+classify promote               # claims + creates; idempotent per message
+classify promote               # a second run must report zero decisions
+```
+
+Idempotency is structural (`UNIQUE (normalized_message_id)` on
+`classify_promotions`); a promotion row with `task_id IS NULL` is the crash
+artifact — decided, not carried out — and later passes leave it alone on
+purpose. Counters per lane render on `/funnel` under "Classify promotion".
