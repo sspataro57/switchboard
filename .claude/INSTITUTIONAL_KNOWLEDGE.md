@@ -1240,3 +1240,22 @@ model call, and that is STRUCTURAL: the package cannot import
 - Advisory lock `0x5157_0021`; losing it is an ERROR (classify's policy, not
   capture's log-and-skip) — a solo pass that silently no-ops looks like an
   empty inbox.
+
+### Capture rules went LIVE (2026-09-09)
+
+Salvador: "allow all the things from all projects to land as tasks." The flip
+is `CAPTURE_RULES_MODE=live` on the connector CronJobs (kube session applied;
+exactly lowercase "live" — anything else is silently shadow by design), live
+horizon left at the 720h default. Seeded first with a one-off
+`opsctl capture-rules run --live --since 720h` from the workstation:
+4,846 considered, 3,130 matched, **40 tasks created**
+(collaboratory 29 / reengine 7 / saka 2 / foundry 1 / town-ai 1), 656 log
+appends. Live decisions are per-message claims (the partial unique index), so
+connector ticks after the seed only act on NEW messages. Capture's lock policy
+is log-and-skip on contention (benign, unlike classify-promote's error).
+
+Same day: projects `foundry` (8), `town-ai` (9), `homelab` (10), `saka` (11 —
+client Mario Cruz / Saka Technologies, TWO CRM client records so TWO
+thread_key_prefix rules, 57+58) were created; upwork client_id-prefix capture
+rules 55 (foundry/Lyle) and 56 (town-ai/Erica) route all their rooms, current
+and future. pod-hut deliberately NOT created — engagement on long pause.
