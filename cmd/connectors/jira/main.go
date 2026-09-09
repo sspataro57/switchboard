@@ -25,6 +25,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/policy"
 	"github.com/sspataro57/switchboard/internal/store"
+	"github.com/sspataro57/switchboard/internal/ticketstatus"
 	"github.com/sspataro57/switchboard/internal/tools"
 )
 
@@ -52,12 +53,13 @@ func run(full, normalizeOnly, all bool) error {
 	sink := jira.NewSink(pool)
 	cfg := jira.Config{Full: full, All: all}
 
-	if !normalizeOnly {
-		key := os.Getenv("OPS_TOKEN_KEY")
-		if key == "" {
-			return fmt.Errorf("OPS_TOKEN_KEY is not set")
-		}
-		factory := func(ctx context.Context, acct jira.Account) (*jira.Client, error) {
+	// The token-decrypting factory, built once and shared by the poller and the
+	// ticket-status pass's candidate-driven lookup. NIL when OPS_TOKEN_KEY is
+	// absent — the reconciler then skips its lookup half LOUDLY (SWT-32 D21)
+	// while the status half still runs from stored raw.
+	var factory jira.ClientFactory
+	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
+		factory = func(ctx context.Context, acct jira.Account) (*jira.Client, error) {
 			var token string
 			if err := pool.QueryRow(ctx,
 				`SELECT pgp_sym_decrypt(refresh_token_encrypted, $2) FROM source_accounts WHERE id=$1`,
@@ -65,6 +67,12 @@ func run(full, normalizeOnly, all bool) error {
 				return nil, fmt.Errorf("decrypt token for %s: %w", acct.Email, err)
 			}
 			return jira.NewClient(http.DefaultClient, acct.SiteBaseURL, acct.Email, token), nil
+		}
+	}
+
+	if !normalizeOnly {
+		if factory == nil {
+			return fmt.Errorf("OPS_TOKEN_KEY is not set")
 		}
 		stats, err := jira.Run(ctx, sink, factory, cfg)
 		printStats("ingest", stats)
@@ -120,6 +128,26 @@ func run(full, normalizeOnly, all bool) error {
 		rulesCfg.Mode, rules.Considered, rules.Matched, rules.Unmatched, rules.TasksCreated, rules.Appended)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
+	}
+
+	// Ticket-status reconciliation (SWT-32), AFTER capture on purpose (D8): a
+	// notification about a ticket that is already Done, or already someone
+	// else's, creates the task in capture's half of this tick and the pass
+	// closes it in the SAME tick — reversed, the task would sit on the board
+	// until the next run. Counters print before the error for the capture
+	// block's recorded reason: zeros included, "found nothing" and "never ran"
+	// are different lines.
+	ts, err := ticketstatus.Run(ctx, pool, ex, ticketstatus.Config{Lookup: factory})
+	fmt.Printf("ticket_status: {\"considered\":%d,\"closed_ticket_done\":%d,\"closed_not_assigned\":%d,"+
+		"\"reopened\":%d,\"refused_active\":%d,\"suppressed_dismissed\":%d,\"converged\":%d,"+
+		"\"unpolled\":%d,\"ambiguous\":%d,\"unreadable\":%d,"+
+		"\"fetched\":%d,\"fetch_skipped_ttl\":%d,\"fetch_failed\":%d}\n",
+		ts.Considered, ts.ClosedTicketDone, ts.ClosedNotAssigned,
+		ts.Reopened, ts.RefusedActive, ts.SuppressedDismissed, ts.Converged,
+		ts.Unpolled, ts.Ambiguous, ts.Unreadable,
+		ts.Fetched, ts.FetchSkippedTTL, ts.FetchFailed)
+	if err != nil {
+		return fmt.Errorf("ticket status: %w", err)
 	}
 	return nil
 }

@@ -93,6 +93,14 @@ var allToolNames = []string{
 	// dismiss tasks could clear its own queue. The absence is asserted, not merely
 	// relied on: internal/mcpserver/adapter_test.go's spineTools.
 	"task_dismiss",
+	// SWT-32 criterion 35: the return path's verb, registered beside task_close
+	// and sharing its transition helper. Deliberately ABSENT from
+	// internal/mcpserver/schemas.go — an agent that could reopen tasks could
+	// resurrect its own closed work — and asserted absent in
+	// internal/mcpserver/adapter_test.go's spineTools. It is NOT humanOnly (D7):
+	// the reconciler calls it as ticketstatus:jira, exactly as the orchestrator
+	// calls task_close.
+	"task_reopen",
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -169,6 +177,11 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		// directly — an ACCEPTED call would run the handler and deref the nil
 		// pool this test relies on.
 		"task_dismiss",
+		// SWT-32: task_reopen needs task_id AND reason; {} is illegal. The
+		// allowed-status half lives in reopen_test.go, which calls validateReopen
+		// directly — an ACCEPTED call would run the handler and deref the nil pool
+		// this test relies on.
+		"task_reopen",
 	}
 
 	for _, name := range toolsUnderTest {

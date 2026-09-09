@@ -141,6 +141,15 @@ var spineTools = []string{
 	// and policy.humanOnly in the matrix — two independent refusals, because the
 	// actor prefix alone is a transport label, not a trust boundary.
 	"task_dismiss",
+	// SWT-32 criterion 39, asserted deliberately rather than by omission (the
+	// SWT-20 / SWT-31 precedent). task_reopen moves a task OUT of `closed`, the
+	// one status nothing else can leave; an agent that could call it could
+	// resurrect work it had just closed, and could undo a human's dismissal. The
+	// gate is this transport allowlist ALONE — unlike task_dismiss, the verb is
+	// deliberately not in policy.humanOnly (D7: the reconciler calls it as
+	// ticketstatus:jira), which is precisely why its absence from the MCP surface
+	// is asserted rather than assumed.
+	"task_reopen",
 }
 
 func TestDraftDeliverySchema_IncludesSlackReply(t *testing.T) {

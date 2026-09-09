@@ -160,7 +160,7 @@ func ingestIssue(ctx context.Context, c *Client, sink Sink, acct Account, key st
 	if err != nil {
 		return fmt.Errorf("split issue %s: %w", key, err)
 	}
-	if err := upsertRaw(ctx, sink, acct.ID, "issue:"+key, issueOnly, stats); err != nil {
+	if err := upsertRaw(ctx, sink, acct.ID, IssueRawID(key), issueOnly, stats); err != nil {
 		return err
 	}
 

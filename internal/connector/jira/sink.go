@@ -44,6 +44,31 @@ func (s *PGSink) ListAccounts(ctx context.Context) ([]Account, error) {
 	return out, rows.Err()
 }
 
+// ListLookupAccounts returns the provider='jira_lookup' accounts (SWT-32 D17):
+// lookup-only credentials the reconciler fetches candidate issues with. A
+// DISTINCT provider value rather than a flag, so every provider='jira' query —
+// ListAccounts, accountMeta, pendingRaw — is blind to these rows by
+// construction: never JQL-polled, never normalized, never given a site
+// identity. The scopes column means "prefixes I may fetch by key" here.
+func (s *PGSink) ListLookupAccounts(ctx context.Context) ([]Account, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, account_email, COALESCE(domain_default,''), scopes
+		 FROM source_accounts WHERE provider='jira_lookup' ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("select jira lookup accounts: %w", err)
+	}
+	defer rows.Close()
+	var out []Account
+	for rows.Next() {
+		var a Account
+		if err := rows.Scan(&a.ID, &a.Email, &a.SiteBaseURL, &a.Projects); err != nil {
+			return nil, fmt.Errorf("scan jira lookup account: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 func (s *PGSink) Cursor(ctx context.Context, accountID int64) (Cursor, error) {
 	var raw []byte
 	if err := s.pool.QueryRow(ctx,

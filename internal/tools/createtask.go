@@ -62,6 +62,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// deliberately NOT in internal/mcpserver/schemas.go — an agent that
 		// could dismiss tasks could clear its own queue. See close.go.
 		{"task_dismiss", validateDismiss, dismissTask},
+		// SWT-32: the reconciler's return path. Spine-facing, NOT humanOnly
+		// (the pass calls it as ticketstatus:jira, the orchestrator precedent);
+		// deliberately NOT in internal/mcpserver/schemas.go — an agent that
+		// could reopen tasks could resurrect its own closed work. See close.go.
+		{"task_reopen", validateReopen, reopenTask},
 		{"record_orchestration", validateRecordOrchestration, recordOrchestration},
 		{"propose_slots", validateProposeSlots, proposeSlots},
 		{"draft_delivery", validateDraftDelivery, draftDelivery},

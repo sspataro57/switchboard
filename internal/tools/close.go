@@ -25,36 +25,51 @@ type closeArgs struct {
 	Reason string `json:"reason"`
 }
 
-// closeTransition is the ONE spelling of "move this task to closed": lock,
-// refuse active work, update, record the status_changed event with the given
-// prose reason. Already-closed is an idempotent success with transitioned=false
-// and no event — orchestrator replays and stale dismiss pages both depend on
-// that. Runs inside the caller's transaction so a caller can commit more (the
-// dismissal label) atomically with the transition.
-func closeTransition(ctx context.Context, tx pgx.Tx, taskID int64, reason string) (transitioned bool, err error) {
+// openStatuses is D6's set (SWT-32), spelled ONCE: exactly the statuses
+// task_close accepts as a SOURCE and therefore exactly the ones task_reopen
+// accepts as a TARGET. closeTransition and validateReopen both read it; a
+// second spelling is how the two verbs drift.
+var openStatuses = []string{"holding", "ready", "blocked", "done_locally", "delivered"}
+
+// closeTransition is the ONE transition helper all three close-family verbs
+// share (SWT-31 D3, SWT-32 criterion 37): one row lock, one active-work
+// refusal, one status_changed writer. `to` is either "closed" (close/dismiss)
+// or a member of openStatuses (reopen).
+//
+// Idempotence differs by direction, deliberately: closing an already-closed
+// task is a no-op (orchestrator replays and stale dismiss pages), and
+// reopening a task that is not closed is a no-op (the spine convention for
+// replays — criterion 36). Active work refuses a close; nothing but `closed`
+// can be reopened. Runs inside the caller's transaction so a caller can commit
+// more (the dismissal label) atomically with the transition.
+func closeTransition(ctx context.Context, tx pgx.Tx, taskID int64, to, reason string) (from string, transitioned bool, err error) {
 	var status string
 	if err := tx.QueryRow(ctx,
 		`SELECT status FROM tasks WHERE id=$1 FOR UPDATE`, taskID).Scan(&status); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, fmt.Errorf("task %d not found", taskID)
+			return "", false, fmt.Errorf("task %d not found", taskID)
 		}
-		return false, fmt.Errorf("lock task %d: %w", taskID, err)
+		return "", false, fmt.Errorf("lock task %d: %w", taskID, err)
 	}
-	switch status {
-	case "closed":
-		return false, nil // idempotent
-	case "claimed", "in_progress", "needs_feedback":
-		return false, fmt.Errorf("task %d is %s; refusing to close active work", taskID, status)
+	if to == "closed" {
+		switch status {
+		case "closed":
+			return status, false, nil // idempotent
+		case "claimed", "in_progress", "needs_feedback":
+			return status, false, fmt.Errorf("task %d is %s; refusing to close active work", taskID, status)
+		}
+	} else if status != "closed" {
+		return status, false, nil // reopen replay: already open, no event
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE tasks SET status='closed', updated_at=now() WHERE id=$1`, taskID); err != nil {
-		return false, fmt.Errorf("close task %d: %w", taskID, err)
+		`UPDATE tasks SET status=$2, updated_at=now() WHERE id=$1`, taskID, to); err != nil {
+		return status, false, fmt.Errorf("transition task %d to %s: %w", taskID, to, err)
 	}
 	if _, err := insertTaskEvent(ctx, tx, taskID, "status_changed",
-		map[string]any{"from": status, "to": "closed", "reason": reason}); err != nil {
-		return false, err
+		map[string]any{"from": status, "to": to, "reason": reason}); err != nil {
+		return status, false, err
 	}
-	return true, nil
+	return status, true, nil
 }
 
 func validateClose(args []byte) error {
@@ -81,13 +96,78 @@ func closeTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, er
 		return nil, fmt.Errorf("parse args: %w", err)
 	}
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
-		_, err := closeTransition(ctx, tx, a.TaskID, a.Reason)
+		_, _, err := closeTransition(ctx, tx, a.TaskID, "closed", a.Reason)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return marshalResult(map[string]any{"task_id": a.TaskID, "status": "closed"})
+}
+
+// ---- task_reopen (SWT-32) -----------------------------------------------------
+
+type reopenArgs struct {
+	TaskID int64  `json:"task_id"`
+	Status string `json:"status,omitempty"`
+	Reason string `json:"reason"`
+}
+
+func validateReopen(args []byte) error {
+	var a reopenArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return fmt.Errorf("parse args: %w", err)
+	}
+	if a.TaskID <= 0 {
+		return errors.New("missing or zero task_id")
+	}
+	if a.Reason == "" {
+		return errors.New("missing reason")
+	}
+	if a.Status == "" {
+		return nil // optional; the handler falls back to ready (D6)
+	}
+	for _, allowed := range openStatuses {
+		if a.Status == allowed {
+			return nil
+		}
+	}
+	// By name, both ways: a reopen to `claimed` would produce a claimed task
+	// with no task_claims row and no worker — a shape nothing else in the
+	// spine can produce.
+	return fmt.Errorf("status %q: must be one of %s", a.Status, strings.Join(openStatuses, ", "))
+}
+
+// reopenTask restores a closed task to an open status (SWT-32 D6): the
+// reconciler's return path, and the human remedy for a mis-click dismissal
+// (SWT-31 named re-open as that remedy; the dismissal SUPPRESSION lives in the
+// pass, not here — D5 — so a human can still undo one). A task that is not
+// closed is an idempotent success with reopened:false and no event.
+func reopenTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, error) {
+	var a reopenArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, fmt.Errorf("parse args: %w", err)
+	}
+	target := a.Status
+	if target == "" {
+		target = "ready"
+	}
+
+	var from string
+	var reopened bool
+	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		f, done, err := closeTransition(ctx, tx, a.TaskID, target, a.Reason)
+		from, reopened = f, done
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	status := target
+	if !reopened {
+		status = from
+	}
+	return marshalResult(map[string]any{"task_id": a.TaskID, "status": status, "reopened": reopened})
 }
 
 // ---- task_dismiss (SWT-31) ----------------------------------------------------
@@ -147,7 +227,7 @@ func dismissTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, 
 
 	var dismissed bool
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
-		if _, err := closeTransition(ctx, tx, a.TaskID, reason); err != nil {
+		if _, _, err := closeTransition(ctx, tx, a.TaskID, "closed", reason); err != nil {
 			return err
 		}
 		// Exec, not QueryRow+RETURNING: the conflict no-op must NOT ride on an

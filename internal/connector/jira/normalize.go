@@ -168,8 +168,9 @@ func Normalize(ctx context.Context, sink *PGSink, cfg Config) (Stats, error) {
 		if !ok {
 			return stats, fmt.Errorf("raw item %d references unknown jira account %d", it.id, it.accountID)
 		}
+		_, isIssue := ParseIssueRawID(it.externalID)
 		switch {
-		case strings.HasPrefix(it.externalID, "issue:"):
+		case isIssue:
 			th, msg, err := NormalizeIssue(it.raw, meta.siteHost, meta.ownAccountID)
 			if err != nil {
 				return stats, fmt.Errorf("normalize %s: %w", it.externalID, err)
