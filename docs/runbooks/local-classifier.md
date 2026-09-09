@@ -342,7 +342,10 @@ UPDATE projects SET classify_promote_after = now() WHERE slug = 'personal';
 NOT backfill: an already-classified old message never re-enters the classify
 inbox (its `NOT EXISTS` excludes it), so its verdict's timestamp never moves.
 The residue backlog and every pre-cutover personal flag stay unpromoted,
-forever, by design.
+forever, by design. **Accepted residual** (Q2, Salvador 2026-09-09): a
+personal-lane run that classifies a *never-before-classified* old message
+records a fresh verdict, so an old bill can land on the board as a live task —
+the verdict clock, not the message clock, is the fence.
 
 **The residue lane cannot promote, twice over.** `worker_type='classify'`
 excludes `classify_residue` by name, and the inner join to the message's

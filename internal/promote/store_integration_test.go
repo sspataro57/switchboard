@@ -1181,3 +1181,43 @@ func TestPromote_Integration_RefusesToRunWhileTheLockIsHeld(t *testing.T) {
 	// the test itself", something else in the repo claimed 0x5157_0021 and the
 	// collision criterion 17 checked for is real.
 }
+
+// ---- criterion 18's numbers: the funnel seam ----------------------------------
+
+// CountersByLane is what /funnel renders; the structure test pins the page's
+// SHAPE and this pins the FOLD (go-reviewer 2026-09-09: the seam had no
+// coverage — a typo in its three-table join would surface only as an error
+// line on the page). Expected counts are this suite's whole corpus: created =
+// due + reraise + stale + the seeded crash artifact (action='task', counted —
+// the fold reads actions, not completions), review = info, attached = followup.
+func TestPromote_Integration_CountersByLaneMatchesTheActions(t *testing.T) {
+	ctx := context.Background()
+	s := newPMSuite(t, ctx)
+	s.run(t, ctx)
+	s.requirePromotedControl(t, ctx)
+
+	counters, err := promote.CountersByLane(ctx, s.pool, 7)
+	if err != nil {
+		t.Fatalf("CountersByLane: %v", err)
+	}
+	var personal *promote.LaneCounters
+	for i := range counters {
+		if counters[i].Lane == "classify" {
+			personal = &counters[i]
+		}
+		if counters[i].Lane == "classify_residue" {
+			t.Errorf("CountersByLane reports a classify_residue lane (%+v); the residue lane cannot "+
+				"promote, so a row here means the fold is reading something other than the promotion log",
+				counters[i])
+		}
+	}
+	if personal == nil {
+		t.Fatalf("CountersByLane returned no 'classify' lane over a window with %d promotion rows",
+			s.ourPromotions(t, ctx))
+	}
+	if personal.Created != 4 || personal.Review != 1 || personal.Attached != 1 {
+		t.Errorf("CountersByLane(classify) = created %d / review %d / attached %d, want 4 / 1 / 1 "+
+			"(due + reraise + stale + the seeded artifact; info; followup)",
+			personal.Created, personal.Review, personal.Attached)
+	}
+}

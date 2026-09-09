@@ -105,7 +105,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 
 	for _, row := range rows {
 		v := row.v
-		existing, finished, err := threadTask(ctx, pool, v.ThreadID)
+		existing, finished, err := threadTask(ctx, pool, v.ThreadID, v.ProjectID)
 		if err != nil {
 			return stats, err
 		}
@@ -268,7 +268,11 @@ func inbox(ctx context.Context, pool *pgxpool.Pool, limit int) ([]verdictRow, er
 		if err := json.Unmarshal(raw, &f); err != nil {
 			// A verdict the store accepted but this pass cannot read is a real
 			// error, not a skip: the claim would otherwise never be taken and
-			// the message would re-surface every pass forever.
+			// the message would re-surface every pass forever. KNOWN BLAST
+			// RADIUS (go-reviewer, 2026-09-09): because this aborts the pass,
+			// one malformed row stalls the WHOLE lane until it is fixed by
+			// hand — chosen over a silent skip on purpose (classify writes
+			// this shape; a stall is visible, a skip is forever).
 			return nil, fmt.Errorf("promote: parse verdict fields for extraction %d: %w", v.ExtractionID, err)
 		}
 		v.Kind, v.Title, v.Reason = f.Kind, f.Title, f.Reason
@@ -282,18 +286,28 @@ func inbox(ctx context.Context, pool *pgxpool.Pool, limit int) ([]verdictRow, er
 	return out, rows.Err()
 }
 
-// threadTask finds the thread's oldest OPEN task (the attach target), and —
-// when there is none — the oldest finished one, so the Q3 fall-through can name
-// it in the promotion row's reason. A nil thread means neither.
-func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64) (openTask, finished *ExistingTask, err error) {
+// threadTask finds the thread's oldest OPEN task IN THE VERDICT'S PROJECT (the
+// attach target), and — when there is none — the oldest finished one, so the
+// Q3 fall-through can name it in the promotion row's reason. A nil thread
+// means neither.
+//
+// Project-scoped ON PURPOSE (go-reviewer, 2026-09-09; a SPEC amendment):
+// task_set_source_thread's other caller is the capture engine, which creates
+// tasks in CLIENT projects. Without the project clause, a thread carrying a
+// client task could absorb a personal verdict's log line — kind, sender,
+// model-authored title — into a non-local_only project, exactly the boundary
+// the institutional-knowledge entry says holds. Latent today (no prod task
+// carries source_thread_id yet) but the clause is one line and the leak is
+// silent.
+func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64, projectID int64) (openTask, finished *ExistingTask, err error) {
 	if threadID == nil {
 		return nil, nil, nil
 	}
 	var t ExistingTask
 	err = pool.QueryRow(ctx,
 		`SELECT id, status FROM tasks
-		  WHERE source_thread_id = $1 AND status NOT IN ('closed','delivered')
-		  ORDER BY id LIMIT 1`, *threadID).Scan(&t.ID, &t.Status)
+		  WHERE source_thread_id = $1 AND project_id = $2 AND status NOT IN ('closed','delivered')
+		  ORDER BY id LIMIT 1`, *threadID, projectID).Scan(&t.ID, &t.Status)
 	switch {
 	case err == nil:
 		return &t, nil, nil
@@ -305,8 +319,8 @@ func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64) (openT
 
 	var f ExistingTask
 	err = pool.QueryRow(ctx,
-		`SELECT id, status FROM tasks WHERE source_thread_id = $1 ORDER BY id LIMIT 1`,
-		*threadID).Scan(&f.ID, &f.Status)
+		`SELECT id, status FROM tasks WHERE source_thread_id = $1 AND project_id = $2 ORDER BY id LIMIT 1`,
+		*threadID, projectID).Scan(&f.ID, &f.Status)
 	switch {
 	case err == nil:
 		return nil, &f, nil

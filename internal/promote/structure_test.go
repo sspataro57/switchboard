@@ -386,9 +386,19 @@ func TestFunnel_HasAPromotionSectionAndStaysReadOnly(t *testing.T) {
 	const rel = "internal/dashboard/funnel.go"
 	src := prRepoFile(t, rel)
 
-	if !strings.Contains(src, "classify_promotions") {
-		t.Errorf("%s never reads classify_promotions. Criterion 18: /funnel's classify block gains one "+
-			"promotion line per lane, read from the promotion log over the same ?days= window", rel)
+	// The page reads the log through the SEAM (SWT-29's rule: the dashboard
+	// restates no fold over ai_runs/ai_extractions), so the guard names the
+	// seam CALL — a comment mentioning the table cannot satisfy it (the first
+	// cut of this assertion was satisfied by exactly that; go-reviewer,
+	// 2026-09-09). The SQL itself is pinned in this package: summary.go must
+	// read classify_promotions.
+	if !strings.Contains(src, "promote.CountersByLane(") {
+		t.Errorf("%s never calls promote.CountersByLane. Criterion 18: /funnel's promotion section reads "+
+			"the promotion log through the one seam that owns its SQL, over the same ?days= window", rel)
+	}
+	if !strings.Contains(prRepoFile(t, "internal/promote/summary.go"), "classify_promotions") {
+		t.Errorf("internal/promote/summary.go does not read classify_promotions; CountersByLane has " +
+			"stopped being the seam the funnel guard above vouches for")
 	}
 	section := regexp.MustCompile(`(?i)\{\s*Name:\s*"[^"]*promot[^"]*"`)
 	if !section.MatchString(src) {

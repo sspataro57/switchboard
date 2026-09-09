@@ -133,10 +133,12 @@ project or worker changes behaviour, and nothing outbound happens at any point.
    is the surface, and `internal/dashboard/board.go:46` already renders
    `holding` as the first column. This requires `create_task` to accept an
    optional `status` of exactly `ready|holding` (see "API changes").
-9. Attach-before-create, OPEN tasks only (Q3 answer): when the message's
-   thread already has a task that is NOT `closed`/`delivered`
-   (`tasks.source_thread_id = nm.thread_id AND status NOT IN
-   ('closed','delivered')`, oldest such task wins on ties), the promoter
+9. Attach-before-create, OPEN tasks only (Q3 answer), IN THE VERDICT'S
+   PROJECT (review amendment, 2026-09-09): when the message's thread already
+   has a task that is NOT `closed`/`delivered`
+   (`tasks.source_thread_id = nm.thread_id AND project_id = <current
+   attribution> AND status NOT IN ('closed','delivered')`, oldest such task
+   wins on ties), the promoter
    appends ONE `task_append_log` event through the executor and writes a
    promotion row with `action='attached'` and that `task_id` — no second task,
    no status change. When the thread's only tasks are `closed`/`delivered`,
