@@ -39,7 +39,10 @@ func main() {
 }
 
 func run(normalizeOnly, all bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	// 30m, not 15m: a full bridge export legitimately runs ~12m now that the
+	// bridge recycles the Slack tab every 2 reloads (2026-09-09), and a client
+	// deadline that fires mid-export also terminates the bridge process.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
 	pool, err := store.NewPool(ctx)
