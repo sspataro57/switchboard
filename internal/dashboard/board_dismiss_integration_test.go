@@ -636,3 +636,55 @@ func TestBoardDismiss_Integration_BothLabelJoinsReturnTheDismissal(t *testing.T)
 			"provenance row to exist (D7: the join key is task_id and nothing else)", n)
 	}
 }
+
+// ---- criterion 17's behavioural half (go-reviewer, 2026-09-09) ----------------
+
+// The structure scan pins the SHAPE (url.Values, the four keys, no RawQuery);
+// this pins the ROUND TRIP: a dismissal made from a filtered board lands back
+// on the SAME filtered board. The hidden inputs in tasks.html and the handler's
+// key loop are two halves of one contract, and a typo in either loses the
+// filter with every other test green.
+func TestBoardDismiss_Integration_RedirectPreservesTheFilters(t *testing.T) {
+	dashGuard(t)
+	ctx := context.Background()
+	pool := dashPool(t, ctx)
+	defer pool.Close()
+	cleanupDismiss(t, ctx, pool)
+	defer cleanupDismiss(t, ctx, pool)
+	sd := seedDismiss(t, ctx, pool)
+
+	ts, client := newDashServer(t, ctx, pool)
+	defer ts.Close()
+
+	resp, err := client.PostForm(ts.URL+"/tasks/"+strconv.FormatInt(sd.capturedTask, 10)+"/dismiss",
+		url.Values{
+			"reason_code":   {"duplicate"},
+			"note":          {""},
+			"project":       {bdSlug},
+			"assignee_type": {"human"},
+		})
+	if err != nil {
+		t.Fatalf("POST dismiss with filters: %v", err)
+	}
+	defer resp.Body.Close()
+
+	landed := resp.Request.URL
+	if !strings.HasSuffix(landed.Path, "/tasks") {
+		t.Fatalf("dismiss landed on %s, want /tasks", landed)
+	}
+	q := landed.Query()
+	if q.Get("project") != bdSlug || q.Get("assignee_type") != "human" {
+		t.Errorf("redirect query = %q — the filters did not survive the round trip, want project=%s and "+
+			"assignee_type=human (criterion 17: rebuilt from the four known keys via url.Values; the "+
+			"hidden inputs in tasks.html and the handler's key loop are two halves of one contract)",
+			landed.RawQuery, bdSlug)
+	}
+	if q.Get("flash") == "" {
+		t.Errorf("redirect query %q carries no flash; the filter rebuild must not drop it", landed.RawQuery)
+	}
+	// The empty filters stay ABSENT, not present-but-empty: the handler only
+	// sets keys with values, so the redirect is a URL a human could have typed.
+	if _, present := q["status"]; present {
+		t.Errorf("redirect query %q carries an empty status key; unset filters are omitted", landed.RawQuery)
+	}
+}

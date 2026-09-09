@@ -150,17 +150,24 @@ func dismissTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, 
 		if _, err := closeTransition(ctx, tx, a.TaskID, reason); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx,
+		// Exec, not QueryRow+RETURNING: the conflict no-op must NOT ride on an
+		// error, because an error here rolls the whole transaction back — and
+		// while today's only replay path (task already closed, row exists)
+		// discards nothing, a future task_reopen would make "second dismiss
+		// silently un-commits the close it just performed" reachable
+		// (go-reviewer, 2026-09-09). RowsAffected carries the same fact with
+		// no rollback and no ErrNoRows special case.
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO task_dismissals (task_id, reason_code, note, dismissed_by)
 			 VALUES ($1,$2, NULLIF($3,''), $4)
-			 ON CONFLICT (task_id) DO NOTHING
-			 RETURNING true`,
-			a.TaskID, a.ReasonCode, a.Note, actor).Scan(&dismissed)
+			 ON CONFLICT (task_id) DO NOTHING`,
+			a.TaskID, a.ReasonCode, a.Note, actor)
+		if err != nil {
+			return fmt.Errorf("record dismissal for task %d: %w", a.TaskID, err)
+		}
+		dismissed = tag.RowsAffected() == 1
+		return nil
 	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The label already exists: the replay is a success that changes nothing.
-		err, dismissed = nil, false
-	}
 	if err != nil {
 		return nil, err
 	}
