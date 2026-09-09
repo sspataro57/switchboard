@@ -30,6 +30,12 @@ import (
 // capture:{connector} / promote:{lane} shape.
 const Actor = "ticketstatus:jira"
 
+// activeWorkRefusal is the substring of internal/tools/close.go's shared
+// refusal this pass keys its mid-pass race handling on; statusset_test.go pins
+// the two spellings together so the message cannot drift out from under the
+// check silently.
+const activeWorkRefusal = "refusing to close active work"
+
 // advisoryLockKey serialises passes — it also covers the lookup, so two
 // overlapping passes cannot both GET the same key. The low four hex digits are
 // this ticket's migration number, the established convention; freeness is
@@ -296,12 +302,22 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			if err := act(ctx, ex, c, obs, d, reason); err != nil {
 				// Fact 11's race, handled rather than fatal (go-reviewer F6): a
 				// worker can claim the task between the candidate read and the
-				// close, and task_close then refuses active work. The pass
-				// moves on; the ref is re-evaluated next tick against the fresh
-				// status. Anything else stays loud and fatal.
-				if strings.Contains(err.Error(), "refusing to close active work") {
+				// close, and task_close then refuses active work. The claim-first
+				// state row written above must NOT be left standing as
+				// last_action='closed' — a close claim the pass did not earn is
+				// exactly what D3's precondition trusts (go-reviewer delta,
+				// 2026-09-09) — so the row is rewritten as an honest "observed,
+				// did nothing"; the next pass re-evaluates against the fresh
+				// status and logs the refusal properly. Anything else stays
+				// loud and fatal.
+				if strings.Contains(err.Error(), activeWorkRefusal) {
 					slog.Warn("ticketstatus: task became active mid-pass; skipping",
 						"key", c.key, "task", c.taskID, "err", err)
+					none := Decision{Warranted: d.Warranted, Action: "none", DropReason: d.DropReason}
+					if err := upsertState(ctx, pool, c, obs, none, reason); err != nil {
+						return stats, err
+					}
+					stats.RefusedActive++
 					continue
 				}
 				return stats, err

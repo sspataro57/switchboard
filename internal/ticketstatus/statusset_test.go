@@ -49,3 +49,19 @@ func TestRestorableMatchesTheToolsOpenStatusList(t *testing.T) {
 		}
 	}
 }
+
+// The refusal SUBSTRING the driver's mid-pass race handling keys on must keep
+// matching the one spelling in internal/tools/close.go (go-reviewer delta,
+// 2026-09-09): a reworded refusal there would silently turn the handled race
+// back into a pass-aborting error here.
+func TestActiveWorkRefusalSubstringMatchesTheToolsSpelling(t *testing.T) {
+	b, err := os.ReadFile("../tools/close.go")
+	if err != nil {
+		t.Fatalf("read internal/tools/close.go: %v", err)
+	}
+	if !strings.Contains(string(b), activeWorkRefusal) {
+		t.Errorf("internal/tools/close.go no longer contains %q; the driver detects the active-work "+
+			"race by this substring, and without the match one mid-pass claim aborts the whole run",
+			activeWorkRefusal)
+	}
+}
