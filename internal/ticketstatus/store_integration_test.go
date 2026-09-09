@@ -1227,6 +1227,13 @@ func TestTicketStatus_LockContentionIsLoggedAndSkipped(t *testing.T) {
 func TestTicketStatus_CountersCoverTheWholeVocabulary(t *testing.T) {
 	ctx := context.Background()
 	s := newTSSuite(t, ctx)
+	// AMENDED 2026-09-09 (implementation session): the fake originally served no
+	// ILK issues here, so the three lookup candidates 404ed — which the per-key
+	// FetchFailed counter (go-reviewer F2) now correctly reports, contradicting
+	// this test's own "healthy pass" premise. Seeded like every sibling test.
+	s.fake.put(tsIssue{"ILK-MINE", "indeterminate", tsLookupID, true})
+	s.fake.put(tsIssue{"ILK-NOTMINE", "indeterminate", tsOtherID, true})
+	s.fake.put(tsIssue{"ILK-DONE", "done", tsLookupID, true})
 	st, _ := s.run(t, ctx, ticketstatus.Config{})
 
 	line := fmt.Sprintf(

@@ -75,6 +75,7 @@ func LookupIssues(ctx context.Context, c *Client, sink Sink, acct Account, keys 
 			// per key, so the log says which issue could not be read.
 			slog.Warn("jira lookup: fetch failed; the stored snapshot, if any, still decides",
 				"key", key, "account", acct.Email, "err", err)
+			stats.FetchFailed++
 			continue
 		}
 		issueOnly, _, _, err := splitIssueComments(raw)

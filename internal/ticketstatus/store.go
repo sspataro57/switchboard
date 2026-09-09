@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -135,6 +136,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 	needFetch := map[int64][]string{} // account id -> keys
 	acctByID := map[int64]jira.Account{}
 	wouldFetch := map[string]bool{}
+	routeAmbiguous := map[string]bool{}
 	seenKey := map[string]bool{}
 	for _, c := range cands {
 		if seenKey[c.key] {
@@ -151,8 +153,16 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 		}
 		acct, outcome := RouteLookup(c.key, lookupAccts)
 		if outcome != "routed" {
-			// No claiming account (or an ambiguous claim): the stored snapshot,
-			// if any, still decides; a key with neither is counted below.
+			// No claiming account, or an ambiguous claim: the stored snapshot,
+			// if any, still decides; a key with neither is counted below — and
+			// an ambiguous route is remembered so its refusal is VISIBLE
+			// (go-reviewer F4: an invisible refusal is indistinguishable from
+			// an unpolled prefix).
+			if outcome == "ambiguous" {
+				routeAmbiguous[c.key] = true
+				slog.Warn("ticketstatus: two lookup accounts claim this key's prefix; refusing to fetch",
+					"key", c.key)
+			}
 			continue
 		}
 		if cfg.DryRun {
@@ -195,6 +205,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			}
 			st, err := jira.LookupIssues(ctx, client, sink, acct, keys, jira.Config{})
 			stats.Fetched += st.IssuesFetched
+			stats.FetchFailed += st.FetchFailed
 			if err != nil {
 				// A whole-call failure (scope refusal, cursor write, /myself)
 				// never becomes a verdict (criterion 32): the previous
@@ -216,7 +227,11 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 		stats.Considered++
 		snap, have := snaps[c.key]
 		if !have {
-			stats.Unpolled++
+			if routeAmbiguous[c.key] {
+				stats.Ambiguous++
+			} else {
+				stats.Unpolled++
+			}
 			continue
 		}
 		if snap.count > 1 {
@@ -264,13 +279,38 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 		}
 
 		reason := decisionReason(obs, d)
-		if d.Act {
-			if err := act(ctx, ex, c, obs, d, reason); err != nil {
+		// Ordering is per action, and each direction protects ITS return path
+		// (go-reviewer F3). A close records state FIRST: if the close commits
+		// and the record were lost, last_action would never say 'closed' and
+		// the reopen path would be dead for that ref forever — while a state
+		// row claiming a close that then failed just re-closes next pass (the
+		// task is still open and restorable). A reopen acts FIRST: a
+		// 'reopened' record for a reopen that failed would leave the task
+		// closed with a state that never authorises another attempt.
+		if d.Act && d.Action == "closed" {
+			if err := upsertState(ctx, pool, c, obs, d, reason); err != nil {
 				return stats, err
 			}
 		}
-		if err := upsertState(ctx, pool, c, obs, d, reason); err != nil {
-			return stats, err
+		if d.Act {
+			if err := act(ctx, ex, c, obs, d, reason); err != nil {
+				// Fact 11's race, handled rather than fatal (go-reviewer F6): a
+				// worker can claim the task between the candidate read and the
+				// close, and task_close then refuses active work. The pass
+				// moves on; the ref is re-evaluated next tick against the fresh
+				// status. Anything else stays loud and fatal.
+				if strings.Contains(err.Error(), "refusing to close active work") {
+					slog.Warn("ticketstatus: task became active mid-pass; skipping",
+						"key", c.key, "task", c.taskID, "err", err)
+					continue
+				}
+				return stats, err
+			}
+		}
+		if !(d.Act && d.Action == "closed") {
+			if err := upsertState(ctx, pool, c, obs, d, reason); err != nil {
+				return stats, err
+			}
 		}
 		count(&stats, d)
 	}

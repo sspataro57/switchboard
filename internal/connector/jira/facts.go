@@ -58,9 +58,19 @@ func IssueFacts(raw json.RawMessage) (Facts, error) {
 		if err := json.Unmarshal(rawStatus, &st); err != nil {
 			return f, fmt.Errorf("parse fields.status: %w", err)
 		}
-		if st.StatusCategory != nil && st.StatusCategory.Key != "" {
+		// Only Jira's three navigable category keys are facts; anything else —
+		// including the real fourth key `undefined` ("No Category", id 1) — is
+		// an evidence gap, NOT a value. Migration 0023's CHECK admits exactly
+		// these three, so an unrecognised key passed through would abort the
+		// whole pass at INSERT time, every tick, at the same ref (go-reviewer
+		// F1, 2026-09-09).
+		key := ""
+		if st.StatusCategory != nil {
+			key = st.StatusCategory.Key
+		}
+		if key == "new" || key == "indeterminate" || key == "done" {
 			f.StatusKnown = true
-			f.StatusCategory = st.StatusCategory.Key
+			f.StatusCategory = key
 			f.StatusName = st.Name
 		}
 	}

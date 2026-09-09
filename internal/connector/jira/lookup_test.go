@@ -345,3 +345,26 @@ func TestLookupPath_ReferencesNoJQL(t *testing.T) {
 		}
 	}
 }
+
+// Per-key resilience and its counter (go-reviewer F2, 2026-09-09; added with
+// the fix): one missing issue must not abort the account's other fetches, and
+// the miss must be COUNTED — a 404 that only surfaced as `unpolled` would be
+// indistinguishable from "no account claims this prefix".
+func TestLookupIssues_AMissingIssueIsCountedAndDoesNotAbortTheRest(t *testing.T) {
+	f := newFakeJira()
+	defer f.close()
+	lookupFixtures(f) // ILK-1..3 exist; ILK-9 does not
+	sink := newJiraFakeSink()
+
+	stats, err := jira.LookupIssues(context.Background(), newLookupClient(f), sink,
+		lookupAccount(f.url()), []string{"ILK-1", "ILK-9", "ILK-3"}, jira.Config{})
+	if err != nil {
+		t.Fatalf("LookupIssues: %v — a per-key miss is a counted skip, not a whole-call failure", err)
+	}
+	if stats.IssuesFetched != 2 || stats.FetchFailed != 1 {
+		t.Errorf("Stats = fetched %d / fetch_failed %d, want 2 / 1", stats.IssuesFetched, stats.FetchFailed)
+	}
+	if len(sink.inserts) != 2 {
+		t.Errorf("raw rows written = %d, want 2 (the two issues that exist)", len(sink.inserts))
+	}
+}

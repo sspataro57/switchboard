@@ -91,3 +91,7 @@ opsctl ticket-status report
 State lives in `ticket_status_syncs` (one row per ref, UPSERTed);
 `last_action='closed'` is the only thing that authorises a later reopen, which
 is what keeps the pass from ever resurrecting a close a human made.
+
+The lookup writes one `sync_runs` row per account per pass with its fetch
+counters in `stats` — diagnostic only: **nothing branches on that payload**
+(the upworkcrm two-rows landmine), and nothing should start to.

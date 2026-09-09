@@ -289,3 +289,26 @@ func TestIssueFacts_RefusesUnparseableBytes(t *testing.T) {
 		})
 	}
 }
+
+// Jira's REAL fourth category key — `undefined` ("No Category", id 1) — is an
+// evidence gap, not a value: migration 0023's CHECK admits exactly
+// new/indeterminate/done, so a fourth key passed through as "known" would
+// abort the reconciler at INSERT time, every tick, at the same ref
+// (go-reviewer F1, 2026-09-09; added with the fix).
+func TestIssueFacts_UnrecognisedCategoryKeyIsAnEvidenceGap(t *testing.T) {
+	for _, key := range []string{"undefined", "something-new-from-atlassian"} {
+		key := key
+		t.Run(key, func(t *testing.T) {
+			block := `{"name":"No Category","id":"1","statusCategory":{"id":1,"key":"` + key + `","name":"No Category"}}`
+			got, err := jira.IssueFacts(factsIssue("ITS-8", block, `null`))
+			if err != nil {
+				t.Fatalf("IssueFacts: %v", err)
+			}
+			if got.StatusKnown || got.StatusCategory != "" {
+				t.Errorf("IssueFacts(category key %q) = {known=%v, category=%q}, want an evidence gap — "+
+					"the pass counts it unreadable and touches nothing, instead of wedging on the "+
+					"state table's CHECK", key, got.StatusKnown, got.StatusCategory)
+			}
+		})
+	}
+}
