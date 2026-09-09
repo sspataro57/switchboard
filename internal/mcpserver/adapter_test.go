@@ -134,6 +134,13 @@ var spineTools = []string{
 	// IS agent-facing, with a free-text external_key). Same shape as the capture
 	// rule tools: the transport, not an actor prefix, is the boundary.
 	"task_set_source_thread",
+	// SWT-31 criterion 10, asserted deliberately rather than by omission (the
+	// SWT-20 precedent above). task_dismiss closes a task AND writes a typed
+	// label; an agent that could call it could clear its own queue and record
+	// that the work never needed doing. The gate is the transport allowlist here
+	// and policy.humanOnly in the matrix — two independent refusals, because the
+	// actor prefix alone is a transport label, not a trust boundary.
+	"task_dismiss",
 }
 
 func TestDraftDeliverySchema_IncludesSlackReply(t *testing.T) {

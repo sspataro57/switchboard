@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -459,6 +461,41 @@ func (s *Server) showPlan(w http.ResponseWriter, r *http.Request) {
 	if err := s.tmpl.ExecuteTemplate(w, "plan.html", d); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// dismissTaskAction is POST /tasks/{id}/dismiss (SWT-31): the board's dismiss
+// verb. One executor call (task_dismiss — humanOnly, closes the task and writes
+// the typed task_dismissals label in one transaction), no SQL of its own
+// (invariant 3). The redirect target is REBUILT from the four known filter keys
+// via url.Values — never echoed from a caller-supplied string (the safeNext
+// lesson in auth.go) — so a dismissal from a filtered board lands back on the
+// same filtered board, minus the dismissed row.
+func (s *Server) dismissTaskAction(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	taskID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || taskID <= 0 {
+		http.Error(w, "bad task id", http.StatusBadRequest)
+		return
+	}
+	raw, err := json.Marshal(map[string]any{
+		"task_id":     taskID,
+		"reason_code": r.PostFormValue("reason_code"),
+		"note":        r.PostFormValue("note"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	back := url.Values{}
+	for _, k := range []string{"project", "status", "assignee_type", "subproject"} {
+		if v := r.PostFormValue(k); v != "" {
+			back.Set(k, v)
+		}
+	}
+	s.executeTask(w, r, "task_dismiss", string(raw), taskID, back)
 }
 
 // planAction runs approve/reject_plan_import through the executor with the

@@ -246,3 +246,30 @@ There is no schema rollback: 0015 drops a column, and forward-only means
 forward-only. Restoring `projects.client_person_id` would be a new migration plus
 a backfill from `capture_decisions`, which is a worse position than fixing the
 rules.
+
+## Task titles for thread-keyed rules (SWT-31)
+
+A rule whose derived external key is the message's thread key (any
+`thread_key_prefix`/`thread_key_contains` rule with no `key_regex` — the Upwork
+client rules) no longer puts the raw key in the title. The label is the message
+**sender**, falling back to the project name, then the slug, then the key.
+
+Before: `upwork_crm:e2ef9b65-…:room:room_6f162de2… — Hi Salvador,`
+After: `Mario Cruz — Hi Salvador,`
+
+Jira-keyed and `body_regex` titles are unchanged, byte for byte. The identity
+dropped from the title still lives in the task body (`thread_key:`, `sender:`,
+`message_id:`) and in `external_refs`. The five tasks created live before this
+shipped were corrected by a one-off psql UPDATE by explicit id (recorded in the
+SWT-31 delivery summary) — capture's live claim for those messages is spent, so
+no code path can ever re-title them.
+
+## Dismissals are labelled data (SWT-31)
+
+Dismissing a task from the board (`task_dismiss`, human-only) closes it and
+writes ONE typed row to `task_dismissals` (reason_code enum + optional note +
+who). **`task_dismissals` is the labelled-data store; `task_events` is NOT.**
+The status_changed event's prose reason is for humans reading a task's history —
+never GROUP BY it, never parse it in a report. The two sanctioned label queries
+(dismissals joined back to the classify verdict, and per-capture-rule dismissal
+counts) are pinned verbatim in the SWT-31 SPEC and its integration tests.

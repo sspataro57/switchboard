@@ -74,6 +74,14 @@ var humanOnly = map[string]bool{
 	// send-shaped — nothing leaves the system — so neither the kill switch nor
 	// a rate limit has any claim on them.
 	"capture_rule_add": true, "capture_rule_set_enabled": true,
+	// SWT-31: a dismissal is a human judgement recorded as TRAINING DATA
+	// (task_dismissals), so the verb is gated on a human actor. task_close
+	// stays open — the orchestrator calls it from R1, R8 and the feedback
+	// rules — which is the whole reason this is a separate verb. Not
+	// send-shaped and not snapshot-gated: nothing leaves the system, so
+	// neither the kill switch nor the rate limit has any claim on it (the
+	// mark_delivery_failed argument, verbatim).
+	"task_dismiss": true,
 }
 
 // snapshotGated tools need the loader (channel/rate/freeze state).

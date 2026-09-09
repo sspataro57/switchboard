@@ -39,7 +39,7 @@
   {{range .Columns}}
   <h2>{{.Status}} ({{len .Tasks}})</h2>
   <table>
-    <tr><th>id</th><th>title</th><th>project</th><th>sub</th><th>assignee</th><th>prio</th><th>order</th><th>parent</th><th>updated</th></tr>
+    <tr><th>id</th><th>title</th><th>project</th><th>sub</th><th>assignee</th><th>prio</th><th>order</th><th>parent</th><th>updated</th><th></th></tr>
     {{range .Tasks}}
     <tr>
       <td><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
@@ -51,6 +51,22 @@
       <td>{{.PlanOrder}}</td>
       <td>{{if .ParentID}}<a href="/tasks/{{.ParentID}}">{{.ParentID}}</a>{{end}}</td>
       <td class="muted">{{.UpdatedAt}}</td>
+      <td>
+        <form class="inline" method="post" action="/tasks/{{.ID}}/dismiss">
+          <input type="hidden" name="project" value="{{index $.Filters "project"}}">
+          <input type="hidden" name="status" value="{{index $.Filters "status"}}">
+          <input type="hidden" name="assignee_type" value="{{index $.Filters "assignee_type"}}">
+          <input type="hidden" name="subproject" value="{{index $.Filters "subproject"}}">
+          <select name="reason_code">
+            <option value="not_actionable">not actionable</option>
+            <option value="wrong_kind">wrong kind</option>
+            <option value="duplicate">duplicate</option>
+            <option value="handled_elsewhere">handled elsewhere</option>
+          </select>
+          <input type="text" name="note" placeholder="note (optional)">
+          <button>Dismiss</button>
+        </form>
+      </td>
     </tr>
     {{end}}
   </table>

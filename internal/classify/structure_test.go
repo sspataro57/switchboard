@@ -1038,11 +1038,11 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		seenAny = true
 		n, _ := strconv.Atoi(m[1])
 		// 0018 is SWT-23's (this branch); 0019 shipped with SWT-20 and merged
-		// first; 0020 is SWT-28's (calendar-booking) and 0021 is SWT-30's
-		// (classify-promotion) — each named by its ticket's "Data model
-		// changes" section. Anything else above 0017 is a migration nobody's
-		// ticket owns.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 {
+		// first; 0020 is SWT-28's (calendar-booking), 0021 is SWT-30's
+		// (classify-promotion) and 0022 is SWT-31's (board-dismissals:
+		// task_dismissals) — each named by its ticket's "Data model changes"
+		// section. Anything else above 0017 is a migration nobody's ticket owns.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

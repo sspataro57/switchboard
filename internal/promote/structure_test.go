@@ -276,13 +276,12 @@ func TestMigration0021_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 			"not applying it — check `SELECT max(version) FROM schema_migrations` before deploying",
 			len(matches))
 	}
-	if extra, _ := filepath.Glob(filepath.Join("..", "..", "migrations", "0022_*.sql")); len(extra) != 0 {
-		t.Errorf("found %d migrations/0022_*.sql file(s): SWT-30 adds ONE migration. (The 0022 the SPEC "+
-			"mentions is classify's ADVISORY LOCK key, not a migration number — the two families share "+
-			"digits and nothing else. The literal key is deliberately NOT spelled here: "+
-			"internal/classify/structure_test.go's collision scan walks internal/ for it and would "+
-			"report this file as a second owner.)", len(extra))
-	}
+	// AMENDED 2026-09-09: this guard originally asserted nothing at 0022
+	// existed, which was true for SWT-30's branch and could not stay true —
+	// SWT-31 (board-dismissals) legitimately owns 0022_task_dismissals.sql.
+	// The LIVING registry of owned migration numbers is the ledger in
+	// internal/classify/structure_test.go; this test keeps only its own
+	// ticket's claim: exactly one 0021.
 
 	rel := filepath.Join("migrations", filepath.Base(matches[0]))
 	sql := strings.ToLower(prRepoFile(t, rel))
