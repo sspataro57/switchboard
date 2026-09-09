@@ -87,6 +87,12 @@ var allToolNames = []string{
 	// conversation could aim that task's deliveries. The absence is asserted, not
 	// merely relied on: internal/mcpserver/adapter_test.go's spineTools.
 	"task_set_source_thread",
+	// SWT-31 criterion 8: the board's first verb. Registered here so a dismissal
+	// runs validate -> policy -> audit like every other action (invariant 3), and
+	// deliberately ABSENT from internal/mcpserver/schemas.go — an agent that could
+	// dismiss tasks could clear its own queue. The absence is asserted, not merely
+	// relied on: internal/mcpserver/adapter_test.go's spineTools.
+	"task_dismiss",
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -158,6 +164,11 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		"record_pr_event",
 		"record_ci_event",
 		"task_pr_transition",
+		// SWT-31: task_dismiss needs task_id AND reason_code; {} is illegal.
+		// The enum half lives in dismiss_test.go, which calls validateDismiss
+		// directly — an ACCEPTED call would run the handler and deref the nil
+		// pool this test relies on.
+		"task_dismiss",
 	}
 
 	for _, name := range toolsUnderTest {

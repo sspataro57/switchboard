@@ -238,3 +238,102 @@ func TestRunbook_DocumentsReadingTheResidue(t *testing.T) {
 			"session notifications, and upwork.com (106) into 'Invitation to Interview'")
 	}
 }
+
+// ---- SWT-31 criterion 5: the title branch is an EQUALITY, not a parse ---------
+
+// "internal/capture contains no `upwork_crm:` literal, no ParseThreadKey import
+// and no key parsing of any kind; the branch is the equality of D1."
+//
+// D1's stated reason, and why this is a structural test rather than a review
+// note: the ONE spelling of the upwork thread-key format lives in
+// internal/connector/upworkcrm/threadkey.go — the SWT-19 rule — and a second
+// spelling here would be a format change away from silently mis-titling every
+// upwork task while every unit test stayed green. The defect is also not
+// upwork-specific: a future slack or gmail `thread_key_prefix` rule with no
+// key_regex has exactly the same key-is-the-thread-key shape.
+func TestCaptureRules_TitleBranchNeverNamesAProviderOrParsesAKey(t *testing.T) {
+	files := capturePackageSourceFiles(t)
+	if len(files) == 0 {
+		t.Fatalf("no non-test source files in internal/capture; a scan with nothing to scan proves nothing")
+	}
+	banned := []struct{ token, why string }{
+		{"upwork_crm:", "D1: branching on the provider puts the upwork thread-key FORMAT in a second " +
+			"file; the one spelling lives in internal/connector/upworkcrm/threadkey.go (the SWT-19 rule)"},
+		{"ParseThreadKey", "same rule from the other direction: importing the parser makes this package " +
+			"depend on a format it does not own, for a title"},
+		{"connector/upworkcrm", "internal/capture is provider-agnostic: the evaluator matches patterns " +
+			"from the capture_rules TABLE, and the driver acts on what it returns"},
+	}
+	for _, rel := range files {
+		src := mustReadRepoFile(t, filepath.Join("internal/capture", rel))
+		for _, b := range banned {
+			if strings.Contains(src, b.token) {
+				t.Errorf("internal/capture/%s contains %q — criterion 5 forbids it: %s", rel, b.token, b.why)
+			}
+		}
+	}
+}
+
+// The other half of criterion 5, scoped to the function that composes the title:
+// the discriminator is `key == msg.ThreadKey && key != ""` and nothing else. A
+// package-wide ban on string splitting would be false — rulesreport.go's
+// threadKeyPrefix histogram legitimately splits a thread key for a REPORT — so
+// this reads ruleTaskTitle's own body.
+func TestRuleTaskTitle_DiscriminatesByEqualityOnly(t *testing.T) {
+	src := mustReadRepoFile(t, "internal/capture/rules_store.go")
+	i := strings.Index(src, "func ruleTaskTitle(")
+	if i < 0 {
+		t.Fatalf("internal/capture/rules_store.go does not declare ruleTaskTitle; this guard has nothing to guard")
+	}
+	body := src[i:]
+	if j := strings.Index(body[1:], "\nfunc "); j > 0 {
+		body = body[:j+1]
+	}
+
+	// The equality itself, in either operand order, tolerant of the field name
+	// the implementer reaches it through (msg.ThreadKey / pm.msg.ThreadKey).
+	eq := regexp.MustCompile(`(?s)(key\s*==\s*[\w.]*ThreadKey|[\w.]*ThreadKey\s*==\s*key)`)
+	if !eq.MatchString(body) {
+		t.Errorf("ruleTaskTitle does not compare the derived key to the message's ThreadKey. D1: the "+
+			"discriminator is a comparison of two values already in hand — it discriminates on real "+
+			"data today (Jira keys are WEB-123, never a thread key), which is what keeps it out of the "+
+			"\"predicate whose discriminating value is a constant in production\" family.\nbody:\n%s", body)
+	}
+	// And the non-empty half, without which two absent values look like a match.
+	if !regexp.MustCompile(`key\s*!=\s*""`).MatchString(body) {
+		t.Errorf("ruleTaskTitle's discriminator has no `key != \"\"` guard. A thread-less message has an "+
+			"empty thread key AND (for a keyless rule) an empty derived key, and equality alone would "+
+			"take the branch for both.\nbody:\n%s", body)
+	}
+	for _, b := range []struct{ token, why string }{
+		{"strings.Split", "the branch is an equality; splitting the key is parsing it"},
+		{"strings.Cut", "same"},
+		{"strings.HasPrefix", "a prefix test on the key is the provider name in disguise"},
+		{"regexp", "no pattern over the key: key_regex is the evaluator's, applied in rules.go"},
+	} {
+		if strings.Contains(body, b.token) {
+			t.Errorf("ruleTaskTitle contains %q — criterion 5: %s", b.token, b.why)
+		}
+	}
+}
+
+// capturePackageSourceFiles lists EVERY non-test .go file in internal/capture.
+// Criterion 5 is stated over the package, not over rules*.go: an
+// `upwork_crm:`-shaped title helper in a new file would satisfy a rules-only
+// scan and be exactly the thing D1 refuses.
+func capturePackageSourceFiles(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read internal/capture: %v", err)
+	}
+	var out []string
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}

@@ -174,6 +174,9 @@ type storedRule struct {
 	subproject  string
 	extSystem   string
 	urlTemplate string
+	// projectName is projects.name — the title's fallback label when a
+	// thread-keyed task's message carries no sender (SWT-31 criterion 3).
+	projectName string
 }
 
 // pendingMessage is one inbound message the pass must decide about.
@@ -368,7 +371,7 @@ func tryRulesLock(ctx context.Context, pool *pgxpool.Pool) (func(), bool, error)
 // list` and a human reading this file see the same sequence.
 func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT r.id, p.slug, r.criteria_type, r.pattern, r.key_regex, r.priority, r.enabled,
+		`SELECT r.id, p.slug, p.name, r.criteria_type, r.pattern, r.key_regex, r.priority, r.enabled,
 		        r.project_id, COALESCE(r.subproject,''), COALESCE(r.external_system,''),
 		        COALESCE(r.url_template,'')
 		   FROM capture_rules r
@@ -383,7 +386,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 	var out []storedRule
 	for rows.Next() {
 		var s storedRule
-		if err := rows.Scan(&s.rule.ID, &s.rule.Project, &s.rule.Kind, &s.rule.Pattern,
+		if err := rows.Scan(&s.rule.ID, &s.rule.Project, &s.projectName, &s.rule.Kind, &s.rule.Pattern,
 			&s.rule.ExternalKeyRegex, &s.rule.Priority, &s.rule.Enabled,
 			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate); err != nil {
 			return nil, fmt.Errorf("scan capture rule: %w", err)
@@ -728,7 +731,7 @@ func createRuleTask(ctx context.Context, ex *executor.Executor, actor string,
 	args, err := json.Marshal(map[string]any{
 		"project":       winner.rule.Project,
 		"subproject":    winner.subproject,
-		"title":         ruleTaskTitle(key, pm.msg.Subject, pm.msg.BodyText),
+		"title":         ruleTaskTitle(key, pm.msg, winner),
 		"body":          ruleTaskBody(pm, winner, system, key),
 		"assignee_type": "human",
 		"priority":      0,
@@ -834,14 +837,37 @@ func appendRuleLog(ctx context.Context, ex *executor.Executor, actor string,
 // ruleTaskTitle is SPEC §7's "{external_key} — {subject-or-first-line}", truncated
 // to 120 runes with the ONE spelling of whitespace-collapsed, rune-safe truncation.
 // No model, no invention: every character is copied from stored data.
-func ruleTaskTitle(key, subject, body string) string {
-	head := strings.TrimSpace(subject)
+// ruleTaskTitle composes a board title. For a key that is NOT the message's
+// thread key (jira, body_regex, any key_regex rule) the shape is byte-identical
+// to what always shipped: `{key} — {head}`. When the derived key IS the
+// message's non-empty thread key — capture.externalKey returns it VERBATIM for
+// a keyless non-body_regex rule, which is what put 128-character keys on the
+// board — the key is a dedup key, not a title, so the label is the SENDER
+// (SWT-31 Q1), falling back to the project name, the slug, then the key itself
+// (criterion 4: never empty, never a dangling separator).
+//
+// The discriminator is the EQUALITY and nothing else (D1): never the provider
+// name — a thread key's format is the owning connector's spelling, not this
+// package's — and `key != ""` so two absent values do not read as a match.
+func ruleTaskTitle(key string, msg Message, winner storedRule) string {
+	head := strings.TrimSpace(msg.Subject)
 	if head == "" {
-		head = ruleFirstLine(body)
+		head = ruleFirstLine(msg.BodyText)
 	}
-	title := key
+	label := key
+	if key != "" && key == msg.ThreadKey {
+		switch {
+		case strings.TrimSpace(msg.Sender) != "":
+			label = strings.TrimSpace(msg.Sender)
+		case winner.projectName != "":
+			label = winner.projectName
+		case winner.rule.Project != "":
+			label = winner.rule.Project
+		}
+	}
+	title := label
 	if head != "" {
-		title = key + " — " + head
+		title = label + " — " + head
 	}
 	return textmatch.NormalizedPrefix(title, rulesTitleLen)
 }

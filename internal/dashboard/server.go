@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -67,6 +68,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /funnel", s.auth.Require(http.HandlerFunc(s.showFunnel)))
 	mux.Handle("GET /plans", s.auth.Require(http.HandlerFunc(s.listPlans)))
 	mux.Handle("GET /plans/{id}", s.auth.Require(http.HandlerFunc(s.showPlan)))
+	// SWT-31: the board's first verb. Auth-required like every POST; the
+	// handler (board.go) rebuilds the filter query itself — criterion 17.
+	mux.Handle("POST /tasks/{id}/dismiss", s.auth.Require(http.HandlerFunc(s.dismissTaskAction)))
 	mux.Handle("POST /plans/{id}/approve", s.auth.Require(s.planAction("approve_plan_import")))
 	mux.Handle("POST /plans/{id}/reject", s.auth.Require(s.planAction("reject_plan_import")))
 	mux.Handle("GET /export/tasks.csv", s.auth.Require(http.HandlerFunc(s.exportCSV)))
@@ -188,6 +192,24 @@ func (s *Server) actionFreeze(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) execute(w http.ResponseWriter, r *http.Request, tool, args string) {
 	s.executeTo(w, r, tool, args, "/deliveries")
+}
+
+// executeTask runs a task-scoped tool with executor.Call.TaskID set — the
+// audit start/complete rows then carry the task (SWT-31 criterion 15; plain
+// executeTo sets none) — and redirects to /tasks carrying the given
+// query values plus the flash.
+func (s *Server) executeTask(w http.ResponseWriter, r *http.Request, tool, args string, taskID int64, back url.Values) {
+	actor := "dashboard:" + s.auth.User(r)
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	_, err := s.ex.Execute(ctx, executor.Call{Tool: tool, Actor: actor, Args: []byte(args), TaskID: &taskID})
+	flash := tool + " ok"
+	if err != nil {
+		flash = err.Error()
+	}
+	back.Set("flash", flash)
+	http.Redirect(w, r, "/tasks?"+back.Encode(), http.StatusSeeOther)
 }
 
 // executeTo runs a tool through the executor with the session actor and

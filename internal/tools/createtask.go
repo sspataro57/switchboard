@@ -57,6 +57,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"task_block", validateBlockUnblock, blockTask},
 		{"task_unblock", validateBlockUnblock, unblockTask},
 		{"task_close", validateClose, closeTask},
+		// SWT-31: the board's dismiss verb — close + a typed task_dismissals
+		// label in one transaction. humanOnly (a dismissal is training data);
+		// deliberately NOT in internal/mcpserver/schemas.go — an agent that
+		// could dismiss tasks could clear its own queue. See close.go.
+		{"task_dismiss", validateDismiss, dismissTask},
 		{"record_orchestration", validateRecordOrchestration, recordOrchestration},
 		{"propose_slots", validateProposeSlots, proposeSlots},
 		{"draft_delivery", validateDraftDelivery, draftDelivery},
