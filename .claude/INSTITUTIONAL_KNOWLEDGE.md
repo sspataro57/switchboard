@@ -1259,3 +1259,21 @@ client Mario Cruz / Saka Technologies, TWO CRM client records so TWO
 thread_key_prefix rules, 57+58) were created; upwork client_id-prefix capture
 rules 55 (foundry/Lyle) and 56 (town-ai/Erica) route all their rooms, current
 and future. pod-hut deliberately NOT created — engagement on long pause.
+
+### Ticket-status reconciler is live (SWT-32, 2026-09-09)
+
+`internal/ticketstatus` runs at the end of every connector-jira tick (after
+capture, deliberately): a jira-keyed task closes when its ticket's
+statusCategory is `done` OR (gated projects) the assignee is not the polling
+account's own accountId; it reopens — to the status it held — when the ticket
+warrants it again. `last_action='closed'` in `ticket_status_syncs` is the only
+thing that authorises a reopen; human dismissals (task_dismissals) always
+outrank the reconciler. Reengine's gate is ARMED. The Avviato lookup half
+(`jira_lookup` provider, candidate-driven, prefix-routed) is dormant until an
+API token is stored via `jira-auth add --lookup-only` — its refs show as
+`unpolled` in `opsctl ticket-status report`, which is expected, not a bug.
+One-off reconciliation ran 2026-09-09: 14 collaboratory tasks closed.
+`task_reopen` exists now (spine, not humanOnly, off MCP); advisory key low
+digits 0023. Landmine class confirmed twice this ticket: Jira has a FOURTH
+statusCategory key (`undefined`) — readers must treat unknown keys as
+evidence gaps, never pass them toward a three-value CHECK.
