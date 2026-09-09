@@ -39,6 +39,11 @@ type Stats struct {
 	RawUnchanged    int `json:"raw_unchanged"`
 	Normalized      int `json:"normalized"`
 	SuspectedMerges int `json:"suspected_merges"`
+	// FetchFailed counts per-key lookup misses (SWT-32 F2): a 404 or a
+	// permission gap on one GET. Only the candidate-driven lookup moves it —
+	// the poller's search path fails whole. Nothing branches on this in a
+	// sync_runs payload; the ticketstatus counters surface it.
+	FetchFailed int `json:"fetch_failed,omitempty"`
 }
 
 type Config struct {
@@ -160,7 +165,7 @@ func ingestIssue(ctx context.Context, c *Client, sink Sink, acct Account, key st
 	if err != nil {
 		return fmt.Errorf("split issue %s: %w", key, err)
 	}
-	if err := upsertRaw(ctx, sink, acct.ID, "issue:"+key, issueOnly, stats); err != nil {
+	if err := upsertRaw(ctx, sink, acct.ID, IssueRawID(key), issueOnly, stats); err != nil {
 		return err
 	}
 

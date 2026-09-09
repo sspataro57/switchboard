@@ -49,6 +49,11 @@ type fakeIssue struct {
 	description string
 	reporter    string // accountId
 	assignee    string
+	// statusCat/statusName render fields.status; SWT-32's facts reader needs a
+	// status block in every snapshot, as real Jira always sends one. Defaults
+	// keep the pre-SWT-32 fixtures valid ("indeterminate" = live work).
+	statusCat   string
+	statusName  string
 	comments    []fakeComment
 	inlineLimit int // how many comments the issue GET embeds; rest via /comment
 }
@@ -202,12 +207,29 @@ func issueObj(iss fakeIssue) map[string]any {
 			"created":     iss.created,
 			"updated":     iss.updated,
 			"reporter":    map[string]any{"accountId": iss.reporter, "displayName": "R " + iss.reporter},
+			"status":      statusObj(iss),
 			"assignee":    map[string]any{"accountId": iss.assignee, "displayName": "A " + iss.assignee},
 			"comment": map[string]any{
 				"total": len(iss.comments), "startAt": 0, "maxResults": inline,
 				"comments": inlineComments,
 			},
 		},
+	}
+}
+
+// statusObj renders fields.status the way the provider serialises it —
+// name and statusCategory side by side.
+func statusObj(iss fakeIssue) map[string]any {
+	cat, name := iss.statusCat, iss.statusName
+	if cat == "" {
+		cat = "indeterminate"
+	}
+	if name == "" {
+		name = "Working"
+	}
+	return map[string]any{
+		"name": name, "id": "3",
+		"statusCategory": map[string]any{"id": 3, "key": cat, "colorName": "green", "name": name},
 	}
 }
 

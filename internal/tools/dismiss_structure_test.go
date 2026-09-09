@@ -58,10 +58,15 @@ func TestMigration0022_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 			"section is ONE migration. Merging a migration is not applying it — check "+
 			"`SELECT max(version) FROM schema_migrations` before deploying", len(matches))
 	}
-	if extra, _ := filepath.Glob(filepath.Join("..", "..", "migrations", "0023_*.sql")); len(extra) != 0 {
-		t.Errorf("found %d migrations/0023_*.sql file(s): SWT-31 adds ONE migration, and criterion 21 "+
-			"says nothing above 0022 exists", len(extra))
-	}
+	// AMENDED 2026-09-09: this guard originally asserted that no 0023_*.sql
+	// existed, which was true on SWT-31's branch and could not stay true —
+	// SWT-32 (jira-status-sync) legitimately owns
+	// 0023_ticket_status_sync.sql, and its own guard
+	// (internal/ticketstatus/structure_test.go) asserts there is exactly one.
+	// The LIVING registry of owned migration numbers is the ledger in
+	// internal/classify/structure_test.go; this test keeps only its own
+	// ticket's claim: exactly one 0022, shaped as below. Same amendment
+	// internal/promote/structure_test.go took when 0022 landed.
 
 	rel := filepath.Join("migrations", filepath.Base(matches[0]))
 	sql := strings.ToLower(dsRepoFile(t, rel))

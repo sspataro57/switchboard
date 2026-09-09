@@ -6,6 +6,7 @@
 //	opsctl fleet
 //	opsctl answer-feedback --id N --answer "..." [--resume]
 //	opsctl capture-rules <list|add|run|report> [flags]
+//	opsctl ticket-status <sync|report> [flags]   (SWT-32: the jira reconciler by hand)
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -25,12 +27,13 @@ import (
 	"github.com/sspataro57/switchboard/internal/fleet"
 	"github.com/sspataro57/switchboard/internal/policy"
 	"github.com/sspataro57/switchboard/internal/store"
+	"github.com/sspataro57/switchboard/internal/ticketstatus"
 	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules|ticket-status> [flags]")
 		os.Exit(2)
 	}
 
@@ -51,6 +54,18 @@ func main() {
 		return
 	case "answer-feedback":
 		if err := runAnswerFeedback(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "opsctl:", err)
+			os.Exit(1)
+		}
+		return
+	case "ticket-status":
+		// Both subcommands are their own paths: `sync` drives the pass (which
+		// makes its own executor calls) and `report` is a read.
+		if len(os.Args) < 3 {
+			err = fmt.Errorf("usage: opsctl ticket-status <sync|report> [flags]")
+			break
+		}
+		if err := runTicketStatus(os.Args[2], os.Args[3:]); err != nil {
 			fmt.Fprintln(os.Stderr, "opsctl:", err)
 			os.Exit(1)
 		}
@@ -600,4 +615,139 @@ func runCaptureRulesReport(argv []string) error {
 	}
 	fmt.Print(out)
 	return nil
+}
+
+// ---- ticket-status (SWT-32) ---------------------------------------------------
+
+const ticketStatusSyncTimeout = 15 * time.Minute
+
+// runTicketStatus drives the jira ticket reconciler by hand — the "usable
+// alone" path, since the CronJob keeps running the pinned old image until the
+// kube session re-pins it.
+func runTicketStatus(sub string, argv []string) error {
+	switch sub {
+	case "sync":
+		return runTicketStatusSync(argv)
+	case "report":
+		return runTicketStatusReport()
+	default:
+		return fmt.Errorf("unknown ticket-status command %q (want sync|report)", sub)
+	}
+}
+
+func runTicketStatusSync(argv []string) error {
+	fs := flag.NewFlagSet("ticket-status sync", flag.ContinueOnError)
+	dryRun := fs.Bool("dry-run", false, "decide over the same rows, write nothing, fetch nothing; print the plan")
+	force := fs.Bool("force", false, "bypass the lookup freshness TTL (the smoke's knob)")
+	limit := fs.Int("limit", 0, "max candidate refs this pass (0 = all)")
+	if err := fs.Parse(argv); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), ticketStatusSyncTimeout)
+	defer cancel()
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	reg := executor.NewRegistry()
+	tools.Register(reg, pool)
+	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
+	ex := executor.New(reg, checker, audit.NewPGStore(pool))
+
+	// The token factory mirrors cmd/connectors/jira: nil without OPS_TOKEN_KEY,
+	// and the pass then skips its lookup half loudly (D21).
+	var factory jira.ClientFactory
+	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
+		factory = func(ctx context.Context, acct jira.Account) (*jira.Client, error) {
+			var token string
+			if err := pool.QueryRow(ctx,
+				`SELECT pgp_sym_decrypt(refresh_token_encrypted, $2) FROM source_accounts WHERE id=$1`,
+				acct.ID, key).Scan(&token); err != nil {
+				return nil, fmt.Errorf("decrypt token for %s: %w", acct.Email, err)
+			}
+			return jira.NewClient(http.DefaultClient, acct.SiteBaseURL, acct.Email, token), nil
+		}
+	}
+
+	st, err := ticketstatus.Run(ctx, pool, ex, ticketstatus.Config{
+		DryRun: *dryRun, Force: *force, Limit: *limit, Lookup: factory,
+	})
+	fmt.Printf("ticket_status: considered=%d closed_ticket_done=%d closed_not_assigned=%d reopened=%d "+
+		"refused_active=%d suppressed_dismissed=%d converged=%d unpolled=%d ambiguous=%d unreadable=%d "+
+		"fetched=%d fetch_skipped_ttl=%d fetch_failed=%d\n",
+		st.Considered, st.ClosedTicketDone, st.ClosedNotAssigned, st.Reopened,
+		st.RefusedActive, st.SuppressedDismissed, st.Converged, st.Unpolled, st.Ambiguous, st.Unreadable,
+		st.Fetched, st.FetchSkippedTTL, st.FetchFailed)
+	return err
+}
+
+// runTicketStatusReport prints the reconciler's current state joined to tasks
+// and projects — read-only, including each project's gate and the unpolled
+// refs with the lookup account, if any, that would claim each.
+func runTicketStatusReport() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	rows, err := pool.Query(ctx, `
+		SELECT r.external_key, p.slug, p.ticket_assignee_gate, t.status,
+		       COALESCE(s.last_action,'(never observed)'), COALESCE(s.drop_reason,''),
+		       COALESCE(s.status_category,''), COALESCE(s.status_name,''),
+		       COALESCE(s.assignee_account_id,''), s.observed_at
+		  FROM external_refs r
+		  JOIN tasks t ON t.id = r.task_id
+		  JOIN projects p ON p.id = t.project_id
+		  LEFT JOIN ticket_status_syncs s ON s.external_ref_id = r.id
+		 WHERE r.system = 'jira'
+		 ORDER BY p.slug, r.external_key`)
+	if err != nil {
+		return fmt.Errorf("select ticket status state: %w", err)
+	}
+	defer rows.Close()
+
+	lookups, err := jira.NewSink(pool).ListLookupAccounts(ctx)
+	if err != nil {
+		return err
+	}
+
+	n := 0
+	for rows.Next() {
+		var key, slug, taskStatus, lastAction, drop, category, name, assignee string
+		var gate bool
+		var observedAt *time.Time
+		if err := rows.Scan(&key, &slug, &gate, &taskStatus, &lastAction, &drop,
+			&category, &name, &assignee, &observedAt); err != nil {
+			return fmt.Errorf("scan ticket status row: %w", err)
+		}
+		n++
+		gateCol := "gate=off"
+		if gate {
+			gateCol = "gate=ON"
+		}
+		claim := ""
+		if lastAction == "(never observed)" {
+			if acct, outcome := ticketstatus.RouteLookup(key, lookups); outcome == "routed" {
+				claim = "  would-lookup=" + acct.Email
+			} else {
+				claim = "  " + outcome
+			}
+		}
+		when := ""
+		if observedAt != nil {
+			when = observedAt.Format("2006-01-02 15:04")
+		}
+		fmt.Printf("%-14s %-16s %-8s task=%-12s %-22s %-13s %s/%s assignee=%s %s%s\n",
+			key, slug, gateCol, taskStatus, lastAction, drop, category, name, assignee, when, claim)
+	}
+	if n == 0 {
+		fmt.Println("no jira-keyed refs; nothing to reconcile")
+	}
+	return rows.Err()
 }

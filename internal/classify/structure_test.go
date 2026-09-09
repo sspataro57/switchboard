@@ -1039,10 +1039,19 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		n, _ := strconv.Atoi(m[1])
 		// 0018 is SWT-23's (this branch); 0019 shipped with SWT-20 and merged
 		// first; 0020 is SWT-28's (calendar-booking), 0021 is SWT-30's
-		// (classify-promotion) and 0022 is SWT-31's (board-dismissals:
-		// task_dismissals) — each named by its ticket's "Data model changes"
-		// section. Anything else above 0017 is a migration nobody's ticket owns.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 {
+		// (classify-promotion), 0022 is SWT-31's (board-dismissals:
+		// task_dismissals) and 0023 is SWT-32's (jira-status-sync:
+		// ticket_status_syncs + projects.ticket_assignee_gate) — each named by
+		// its ticket's "Data model changes" section. Anything else above 0017 is
+		// a migration nobody's ticket owns.
+		//
+		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
+		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
+		// asserts only its own file; the numbers nobody owns are caught HERE,
+		// because the migrate runner keys on schema_migrations.version with NO
+		// checksum — a stray or edited file is skipped SILENTLY and the schema
+		// diverges with no error anywhere.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}
