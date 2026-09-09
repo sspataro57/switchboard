@@ -25,6 +25,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/availability"
 	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/classify"
+	"github.com/sspataro57/switchboard/internal/promote"
 	"github.com/sspataro57/switchboard/internal/tools"
 )
 
@@ -143,15 +144,16 @@ type funnelLane struct {
 }
 
 type funnelPage struct {
-	Days      int
-	MaxAge    string // the effective AVAIL_MAX_SYNC_AGE, printed next to the section
-	Errors    []string
-	Health    []funnelHealthRow
-	Intake    []intakeDay
-	Accounts  []string // intake column order
-	Capture   []capture.DayAttribution
-	Lanes     []funnelLane
-	Generated string
+	Days       int
+	MaxAge     string // the effective AVAIL_MAX_SYNC_AGE, printed next to the section
+	Errors     []string
+	Health     []funnelHealthRow
+	Intake     []intakeDay
+	Accounts   []string // intake column order
+	Capture    []capture.DayAttribution
+	Lanes      []funnelLane
+	Promotions []promote.LaneCounters
+	Generated  string
 }
 
 func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
@@ -339,6 +341,20 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				}
 				page.Lanes = append(page.Lanes, funnelLane{Name: lane.Name, Summary: sum})
 			}
+			return nil
+		}},
+		{Name: "classify promotion", Load: func() error {
+			// SWT-30 criterion 18: one promotion line per lane over the same
+			// ?days= window, read from classify_promotions through the seam that
+			// owns its SQL (promote.CountersByLane — the dashboard restates no
+			// fold over ai_runs/ai_extractions, SWT-29's rule). The page stays a
+			// WINDOW, NOT A CONTROL: no POST route exists here — arming or
+			// approving happens elsewhere.
+			counters, err := promote.CountersByLane(ctx, s.pool, days)
+			if err != nil {
+				return err
+			}
+			page.Promotions = counters
 			return nil
 		}},
 	})
