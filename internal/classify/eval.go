@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,7 +22,7 @@ import (
 // It carries NO MESSAGE CONTENT — not a subject, not a body, not a sender. The
 // bodies are loaded from the database by id at eval time, so the labelled set is
 // safe to commit while the mail it scores never leaves the machine. `Note` is
-// free text and is documented as content-free for the same reason.
+// a CLOSED vocabulary (LabelNoteAllowed), never free text, for the same reason.
 //
 // Stratum (SWT-23) is set on every residue line and absent from the personal
 // file: `uniform` is the only stratum a base rate or an honest precision can
@@ -73,6 +72,24 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 	if err := cfg.Lane.validate(); err != nil {
 		return err
 	}
+	// One label per message, refused here rather than trusted to the loader
+	// (Codex adversarial review, round 6): the sub-threshold refusal gates on
+	// the SCORED count, so a file that repeated its rows could cross
+	// EvalResultThreshold — and print ratios — with no new judgement behind
+	// them. Every caller of this exported function gets the check, and it runs
+	// BEFORE the router below is asked anything (round 7: Route probes the
+	// local endpoint, which is I/O).
+	ids := make([]int64, 0, len(labels))
+	seenLabel := make(map[int64]bool, len(labels))
+	for _, l := range labels {
+		if seenLabel[l.MessageID] {
+			return fmt.Errorf("the labelled set lists message %d more than once; one label per message — a "+
+				"repeated row adds no judgement and would inflate the scored count past the ratio threshold",
+				l.MessageID)
+		}
+		seenLabel[l.MessageID] = true
+		ids = append(ids, l.MessageID)
+	}
 	// Refuse FIRST, before a single message is read or sent. The check is the
 	// router's own answer for the class this worker's inbox always carries.
 	lane, decision, reason := router.Route(ctx, provider.ClassRestricted)
@@ -82,10 +99,6 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 			"produce a number for a model that will never run", reason)
 	}
 
-	ids := make([]int64, 0, len(labels))
-	for _, l := range labels {
-		ids = append(ids, l.MessageID)
-	}
 	msgs, err := store.MessagesByID(ctx, cfg, ids)
 	if err != nil {
 		return fmt.Errorf("load labelled messages: %w", err)
@@ -101,6 +114,7 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 	var scored []PendingMessage
 	wantActionable := map[int64]bool{}
 	stratumOf := map[int64]string{}
+	blanket := map[int64]bool{}
 	var missing, drifted []int64
 	for _, l := range labels {
 		m, ok := byID[l.MessageID]
@@ -113,8 +127,11 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 			continue
 		}
 		scored = append(scored, m)
-		wantActionable[l.MessageID] = l.Label == "actionable"
+		// The LANE's positive token (criterion 23): scored against
+		// "actionable", every needs_reply label would count as a negative.
+		wantActionable[l.MessageID] = l.Label == cfg.Lane.Contract.PositiveLabel
 		stratumOf[l.MessageID] = l.Stratum
+		blanket[l.MessageID] = l.Note == OwnerBlanketNote
 	}
 
 	if len(missing) > 0 || len(drifted) > 0 {
@@ -164,12 +181,35 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 	// stale verdicts. Empty path = disabled (the unit suites' path).
 	done := map[int64]outcome{}
 	ckptModel := ""
+	// ckptKey binds every checkpoint line to WHICH evaluation produced it
+	// (Codex adversarial review, rounds 3 and 4): the lane's worker_type and
+	// prompt version, a fingerprint of the system prompt and output schema
+	// actually sent, the configured model, and every knob that shapes the
+	// output (think, max tokens, context size). A checkpoint path reused across
+	// lanes, prompts, models or budgets would otherwise feed verdicts to a
+	// different evaluation into this score without re-asking. It is checked at
+	// LOAD, before any request, so even a fully checkpointed resume — where no
+	// request, and so no server-reported-model check below, would ever run — is
+	// covered. A mismatch is refused, never merged.
+	promptFP := sha256.Sum256([]byte(cfg.Lane.System + "\x00" + string(cfg.Lane.Contract.Schema)))
+	ckptKey := fmt.Sprintf("%s/%s/%s/model=%s/think=%t/max=%d/ctx=%d",
+		cfg.Lane.WorkerType, cfg.Lane.PromptVersion, hex.EncodeToString(promptFP[:])[:12],
+		cfg.Model, cfg.Think, cfg.MaxTokens, cfg.NumCtx)
 	if cfg.EvalCheckpoint != "" {
 		if raw, err := os.ReadFile(cfg.EvalCheckpoint); err == nil {
 			for _, line := range strings.Split(string(raw), "\n") {
 				parts := strings.Split(line, "\t")
 				if len(parts) < 4 {
 					continue
+				}
+				if len(parts) < 5 || parts[4] != ckptKey {
+					got := "(unbound: written before checkpoints recorded their evaluation)"
+					if len(parts) >= 5 {
+						got = parts[4]
+					}
+					return fmt.Errorf("checkpoint %s holds verdicts from a different evaluation (%s); this run is "+
+						"%s. Delete the checkpoint (rescoring everything) or point --checkpoint at this "+
+						"evaluation's own file", cfg.EvalCheckpoint, got, ckptKey)
 				}
 				id, err1 := strconv.ParseInt(parts[0], 10, 64)
 				act, err2 := strconv.ParseBool(parts[1])
@@ -214,9 +254,9 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 			// here would be a second source of truth for the same fact.
 			Model:      "",
 			System:     cfg.Lane.System,
-			User:       renderUser(m),
-			SchemaName: SchemaName,
-			Schema:     VerdictSchema,
+			User:       renderUser(cfg.Lane, m),
+			SchemaName: cfg.Lane.Contract.SchemaName,
+			Schema:     cfg.Lane.Contract.Schema,
 			MaxTokens:  cfg.MaxTokens,
 			Think:      cfg.Think,
 			NumCtx:     cfg.NumCtx,
@@ -250,7 +290,7 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 					if model == "" {
 						model = cfg.Model
 					}
-					if _, err := fmt.Fprintf(ckpt, "%d\t%t\t%d\t%s\n", o.id, o.actionable, o.latencyMS, model); err != nil {
+					if _, err := fmt.Fprintf(ckpt, "%d\t%t\t%d\t%s\t%s\n", o.id, o.actionable, o.latencyMS, model, ckptKey); err != nil {
 						return fmt.Errorf("append eval checkpoint: %w", err)
 					}
 				}
@@ -259,8 +299,11 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 			}
 			return fmt.Errorf("classify message %d: %w", m.MessageID, err)
 		}
-		var v verdict
-		if err := json.Unmarshal(resp.Raw, &v); err != nil {
+		// The lane's decision field (criterion 23): reading `actionable` off an
+		// inquiry verdict decodes to false on every row — a total miss that
+		// looks like a terrible prompt rather than a scorer on the wrong key.
+		decision, err := decodeDecision(cfg.Lane, resp.Raw)
+		if err != nil {
 			return fmt.Errorf("parse verdict for message %d: %w", m.MessageID, err)
 		}
 		// A checkpoint from ANOTHER model must refuse, not merge: the header's
@@ -275,12 +318,12 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 		if scoredModel == "" {
 			scoredModel = resp.Model
 		}
-		o := outcome{id: m.MessageID, actionable: v.Actionable, latencyMS: resp.LatencyMS}
+		o := outcome{id: m.MessageID, actionable: decision, latencyMS: resp.LatencyMS}
 		outcomes = append(outcomes, o)
 		if ckpt != nil {
 			// One line per verdict, flushed by the unbuffered write: the whole
 			// point is surviving an abrupt death.
-			if _, err := fmt.Fprintf(ckpt, "%d\t%t\t%d\t%s\n", o.id, o.actionable, o.latencyMS, resp.Model); err != nil {
+			if _, err := fmt.Fprintf(ckpt, "%d\t%t\t%d\t%s\t%s\n", o.id, o.actionable, o.latencyMS, resp.Model, ckptKey); err != nil {
 				return fmt.Errorf("append eval checkpoint: %w", err)
 			}
 		}
@@ -293,6 +336,7 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 	}
 
 	var tp, fp, fn int
+	var blanketN, blanketFlagged, blanketUniformFlagged int
 	var uniformTP, uniformFP, uniformN, uniformActionable int
 	hasStrata := false
 	var falseNegatives []int64
@@ -326,34 +370,109 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 			}
 		}
 		lat = append(lat, o.latencyMS)
+		if blanket[o.id] {
+			blanketN++
+			// Only a flag on a row labelled NEGATIVE is a possible bulk-labelled
+			// ask; the line below says exactly that, so it counts exactly that.
+			if o.actionable && !want {
+				blanketFlagged++
+				if stratum == "uniform" {
+					blanketUniformFlagged++
+				}
+			}
+		}
 	}
 
 	fmt.Fprintf(w, "classify eval — model %s — n=%d scored (%d labels in the file)\n",
 		displayModel(scoredModel), len(outcomes), len(labels))
-	if hasStrata {
+	// pos is the lane's positive token. Every line below names it rather than
+	// "actionable": the same bytes on the personal and residue lanes, and on the
+	// inquiry lane a count phrased in the lane's own question (D1).
+	pos := cfg.Lane.Contract.PositiveLabel
+	if len(outcomes) < EvalResultThreshold {
+		// SWT-33 criterion 31 / D7. Below the threshold the eval prints COUNTS
+		// and the marker and NO ratio-shaped number anywhere — not a rounder
+		// one, not one in parentheses, none. A percentage at n=40 is noise that
+		// reads exactly like a measurement once it is pasted somewhere else,
+		// and this repo has already shipped a 25-29x cost error by quoting a
+		// number out of the context that produced it. A convention did not stop
+		// that; this refusal does.
+		//
+		// The counts are NOT withheld: the refusal replaces the ratio, it does
+		// not delete the result.
+		//
+		// The vocabulary stays ("recall", "precision") so a reader looking for
+		// those numbers finds them — what changes is that they are COUNTS, a
+		// fraction of labelled messages, not a decimal that can be lifted out
+		// of this output and quoted as a rate.
+		//
+		// EVERY lane, on the SCORED n, enforced HERE. The first cut scoped it to
+		// the inquiry lane plus a caller-set flag, which any caller of this
+		// exported function could leave unset (Codex adversarial re-review). The
+		// measured lanes' own fixtures (280, 874; the personal file's minimum IS
+		// the threshold) sit above it, so their published output is unchanged.
+		// A stratified set keeps its three-line semantics — recall over all
+		// strata, precision and base rate from the uniform stratum — as counts.
+		if hasStrata {
+			fmt.Fprintf(w, "  recall    %d of %d labelled %s caught (all strata — %s-shaped mail is over-represented by design; counts only)\n",
+				tp, tp+fn, pos, pos)
+			fmt.Fprintf(w, "  precision uniform stratum only: %d of %d flagged were labelled %s\n",
+				uniformTP, uniformTP+uniformFP, pos)
+			fmt.Fprintf(w, "  base rate %d of %d uniform labels %s\n", uniformActionable, uniformN, pos)
+		} else {
+			fmt.Fprintf(w, "  recall    %d of %d labelled %s caught (counts only, see below)\n",
+				tp, tp+fn, pos)
+			fmt.Fprintf(w, "  precision %d of %d flagged were labelled %s\n",
+				tp, tp+fp, pos)
+		}
+		fmt.Fprintf(w, "  median latency %d ms\n", median(lat))
+		fmt.Fprintf(w, "  %s (n=%d < %d)\n\n", EvalIndicativeMarker, len(outcomes), EvalResultThreshold)
+	} else if hasStrata {
 		// The three lines of SWT-23 criterion 20, each saying what it is worth —
 		// three bare numbers with no note beside them are three numbers a reader
 		// will quote interchangeably.
-		fmt.Fprintf(w, "  recall    %s   (%d of %d actionable caught; all strata — actionable-shaped mail is over-represented by design)\n",
-			ratio(tp, tp+fn), tp, tp+fn)
-		fmt.Fprintf(w, "  precision %s   (uniform stratum only: %d of %d flagged were actionable — the only precision that describes production)\n",
-			ratio(uniformTP, uniformTP+uniformFP), uniformTP, uniformTP+uniformFP)
-		fmt.Fprintf(w, "  base rate %d of %d uniform labels actionable — the number that decides this lane's future\n",
-			uniformActionable, uniformN)
+		fmt.Fprintf(w, "  recall    %s   (%d of %d %s caught; all strata — %s-shaped mail is over-represented by design)\n",
+			ratio(tp, tp+fn), tp, tp+fn, pos, pos)
+		fmt.Fprintf(w, "  precision %s   (uniform stratum only: %d of %d flagged were %s — the only precision that describes production)\n",
+			ratio(uniformTP, uniformTP+uniformFP), uniformTP, uniformTP+uniformFP, pos)
+		fmt.Fprintf(w, "  base rate %d of %d uniform labels %s — the number that decides this lane's future\n",
+			uniformActionable, uniformN, pos)
 		fmt.Fprintf(w, "  median latency %d ms\n\n", median(lat))
 	} else {
 		// A strata-less set prints the SWT-22 output byte-for-byte: this is the
 		// path every personal number was measured through, and a stratum
 		// breakdown here would be lines computed over an empty uniform stratum.
-		fmt.Fprintf(w, "  recall    %s   (%d of %d actionable messages caught)\n", ratio(tp, tp+fn), tp, tp+fn)
-		fmt.Fprintf(w, "  precision %s   (%d of %d flagged were actionable)\n", ratio(tp, tp+fp), tp, tp+fp)
+		fmt.Fprintf(w, "  recall    %s   (%d of %d %s messages caught)\n", ratio(tp, tp+fn), tp, tp+fn, pos)
+		fmt.Fprintf(w, "  precision %s   (%d of %d flagged were %s)\n", ratio(tp, tp+fp), tp, tp+fp, pos)
 		fmt.Fprintf(w, "  median latency %d ms\n\n", median(lat))
 	}
 
-	// RECALL IS THE OBJECTIVE, so the misses are the output that matters. A score
-	// without ids tells an operator that something is wrong and nothing about
-	// what.
-	fmt.Fprintf(w, "false negatives (%d) — labelled actionable, classified not:\n", len(falseNegatives))
+	// Labels the owner set by a BLANKET instruction rather than one by one
+	// (Codex adversarial review, round 5). They are his judgement and stay in
+	// the score, but they may answer "already dealt with" rather than "was it an
+	// ask when it arrived", so a flag on one can be a real ask scored as a false
+	// positive. Printed on their own line so the counts above can be read with
+	// that subtracted. Only printed when present, so the personal and residue
+	// output (whose files carry no such note) is unchanged.
+	//
+	// On a STRATIFIED set the precision line is uniform-stratum only, so the
+	// all-strata count cannot be subtracted from it (most enriched rows are the
+	// model's own earlier flags); the uniform share is printed beside it, and
+	// that is the number that corrects the precision line.
+	if blanketN > 0 {
+		if hasStrata {
+			fmt.Fprintf(w, "owner-blanket labels: %d scored, %d labelled `not` and flagged (%d in the uniform "+
+				"stratum — the share of the precision line's false positives that may be real asks labelled in "+
+				"bulk)\n\n", blanketN, blanketFlagged, blanketUniformFlagged)
+		} else {
+			fmt.Fprintf(w, "owner-blanket labels: %d scored, %d labelled `not` and flagged — each may be a real "+
+				"ask the owner labelled `not` in bulk\n\n", blanketN, blanketFlagged)
+		}
+	}
+
+	// The misses, by id. A score without ids tells an operator that something is
+	// wrong and nothing about what.
+	fmt.Fprintf(w, "false negatives (%d) — labelled %s, classified not:\n", len(falseNegatives), pos)
 	if len(falseNegatives) == 0 {
 		fmt.Fprintln(w, "  none")
 	}
@@ -365,6 +484,15 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 		fmt.Fprintf(w, "  message %d  %s\n", id, subject)
 	}
 	fmt.Fprintln(w)
+	if cfg.Lane.Name == LaneInquiry.Name {
+		// The inquiry lane's objective is the OPPOSITE of the other two
+		// (criterion 8), and its closing note says so.
+		fmt.Fprintln(w, "Precision is this lane's objective: a false \"someone is waiting on you\" costs trust in a")
+		fmt.Fprintln(w, "surface meant to be relied on, and most of this conversation is chatter. Tune against")
+		fmt.Fprintln(w, "these labels, never against intuition — and read the counts, not a rate, until the set")
+		fmt.Fprintf(w, "reaches %d labels.\n", EvalResultThreshold)
+		return nil
+	}
 	fmt.Fprintln(w, "Recall is the objective: a missed payment or fine notice is a late fee, a false alarm")
 	fmt.Fprintln(w, "costs a second to dismiss. Tune against these labels, never against intuition — this")
 	fmt.Fprintln(w, "fixture has been wrong before and the models were right.")
@@ -378,6 +506,52 @@ func displayModel(model string) string {
 		return "(model not reported)"
 	}
 	return model
+}
+
+// EvalResultThreshold is the number of scored labels below which Eval refuses
+// to print a ratio (SWT-33 D7). It is ALSO the size of the stratified set the
+// runbook commits to (uniform >= 80 + enriched >= 40) — one fact, so it gets
+// one spelling: the labelled-set guard reads THIS constant rather than
+// restating 120, or the two drift the first time the minimum is raised.
+const EvalResultThreshold = 120
+
+// EvalIndicativeMarker is the one spelling of the sub-threshold warning. Worded
+// so it cannot be quoted out of context: the half that survives being pasted
+// into a Jira comment is "this is not a measurement".
+const EvalIndicativeMarker = "INDICATIVE ONLY — this is not a measurement"
+
+// OwnerBlanketNotePrefix marks a label the owner set by blanket instruction
+// rather than one by one (docs/evals/inquiry-needs-reply.jsonl's `note`). Eval
+// reports those rows on their own line; one spelling, read here and written in
+// the fixture.
+const OwnerBlanketNotePrefix = "owner-blanket"
+
+// OwnerBlanketNote is the exact note carried by a blanket-labelled row.
+const OwnerBlanketNote = OwnerBlanketNotePrefix + ": labelled by the owner's blanket instruction, not one by one"
+
+// LabelStratumAllowed says whether a label's `stratum` is in the closed
+// vocabulary: absent, or one of the three strata the eval understands. One
+// spelling, read by cmd/classify's loader (Codex adversarial review, round 9:
+// an unconstrained string field is a place client text can ride along).
+func LabelStratumAllowed(stratum string) bool {
+	switch stratum {
+	case "", "uniform", "enriched", "domain_gate":
+		return true
+	}
+	return false
+}
+
+// LabelNoteAllowed says whether a label file's `note` value is in the CLOSED
+// vocabulary. A note is never free text (Codex adversarial review, round 8):
+// the labelled sets are committed, and a free-text field is one paste away
+// from putting a client's message into git — the exact leak the ids-plus-hash
+// format exists to prevent. Add a value here, deliberately, to allow it.
+func LabelNoteAllowed(note string) bool {
+	switch note {
+	case "", OwnerBlanketNote:
+		return true
+	}
+	return false
 }
 
 func ratio(num, den int) string {

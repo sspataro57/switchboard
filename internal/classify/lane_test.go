@@ -27,6 +27,21 @@ package classify_test
 //
 // GREENFIELD NOTE: Lane, LaneResidue, ResidueSystemPrompt and Config.Lane do not
 // exist yet, so this file compile-FAILS. Expected red.
+//
+// AMENDED BY SWT-33 (inquiry-classify), criterion 3, 2026-09-10. Two guards in
+// this file became WRONG rather than merely out of date, and the repo's standing
+// rule is to REWRITE them, never to delete:
+//
+//   - TestLane_ThereAreExactlyTwoAndTheyAreDeclaredInGo -> ...ExactlyThree...
+//     The SPEC that its message demanded ("if a third is genuinely wanted, the
+//     argument belongs in a SPEC") was written: docs/tickets/inquiry-classify_SPEC.md.
+//   - TestLane_DoesNotForkTheOutputContract -> TestLane_ThreeLanesTwoContracts.
+//     SWT-33 D1 forks the contract DELIBERATELY, and the replacement guard —
+//     LanePersonal.Contract == LaneResidue.Contract — is a stronger statement of
+//     what the field scan was protecting.
+//
+// The Lane struct gains a Contract field; everything else in this file is SWT-23's
+// and must stay green byte for byte.
 
 import (
 	"context"
@@ -96,13 +111,21 @@ func (s *lnStore) PendingMessages(ctx context.Context, cfg classify.Config) ([]c
 	return s.cfStore.PendingMessages(ctx, cfg)
 }
 
-// ---- criterion 10: there are exactly two lanes -------------------------------
+// ---- SWT-33 criterion 3: there are exactly THREE lanes -----------------------
 
-// "Exactly two" is a real constraint rather than tidiness: a third lane means a
-// third worker_type, a third prompt nothing measured, and a third population
-// whose class nobody argued about. When one is genuinely wanted, this test is
-// the place the argument gets written down.
-func TestLane_ThereAreExactlyTwoAndTheyAreDeclaredInGo(t *testing.T) {
+// REWRITTEN, NOT DELETED (SWT-33 criterion 3; the repo's standing rule for a
+// guard that becomes wrong). SWT-23 asserted "exactly two, and when a third is
+// genuinely wanted the argument belongs in a SPEC, not in a var block". The
+// argument WAS written down, in docs/tickets/inquiry-classify_SPEC.md: the
+// inquiry lane asks a different QUESTION of a different population (does this
+// message need a reply from Salvador, over an armed client project's inbound
+// traffic), with its own prompt, its own labelled set and its own worker_type.
+//
+// So the count moves from two to three and the constraint stays exactly as
+// binding: a FOURTH lane is a fourth worker_type, a fourth prompt nothing
+// measured and a fourth population whose class nobody argued about. Deleting
+// this test is a failure — it is where that argument gets written down.
+func TestLane_ThereAreExactlyThreeAndTheyAreDeclaredInGo(t *testing.T) {
 	declared := map[string]string{} // var name -> file
 	for _, rel := range csSources(t, "internal/classify") {
 		fset := token.NewFileSet()
@@ -141,13 +164,14 @@ func TestLane_ThereAreExactlyTwoAndTheyAreDeclaredInGo(t *testing.T) {
 		}
 	}
 
-	if len(declared) != 2 {
-		t.Fatalf("internal/classify declares %d package-level Lane value(s) (%v); criterion 10 says there "+
-			"are EXACTLY TWO, LanePersonal and LaneResidue. A third lane is a third worker_type, a third "+
-			"prompt nothing measured and a third population whose class nobody argued about — if one is "+
-			"genuinely wanted, the argument belongs in a SPEC, not in a var block", len(declared), declared)
+	if len(declared) != 3 {
+		t.Fatalf("internal/classify declares %d package-level Lane value(s) (%v); SWT-33 criterion 3 says "+
+			"there are EXACTLY THREE — LanePersonal, LaneResidue and LaneInquiry. A FOURTH lane is a "+
+			"fourth worker_type, a fourth prompt nothing measured and a fourth population whose class "+
+			"nobody argued about — if one is genuinely wanted, the argument belongs in a SPEC, not in a "+
+			"var block, exactly as SWT-33's did", len(declared), declared)
 	}
-	for _, want := range []string{"LanePersonal", "LaneResidue"} {
+	for _, want := range []string{"LanePersonal", "LaneResidue", "LaneInquiry"} {
 		if _, ok := declared[want]; !ok {
 			t.Errorf("no package-level Lane named %q; declared: %v", want, declared)
 		}
@@ -235,41 +259,93 @@ func TestLane_ValuesAreTheTwoContracts(t *testing.T) {
 	}
 }
 
-// ---- criterion 10: ONE contract, not one per lane ----------------------------
+// ---- SWT-33 criterion 3: THREE lanes, TWO contracts ---------------------------
 
-// The argument is in the SPEC's "three answers", (a): reusing VerdictSchema
-// verbatim is the only way the residue's recall/precision can be read against
-// the personal lane's 0.94 / 0.50. A different schema makes the two lanes two
-// experiments.
-func TestLane_DoesNotForkTheOutputContract(t *testing.T) {
+// REWRITTEN, NOT DELETED. SWT-23's TestLane_DoesNotForkTheOutputContract scanned
+// classify.Lane's FIELD LIST and failed on any extra field, on the theory that a
+// lane-scoped schema would make the two lanes two experiments. That theory was
+// right about what it was protecting — SWT-23's 0.94 / 0.50 comparability — and
+// wrong about the mechanism, because a field scan cannot tell a third lane that
+// SHARES the contract from one that forks it.
+//
+// SWT-33 D1 forks the contract deliberately: VerdictSchema's `kind` enum is
+// payment_due | deadline | appointment | action_required | informational — the
+// vocabulary of a bill, not of a conversation — and scoring `actionable`
+// against inquiry labels would make two different questions' recall/precision
+// falsely comparable.
+//
+// The replacement guard is STRONGER than the field list it replaces: it asserts
+// the equality directly. LanePersonal.Contract == LaneResidue.Contract is
+// exactly the property "one contract, both lanes" was standing for, and it goes
+// red on a fork of EITHER of them rather than on the mere presence of a field.
+func TestLane_ThreeLanesTwoContracts(t *testing.T) {
+	// The struct's shape, still pinned: the five values every lane carries, plus
+	// the Contract. A sixth unexplained field is still a fork.
 	fields := map[string]bool{}
 	rt := reflect.TypeOf(classify.Lane{})
 	for i := 0; i < rt.NumField(); i++ {
 		fields[rt.Field(i).Name] = true
 	}
-	want := []string{"Name", "WorkerType", "System", "PromptVersion", "LabelsPath"}
+	want := []string{"Name", "WorkerType", "System", "PromptVersion", "LabelsPath", "Contract"}
 	for _, f := range want {
 		if !fields[f] {
-			t.Errorf("classify.Lane has no %q field; the SPEC's struct is %v", f, want)
+			t.Errorf("classify.Lane has no %q field; SWT-33 criterion 2's struct is %v", f, want)
 		}
 	}
 	for f := range fields {
 		switch f {
-		case "Name", "WorkerType", "System", "PromptVersion", "LabelsPath":
+		case "Name", "WorkerType", "System", "PromptVersion", "LabelsPath", "Contract":
 		default:
-			t.Errorf("classify.Lane has an extra field %q. If it is a schema or a schema name, that is the "+
-				"fork criterion 10 refuses: ONE contract for both lanes, so the two numbers are comparable "+
-				"and TestSchema_MatchesTheOutputContract keeps meaning something", f)
+			t.Errorf("classify.Lane has an extra field %q. The output contract lives in Contract and "+
+				"NOWHERE ELSE: a second schema-shaped field beside it is two places one fact lives, and "+
+				"the two disagree the first time one is edited", f)
 		}
 	}
 
-	// And no lane-scoped schema smuggled in beside the struct.
+	// THE REPLACEMENT ASSERTION. Spelled with reflect.DeepEqual only so the
+	// implementation may keep Schema as json.RawMessage; it is the same claim
+	// the SPEC writes as `LanePersonal.Contract == LaneResidue.Contract`.
+	if !reflect.DeepEqual(classify.LanePersonal.Contract, classify.LaneResidue.Contract) {
+		t.Errorf("LanePersonal.Contract != LaneResidue.Contract:\n personal: %+v\n residue:  %+v\n"+
+			"This is what SWT-23's field scan was protecting and what SWT-33 criterion 2 makes explicit: "+
+			"the residue's recall/precision is only readable against the personal lane's 0.94 / 0.50 "+
+			"while the two answer the SAME question through the SAME schema. Forking it makes them two "+
+			"experiments with one table.",
+			classify.LanePersonal.Contract, classify.LaneResidue.Contract)
+	}
+
+	// Two contracts across three lanes: the inquiry lane has its own, and the
+	// other two share one. Counted rather than compared pairwise, because
+	// pairwise is where the third one gets forgotten.
+	seen := map[string]bool{}
+	for _, l := range []classify.Lane{classify.LanePersonal, classify.LaneResidue, classify.LaneInquiry} {
+		seen[fmt.Sprintf("%+v", l.Contract)] = true
+	}
+	if len(seen) != 2 {
+		t.Errorf("the three lanes carry %d distinct contracts, want exactly 2 (the shared actionability "+
+			"contract, and the inquiry lane's own). %d would mean the inquiry lane is scoring `actionable` "+
+			"against needs_reply labels; 3 would mean the residue lane forked away from the personal one "+
+			"and SWT-23's comparison silently stopped meaning anything", len(seen), len(seen))
+	}
+
+	// And the shared one is still the ACTIONABILITY contract, unchanged. Without
+	// this, "two contracts" is satisfied by two NEW ones.
+	if fmt.Sprintf("%s", classify.LanePersonal.Contract.Schema) != fmt.Sprintf("%s", classify.VerdictSchema) {
+		t.Errorf("LanePersonal.Contract.Schema is not classify.VerdictSchema verbatim. Criterion 2: the "+
+			"actionability VerdictSchema and SchemaName are unchanged BYTE FOR BYTE, and "+
+			"TestSchema_MatchesTheOutputContract still passes untouched:\n%s",
+			classify.LanePersonal.Contract.Schema)
+	}
+
+	// No residue-scoped schema smuggled in beside the struct. Unchanged from
+	// SWT-23: the residue lane still has no contract of its own.
 	for _, rel := range csSources(t, "internal/classify") {
 		code := csGoCode(t, rel)
 		for _, banned := range []string{"ResidueVerdictSchema", "ResidueSchemaName", "residueVerdictSchema"} {
 			if strings.Contains(code, banned) {
-				t.Errorf("%s declares %s. VerdictSchema and SchemaName are NOT lane-scoped (criterion 10): "+
-					"one contract, both lanes", rel, banned)
+				t.Errorf("%s declares %s. The residue lane shares the personal lane's contract and always "+
+					"has (SWT-23 criterion 10); the lane that got its own is `inquiry`, and it got one "+
+					"because it asks a different question", rel, banned)
 			}
 		}
 	}

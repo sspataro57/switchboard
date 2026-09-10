@@ -1,6 +1,6 @@
 # Runbook — the local actionability classifier (SWT-22)
 
-`classify` runs TWO lanes since SWT-23: `--lane personal` (the SWT-22 lane — mail the capture rules attributed to the `personal` project) and `--lane residue` (the unmatched pile nothing has routed). One binary, one verdict contract, two inboxes and two prompts.
+`classify` runs THREE lanes: `--lane personal` (the SWT-22 lane — mail the capture rules attributed to the `personal` project), `--lane residue` (SWT-23 — the unmatched pile nothing has routed) and `--lane inquiry` (SWT-33 — client conversation on projects armed with `ai_inquiry`: does this message need a reply from Salvador). One binary, two verdict contracts (actionability for the first two, needs-reply for the inquiry lane), three inboxes and three prompts.
 
 `classify` reads personal mail — the messages the capture rules attributed to the
 `personal` project — and records a shadow verdict: is this something that has to
@@ -211,6 +211,240 @@ the label file.
 Measured numbers for this lane are recorded in the score table above alongside
 the personal rows, with their date.
 
+## The inquiry lane (SWT-33)
+
+The third inbox: inbound messages whose LATEST capture decision attributes them
+to a project armed with `projects.ai_inquiry` (migration 0024; only
+`collaboratory` today). It asks a different question from the other two lanes —
+**does this message contain an inquiry that needs a reply from Salvador** — so
+it has its own output contract (`needs_reply`, `ask_kind`, `asker`, `ask`,
+`reason`), its own prompt and its own labels. Verdicts land under worker_type
+`classify_inquiry`. SHADOW: it creates no task and no outbound row of any kind.
+
+```bash
+DATABASE_URL=... go run ./cmd/classify run --lane inquiry --since 168h
+DATABASE_URL=... go run ./cmd/classify report --lane inquiry --since 168h
+DATABASE_URL=... go run ./cmd/classify eval --lane inquiry   # labels default to docs/evals/inquiry-needs-reply.jsonl
+```
+
+Arming and disarming a project is one UPDATE each way, and there is nothing to
+undo, because the lane creates nothing:
+
+```sql
+UPDATE projects SET ai_inquiry = true  WHERE slug = '<slug>';
+UPDATE projects SET ai_inquiry = false WHERE slug = '<slug>';
+```
+
+`ai_inquiry` is a WORKLOAD flag, like `ai_classify` (which opts mail into the
+personal lane's actionability question and is set on `personal` only). Neither
+is the boundary; `ai_locality` is, and this lane's filter deliberately does
+NOT read it — `collaboratory` is `ai_locality='any'`, and a `local_only` clause
+would return zero rows. The lane is contained instead by `classify.Run` pinning
+its routed class to restricted and by `cmd/classify` having no hosted client at
+all. **Never "fix" skips by adding a hosted client**: the pin exists so the lane
+works without one.
+
+**`--since` is REQUIRED on an inquiry run** — an unbounded pass is refused, not
+defaulted. An inquiry goes stale in days, and the armed project's history is
+unbounded from the code's point of view. The arithmetic: `collaboratory`
+receives ~34 inbound messages a day (184 slack + 35 gmail + 17 jira over the
+week measured 2026-09-10) x the measured **4.5 s** median per verdict = ~2.5
+GPU-minutes per day of history. Measured on the first shadow pass, 2026-09-10:
+50 verdicts, median 4,454 ms, p90 5,263 ms, z4 at the 90 W cap, with the full
+six-message context in the prompt. (The SPEC's planning figure was ~10 s; size
+passes with the measured one, and re-measure if the context window changes.)
+Evals are exempt: they are bounded by the label file.
+
+Cadence during the shadow period: twice daily with `--since 24h` (overlap is
+free — the extraction `NOT EXISTS` dedups). **The advisory lock `0x5157_0022`
+is shared by all three lanes**, and `run` treats losing it as an error, so never
+schedule two lanes in the same minute: chain them in one command
+(`classify run --lane personal && classify run --lane inquiry --since 24h`) or
+stagger them by more than the longest pass. The CronJob is a kube-repo handoff.
+
+### What the model decides, and what the spine decides
+
+The model sees up to six PRIOR messages of the same thread — both directions,
+tagged `me:` / `them:`, oldest first — then the message itself. Never a later
+message: a verdict stays a stable property of the message and a label stays
+valid forever. The model answers "is this an inquiry to me, in this context";
+it does not answer "is it still open".
+
+"Still open" is decided at READ time by `classify.Summarize`, from the stored
+verdicts plus a join to `normalized_messages`: a flagged verdict whose thread
+carries an `outbound` message sent after it is no longer open. Nothing is
+written back, so retuning the rule costs no GPU. Every flagged verdict is in
+exactly one of three states:
+
+| state | meaning |
+|---|---|
+| `open` | no outbound message on the thread since |
+| `answered in thread` | a later outbound on a thread-exact key — a reply in that thread |
+| `spoke in conversation since` | a later outbound anywhere in an unthreaded Slack channel or DM |
+
+### `thread_scope`
+
+Every verdict records `thread_id`, `thread_key` (verbatim), `thread_scope` and
+`external_message_id`, so a later drafting ticket can aim a reply at the exact
+thread without re-deriving anything. This ticket aims nothing.
+
+- `thread` — the key names one thread: a gmail thread, a jira issue
+  (`jira:{host}:{KEY}`), or a Slack message with a thread root
+  (`slack:{ws}:{conv}:{root}`).
+- `conversation` — an unthreaded Slack message, whose key is the whole channel
+  or DM (`slack:{ws}:{conv}`). **A weaker claim**: a later outbound there only
+  means Salvador has spoken in the conversation since — nearly a reply in a DM,
+  almost nothing in a busy channel. That is why it is its own counter and never
+  counted as answered. There is no thread to reply into yet; the recorded
+  `external_message_id` is what a later ticket would root one at.
+- `none` — the message has no thread at all.
+
+Measured 2026-09-10: 113 thread-exact Slack keys vs 83 conversation-level ones,
+and ONE conversation-level key holds 9,704 messages — which is why classifying
+whole threads was rejected. Whether a Slack key is rooted is decided by
+`slackweb.IsRootedThreadKey` alone; never parse the key in SQL or anywhere else.
+
+### The fold's input, measured
+
+The fold rests on `normalized_messages.direction = 'outbound'`, and Slack
+direction fails closed per workspace. Measured per workspace on 2026-09-10 (all
+time): `T0360B84U` (Avviato) 24,352 inbound / 19,012 outbound, latest outbound
+2026-09-04; `T0HPR78RX` (Collaboratory/LlamaSite) 2,155 inbound / 2,393
+outbound, latest outbound 2026-09-09.
+
+Per channel, over the 30 days to 2026-09-10, on every thread that carries a
+collaboratory-attributed message — the fold's actual input. (Counting the
+attributed messages themselves shows almost no outbound at all, because capture
+never decides an outbound message; count the THREADS.)
+
+| channel | outbound on those threads | all messages | the fold |
+|---|---:|---:|---|
+| slack | 793 | 1,681 | discriminates |
+| jira  | 25 | 105 | discriminates |
+| gmail | 1 | 447 | **near-INERT for this channel** — replies to collaboratory mail almost never land on the same thread, so a gmail verdict reads `open` whether or not it was answered |
+
+Re-measure before trusting a gmail `open`. Never freeze these numbers in a test
+— the corpus is live.
+
+### Reading the report, by channel
+
+`classify report --lane inquiry` — and the inquiry block on `/funnel`, which
+prints the same numbers from the same fold — shows the three states and then
+every count **by channel**: classified, flagged, open, answered in thread, spoke
+in conversation since, skipped. There is deliberately no `--channel` flag: the
+lane runs over every channel of an armed project, and the breakdown is what says
+which message shape broke when a number looks wrong. The rows sum to the lane
+totals; `(unrecorded)` holds skips written before the lane recorded a channel.
+
+The **base rate** — flagged ÷ classified, per channel — is the number that
+decides this lane's future. Record it here after the first week of shadow
+output.
+
+**First shadow pass, 2026-09-10** (`run --lane inquiry --since 168h --limit 50`):
+50 processed, 16 flagged, 0 skipped, 0 errors — all 50 slack and all
+`conversation` scope, because the oldest-first limit never reached the week's
+gmail. open 9 / answered in thread 0 / spoke in conversation since 7. Nothing
+else moved: tasks 70 → 70, deliveries 3 → 3, and the personal and residue
+reports were byte-identical before and after. 16 of 50 is NOT a base rate —
+the sample is the week's oldest 50, not a uniform draw. Observations for the
+labelling, not for tuning (tuning happens against labels, never intuition):
+3 of the 16 flags carry `ask_kind: fyi` with `needs_reply: true`, a
+self-contradiction; several flags in the `a-millon` channel are team members
+addressing each other (`@esteban …`), the "addressed to someone else" case the
+prompt names. One verdict's thread is in workspace `T0360B84U` (Avviato),
+channel `C1C1TSLJH`, which a capture rule attributes to collaboratory — a
+capture-rule question, outside this lane.
+
+### Eval — and why it prints no ratio yet
+
+| date       | n  | needs_reply | caught | flagged & labelled | median latency | model    | note |
+|------------|----|------------:|-------:|-------------------:|---------------:|----------|------|
+| 2026-09-10 | 61 | 2           | 2 of 2 | 2 of 7 (uniform)   | 4.3 s          | qwen3:8b | base rate 2 of 45 uniform · owner-blanket: 28 scored, 17 `not`+flagged, 2 of them uniform · INDICATIVE ONLY — this is not a measurement |
+
+The 2026-09-10 row, read with the starter-set notes below: both labelled asks
+were caught (`caught 2 of 2`), and 5 of the 7 uniform-stratum flags were
+labelled `not`. The eval's own owner-blanket line says 2 of those 5 are
+bulk-labelled rows (possibly real asks at the time), so at least 3 are false
+alarms on individually judged labels. The precision count is therefore a LOWER
+bound, and two positives say nothing about recall. Median 4,303 ms over 61
+verdicts on the z4 (the first run: 4,325 ms), consistent with the shadow pass's
+4.5 s.
+
+Below `classify.EvalResultThreshold` = 120 scored labels,
+`classify eval --lane inquiry` prints COUNTS (`caught 7 of 9 labelled
+needs_reply`) and the marker `INDICATIVE ONLY — this is not a measurement`,
+and no ratio anywhere. Quote the counts WITH the marker, in this table and in
+any Jira comment — never a percentage. The refusal is code, not convention:
+this repo once turned 29.5 GPU-hours into "60 minutes" by quoting a number
+outside the context that produced it.
+
+**The starter set as actually built (2026-09-10) — read the counts with this.**
+61 labels, all Salvador's. What a label MEANS, decided with him: "when this
+message arrived, was someone asking me something?" — judged against the
+messages before it, exactly as the model sees it; whether he replied LATER is
+the fold's job (answered in thread / spoke since), never the label's.
+
+- 42 from the 14-day draw (16 `enriched` = the first shadow pass's flags, 26
+  `uniform`), all `not`: 24 judged one by one, 18 by his blanket instruction
+  that everything before 2026-09-10 was already dealt with. Some of those were asks at the time (his
+  choice, recorded, not re-litigated), so a model that flags them is scored as
+  a false positive: precision on this set is a LOWER bound.
+- 19 = every message in the inquiry inbox on 2026-09-10 (`uniform`): 9
+  labelled one by one, 10 by his statement that the rest were "just info"; 2
+  are `needs_reply`.
+- **Provenance is in the file.** 33 labels were judged one by one; the 28 set
+  by a blanket instruction carry the exact `classify.OwnerBlanketNote` marker in `note` (content-free).
+  Both are his judgement — criterion 32 bars an AGENT or a heuristic from
+  labelling, not the owner from answering in bulk — but the Codex adversarial
+  review (round 4) flagged that "hand-checked" reads as one-by-one, so the
+  distinction is kept, and `classify eval` READS it (round 5): it prints
+  `owner-blanket labels: N scored, M labelled not and flagged (U in the uniform
+  stratum …)` on its own line. On this stratified set the precision line counts
+  the UNIFORM stratum only, so U — never M — is the number that may be
+  subtracted from its false positives: most enriched rows are the model's own
+  earlier flags, and the all-strata M would drive the correction negative. When the set
+  is grown by the protocol below, re-judge the blanket rows individually first.
+- **Two positives measure almost nothing about recall.** The useful number here
+  is the precision count; recall waits for the protocol below.
+- Reported while labelling: HOC and LlamaSite work is not his, yet the
+  `a-millon` channel is attributed to collaboratory — a capture-rule follow-up
+  that would remove a known source of false flags from this lane.
+
+**Dated commitment (2026-09-10):** grow the set to 120 stratified labels —
+`uniform` >= 80, `enriched` >= 40 — during the shadow period. When it gets
+there, raise the structure test's minimum in the same change: strata become
+required, the refusal stops firing, and the first real recall and precision may
+be published.
+
+### Labelling protocol
+
+The judgement "does Salvador need to answer this" is **his**. It cannot be
+delegated to an agent or inferred from a heuristic: an agent may draw the
+candidates and compute the hashes, never choose the label.
+
+1. **The starter 40**: `collaboratory` messages from the last 14 days — recent
+   enough that he can confirm each from memory in seconds — mixed across slack,
+   gmail and jira in roughly the population's proportions (~78% slack, ~15%
+   gmail, ~7% jira in the week measured 2026-09-10), each labelled
+   `needs_reply` or `not` by Salvador with the thread context in front of him.
+2. **The remaining 80**, during the shadow period: real flagged output from
+   `/funnel` (stratum `enriched`) **plus a uniform sample of unflagged messages
+   from the same window** (stratum `uniform`). The uniform half is not
+   optional — a set built only from flagged output can measure precision and can
+   never measure recall.
+3. Every line is `{"message_id", "label", "subject_sha256"}` with optional
+   `stratum` and `note`; `subject_sha256` is `classify.SubjectHash(subject)`.
+   The file never carries message content. The record is CLOSED — `classify
+   eval` refuses any other key — and `note` is a closed vocabulary
+   (`classify.LabelNoteAllowed`; today only `classify.OwnerBlanketNote`), never
+   free text: a free-text note is one paste from a client's message in git.
+
+**The Slack subject hash is weak, and that is accepted.** slackweb sets a
+message's `subject` to the CONVERSATION NAME, so every message in a channel
+shares one `subject_sha256`, and the drift detector can only catch an id that
+moved to a different channel. Do not add a second hash spelling to fix it —
+`classify.SubjectHash` is the one spelling.
+
 ## The labelled set
 
 `docs/evals/personal-actionability.jsonl` — the only thing anyone is permitted to
@@ -226,6 +460,11 @@ file is safe to commit while the mail never leaves the machine.
 | 2026-08-31 | 280 | 35         | 0.94   | 0.50      | 7.2 s          | qwen3:8b |
 | 2026-09-02 | 874 | 34         | 0.59   | 0.28      | 11.9 s         | qwen3:8b |
 | 2026-09-07 | 280 | 35         | 0.57   | 0.67      | 31.3 s         | qwen3:8b (think:true) |
+
+**Below 120 scored labels, `classify eval` prints COUNTS and
+`INDICATIVE ONLY — this is not a measurement` on every lane (SWT-33)** — so a
+hand-picked `--labels` subset of this file prints counts, never a ratio. Every
+row above was measured at n >= 280.
 
 The 2026-09-07 row is the THINKING A/B (`eval --think`: think:true, 2048-token
 budget, 8k ctx — the knob exists exactly for this measurement) on the same 280

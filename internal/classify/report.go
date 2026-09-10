@@ -33,6 +33,13 @@ func ReportForWorker(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since
 	if err != nil {
 		return err
 	}
+	// The inquiry lane has its own printer (SWT-33 criterion 20) rather than a
+	// branch inside this one, so the personal and residue text stays
+	// byte-identical under its characterization test.
+	if lane, ok := LaneByWorkerType(workerType); ok && lane.Name == LaneInquiry.Name {
+		renderInquiryReport(w, s)
+		return nil
+	}
 
 	var lines []string
 	// allFlags, not Flags: the report prints EVERY flagged line, exactly as it
@@ -94,13 +101,7 @@ func renderSkipped(w io.Writer, s Summary) {
 	if s.Skipped == 0 {
 		return
 	}
-	fmt.Fprintf(w, "  skipped: %d (never sent to any provider)\n", s.Skipped)
-	for _, k := range sortedKeys(s.ByAvailReason) {
-		fmt.Fprintf(w, "    why the lane refused   %-28s %d\n", k, s.ByAvailReason[k])
-	}
-	for _, k := range sortedKeys(s.ByClassReason) {
-		fmt.Fprintf(w, "    why it was restricted  %-28s %d\n", k, s.ByClassReason[k])
-	}
+	renderSkipCounts(w, s)
 	// The half a counter cannot carry. Nothing in the numbers distinguishes "the
 	// local box is off" from "nothing was actionable", and the fix a reader
 	// invents for the first is a fallback to the hosted lane — the one change the
@@ -110,6 +111,70 @@ func renderSkipped(w io.Writer, s Summary) {
 	fmt.Fprintln(w, "          Personal mail is only ever classified locally; falling back to a hosted")
 	fmt.Fprintln(w, "          provider is never the fix. See docs/runbooks/provider-locality.md.")
 	fmt.Fprintln(w)
+}
+
+// renderSkipCounts is the skipped section's counting half, shared by every
+// lane's printer; the note that follows it is lane-specific.
+func renderSkipCounts(w io.Writer, s Summary) {
+	fmt.Fprintf(w, "  skipped: %d (never sent to any provider)\n", s.Skipped)
+	for _, k := range sortedKeys(s.ByAvailReason) {
+		fmt.Fprintf(w, "    why the lane refused   %-28s %d\n", k, s.ByAvailReason[k])
+	}
+	for _, k := range sortedKeys(s.ByClassReason) {
+		fmt.Fprintf(w, "    why it was restricted  %-28s %d\n", k, s.ByClassReason[k])
+	}
+}
+
+// renderInquiryReport prints the inquiry lane (SWT-33 criteria 20 and 30): the
+// three open/answered states, every count by channel, and per flagged verdict
+// the ask, the asker, the thread scope and the state. Every number comes from
+// Summarize — the /funnel block renders the same Summary.
+func renderInquiryReport(w io.Writer, s Summary) {
+	fmt.Fprintln(w, "Classify shadow report (inquiry — does this need a reply from Salvador?)")
+	fmt.Fprintf(w, "  classified: %d  flagged: %d\n", s.Classified, s.Flagged)
+	fmt.Fprintf(w, "  open: %d  answered in thread: %d  spoke in conversation since: %d\n",
+		s.Open, s.AnsweredInThread, s.SpokeInConversationSince)
+	for _, k := range sortedKeys(s.ByKind) {
+		fmt.Fprintf(w, "    by ask_kind  %-14s %d\n", k, s.ByKind[k])
+	}
+	if len(s.ByChannel) > 0 {
+		// By channel (criterion 30): the diagnostic the rejected --channel flag
+		// would have given — a bad number still says which message shape broke.
+		fmt.Fprintln(w, "  by channel      classified  flagged   open  answered-in-thread  spoke-since  skipped")
+		channels := make([]string, 0, len(s.ByChannel))
+		for ch := range s.ByChannel {
+			channels = append(channels, ch)
+		}
+		sort.Strings(channels)
+		for _, ch := range channels {
+			c := s.ByChannel[ch]
+			fmt.Fprintf(w, "    %-13s %10d %8d %6d %19d %12d %8d\n", ch,
+				c.Classified, c.Flagged, c.Open, c.AnsweredInThread, c.SpokeInConversationSince, c.Skipped)
+		}
+	}
+	fmt.Fprintln(w, "  answered in thread = a later outbound on a thread-exact key (a reply in that thread);")
+	fmt.Fprintln(w, "  spoke in conversation since = a later outbound anywhere in an unthreaded channel or DM,")
+	fmt.Fprintln(w, "  a weaker claim that is never counted as answered.")
+	fmt.Fprintln(w)
+
+	if s.Skipped > 0 {
+		renderSkipCounts(w, s)
+		fmt.Fprintln(w, "    NOTE: an all-skipped pass is EXPECTED when the local model is not running.")
+		fmt.Fprintln(w, "          This lane's class is pinned to restricted, so it is only ever classified")
+		fmt.Fprintln(w, "          locally; falling back to a hosted provider is never the fix. See")
+		fmt.Fprintln(w, "          docs/runbooks/local-classifier.md (the inquiry lane).")
+		fmt.Fprintln(w)
+	}
+
+	if len(s.allFlags) > 0 {
+		fmt.Fprintln(w, "flagged, newest first:")
+		for _, f := range s.allFlags {
+			fmt.Fprintf(w, "  %s  #%-7d %-10s %-6s %-24s %-28s %s  (asker: %s)  [thread_scope=%s]  %s\n",
+				f.At.Format("2006-01-02 15:04"), f.MessageID, f.Kind, f.Channel,
+				trunc(f.Sender, 24), trunc(f.Subject, 28), f.Title, f.Asker, f.ThreadScope, f.State)
+		}
+		fmt.Fprintln(w)
+	}
 }
 
 func trunc(s string, n int) string {

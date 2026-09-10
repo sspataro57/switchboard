@@ -104,18 +104,69 @@ const inboxWhereResidue = `
 	           JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type = 'classify_residue'
 	          WHERE e.raw_source_item_id = nm.raw_source_item_id)`
 
+// inboxWhereInquiry is the INQUIRY lane's filter (SWT-33 criterion 9): inbound
+// messages whose LATEST capture decision attributes them to a project armed
+// with ai_inquiry, not yet given an inquiry verdict.
+//
+//   - `nm.direction = 'inbound'` — asserted for the reader, and it cannot
+//     discriminate on its own, for the reason inboxWhere records: the capture
+//     engine only ever decides inbound messages (invariant 5), so our own sends
+//     are kept out by the decision join, never by this line.
+//   - `latest.action = 'attributed'` on the LATEST decision, spelled as the
+//     positive: 'task' and 'task_log' NAME a project and so survive the join,
+//     and those messages already produced a task.
+//   - `p.ai_inquiry` (0024). THE WORKLOAD FLAG, and the only clause that keeps an
+//     unarmed project's client conversation out of this lane — the integration
+//     suite's identical-but-unarmed project is what goes red when it is dropped.
+//   - NOT EXISTS keyed on worker_type='classify_inquiry', so a personal- or
+//     residue-lane verdict on the same raw item never hides a message from this
+//     lane, or the other way round.
+//
+// DELIBERATELY NO ai_locality CLAUSE (criterion 10), and the absence is not an
+// omission. `collaboratory`, the one armed project, is ai_locality='any', so the
+// personal lane's `= 'local_only'` clause would return zero rows here and leave
+// the lane silently inert. This lane is contained elsewhere, twice over:
+// cmd/classify's buildRouter builds the router with general = nil — there is no
+// hosted client to fall back TO — and Run pins this lane's routed class to
+// ClassRestricted (criterion 11), so even a router that HAD a general client
+// would never be offered these messages or their thread neighbours' bodies.
+const inboxWhereInquiry = `
+	  FROM normalized_messages nm
+	  JOIN LATERAL (SELECT cd.action, cd.project_id
+	                  FROM capture_decisions cd
+	                 WHERE cd.message_id = nm.id
+	                 ORDER BY cd.id DESC LIMIT 1) latest ON true
+	  JOIN projects p ON p.id = latest.project_id
+	 WHERE nm.direction = 'inbound'
+	   AND latest.action = 'attributed'
+	   AND p.ai_inquiry
+	   AND NOT EXISTS (
+	         SELECT 1 FROM ai_extractions e
+	           JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type = 'classify_inquiry'
+	          WHERE e.raw_source_item_id = nm.raw_source_item_id)`
+
+// inboxSelect is shared by every lane's loader. The last two columns (SWT-33
+// criterion 13) are the thread identity an inquiry verdict records VERBATIM:
+// the message's own provider id, and the thread key as normalized_threads
+// stores it. Selected, never parsed — the one reading of the slack key's shape
+// is slackweb.IsRootedThreadKey.
 const inboxSelect = `
 	SELECT nm.id, nm.raw_source_item_id, COALESCE(nm.thread_id, 0),
 	       COALESCE(nm.sent_at, now()), COALESCE(nm.sender,''), COALESCE(nm.subject,''),
 	       COALESCE(nm.channel,''), COALESCE(nm.body_text,''), COALESCE(nm.direction,''),
 	       COALESCE(p.id, 0), COALESCE(p.slug, ''), COALESCE(p.ai_locality = 'local_only', false),
-	       COALESCE(nm.links, '[]'::jsonb)`
+	       COALESCE(nm.links, '[]'::jsonb),
+	       COALESCE(nm.external_message_id, ''),
+	       COALESCE((SELECT nt.thread_key FROM normalized_threads nt WHERE nt.id = nm.thread_id), '')`
 
 // PendingMessages returns one pass of the lane's inbox, oldest first.
 func (s *PGStore) PendingMessages(ctx context.Context, cfg Config) ([]PendingMessage, error) {
 	where, attr := inboxWhere, attrProject
-	if cfg.Lane.Name == LaneResidue.Name {
+	switch cfg.Lane.Name {
+	case LaneResidue.Name:
 		where, attr = inboxWhereResidue, attrUnmatched
+	case LaneInquiry.Name:
+		where = inboxWhereInquiry
 	}
 	q := inboxSelect + where
 	args := []any{}
@@ -127,7 +178,7 @@ func (s *PGStore) PendingMessages(ctx context.Context, cfg Config) ([]PendingMes
 	if cfg.Limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", cfg.Limit)
 	}
-	return s.scanMessages(ctx, attr, q, args...)
+	return s.scanMessages(ctx, cfg.Lane, attr, q, args...)
 }
 
 // MessagesByID loads labelled messages for the eval harness. It deliberately
@@ -147,6 +198,25 @@ func (s *PGStore) MessagesByID(ctx context.Context, cfg Config, ids []int64) ([]
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	// The INQUIRY loader (SWT-33) takes the residue's shape: no ai_inquiry and no
+	// action predicate, for the same reason — a labelled message whose project
+	// was disarmed or re-routed since must stay scoreable, or the labelled set
+	// decays by another mechanism. It loads the same PRIOR thread context the
+	// run path does (scanMessages), so an eval scores the prompt that runs.
+	// Safe for the reason the residue branch is: Eval refuses any lane but the
+	// local one before it reads anything.
+	if cfg.Lane.Name == LaneInquiry.Name {
+		q := inboxSelect + `
+	  FROM normalized_messages nm
+	  LEFT JOIN LATERAL (SELECT cd.action, cd.project_id
+	                  FROM capture_decisions cd
+	                 WHERE cd.message_id = nm.id
+	                 ORDER BY cd.id DESC LIMIT 1) latest ON true
+	  LEFT JOIN projects p ON p.id = latest.project_id
+	 WHERE nm.id = ANY($1)
+	 ORDER BY nm.id`
+		return s.scanMessages(ctx, cfg.Lane, attrProject, q, ids)
+	}
 	if cfg.Lane.Name == LaneResidue.Name {
 		q := inboxSelect + `
 	  FROM normalized_messages nm
@@ -157,7 +227,7 @@ func (s *PGStore) MessagesByID(ctx context.Context, cfg Config, ids []int64) ([]
 	  LEFT JOIN projects p ON p.id = latest.project_id
 	 WHERE nm.id = ANY($1)
 	 ORDER BY nm.id`
-		msgs, err := s.scanMessages(ctx, attrUnmatched, q, ids)
+		msgs, err := s.scanMessages(ctx, cfg.Lane, attrUnmatched, q, ids)
 		if err != nil {
 			return nil, err
 		}
@@ -182,7 +252,7 @@ func (s *PGStore) MessagesByID(ctx context.Context, cfg Config, ids []int64) ([]
 	 WHERE nm.id = ANY($1)
 	   AND p.ai_locality = 'local_only'
 	 ORDER BY nm.id`
-	return s.scanMessages(ctx, attrProject, q, ids)
+	return s.scanMessages(ctx, cfg.Lane, attrProject, q, ids)
 }
 
 // claimedSince names the labelled messages whose LATEST decision is no longer
@@ -209,7 +279,7 @@ func (s *PGStore) claimedSince(ctx context.Context, ids []int64) (map[int64]bool
 	return out, rows.Err()
 }
 
-func (s *PGStore) scanMessages(ctx context.Context, attr provider.AttributionState, q string, args ...any) ([]PendingMessage, error) {
+func (s *PGStore) scanMessages(ctx context.Context, lane Lane, attr provider.AttributionState, q string, args ...any) ([]PendingMessage, error) {
 	rows, err := s.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("select classify inbox: %w", err)
@@ -222,7 +292,8 @@ func (s *PGStore) scanMessages(ctx context.Context, attr provider.AttributionSta
 		var linksRaw []byte
 		if err := rows.Scan(&m.MessageID, &m.RawSourceItemID, &m.ThreadID, &m.SentAt,
 			&m.Sender, &m.Subject, &m.Channel, &m.BodyText, &m.Direction,
-			&m.ProjectID, &m.ProjectSlug, &m.ProjectLocalOnly, &linksRaw); err != nil {
+			&m.ProjectID, &m.ProjectSlug, &m.ProjectLocalOnly, &linksRaw,
+			&m.ExternalMessageID, &m.ThreadKey); err != nil {
 			return nil, fmt.Errorf("scan classify inbox row: %w", err)
 		}
 		// The links COLUMN is the contract with the normalizer (SWT-25): the
@@ -252,8 +323,51 @@ func (s *PGStore) scanMessages(ctx context.Context, attr provider.AttributionSta
 			return nil, err
 		}
 		out[i].Neighbours = ns
+		// The inquiry lane's transcript (SWT-33 criterion 16). The other two
+		// lanes classify one message alone and never pay for this query.
+		if lane.Name == LaneInquiry.Name {
+			thread, err := s.priorThread(ctx, out[i])
+			if err != nil {
+				return nil, err
+			}
+			out[i].ThreadContext = InquiryContext(out[i], thread)
+		}
 	}
 	return out, nil
+}
+
+// priorThread loads the inquiry prompt's transcript: the target's thread, BOTH
+// directions, strictly before it by (sent_at, id), the newest
+// inquiryContextMax rows. InquiryContext then applies the same rule in Go, so
+// the SQL bound and the pure rule cannot disagree about what "prior" means.
+//
+// NOT neighbours(): that loader's direction='inbound' filter exists for
+// capture-decision reasons (invariant 5), and a transcript with our own replies
+// removed is a transcript in which nothing was ever answered — the one case
+// this lane's context exists to get right.
+func (s *PGStore) priorThread(ctx context.Context, m PendingMessage) ([]ThreadMessage, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT nm.id, nm.sent_at, COALESCE(nm.direction, ''), COALESCE(nm.body_text, '')
+		  FROM normalized_messages nm
+		 WHERE nm.thread_id = $1
+		   AND nm.sent_at IS NOT NULL
+		   AND (nm.sent_at < $2::timestamptz OR (nm.sent_at = $2::timestamptz AND nm.id < $3))
+		 ORDER BY nm.sent_at DESC, nm.id DESC
+		 LIMIT $4`, m.ThreadID, m.SentAt, m.MessageID, inquiryContextMax)
+	if err != nil {
+		return nil, fmt.Errorf("load prior thread for message %d: %w", m.MessageID, err)
+	}
+	defer rows.Close()
+
+	var out []ThreadMessage
+	for rows.Next() {
+		var t ThreadMessage
+		if err := rows.Scan(&t.MessageID, &t.SentAt, &t.Direction, &t.BodyText); err != nil {
+			return nil, fmt.Errorf("scan prior thread message: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // neighbours loads the INBOUND thread siblings' attribution.
@@ -262,7 +376,8 @@ func (s *PGStore) scanMessages(ctx context.Context, attr provider.AttributionSta
 // engine reads direction='inbound' (invariant 5), so an outbound message can
 // never carry a decision on any pass in any mode. Folding one would read "no
 // decision" as "unclassified" when it means "not applicable", and would restrict
-// every thread the system has ever replied on, permanently.
+// every thread the system has ever replied on, permanently. For the same reason
+// it must not be reused as the inquiry transcript — see priorThread.
 func (s *PGStore) neighbours(ctx context.Context, threadID, selfID int64) ([]NeighbourClass, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT COALESCE(p.ai_locality = 'local_only', false),

@@ -435,6 +435,43 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   those rows are Slack/Upwork WORK sitting unmatched (measured 2026-08-31:
   1,287, all channel='upwork').
 
+### Inquiry lane (SWT-33)
+
+- `classify` has THREE lanes: `personal` (worker_type `classify`), `residue`
+  (`classify_residue`), `inquiry` (`classify_inquiry`), and TWO output
+  contracts — actionability, shared by personal and residue (the guard is
+  `LanePersonal.Contract == LaneResidue.Contract`), and needs-reply for inquiry.
+  Distinct worker_types because every inbox keys its NOT EXISTS on it.
+- Three project columns, three questions: `ai_locality` is the BOUNDARY (where a
+  message may go); `ai_classify` (0018) opts mail into the personal lane's
+  actionability question; `ai_inquiry` (0024) opts a project's inbound client
+  conversation into the inquiry lane. Only `collaboratory` is armed.
+- The inquiry lane's routed class is PINNED to `ClassRestricted`
+  (`classify.routedClass`). Without it the lane is a silent no-op:
+  collaboratory is `ai_locality='any'`, so ClassOf returns `ClassGeneral`,
+  cmd/classify's router has a nil general client, and every message skips as
+  `no_general_provider` in a pass that exits 0 and reads as an empty inbox. Its
+  filter has NO ai_locality clause for the same reason (it would return zero
+  rows). Never add a hosted client to make skips go away.
+- "Still open" is a READ-TIME fold in `classify.Summarize` (a later
+  `direction='outbound'` message on the verdict's thread), never written back.
+  `thread_scope` is `thread` | `conversation` | `none`; `conversation` (an
+  unthreaded Slack channel or DM) is a weaker claim with its own counter.
+  Measured 2026-09-10: 113 thread-exact Slack keys vs 83 conversation-level, one
+  conversation-level key holding 9,704 messages. The rooted/unrooted rule has
+  ONE spelling: `slackweb.IsRootedThreadKey`.
+- The gmail half of the fold is near-inert for collaboratory: 1 outbound among
+  447 messages on its gmail threads (30 days to 2026-09-10) — replies do not land
+  on the same thread. A gmail `open` means little until that changes.
+- The advisory lock `0x5157_0022` is SHARED by all three lanes and
+  `classify run` exits 1 when it loses it: never schedule two lanes in the same
+  minute — chain them in one command or stagger them.
+- `classify eval` refuses to print a ratio below `classify.EvalResultThreshold`
+  (120) SCORED labels, on EVERY lane — counts plus `EvalIndicativeMarker`,
+  enforced inside `Eval` (a caller-set flag was bypassable). The measured
+  lanes' own files (280, 874) sit above it. The labels are Salvador's
+  judgement alone (runbook, "Labelling protocol").
+
 ### Link preservation (SWT-25)
 
 - `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written
@@ -643,6 +680,12 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
   (Collaboratory/LlamaSite) has none, so the bridge is narrowed to Avviato. A send
   into an unexported workspace stays unconfirmed forever and always ends flagged.
   `connector-slackweb` is also currently SUSPENDED.
+  **CORRECTED 2026-09-10 (SWT-33):** the export half is no longer true —
+  `T0HPR78RX` now carries resolved direction, 2,155 inbound / 2,393 outbound
+  rows, latest outbound 2026-09-09, so its `OWN_USER_IDS` entry exists and it
+  exports. Load-bearing for the inquiry lane's replied-since fold, which rests
+  entirely on `direction='outbound'` existing for this workspace. Whether the
+  SEND narrowing and the SUSPENDED note are also stale was NOT re-checked.
 - **A browser click reserves no message id.** Hence the whole shape:
   `send_attempted_at` commits before the click, `sent_external_id` stays NULL on
   success, and the next export stamps it by matching a 120-char body prefix.
