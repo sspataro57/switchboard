@@ -5,6 +5,10 @@
 //	DATABASE_URL   ops db, required
 //	OPS_WORKER_ID  the caller's identity, required (wrapper sets it when
 //	               spawning claude; interactive sessions use manual:<user>)
+//
+// This binary serves the FULL allowlist and wires the senders: worker consoles
+// and this repo's .mcp.json. The install every other repo sees is the read-only
+// cmd/ops-mcp-read (SWT-35).
 package main
 
 import (
@@ -12,8 +16,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/connector/google"
@@ -80,28 +82,6 @@ func run() error {
 	}
 
 	adapter := mcpserver.New(ex, workerID)
-
-	srv := mcp.NewServer(&mcp.Implementation{Name: "ops-mcp", Version: "0.1.0"}, nil)
-	for _, t := range adapter.ListTools() {
-		srv.AddTool(
-			&mcp.Tool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema},
-			func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				out, err := adapter.CallTool(ctx, req.Params.Name, req.Params.Arguments)
-				if err != nil {
-					return &mcp.CallToolResult{
-						IsError: true,
-						Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
-					}, nil
-				}
-				return &mcp.CallToolResult{
-					Content: []mcp.Content{&mcp.TextContent{Text: string(out)}},
-				}, nil
-			})
-	}
-
 	slog.Info("ops-mcp serving", "worker_id", workerID, "tools", len(adapter.ListTools()))
-	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		return fmt.Errorf("serve: %w", err)
-	}
-	return nil
+	return adapter.Serve(ctx, "ops-mcp")
 }

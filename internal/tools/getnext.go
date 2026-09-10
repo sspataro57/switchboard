@@ -29,6 +29,12 @@ func validateGetNext(args []byte) error {
 	return nil
 }
 
+// taskQueueOrder is the ONE spelling of the queue order (SWT-35, L7), shared by
+// task_get_next and task_list: task_list's first ready/claude row must be the
+// task a worker would be handed, and two copies of this agree only until one is
+// edited. Pinned by getnext_ordering_integration_test.go.
+const taskQueueOrder = `t.priority DESC, t.plan_order ASC NULLS LAST, t.created_at ASC, t.id ASC`
+
 type nextTask struct {
 	ID         int64  `json:"id"`
 	Project    string `json:"project"`
@@ -52,7 +58,7 @@ func getNext(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, erro
 		   AND t.status = 'ready'
 		   AND t.assignee_type = 'claude'
 		   AND ($2 = '' OR t.subproject = $2)
-		 ORDER BY t.priority DESC, t.plan_order ASC NULLS LAST, t.created_at ASC, t.id ASC
+		 ORDER BY `+taskQueueOrder+`
 		 LIMIT 1`,
 		a.Client, a.Subproject).Scan(&nt.ID, &nt.Project, &subproject, &nt.Title, &nt.Priority)
 	if errors.Is(err, pgx.ErrNoRows) {

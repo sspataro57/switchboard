@@ -65,6 +65,21 @@ var agentTools = []Tool{
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"system":{"type":"string","enum":["jira","github","upwork_crm"]},"external_key":{"type":"string"},"external_url":{"type":"string"}},"required":["task_id","system","external_key"]}`),
 	},
 	{
+		// SWT-35: the queue read for Salvador's per-repo sessions (the slug
+		// comes from Claude Code's own per-project memory) and for workers.
+		Name: "task_list",
+		Description: "List one project's task queue, read-only: it does not claim — a worker takes work only via task_get_next. " +
+			"project is the caller's project slug (confirm it with project_list). Returns compact rows in task_get_next " +
+			"order plus counts by status. Closed and delivered tasks are hidden by default; ask for them with status.",
+		InputSchema: schema(`{"type":"object","properties":{"project":{"type":"string","description":"project slug (see project_list)"},"status":{"type":"string","enum":["holding","ready","claimed","in_progress","needs_feedback","pr_open","awaiting_ci","awaiting_merge","done_locally","delivered","closed","blocked"],"description":"one status; default: everything except closed and delivered"},"assignee_type":{"type":"string","enum":["human","claude"]},"subproject":{"type":"string"},"limit":{"type":"integer","description":"default 25, max 200; counts always cover the full set"}},"required":["project"]}`),
+	},
+	{
+		Name: "project_list",
+		Description: "List every switchboard project slug, read-only, with its client and count of tasks in play. " +
+			"Use it to confirm a slug before memorising it as this repo's queue.",
+		InputSchema: schema(`{"type":"object"}`),
+	},
+	{
 		Name:        "mail_search",
 		Description: "Search ingested mail (subject, sender, body) served from switchboard's normalized store, NOT from a live mailbox — you see only what ingestion has captured, so a result set is bounded by the backfill window rather than by the mailbox. At least one of query/from/thread_key is required.",
 		InputSchema: schema(`{"type":"object","properties":{"query":{"type":"string","description":"case-insensitive substring over subject, sender and body"},"from":{"type":"string"},"thread_key":{"type":"string"},"since":{"type":"string","description":"RFC3339 or a Postgres timestamp"},"until":{"type":"string"},"direction":{"type":"string","enum":["inbound","outbound"]},"limit":{"type":"integer","description":"default 20, max 50"}}}`),

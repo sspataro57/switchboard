@@ -84,6 +84,12 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"task_mark_delivered", validateMarkDelivered, taskMarkDelivered},
 		{"set_sending_frozen", validateSetFrozen, setSendingFrozen},
 		{"link_external_ref", validateLinkExternalRef, linkExternalRef},
+		// SWT-35: read-only queue tools — like mail_search, not humanOnly and
+		// not snapshotGated (they write only their audit row). No client or
+		// locality refusal, by Salvador's decisions of 2026-09-10; rows never
+		// carry a body. See tasklist.go.
+		{"task_list", validateTaskList, taskList},
+		{"project_list", validateProjectList, projectList},
 		// Read-only mail surface (SWT-11). Served from normalized_messages, never
 		// from live IMAP — see internal/tools/mail.go.
 		{"mail_search", validateMailSearch, mailSearch},
