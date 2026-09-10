@@ -23,10 +23,15 @@ import (
 // Facts are the only two things this ticket reads out of an issue.
 type Facts struct {
 	StatusCategory string // fields.status.statusCategory.key — the discriminator (D2)
-	StatusName     string // fields.status.name — DIAGNOSTIC ONLY; nothing branches on it
-	StatusKnown    bool
-	Assignee       string // fields.assignee.accountId — the identity D12 compares
-	AssigneeKnown  bool
+	// StatusName is fields.status.name. It was DIAGNOSTIC ONLY until SWT-34
+	// (2026-09-10): a per-project CONFIGURED set of status names may now branch
+	// on it (see internal/ticketstatus and migration 0025). The name is still
+	// never a discriminator in CODE — only in operator-written data, which is
+	// what keeps SWT-32's D2 intact.
+	StatusName    string
+	StatusKnown   bool
+	Assignee      string // fields.assignee.accountId — the identity D12 compares
+	AssigneeKnown bool
 }
 
 // IssueFacts parses one stored issue snapshot. Malformed bytes are an ERROR,

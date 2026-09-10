@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sspataro57/switchboard/internal/audit"
@@ -675,10 +676,11 @@ func runTicketStatusSync(argv []string) error {
 	st, err := ticketstatus.Run(ctx, pool, ex, ticketstatus.Config{
 		DryRun: *dryRun, Force: *force, Limit: *limit, Lookup: factory,
 	})
-	fmt.Printf("ticket_status: considered=%d closed_ticket_done=%d closed_not_assigned=%d reopened=%d "+
+	fmt.Printf("ticket_status: considered=%d closed_ticket_done=%d closed_ticket_delivered=%d "+
+		"closed_not_assigned=%d reopened=%d "+
 		"refused_active=%d suppressed_dismissed=%d converged=%d unpolled=%d ambiguous=%d unreadable=%d "+
 		"fetched=%d fetch_skipped_ttl=%d fetch_failed=%d\n",
-		st.Considered, st.ClosedTicketDone, st.ClosedNotAssigned, st.Reopened,
+		st.Considered, st.ClosedTicketDone, st.ClosedTicketDelivered, st.ClosedNotAssigned, st.Reopened,
 		st.RefusedActive, st.SuppressedDismissed, st.Converged, st.Unpolled, st.Ambiguous, st.Unreadable,
 		st.Fetched, st.FetchSkippedTTL, st.FetchFailed)
 	return err
@@ -700,7 +702,8 @@ func runTicketStatusReport() error {
 		SELECT r.external_key, p.slug, p.ticket_assignee_gate, t.status,
 		       COALESCE(s.last_action,'(never observed)'), COALESCE(s.drop_reason,''),
 		       COALESCE(s.status_category,''), COALESCE(s.status_name,''),
-		       COALESCE(s.assignee_account_id,''), s.observed_at
+		       COALESCE(s.assignee_account_id,''), s.observed_at,
+		       p.ticket_delivered_statuses
 		  FROM external_refs r
 		  JOIN tasks t ON t.id = r.task_id
 		  JOIN projects p ON p.id = t.project_id
@@ -722,14 +725,27 @@ func runTicketStatusReport() error {
 		var key, slug, taskStatus, lastAction, drop, category, name, assignee string
 		var gate bool
 		var observedAt *time.Time
+		var deliveredSet []string
 		if err := rows.Scan(&key, &slug, &gate, &taskStatus, &lastAction, &drop,
-			&category, &name, &assignee, &observedAt); err != nil {
+			&category, &name, &assignee, &observedAt, &deliveredSet); err != nil {
 			return fmt.Errorf("scan ticket status row: %w", err)
 		}
 		n++
 		gateCol := "gate=off"
 		if gate {
 			gateCol = "gate=ON"
+		}
+		// E12: an armed set that matches nothing looks exactly like an unarmed
+		// one, and a mis-typed entry is the likely failure — so the report
+		// prints BOTH the configured set and whether THIS row's last-observed
+		// status is a member, turning a silent typo into a visible one.
+		deliveredCol := "delivered=no"
+		if ticketstatus.IsDeliveredStatus(name, deliveredSet) {
+			deliveredCol = "delivered=YES"
+		}
+		armed := "armed=[]"
+		if len(deliveredSet) > 0 {
+			armed = "armed=" + strings.Join(deliveredSet, "|")
 		}
 		claim := ""
 		if lastAction == "(never observed)" {
@@ -743,8 +759,9 @@ func runTicketStatusReport() error {
 		if observedAt != nil {
 			when = observedAt.Format("2006-01-02 15:04")
 		}
-		fmt.Printf("%-14s %-16s %-8s task=%-12s %-22s %-13s %s/%s assignee=%s %s%s\n",
-			key, slug, gateCol, taskStatus, lastAction, drop, category, name, assignee, when, claim)
+		fmt.Printf("%-14s %-16s %-8s %-13s task=%-12s %-22s %-17s %s/%s assignee=%s %s  %s%s\n",
+			key, slug, gateCol, deliveredCol, taskStatus, lastAction, drop, category, name,
+			assignee, when, armed, claim)
 	}
 	if n == 0 {
 		fmt.Println("no jira-keyed refs; nothing to reconcile")

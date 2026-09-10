@@ -95,3 +95,60 @@ is what keeps the pass from ever resurrecting a close a human made.
 The lookup writes one `sync_runs` row per account per pass with its fetch
 counters in `stats` — diagnostic only: **nothing branches on that payload**
 (the upworkcrm two-rows landmine), and nothing should start to.
+
+## Delivered statuses: "QA means I delivered" (SWT-34)
+
+A ticket can stop warranting a task without being *finished*. When Salvador
+hands work back — a client's QA column — the ball is in someone else's court,
+but `statusCategory` cannot say so: a QA column and a work-in-progress column
+are BOTH `indeterminate`. So the reconciler gains a third, **per-project
+configured** clause over the status NAME.
+
+This does not overturn SWT-32's D2. `statuscategory` remains the discriminator
+for *is this ticket finished* — Jira's own structure, in code. `not my turn` is
+one team's workflow, so it lives in data an operator wrote:
+
+```sql
+-- arm (collaboratory; drops its TT-In QA tasks on the next pass)
+UPDATE projects SET ticket_delivered_statuses = ARRAY['TT-In QA'] WHERE slug = 'collaboratory';
+
+-- revert: the next pass puts those tasks back in the status they held
+UPDATE projects SET ticket_delivered_statuses = '{}' WHERE slug = 'collaboratory';
+```
+
+Empty (`'{}'`, the default) is today's behaviour exactly, so every other project
+is unaffected until armed. Matching is EXACT on a normalized form — lowercased,
+unicode whitespace collapsed — never substring: a `QA` substring would also eat
+a "QA Blocked" or "Needs QA Rework" column, where the ball IS in his court.
+Adding a status is one array element.
+
+`TT-In Review` is deliberately NOT armed: it can mean "waiting on their
+reviewer" (delivered) or "review comments are mine to address" (not delivered),
+and guessing is how a task silently disappears while the ball is in his court.
+
+Because it is a clause in the same `warranted` predicate, **reopen comes free**:
+a ticket leaving the delivered set is warranted again and the existing reopen
+path restores the task to the status it held. The drop is recorded as
+`drop_reason='ticket_delivered'`, which is also what `opsctl ticket-status
+report` and the `closed_ticket_delivered` counter say. The report additionally
+prints each project's armed set and whether the row's own status is a member —
+an armed set that matches nothing otherwise looks identical to an unarmed one,
+and a mis-typed entry is the likely failure.
+
+**The gap, until `qa-question-resurface` ships.** Salvador also asked that a
+*fresh question* resurface a dropped task. That half is deferred, because a
+question is not a status change: bolting it onto `warranted` would let the very
+next pass re-close the task, giving a board row that flaps every 15 minutes. It
+needs its own recorded action plus a re-close suppression. In the meantime a
+client question on a dropped ticket IS still recorded — capture appends it as a
+`log` event on the closed task — it is simply surfaced nowhere. To read those by
+hand:
+
+```sql
+SELECT te.task_id, te.created_at, te.payload->>'message'
+  FROM task_events te
+  JOIN ticket_status_syncs s ON s.task_id = te.task_id
+ WHERE te.event_type = 'log' AND s.drop_reason = 'ticket_delivered'
+   AND te.created_at > s.acted_at
+ ORDER BY te.created_at DESC;
+```
