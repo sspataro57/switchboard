@@ -38,7 +38,10 @@ claude mcp get ops
   identity ("identity is never model-chosen"); audit rows from these sessions carry
   actor `mcp:manual:salvo`.
 - **`${OPS_DATABASE_URL}`** is expanded by Claude Code from the launching shell's
-  environment. If `/mcp` shows the server failing with `DATABASE_URL is not set` or a
+  environment — verified at the first install (2026-09-10): the entry stores the
+  literal `${OPS_DATABASE_URL}` and `claude mcp get ops` reports it Connected, which
+  needs the startup db ping to pass. If `/mcp` shows the server failing with
+  `DATABASE_URL is not set` or a
   connection error, re-add it with the literal DSN (the same exposure as
   `~/.pgpass`).
 
@@ -56,8 +59,12 @@ and every other repo gets the installed `ops-mcp-read`. `.mcp.json` is unchanged
 2. In another repo (e.g. `cd ~/projects/personal/kube && claude`), `/mcp` shows
    `ops` connected with exactly three tools: `project_list`, `task_get_next`,
    `task_list`.
-3. In `~/projects/personal/switchboard`, `/mcp` shows ONE `ops` — the project-scope
-   `go run` entry with the full tool list.
+3. In `~/projects/personal/switchboard`, a SESSION gets ONE `ops` — the
+   project-scope `go run` entry with the full tool list (19 tools at install).
+   Check this inside a session (`/mcp`, or ask it to list its `mcp__ops__*` tools),
+   NOT with `claude mcp get ops` / `claude mcp list`: run inside this repo, those
+   CLI commands display the user-scope `ops-mcp-read` entry even though a session
+   loads `.mcp.json`'s (verified 2026-09-10).
 4. From the other repo, `project_list` and `task_list(project=<slug>)` answer, and
    each project's `in_play` equals the `total` of its `task_list`.
 5. `psql -h 192.168.50.49 -U ops -d ops -c "SELECT actor, tool, status FROM

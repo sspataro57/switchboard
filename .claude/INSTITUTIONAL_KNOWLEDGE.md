@@ -510,7 +510,15 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `OPS_WORKER_ID=manual:salvo`. Never install `ops-mcp` (full) at user scope.
   Re-run `go install ./cmd/ops-mcp-read` after any merge touching
   `cmd/ops-mcp-read`, `internal/mcpserver` or `internal/tools`. In this repo
-  `.mcp.json`'s project-scope `ops` (full) shadows it.
+  `.mcp.json`'s project-scope `ops` (full) shadows it. Installed 2026-09-10:
+  `DATABASE_URL='${OPS_DATABASE_URL}'` DOES expand in a user-scope entry
+  (Connected on first `claude mcp get ops`); no literal DSN needed.
+- **LANDMINE: `claude mcp get/list` lie about same-name precedence.** Inside
+  this repo they show the user-scope `ops` (ops-mcp-read), yet a session here
+  loads `.mcp.json`'s full `ops` (19 tools; a session in `kube` gets 3).
+  Verify precedence from inside a session, never from the CLI listing.
+- `claude -p` from a shell uses `ANTHROPIC_API_KEY` (exported, no credit) over
+  the claude.ai login: prefix `env -u ANTHROPIC_API_KEY` for smoke sessions.
 - `task_list` reads resolve + page + counts in ONE `RepeatableRead, ReadOnly`
   transaction: a shared WHERE stops predicate drift, not drift in time.
 - Residual (Future work): row TITLES — some derived from private mail — reach
