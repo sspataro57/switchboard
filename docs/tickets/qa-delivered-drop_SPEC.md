@@ -363,7 +363,7 @@ cleared goes permanently silent", applied to configuration.
    must turn it red: removing the ADD CONSTRAINT from 0025. (A structural scan of
    the SQL text is not enough — the constraint that matters is the one in the
    database.)
-6. `internal/classify/structure_test.go`'s ledger accepts 24 and nothing above it;
+6. `internal/classify/structure_test.go`'s ledger accepts 25 and nothing above it;
    the test still fails for any unowned migration number.
 7. `internal/ticketstatus/structure_test.go`'s existing 0023 guard is UNCHANGED
    (it asserts 0023's own shape, including its two-value `drop_reason` CHECK — an

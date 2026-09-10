@@ -10,10 +10,9 @@
 -- WHY NAMES HERE AND NOT IN CODE, given SWT-32's D2 bans a status-name list:
 -- D2 answers "is this ticket finished", which Jira itself owns as a three-value
 -- statusCategory. This answers "is the ball in my court", which no function of
--- statusCategory can express it: a client's QA column and their
--- work-in-progress column are both `indeterminate`, yet one means "I handed
--- it back" and the other means "I am mid-build".
--- `indeterminate`. A workflow-shaped fact belongs in CONFIGURATION, never in
+-- statusCategory can express: a client's QA column and their work-in-progress
+-- column are both `indeterminate`, yet one means "I handed it back" and the
+-- other means "I am mid-build". A workflow-shaped fact belongs in CONFIGURATION, never in
 -- the binary: a typed column, per project, hand-armed, with the same shape and
 -- polarity as ai_locality (0016), ai_classify (0018), classify_promote_after
 -- (0021) and ticket_assignee_gate (0023). When a client renames their column,

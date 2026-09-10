@@ -33,7 +33,9 @@ package ticketstatus_test
 //	type Observation struct {
 //	    TicketKey      string // diagnostic; the prose reasons name it
 //	    StatusCategory string // jira.Facts — 'new' | 'indeterminate' | 'done'
-//	    StatusName     string // DIAGNOSTIC ONLY (D2). Nothing branches on it.
+//	    StatusName     string // was DIAGNOSTIC ONLY (D2); since SWT-34
+//	                          // (2026-09-10) a per-project CONFIGURED set of
+//	                          // names may branch on it — never code.
 //	    StatusKnown    bool
 //	    Assignee       string // fields.assignee.accountId ("" + known = unassigned)
 //	    AssigneeKnown  bool
@@ -168,7 +170,11 @@ func TestDecide_Warranted_EighteenRows(t *testing.T) {
 	}
 }
 
-// The name is never consulted — the behavioural half of criterion 8's scan.
+// The name alone never drops a task in an UNARMED project — the behavioural
+// half of criterion 8's scan. AMENDED 2026-09-10 (SWT-34): this test's
+// observations carry no DeliveredStatuses, so the name is genuinely not
+// consulted here; with a project armed, a configured name DOES decide, which
+// is decide_delivered_test.go's table.
 // A ticket NAMED "Closed" whose category is `indeterminate` is live work.
 func TestDecide_IgnoresTheStatusName(t *testing.T) {
 	o := obs("indeterminate", tsOwn, true)

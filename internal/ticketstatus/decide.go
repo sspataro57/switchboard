@@ -2,7 +2,8 @@
 // reference (SWT-32, docs/tickets/jira-status-sync_SPEC.md): a ticket that
 // stops warranting its task — moved to Done, or assigned away under a gated
 // project — drops the task from the board, and a ticket that warrants it again
-// brings it back. One predicate, two facts, both directions (D15).
+// brings it back. One predicate, THREE facts since SWT-34 (status category, a per-project
+// configured delivered status, the assignee gate), both directions (D15).
 //
 // The DECISION in this file is pure: a function of (observation, recorded
 // state) with zero I/O, in the internal/orchestrator/rules.go discipline
