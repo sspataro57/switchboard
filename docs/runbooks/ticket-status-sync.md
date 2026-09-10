@@ -122,9 +122,10 @@ unicode whitespace collapsed — never substring: a `QA` substring would also ea
 a "QA Blocked" or "Needs QA Rework" column, where the ball IS in his court.
 Adding a status is one array element.
 
-`TT-In Review` is deliberately NOT armed: it can mean "waiting on their
-reviewer" (delivered) or "review comments are mine to address" (not delivered),
-and guessing is how a task silently disappears while the ball is in his court.
+`TT-In Review` is deliberately NOT armed, and this is settled rather than
+pending (Salvador, 2026-09-10): **in review means CI is running on it — the work
+is not ready**. It is not a hand-back, so its tasks stay on the board. Do not
+add it to the array "for symmetry" with QA.
 
 Because it is a clause in the same `warranted` predicate, **reopen comes free**:
 a ticket leaving the delivered set is warranted again and the existing reopen

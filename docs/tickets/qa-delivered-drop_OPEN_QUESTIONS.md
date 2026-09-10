@@ -30,3 +30,12 @@ ball is in your court, which is the one failure this ticket must not create.
 
 Answer by editing the entries. Say "questions answered" and I'll fold them into
 the SPEC.
+
+**ANSWERED (Salvador, 2026-09-10): NO — `TT-In Review` stays OUT of the set.**
+His words: *"in review means ci is running on it it's not ready"*. So the status
+does not mean "handed back for someone else to check"; it means the work is
+still in flight and has not been delivered at all. Reading (b) was the right
+one, the seeded set stays `ARRAY['TT-In QA']`, and the 2 In Review tasks
+correctly remain on the board. No code change was needed — the array was seeded
+with QA alone precisely because guessing here was the one failure this ticket
+could not afford.
