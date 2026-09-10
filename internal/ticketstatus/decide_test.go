@@ -353,12 +353,22 @@ func TestDecide_ActiveWorkIsRefusedNotClosed(t *testing.T) {
 // The dedup key is the recorded observation, not merely the recorded action: a
 // ticket that moved from one colleague to another is NEW information and the log
 // line names the assignee, so it says something a reader has not seen.
+//
+// AMENDED 2026-09-10 (SWT-34 E6): the key now also carries StatusName, because
+// once a per-project CONFIGURED name can trigger the drop, a claimed task whose
+// ticket moves between two delivered statuses of the same category and assignee
+// is a changed observation that would otherwise get no second log line. These
+// fixtures therefore name StatusName explicitly rather than leaning on the zero
+// value — a State whose name is "" against an observation whose name is not is a
+// CHANGED observation, which is correct behaviour and would make this test read
+// as broken.
 func TestDecide_RefusedActiveIsLoggedOncePerObservation(t *testing.T) {
 	o := obs("indeterminate", tsOther, true) // not mine, gate armed
 	o.TaskStatus = "in_progress"
 
 	same := &ticketstatus.State{
 		LastAction: "refused_active", StatusCategory: "indeterminate", Assignee: tsOther,
+		StatusName: o.StatusName,
 	}
 	if got := ticketstatus.Decide(o, same); got.Act {
 		t.Errorf("Decide(unchanged refusal, already recorded) = %+v, want Act=false. Criterion 24: a "+
@@ -374,6 +384,7 @@ func TestDecide_RefusedActiveIsLoggedOncePerObservation(t *testing.T) {
 
 	moved := &ticketstatus.State{
 		LastAction: "refused_active", StatusCategory: "indeterminate", Assignee: "acc-a-third-person",
+		StatusName: o.StatusName,
 	}
 	if got := ticketstatus.Decide(o, moved); !got.Act {
 		t.Errorf("Decide(refusal whose ASSIGNEE changed since the record) = %+v, want Act=true. The "+
