@@ -25,31 +25,73 @@ type Tool struct {
 	InputSchema json.RawMessage
 }
 
+// Profile selects which slice of the agent-facing allowlist a Server serves.
+// Each binary fixes its own — there is no environment setting, so nothing can
+// fall back from one to the other.
+type Profile string
+
+const (
+	// ProfileFull serves the whole agentTools allowlist: cmd/ops-mcp (worker
+	// consoles and this repo's .mcp.json).
+	ProfileFull Profile = "full"
+	// ProfileRead serves the queue reads only: cmd/ops-mcp-read, the user-scope
+	// install every other repo's session sees (SWT-35). A session in an
+	// unrelated repo reads untrusted content all day; it can look at the queues
+	// and change nothing.
+	ProfileRead Profile = "read"
+)
+
+// readProfileTools write nothing but their audit row. task_context is left out
+// deliberately: fetched by the claim holder it flips claimed → in_progress.
+var readProfileTools = []string{"project_list", "task_list", "task_get_next"}
+
 // Server adapts MCP tool calls onto the executor for one worker identity.
 type Server struct {
 	ex       Executor
 	workerID string
+	tools    []Tool
+	allowed  map[string]bool
 }
 
-// New builds the adapter. workerID comes from OPS_WORKER_ID — identity is
-// never model-chosen.
+// New builds the full-profile adapter. workerID comes from OPS_WORKER_ID —
+// identity is never model-chosen.
 func New(ex Executor, workerID string) *Server {
-	return &Server{ex: ex, workerID: workerID}
+	return NewWithProfile(ex, workerID, ProfileFull)
 }
 
-// ListTools returns exactly the agent-facing allowlist. Spine-facing tools
-// (task_release, answer_feedback) are registered on the executor but never
-// listed or callable here.
+// NewWithProfile builds the adapter serving profile p. The read profile's
+// tools are taken FROM agentTools, so their schemas cannot drift.
+func NewWithProfile(ex Executor, workerID string, p Profile) *Server {
+	s := &Server{ex: ex, workerID: workerID, allowed: map[string]bool{}}
+	keep := agentToolNames
+	if p != ProfileFull {
+		keep = map[string]bool{}
+		for _, n := range readProfileTools {
+			keep[n] = true
+		}
+	}
+	for _, t := range agentTools {
+		if keep[t.Name] {
+			s.tools = append(s.tools, t)
+			s.allowed[t.Name] = true
+		}
+	}
+	return s
+}
+
+// ListTools returns exactly this profile's slice of the agent-facing allowlist.
+// Spine-facing tools (task_release, answer_feedback) are registered on the
+// executor but never listed or callable here.
 func (s *Server) ListTools() []Tool {
-	out := make([]Tool, len(agentTools))
-	copy(out, agentTools)
+	out := make([]Tool, len(s.tools))
+	copy(out, s.tools)
 	return out
 }
 
 // CallTool maps one MCP tools/call onto the executor. A model-supplied
 // worker_id is force-overwritten from the server's identity.
 func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
-	if !agentToolNames[name] {
+	if !s.allowed[name] {
 		return nil, fmt.Errorf("tool %q is not available over MCP", name)
 	}
 	if name == "task_append_log" {

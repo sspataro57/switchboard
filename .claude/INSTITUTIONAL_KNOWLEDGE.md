@@ -472,6 +472,52 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   lanes' own files (280, 874) sit above it. The labels are Salvador's
   judgement alone (runbook, "Labelling protocol").
 
+### Queue read tools over MCP (SWT-35)
+
+- `task_list(project, status?, assignee_type?, subproject?, limit?)` and
+  `project_list` are read-only, MCP-listed executor tools (not humanOnly, not
+  snapshotGated — `mail_search`'s shape). `task_list` orders by `taskQueueOrder`
+  (getnext.go), the ONE spelling shared with `task_get_next`.
+- Its default status set is `in_play` = everything except `closed` AND
+  `delivered` — deliberately unlike the dashboard board, which hides only
+  `closed` (rows in a model context cost tokens). `inPlayPredicate` is the one
+  spelling, also behind `project_list`'s `in_play` count. Rows never carry a
+  body; `task_context` is the per-task read.
+- The MCP surface is NOT scoped by client: cross-client privacy is not a goal
+  (Salvador, 2026-09-10), and by his decision the same day `local_only`
+  projects are listed like any other. A worker console's actor is
+  `mcp:{client}` / `mcp:{client}.{sub}` (opsworker sets OPS_WORKER_ID to the
+  bare client) — `mcp:worker:{client}` exists only in tests.
+- Production has SIX `ai_locality='local_only'` projects (bulk, homelab,
+  personal, foundry, saka, town-ai) although the migrations set only two: the
+  column's `local_only` default catches every hand-created project. Measure the
+  table, never count from the migrations.
+- **LANDMINE: omitting a variable from an MCP install does not unset it.** A
+  stdio MCP server inherits the environment of the shell that launched `claude`
+  (this repo's ops-mcp carries `OPS_TOKEN_KEY`, `JIRA_TOKEN_PERSONAL`,
+  `OPENAI_API_KEY` in `/proc/<pid>/environ`; `.mcp.json` sets none), and
+  `~/.bashrc` exports them. Never treat "we didn't pass the secret" as a
+  boundary — gate in the binary.
+- Hence a separate READ-ONLY binary, `cmd/ops-mcp-read`
+  (`mcpserver.NewWithProfile(…, ProfileRead)`): lists/accepts only
+  `project_list`, `task_list`, `task_get_next`; its main calls no `tools.Set*`
+  seam, so NO sender is wired (connector code is linked via internal/tools but
+  stays nil). Not an env setting on ops-mcp: that was tried and fails open (unset
+  had to mean full for existing launchers). `task_context` is not in the read
+  profile: the claim holder's fetch flips claimed → in_progress.
+- Installed once at Claude Code USER scope as `ops` → `ops-mcp-read` (runbook
+  `docs/runbooks/ops-mcp-user-scope.md`): a `go install` binary from `main`,
+  `OPS_WORKER_ID=manual:salvo`. Never install `ops-mcp` (full) at user scope.
+  Re-run `go install ./cmd/ops-mcp-read` after any merge touching
+  `cmd/ops-mcp-read`, `internal/mcpserver` or `internal/tools`. In this repo
+  `.mcp.json`'s project-scope `ops` (full) shadows it.
+- `task_list` reads resolve + page + counts in ONE `RepeatableRead, ReadOnly`
+  transaction: a shared WHERE stops predicate drift, not drift in time.
+- Residual (Future work): row TITLES — some derived from private mail — reach
+  whatever model the calling session runs, including for `personal`; and in
+  the full profile `task_context` still returns any task's body by id with no
+  client or locality clause.
+
 ### Link preservation (SWT-25)
 
 - `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written

@@ -101,6 +101,14 @@ var allToolNames = []string{
 	// the reconciler calls it as ticketstatus:jira, exactly as the orchestrator
 	// calls task_close.
 	"task_reopen",
+	// SWT-35 (task-list-mcp) criterion 1: the two read-only queue tools. Both
+	// are MCP-listed (internal/mcpserver/schemas.go) and neither is humanOnly
+	// nor snapshotGated (L12) — mail_search's shape: they write nothing but
+	// their audit row. project_list is the first registered tool with NO
+	// required field; see TestValidate_RejectsMissingRequiredArgs's amended
+	// comment.
+	"task_list",
+	"project_list",
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -128,6 +136,16 @@ func TestRegister_AllToolsRegistered(t *testing.T) {
 // delivery_id; task_mark_delivered needs task_id; set_sending_frozen requires
 // an explicit `frozen` bool (freeze/unfreeze must be deliberate — an empty {}
 // is rejected so the audited flag is never flipped by omission).
+//
+// AMENDED 2026-09-10 (SWT-35, task-list-mcp criterion 2): "empty args are
+// illegal for every tool" stopped being true with `project_list`, the first
+// registered tool with NO required field — it lists every project and takes no
+// arguments, so `{}` (and, over MCP, `{"worker_id":...}`) is its only legal
+// call. It is therefore NOT in toolsUnderTest below, and cannot be: an accepted
+// {} would pass Validate, reach the handler and deref this test's nil pool. Its
+// contract ({}, an injected worker_id and an empty body accepted; a non-object
+// refused) is TestValidateProjectList in tasklist_test.go. Every OTHER tool
+// still rejects {}; the sentence above stays true for them.
 func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 	reg := executor.NewRegistry()
 	tools.Register(reg, nil)
@@ -182,6 +200,14 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		// directly — an ACCEPTED call would run the handler and deref the nil pool
 		// this test relies on.
 		"task_reopen",
+		// SWT-35 criterion 2: task_list needs project; {} is illegal ("missing
+		// project", L2 — the server infers nothing, for any actor). The accept
+		// half of its validator (all twelve statuses, limit 0 and 10,000, an
+		// injected worker_id) lives in tasklist_test.go, which calls
+		// validateTaskList directly for the nil-pool reason given above for
+		// task_dismiss. project_list is DELIBERATELY ABSENT — see the amended
+		// header comment.
+		"task_list",
 	}
 
 	for _, name := range toolsUnderTest {

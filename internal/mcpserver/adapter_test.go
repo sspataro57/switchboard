@@ -101,6 +101,13 @@ var wantAgentTools = []string{
 	// in the loop. The matrix (channel_mismatch, kill switch, rate limit) and
 	// the handler's LoadBusy refusal are the gates, not the actor.
 	"book_calendar_block",
+	// SWT-35 (task-list-mcp) criterion 18: read-only queue reads, the
+	// mail_search precedent — not humanOnly, not snapshotGated, and nothing in
+	// either handler branches on who is calling (L12). Listing task_list does
+	// not widen claiming: a worker still takes work only via task_get_next
+	// (L14, a prompt rule).
+	"task_list",
+	"project_list",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.
