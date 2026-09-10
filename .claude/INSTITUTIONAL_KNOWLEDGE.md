@@ -1277,3 +1277,28 @@ One-off reconciliation ran 2026-09-09: 14 collaboratory tasks closed.
 digits 0023. Landmine class confirmed twice this ticket: Jira has a FOURTH
 statusCategory key (`undefined`) — readers must treat unknown keys as
 evidence gaps, never pass them toward a three-value CHECK.
+
+### Pipedream's free tier is 100 credits/MONTH (verified 2026-09-10)
+
+Read off the billing page, after two cadence decisions had silently assumed a
+DAILY budget: the free workspace allows **100 execution credits per month,
+resetting on the 1st**, and the calendar workflow costs **~1 credit per
+invocation** (its usage chart shows 21 credits on 2026-09-08 at hourly
+cadence). A booking spends one too. So hourly polling is 7x the monthly cap and
+`*/20` is 21x; **~3 invocations/day is the ceiling for reads and writes
+combined**. Cadence is now `0 11,17 * * *` (twice daily, 07:00/13:00 EDT).
+
+**The failure signature is a liar**: with the cap spent, EVERY request — even
+an unauthenticated GET with no body — returns `HTTP 400 "Error in workflow"`,
+17 bytes of text/html, no detail. That reads exactly like a broken workflow
+step or a bad request envelope; it is neither. Check credits at
+pipedream.com/settings/billing BEFORE debugging the workflow, and note the
+cap's effect persists for the rest of the calendar month (2026-09-08 → Oct 1
+here: 507 consecutive failed runs).
+
+Standing consequence: `AVAIL_MAX_SYNC_AGE=150m` is far tighter than the polling
+gap this budget forces, so availability will refuse nearly all day even once
+credits return — the freshness gate and the cadence have to be decided
+together. The durable fix is to take calendar READS off Pipedream entirely
+(private iCal feed, or the Google Calendar API) and keep Pipedream for the rare
+booking write.

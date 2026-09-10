@@ -159,17 +159,38 @@ recorded landmine), then `kubectl -n ops patch cronjob connector-gcal -p
 `AVAIL_MAX_SYNC_AGE` (1h default), and check Pipedream's free-tier invocation
 allowance (~72/day at `*/20`) before scheduling.
 
-**Quota incident (2026-09-08)**: the free tier ran dry mid-morning at `*/20`
-(~90 invocations/24h plus manual runs) — the workflow returns errors and
-`propose_slots` fail-closes until the quota resets, which is the designed
-behaviour, not an outage to debug. Decision (Salvador, no paid plan): cadence
-lowered to **hourly** (`0 * * * *`, 24/day) with `AVAIL_MAX_SYNC_AGE=150m`
-everywhere availability is served (cluster env + `~/.bashrc` for local
-opsctl) — the freshness gate must stay at least 2× the poll interval. Cost:
-calendar data and the busy set can be up to ~1h stale, and a booked block's
-loop closure waits up to an hour for its observing poll. Tighten back toward
-`*/30` only after reading the real credits-per-invocation off Pipedream's
-usage page. The calendar sync age — judged with the SAME `AVAIL_MAX_SYNC_AGE`
+**Quota incident (2026-09-08), and THE NUMBER that settles it (read off the
+Pipedream billing page 2026-09-10)**: the free workspace allowance is
+**100 execution credits per MONTH, resetting on the 1st** — not a daily
+budget, which is what both earlier cadence decisions silently assumed. The
+usage chart attributes **21 credits to `switchboard-calendar` on 2026-09-08
+alone** at hourly cadence, so the real cost is **~1 credit per invocation**,
+and a booking (`book_calendar_block`) spends one too.
+
+Arithmetic that follows, and it is brutal: hourly = ~720 credits/month against
+a 100 cap (7× over); `*/20` = ~2,160 (21× over). **The sustainable ceiling is
+~3 polls per day**, total, for reads AND writes together. When the cap is
+spent, every request — including an unauthenticated GET with no body — returns
+`HTTP 400 "Error in workflow"` with no detail, which reads exactly like a
+broken workflow; check the credits before debugging the steps. The cap was hit
+2026-09-08 06:40Z and stayed hit for the rest of the month (507 failed runs).
+
+Cadence as it now stands (2026-09-10): **`0 11,17 * * *`** — twice daily at
+07:00/13:00 EDT, ~60 credits/month, leaving ~40 for bookings and retries. The
+schedule is chosen for WHEN (just before the working day, and midday, local)
+rather than how often, because at two polls a day each credit should land when
+someone might actually call `propose_slots`; a 03:00 local poll refreshes
+nothing anyone will use.
+
+**Open consequence, deliberately NOT yet resolved**: `AVAIL_MAX_SYNC_AGE` is
+still `150m`, which is far tighter than a 12-hour polling gap — so once credits
+return, availability will REFUSE nearly all day. The value must move with the
+cadence or the integration is up but mute. The tradeoff is Salvador's to make:
+keep it tight (accurate, answers only just after a poll) or raise it to ~7h
+(always answers, may offer a slot already filled by hand). The real fix is to
+stop reading through Pipedream at all — a private iCal feed or the Google
+Calendar API for the READS, keeping Pipedream only for the occasional booking
+write, which fits inside 100 credits comfortably. The calendar sync age — judged with the SAME `AVAIL_MAX_SYNC_AGE`
 and readiness predicate `propose_slots` uses — is visible on the dashboard's
 `/funnel` page (SWT-29), alongside every other connector's freshness. Don't ALSO run the mail
 one-shot with `CAL_SOURCE=pipedream` or invocations double; production mail
