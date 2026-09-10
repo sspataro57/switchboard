@@ -537,22 +537,64 @@ func TestMaxCalendarSyncAgeIsReachableAndFailsLoud(t *testing.T) {
 	}
 }
 
-// ---- criterion 10: the lanes are referenced, never spelled --------------------
+// ---- criterion 10 / SWT-33 criterion 21: the lanes are referenced, never spelled
 
+// AMENDED BY SWT-33 (inquiry-classify), 2026-09-10: the loop gains
+// classify.LaneInquiry, so this guard counts THREE lane vars instead of two.
+// The literal ban is unchanged and grows one entry — `"classify_inquiry"` is a
+// third place the same fact would live.
 func TestFunnelReferencesTheLaneVarsNotTheirWorkerTypeLiterals(t *testing.T) {
 	src := funnelRepoFile(t, filepath.Join("internal", "dashboard", "funnel.go"))
 
-	for _, want := range []string{"classify.LanePersonal", "classify.LaneResidue"} {
+	for _, want := range []string{"classify.LanePersonal", "classify.LaneResidue", "classify.LaneInquiry"} {
 		if !strings.Contains(src, want) {
-			t.Errorf("internal/dashboard/funnel.go never references %s. Criterion 10: BOTH lanes render, "+
-				"through those vars", want)
+			t.Errorf("internal/dashboard/funnel.go never references %s. Criterion 10 and SWT-33 criterion "+
+				"21: ALL THREE lanes render, through those vars. A lane that is classified nightly and "+
+				"never rendered is a lane nobody reads — and reading the flagged output on /funnel IS the "+
+				"first real measurement of the inquiry lane (Q3)", want)
 		}
 	}
-	for _, banned := range []string{`"classify_residue"`, `"classify"`} {
+	for _, banned := range []string{`"classify_residue"`, `"classify"`, `"classify_inquiry"`} {
 		if funnelMentionsOutsideComments(src, banned) {
-			t.Errorf("internal/dashboard/funnel.go spells the worker_type %s as a literal. The two lanes' "+
-				"worker_type values differ because both inbox filters key their NOT EXISTS on them (IK, "+
-				"residue lane); a literal here is a second place that fact lives", banned)
+			t.Errorf("internal/dashboard/funnel.go spells the worker_type %s as a literal. The three "+
+				"lanes' worker_type values differ because every inbox filter keys its NOT EXISTS on them "+
+				"(IK, residue lane); a literal here is a second place that fact lives", banned)
+		}
+	}
+}
+
+// ---- SWT-33 criteria 21 + 30: the inquiry block, and no fold restated --------
+
+// The dashboard restates NO fold: every number in the inquiry block comes from
+// classify.Summarize, which is also what `classify report --lane inquiry`
+// prints. TestFunnelAddsNoSQLOverCaptureOrClassifyTables below is the other half
+// of that claim (no ai_extractions SQL here); this half is that the three
+// counters and the thread scope are RENDERED, so the seam is actually used.
+func TestFunnelTemplate_RendersTheInquiryCountersAndTheThreadScope(t *testing.T) {
+	tmpl := strings.ToLower(funnelTemplate(t))
+
+	// POSITIVE CONTROL: the lane loop must still be there, or every needle
+	// below fails for the uninteresting reason that the block was deleted.
+	if !strings.Contains(tmpl, "{{range .lanes}}") && !strings.Contains(tmpl, "{{range .lanes }}") {
+		t.Fatalf("templates/funnel.html no longer ranges over .Lanes; the classify block is what SWT-33 " +
+			"criterion 21 adds a third entry to")
+	}
+
+	for _, want := range []struct{ needle, why string }{
+		{"open", "the OPEN counter — the only one of the three that means 'someone is still waiting'"},
+		{"answered in thread", "the second state, on a THREAD-EXACT key: a later outbound there is " +
+			"genuinely a reply in that thread"},
+		{"spoke in conversation since", "the third state, and the one that must never be collapsed into " +
+			"the second. On a conversation-level slack key a later outbound only means Salvador has " +
+			"SPOKEN in the channel since — measured 2026-09-10 at 83 conversation-level keys, one of " +
+			"which holds 9,704 messages"},
+		{"thread_scope", "the scope per flag, so a reader can see WHICH claim each line is making"},
+		{"by channel", "criterion 30's by-channel rows. Q2 rejected a --channel flag and bought the " +
+			"diagnostic back here: a bad number still says which message shape broke"},
+	} {
+		if !strings.Contains(tmpl, want.needle) {
+			t.Errorf("templates/funnel.html never renders %q — %s (SWT-33 criteria 21 and 30)",
+				want.needle, want.why)
 		}
 	}
 }

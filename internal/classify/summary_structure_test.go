@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -80,7 +81,87 @@ func TestClassifySummary_OwnsTheQueriesAndTheFolds(t *testing.T) {
 	// to normalized_messages for a second copy of those values is a second
 	// source of truth for what the model was shown, and it silently disagrees
 	// the moment a message is re-normalized.
-	if csOutsideComments(summary, "normalized_messages") {
+	//
+	// AMENDED BY SWT-33 (criterion 30, 2026-09-10), not relaxed: exactly ONE
+	// join back is sanctioned — the inquiry lane's "still open" fold, which is
+	// deliberately a statement about the world NOW (a later outbound message on
+	// the thread) and not a second copy of what was classified. It is carved out
+	// BY NAME — the two constants repliedSinceSQL (the joins) and
+	// repliedSinceCol (the column) — and held to an ALLOWLIST of identifiers: a
+	// new column read from the table (sender, channel, body_text, anything) is an
+	// identifier the list does not carry, and fails. Outside the carve-out, the
+	// table name and the fold's aliases (t., lo.) may not appear at all, so a
+	// select-list expression cannot reach the joined row around the check.
+	// (Re-review fix: the first cut was a DENYLIST inside one constant, which
+	// missed `channel` and missed the alias used outside it.)
+	allowed := map[string]bool{}
+	for _, w := range strings.Fields(`left join normalized_messages t on id e fields normalized_message_id
+		bigint select thread_id max sent_at as last_outbound from where direction outbound and is not null
+		group by lo nullif coalesce false`) {
+		allowed[w] = true
+	}
+	ident := regexp.MustCompile(`[A-Za-z_]+`)
+	scan := summary
+	carved := 0
+	for _, name := range []string{"repliedSinceSQL", "repliedSinceCol"} {
+		head := "const " + name + " = `"
+		i := strings.Index(summary, head)
+		if i < 0 {
+			continue
+		}
+		body := summary[i+len(head):]
+		end := strings.Index(body, "`")
+		if end < 0 {
+			t.Fatalf("summary.go's %s literal is unterminated", name)
+		}
+		lit := body[:end]
+		carved++
+		for _, w := range ident.FindAllString(lit, -1) {
+			if !allowed[strings.ToLower(w)] {
+				t.Errorf("internal/classify/summary.go's %s uses %q, which the replied-since allowlist does not "+
+					"carry. The one sanctioned join back (SWT-33 criterion 30) reads thread_id, direction and "+
+					"sent_at; what the model was shown — sender, subject, channel, body — still comes from the "+
+					"stored fields", name, w)
+			}
+		}
+		scan = strings.Replace(scan, lit, "", 1)
+	}
+	if strings.Contains(summary, "normalized_messages") && carved != 2 {
+		t.Errorf("internal/classify/summary.go mentions normalized_messages but does not declare BOTH carve-out "+
+			"constants (found %d of repliedSinceSQL / repliedSinceCol)", carved)
+	}
+	aliasUse := regexp.MustCompile(`\b(t|lo)\.[a-z_]+`)
+	for _, line := range strings.Split(scan, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		if aliasUse.MatchString(line) {
+			t.Errorf("internal/classify/summary.go reaches the replied-since join's aliases outside its carve-out:\n"+
+				"\t%s\nThe joined row may only be read inside repliedSinceSQL / repliedSinceCol", strings.TrimSpace(line))
+		}
+	}
+	// UNQUALIFIED columns (second re-review): ai_runs and ai_extractions carry no
+	// body_text, sender, subject or channel, so a bare column added to the
+	// verdict select list would silently resolve to the joined t row on the
+	// inquiry lane — past the allowlist, the alias ban and the table-name ban.
+	// So the select lists outside the carve-out are pinned: the verdict query's
+	// is exactly `e.fields, r.created_at, <replied>`, and there are two SELECTs
+	// (verdicts, skipped runs) and no third.
+	if !strings.Contains(scan, "q := `SELECT e.fields, r.created_at, ` + replied + `\n") {
+		t.Errorf("internal/classify/summary.go's verdict query no longer selects exactly `e.fields, " +
+			"r.created_at, ` + replied. Anything added there reaches the replied-since join's row unqualified")
+	}
+	selects := 0
+	for _, line := range strings.Split(scan, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "//") {
+			selects += strings.Count(line, "SELECT")
+		}
+	}
+	if selects != 2 {
+		t.Errorf("internal/classify/summary.go carries %d SELECT(s) outside the replied-since carve-out, want 2 "+
+			"(the verdict query and the skipped-run query)", selects)
+	}
+	if csOutsideComments(scan, "normalized_messages") {
 		t.Errorf("internal/classify/summary.go joins normalized_messages. Criterion 13: the flag list's " +
 			"sender and subject come from the stored ai_extractions.fields — no join back for a second copy")
 	}

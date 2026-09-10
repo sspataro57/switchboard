@@ -1,15 +1,20 @@
 package classify
 
-// SWT-23: the lane split. There are EXACTLY TWO lanes — a third lane is a third
-// worker_type, a third prompt nothing measured, and a third population whose
-// class nobody argued about; if one is genuinely wanted, the argument belongs in
-// a SPEC, not in this var block (the structural test that counts these is where
-// that argument gets written down).
+// SWT-23's lane split, as SWT-33 (2026-09-10) amended it: there are EXACTLY
+// THREE lanes and EXACTLY TWO contracts. A lane still costs a worker_type, a
+// prompt and a population whose class somebody has to argue about, and that
+// argument still belongs in a SPEC rather than in this var block — the
+// structural test that counts these is where it gets written down.
 //
-// What a Lane is NOT: a schema. VerdictSchema and SchemaName are shared by both
-// lanes on purpose — one contract is the only way the residue's recall/precision
-// can be read against the personal lane's 0.94 / 0.50, and a lane-scoped schema
-// would make the two lanes two experiments.
+// What a Lane is NOT: a schema, casually. LanePersonal and LaneResidue share
+// ONE Contract on purpose — that is the only thing making the residue's
+// recall/precision readable against the personal lane's 0.94 / 0.50, and a
+// per-lane schema would have made those two lanes two experiments.
+// LaneInquiry carries a SECOND contract because it asks a genuinely different
+// question ("does this need a reply from me", not "is this actionable"), so
+// scoring one against the other's labels would compare nothing to nothing.
+// Two contracts, three lanes, and the assertion that keeps the first sentence
+// true is LanePersonal.Contract == LaneResidue.Contract.
 //
 // The residue lane's containment story, stated here because criterion 15 says
 // the honesty label is re-stated rather than inherited: a residue row has NO
@@ -21,17 +26,52 @@ package classify
 // containment. Two lanes, two reasons, one outcome — and neither reason is the
 // class fold acting as a guard.
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// Contract is the output shape a lane's verdicts take: the structured-output
+// schema the provider is given, and the field names everything downstream reads
+// them back by. Shared by the two actionability lanes; distinct for inquiry.
+type Contract struct {
+	SchemaName    string          // provider.Request.SchemaName
+	Schema        json.RawMessage // provider.Request.Schema
+	DecisionKey   string          // the verdict's boolean: "actionable" | "needs_reply"
+	CategoryKey   string          // the grouped category: "kind" | "ask_kind"
+	PositiveLabel string          // the eval fixture's positive token
+}
+
+// ActionabilityContract is the shape SWT-22 shipped and SWT-23 shared. Named so
+// the two lanes that use it point at ONE value rather than two equal literals —
+// two literals is how "one contract" quietly becomes two.
+var ActionabilityContract = Contract{
+	SchemaName:    SchemaName,
+	Schema:        VerdictSchema,
+	DecisionKey:   "actionable",
+	CategoryKey:   "kind",
+	PositiveLabel: "actionable",
+}
+
+// InquiryContract is SWT-33's second contract.
+var InquiryContract = Contract{
+	SchemaName:    InquirySchemaName,
+	Schema:        InquiryVerdictSchema,
+	DecisionKey:   "needs_reply",
+	CategoryKey:   "ask_kind",
+	PositiveLabel: "needs_reply",
+}
 
 // Lane names one classify population: which inbox filter, which system prompt,
-// which worker_type its rows are recorded under, and which labelled set its
-// eval defaults to.
+// which worker_type its rows are recorded under, which labelled set its eval
+// defaults to, and which output Contract its verdicts take.
 type Lane struct {
-	Name          string // "personal" | "residue"
+	Name          string // "personal" | "residue" | "inquiry"
 	WorkerType    string // ai_runs.worker_type
 	System        string // the system prompt
 	PromptVersion string
 	LabelsPath    string // default eval fixture
+	Contract      Contract
 }
 
 // The two lanes. WorkerType differs because both inbox filters key their NOT
@@ -46,6 +86,7 @@ var (
 		System:        SystemPrompt,
 		PromptVersion: PromptVersion,
 		LabelsPath:    "docs/evals/personal-actionability.jsonl",
+		Contract:      ActionabilityContract,
 	}
 	LaneResidue = Lane{
 		Name:          "residue",
@@ -53,6 +94,19 @@ var (
 		System:        ResidueSystemPrompt,
 		PromptVersion: ResiduePromptVersion,
 		LabelsPath:    "docs/evals/residue-actionability.jsonl",
+		Contract:      ActionabilityContract,
+	}
+	// LaneInquiry (SWT-33) reads client conversation, not mail, and asks
+	// whether a reply is owed. Its containment is NOT the ai_locality column —
+	// collaboratory is 'any' — but cmd/classify's router, which is built with
+	// NO general client at all, plus the lane's pinned restricted class.
+	LaneInquiry = Lane{
+		Name:          "inquiry",
+		WorkerType:    "classify_inquiry",
+		System:        InquirySystemPrompt,
+		PromptVersion: InquiryPromptVersion,
+		LabelsPath:    "docs/evals/inquiry-needs-reply.jsonl",
+		Contract:      InquiryContract,
 	}
 )
 
@@ -65,9 +119,25 @@ func LaneByName(name string) (Lane, error) {
 		return LanePersonal, nil
 	case LaneResidue.Name:
 		return LaneResidue, nil
+	case LaneInquiry.Name:
+		return LaneInquiry, nil
 	default:
-		return Lane{}, fmt.Errorf("unknown lane %q (want %q or %q)", name, LanePersonal.Name, LaneResidue.Name)
+		return Lane{}, fmt.Errorf("unknown lane %q (want %q, %q or %q)",
+			name, LanePersonal.Name, LaneResidue.Name, LaneInquiry.Name)
 	}
+}
+
+// LaneByWorkerType resolves the lane a stored ai_runs row belongs to. Summarize
+// takes a worker_type string (its signature is pinned by a structure test and
+// its golden report uses a non-lane worker_type), so the lookup is by value and
+// an unrecognised worker_type is NOT an error — it keeps today's behaviour.
+func LaneByWorkerType(workerType string) (Lane, bool) {
+	for _, l := range []Lane{LanePersonal, LaneResidue, LaneInquiry} {
+		if l.WorkerType == workerType {
+			return l, true
+		}
+	}
+	return Lane{}, false
 }
 
 // validate refuses the zero value rather than defaulting it. A default would be
@@ -75,9 +145,9 @@ func LaneByName(name string) (Lane, error) {
 // symptom is a prompt asking whether a Nextdoor digest is a personal bill.
 func (l Lane) validate() error {
 	if l.Name == "" || l.WorkerType == "" || l.System == "" || l.PromptVersion == "" {
-		return fmt.Errorf("classify: Config.Lane is unset or incomplete; pass LanePersonal or LaneResidue — " +
-			"the zero lane is refused rather than defaulted, so the residue is never classified by the " +
-			"personal prompt by omission")
+		return fmt.Errorf("classify: Config.Lane is unset or incomplete; pass LanePersonal, LaneResidue " +
+			"or LaneInquiry — the zero lane is refused rather than defaulted, so the residue is never " +
+			"classified by the personal prompt by omission")
 	}
 	return nil
 }

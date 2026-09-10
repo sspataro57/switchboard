@@ -137,9 +137,13 @@ type funnelHealthRow struct {
 	Verdict  string
 }
 
-// funnelLane is one classify lane's rendered block.
+// funnelLane is one classify lane's rendered block. Inquiry selects the
+// inquiry lane's layout (SWT-33 criteria 21 and 30): its three open/answered
+// counters, the thread scope per flag and the by-channel rows — every number
+// still from classify.Summarize, never restated here.
 type funnelLane struct {
 	Name    string
+	Inquiry bool
 	Summary classify.Summary
 }
 
@@ -334,12 +338,14 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 		}},
 		{Name: "classify shadow summary", Load: func() error {
 			since := time.Duration(days) * 24 * time.Hour
-			for _, lane := range []classify.Lane{classify.LanePersonal, classify.LaneResidue} {
+			for _, lane := range []classify.Lane{classify.LanePersonal, classify.LaneResidue, classify.LaneInquiry} {
 				sum, err := classify.Summarize(ctx, s.pool, since, lane.WorkerType)
 				if err != nil {
 					return err
 				}
-				page.Lanes = append(page.Lanes, funnelLane{Name: lane.Name, Summary: sum})
+				page.Lanes = append(page.Lanes, funnelLane{
+					Name: lane.Name, Inquiry: lane.Name == classify.LaneInquiry.Name, Summary: sum,
+				})
 			}
 			return nil
 		}},

@@ -651,37 +651,96 @@ func TestReports_ShareTheNoFallbackNote(t *testing.T) {
 
 // GENERALISED BY SWT-23 criterion 26: a TABLE over both files, not a copy. The
 // shared assertions (no content keys, unique positive ids, a valid label, a
-// 16-hex subject hash, no unexpected keys) are the same rules for both sets; the
-// per-file parts are the minimum counts and the `stratum` key, which is REQUIRED
-// on every residue line and FORBIDDEN in the personal file.
+// 16-hex subject hash, no unexpected keys) are the same rules for every set; the
+// per-file parts are the minimum counts, the LABEL VOCABULARY and the `stratum`
+// key.
 //
-// Why stratum is forbidden there rather than merely absent: the personal file is
-// what produced 0.94 / 0.50 on 2026-08-31, and criterion 20 requires that a
-// strata-less set still prints today's output byte-for-byte. A stray stratum key
-// in that file would silently switch it onto the three-line breakdown, computing
+// EXTENDED BY SWT-33 criterion 22 with a THIRD row, and two of the table's
+// columns had to become per-file rather than shared:
+//
+//   - `labels`. The inquiry file's vocabulary is needs_reply | not, not
+//     actionable | not. It is per-file because criterion 23 validates the file
+//     against the LANE's positive token — a personal file must not be scoreable
+//     as an inquiry file and vice versa, and a hardcoded pair here would have
+//     accepted either.
+//   - `strataRequiredAt`. Strata are OPTIONAL on the inquiry file today and
+//     REQUIRED once it reaches the threshold, and that threshold is spelled
+//     `classify.EvalResultThreshold` DELIBERATELY. Criterion 31's eval refusal
+//     and criterion 22's dated commitment are two statements of ONE number:
+//     spelled twice they drift the first time the minimum is raised, and the
+//     binary would keep refusing (or stop refusing) while the table said
+//     otherwise. One spelling, in Go, read by both.
+//
+// Why stratum is FORBIDDEN in the personal file rather than merely absent: that
+// file is what produced 0.94 / 0.50 on 2026-08-31, and criterion 20 requires
+// that a strata-less set still prints today's output byte-for-byte. A stray
+// stratum key would silently switch it onto the three-line breakdown, computing
 // a "precision (uniform stratum only)" over whichever handful of lines happened
 // to carry the key.
 func TestLabelsFile_IsIdsAndLabelsOnly(t *testing.T) {
 	files := []struct {
-		rel      string
-		min      int
-		strata   bool           // stratum REQUIRED on every line
-		perStrat map[string]int // minimum per stratum
-		why      string
+		rel string
+		min int
+		// labels is the file's CLOSED label vocabulary.
+		labels []string
+		// strataForbidden: a `stratum` key is an error on this file.
+		strataForbidden bool
+		// strataRequiredAt: `stratum` is REQUIRED on every line once the file
+		// holds at least this many labels. 0 = always required.
+		strataRequiredAt int
+		perStrat         map[string]int // minimum per stratum, checked at/above strataRequiredAt
+		wantDomainGate   bool
+		why              string
 	}{
 		{
-			rel: "docs/evals/personal-actionability.jsonl", min: 100,
-			why: "SWT-22 criterion 24's minimum to merge is 100 HAND-CHECKED messages drawn from the " +
-				"personal population, including the Pines announcements-vs-violations pairs",
+			// RAISED by SWT-33's re-review from SWT-22's merge minimum of 100 to
+			// classify.EvalResultThreshold (the file carries 280). Eval prints a
+			// bare ratio for a lane's OWN fixture on the premise that the fixture
+			// is above the threshold; a legal 100-119 line file would have
+			// printed one with no marker.
+			rel: "docs/evals/personal-actionability.jsonl", min: classify.EvalResultThreshold,
+			labels: []string{"actionable", "not"}, strataForbidden: true,
+			why: "SWT-22 criterion 24's minimum to merge was 100 HAND-CHECKED messages drawn from the " +
+				"personal population, including the Pines announcements-vs-violations pairs; SWT-33 raised it " +
+				"to the eval's ratio threshold so the lane's own fixture can never print a sub-threshold ratio",
 		},
 		{
-			rel: "docs/evals/residue-actionability.jsonl", min: 300, strata: true,
-			perStrat: map[string]int{"uniform": 200, "enriched": 100},
+			rel: "docs/evals/residue-actionability.jsonl", min: 300,
+			labels: []string{"actionable", "not"}, strataRequiredAt: 0,
+			perStrat: map[string]int{"uniform": 200, "enriched": 100}, wantDomainGate: true,
 			why: "SWT-23 criteria 18-19: the residue set is drawn FRESH and STRATIFIED — the personal " +
 				"set does not transfer, and neither do the spike's numbers. uniform >= 200 (the only " +
 				"stratum a base rate or an honest precision can come from), enriched >= 100 (the recall " +
 				"denominator: a uniform 200 at a ~2% base rate yields four positives and a recall that " +
 				"is noise), plus the domain_gate samples of criterion 6",
+		},
+		{
+			// SWT-33 criterion 22 [Q3], answered 2026-09-10. The minimum to
+			// merge is 40, and the DATED COMMITMENT is to a stratified set of
+			// classify.EvalResultThreshold labels (uniform >= 80, enriched >=
+			// 40) accumulated DURING the shadow period by the labelling
+			// protocol in docs/runbooks/local-classifier.md.
+			//
+			// What makes shipping at 40 safe is CRITERION 31, not optimism:
+			// below classify.EvalResultThreshold scored labels `classify eval`
+			// refuses to print a ratio at all and prints counts plus
+			// classify.EvalIndicativeMarker instead. Q3's answer was explicit
+			// that the condition is enforced in code rather than trusted —
+			// this repo shipped a 25-29x cost error by quoting a number out of
+			// the context that produced it, and a convention would not have
+			// stopped it.
+			//
+			// RAISING THE MINIMUM IS A SCHEDULED EDIT: when the set reaches
+			// classify.EvalResultThreshold, `min` moves here and strata become
+			// required by the field below without anyone remembering to.
+			rel: "docs/evals/inquiry-needs-reply.jsonl", min: 40,
+			labels: []string{"needs_reply", "not"}, strataRequiredAt: classify.EvalResultThreshold,
+			perStrat: map[string]int{"uniform": 80, "enriched": 40},
+			why: "SWT-33 criterion 22: at least 40 hand-checked labels drawn from `collaboratory` " +
+				"messages recent enough that Salvador can confirm them from memory in seconds, mixed " +
+				"across slack/gmail/jira in roughly the population's proportions. The judgement 'does " +
+				"Salvador need to answer this' is HIS and cannot be delegated to an agent or inferred " +
+				"from a heuristic (criterion 32)",
 		},
 	}
 
@@ -695,9 +754,20 @@ func TestLabelsFile_IsIdsAndLabelsOnly(t *testing.T) {
 				t.Fatalf("read %s: %v\n%s", f.rel, err, f.why)
 			}
 
+			validLabel := map[string]bool{}
+			for _, l := range f.labels {
+				validLabel[l] = true
+			}
+
 			seen := map[float64]bool{}
-			lines := 0
+			var lines int
 			perStratum := map[string]int{}
+			type record struct {
+				line    int
+				stratum string
+				has     bool
+			}
+			var records []record
 
 			for i, line := range strings.Split(string(raw), "\n") {
 				line = strings.TrimSpace(line)
@@ -709,6 +779,13 @@ func TestLabelsFile_IsIdsAndLabelsOnly(t *testing.T) {
 				if err := json.Unmarshal([]byte(line), &obj); err != nil {
 					t.Errorf("%s:%d does not parse as one JSON object: %v", f.rel, i+1, err)
 					continue
+				}
+				// A repeated key survives json.Unmarshal as its LAST value only, so
+				// every check below would see the allowed value while an earlier one
+				// sat in git (SWT-33, Codex round 10).
+				if k, err := classify.DuplicateLabelKey([]byte(line)); err != nil || k != "" {
+					t.Errorf("%s:%d repeats the key %q (err %v); one value per key, or an earlier value can "+
+						"carry text past every check", f.rel, i+1, k, err)
 				}
 				for _, banned := range []string{"subject", "body", "sender", "from", "text", "snippet"} {
 					if _, ok := obj[banned]; ok {
@@ -727,10 +804,13 @@ func TestLabelsFile_IsIdsAndLabelsOnly(t *testing.T) {
 				} else {
 					seen[id] = true
 				}
-				switch obj["label"] {
-				case "actionable", "not":
-				default:
-					t.Errorf("%s:%d label = %v, want \"actionable\" or \"not\"", f.rel, i+1, obj["label"])
+				lbl, _ := obj["label"].(string)
+				if !validLabel[lbl] {
+					t.Errorf("%s:%d label = %v, want one of %v. The vocabulary is PER FILE (SWT-33 "+
+						"criterion 23): loadLabels validates against the lane's positive token so a "+
+						"personal file cannot be scored as an inquiry file, and `actionable` scored "+
+						"against inquiry labels would make two different questions' recall/precision "+
+						"falsely comparable", f.rel, i+1, obj["label"], f.labels)
 				}
 				h, _ := obj["subject_sha256"].(string)
 				if !hex16.MatchString(h) {
@@ -740,20 +820,15 @@ func TestLabelsFile_IsIdsAndLabelsOnly(t *testing.T) {
 				}
 
 				stratum, hasStratum := obj["stratum"].(string)
+				records = append(records, record{line: i + 1, stratum: stratum, has: hasStratum})
 				switch {
-				case f.strata && !hasStratum:
-					t.Errorf("%s:%d has no `stratum`. It is REQUIRED on every residue line and must be one "+
-						"of uniform | enriched | domain_gate (criterion 18). Without it the eval cannot "+
-						"tell an honest precision from one computed over a sample deliberately enriched "+
-						"with positives — and that number WILL be quoted as if it described production",
+				case f.strataForbidden && hasStratum:
+					t.Errorf("%s:%d carries a `stratum` key. This file has no strata and must keep none: "+
+						"criterion 20 requires a strata-less set to print today's output byte-for-byte, "+
+						"and one stray key switches the whole file onto the three-line breakdown",
 						f.rel, i+1)
-				case f.strata && !strata[stratum]:
+				case hasStratum && !strata[stratum]:
 					t.Errorf("%s:%d stratum = %q, want uniform | enriched | domain_gate", f.rel, i+1, stratum)
-				case !f.strata && hasStratum:
-					t.Errorf("%s:%d carries a `stratum` key. The personal file has no strata and must keep "+
-						"none: criterion 20 requires a strata-less set to print today's output "+
-						"byte-for-byte, and one stray key switches the whole file onto the three-line "+
-						"breakdown", f.rel, i+1)
 				}
 				if hasStratum {
 					perStratum[stratum]++
@@ -763,13 +838,24 @@ func TestLabelsFile_IsIdsAndLabelsOnly(t *testing.T) {
 					switch k {
 					case "message_id", "label", "subject_sha256", "note":
 					case "stratum":
-						if !f.strata {
+						if f.strataForbidden {
 							t.Errorf("%s:%d has an unexpected key %q", f.rel, i+1, k)
 						}
 					default:
 						t.Errorf("%s:%d has an unexpected key %q; the record is ids + labels + a subject "+
-							"hash + an optional note (+ a stratum, in the residue file) and nothing else",
-							f.rel, i+1, k)
+							"hash + an optional note (+ a stratum, where the file has strata) and nothing "+
+							"else", f.rel, i+1, k)
+					}
+				}
+				// The note is a CLOSED vocabulary (SWT-33, Codex round 8): never
+				// free text in a committed file.
+				if note, ok := obj["note"]; ok {
+					// A non-string note (an array, an object) is refused too —
+					// asserting it to "" would let `["client text"]` through.
+					s, isString := note.(string)
+					if !isString || !classify.LabelNoteAllowed(s) {
+						t.Errorf("%s:%d carries a note outside classify.LabelNoteAllowed's closed vocabulary; "+
+							"a free-text note is one paste from a client's message in git", f.rel, i+1)
 					}
 				}
 			}
@@ -779,17 +865,34 @@ func TestLabelsFile_IsIdsAndLabelsOnly(t *testing.T) {
 					"REFUSED: the spike's first eval scored every model 0.10-0.27 recall because the "+
 					"FIXTURE was wrong and the models were right", f.rel, lines, f.min, f.why)
 			}
-			for stratum, min := range f.perStrat {
-				if perStratum[stratum] < min {
-					t.Errorf("%s has %d %q labels, want at least %d. %s",
-						f.rel, perStratum[stratum], stratum, min, f.why)
+
+			// Strata become REQUIRED at the threshold — a scheduled edit rather
+			// than a forgotten one, and keyed on the SAME constant the eval's
+			// refusal reads (SWT-33 criteria 22 and 31).
+			strataRequired := !f.strataForbidden && lines >= f.strataRequiredAt
+			if strataRequired {
+				for _, r := range records {
+					if !r.has {
+						t.Errorf("%s:%d has no `stratum`, and this file now holds %d labels (>= %d). "+
+							"Without it the eval cannot tell an honest precision from one computed over "+
+							"a sample deliberately enriched with positives — and that number WILL be "+
+							"quoted as if it described production",
+							f.rel, r.line, lines, f.strataRequiredAt)
+					}
 				}
-			}
-			if f.strata && perStratum["domain_gate"] == 0 {
-				t.Errorf("%s has no domain_gate labels. Criterion 6's claim gate is a hand-checked sample "+
-					"of >= 20 messages per domain containing ZERO actionable ones, and criterion 19 says "+
-					"those rows JOIN the labelled set — the gate and the eval are the same work done once, "+
-					"and recording them is what makes the gate auditable", f.rel)
+				for stratum, minimum := range f.perStrat {
+					if perStratum[stratum] < minimum {
+						t.Errorf("%s has %d %q labels, want at least %d. %s",
+							f.rel, perStratum[stratum], stratum, minimum, f.why)
+					}
+				}
+				if f.wantDomainGate && perStratum["domain_gate"] == 0 {
+					t.Errorf("%s has no domain_gate labels. Criterion 6's claim gate is a hand-checked "+
+						"sample of >= 20 messages per domain containing ZERO actionable ones, and "+
+						"criterion 19 says those rows JOIN the labelled set — the gate and the eval are "+
+						"the same work done once, and recording them is what makes the gate auditable",
+						f.rel)
+				}
 			}
 		})
 	}
@@ -1040,8 +1143,9 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// 0018 is SWT-23's (this branch); 0019 shipped with SWT-20 and merged
 		// first; 0020 is SWT-28's (calendar-booking), 0021 is SWT-30's
 		// (classify-promotion), 0022 is SWT-31's (board-dismissals:
-		// task_dismissals) and 0023 is SWT-32's (jira-status-sync:
-		// ticket_status_syncs + projects.ticket_assignee_gate) — each named by
+		// task_dismissals), 0023 is SWT-32's (jira-status-sync:
+		// ticket_status_syncs + projects.ticket_assignee_gate) and 0024 is
+		// SWT-33's (inquiry-classify: projects.ai_inquiry) — each named by
 		// its ticket's "Data model changes" section. Anything else above 0017 is
 		// a migration nobody's ticket owns.
 		//
@@ -1051,7 +1155,11 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// because the migrate runner keys on schema_migrations.version with NO
 		// checksum — a stray or edited file is skipped SILENTLY and the schema
 		// diverges with no error anywhere.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 25 {
+		// 24 is SWT-33's (this branch, ai_inquiry) and 25 is SWT-34's
+		// (delivered statuses, merged first) — the two were built in parallel
+		// and this line is where their ledgers meet, exactly as SWT-34's review
+		// predicted. Both are owned by a SPEC's data-model section.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

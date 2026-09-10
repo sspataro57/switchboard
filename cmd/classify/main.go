@@ -1,9 +1,10 @@
-// classify is the LOCAL actionability classifier for personal mail (SWT-22),
-// SHADOW MODE: it records verdicts and creates nothing.
+// classify is the LOCAL classifier (SWT-22), SHADOW MODE: it records verdicts
+// and creates nothing. Three lanes — personal and residue ask whether mail is
+// actionable, inquiry (SWT-33) whether a client message needs a reply.
 //
-//	classify run     [--lane personal|residue] [--limit N] [--since 720h]
-//	classify report  [--lane personal|residue] [--since 720h]
-//	classify eval    [--lane personal|residue] [--labels <file>] [--checkpoint <file>]
+//	classify run     [--lane personal|residue|inquiry] [--limit N] [--since 720h]
+//	classify report  [--lane personal|residue|inquiry] [--since 720h]
+//	classify eval    [--lane personal|residue|inquiry] [--labels <file>] [--checkpoint <file>]
 //	classify promote [--dry-run] [--limit N]
 //
 // `promote` (SWT-30) is the one deliberate exit from shadow: it turns stored
@@ -20,6 +21,11 @@
 // `eval` defaults --labels to the lane's own fixture, so the residue is never
 // scored against the personal labels by omission.
 //
+// The inquiry lane (SWT-33) asks whether a client message needs a reply from
+// Salvador, over projects armed with projects.ai_inquiry. It REQUIRES --since
+// on `run` as well — an inquiry goes stale in days. `eval` on ANY lane refuses
+// to print a ratio below classify.EvalResultThreshold scored labels.
+//
 //	DATABASE_URL           ops db, required
 //	OPS_LOCAL_PROVIDER_URL local ollama base URL, no /v1
 //	OPS_LOCAL_MODEL        required once the URL is set; no fallback
@@ -28,10 +34,13 @@
 //	                       completion always name the same model
 //
 // There is NO hosted lane here, and that is the design rather than an omission.
-// Every message this worker reads is attributed to a project whose ai_locality
-// is 'local_only', so a hosted client would be refused on every message anyway —
-// building one would only create something for a later contributor to "fix" a
-// skip into. The two OPS_LOCAL_* variables the code below reads are documented
+// Every message this worker reads is restricted: the personal lane's through a
+// project whose ai_locality is 'local_only', the residue's because an unmatched
+// message has no project at all, and the inquiry lane's because classify.Run
+// PINS its routed class to restricted — its armed project is ai_locality='any',
+// and that nil general client below is what the pin relies on. So a hosted
+// client would be refused on every message anyway — building one would only
+// create something for a later contributor to "fix" a skip into. The two OPS_LOCAL_* variables the code below reads are documented
 // in docs/runbooks/local-classifier.md.
 package main
 
@@ -43,6 +52,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -173,9 +183,9 @@ func buildRouter() (*provider.Router, string) {
 
 func runCmd(argv []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue")
+	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue | inquiry")
 	limit := fs.Int("limit", 0, "max messages this run (0 = all pending)")
-	since := fs.Duration("since", 0, "only messages with sent_at within this window (0 = all; REQUIRED on the residue lane)")
+	since := fs.Duration("since", 0, "only messages with sent_at within this window (0 = all; REQUIRED on the residue and inquiry lanes)")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -220,7 +230,7 @@ func runCmd(argv []string) error {
 
 func reportCmd(argv []string) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
-	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue")
+	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue | inquiry")
 	since := fs.Duration("since", 0, "only runs within this window (0 = all)")
 	if err := fs.Parse(argv); err != nil {
 		return err
@@ -244,7 +254,7 @@ func reportCmd(argv []string) error {
 
 func evalCmd(argv []string) error {
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
-	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue")
+	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue | inquiry")
 	labelsPath := fs.String("labels", "",
 		"the hand-checked labelled set (default: the lane's own fixture)")
 	ckptPath := fs.String("checkpoint", "",
@@ -265,7 +275,7 @@ func evalCmd(argv []string) error {
 		*labelsPath = lane.LabelsPath
 	}
 
-	labels, err := loadLabels(*labelsPath)
+	labels, err := loadLabels(*labelsPath, lane)
 	if err != nil {
 		return err
 	}
@@ -311,10 +321,19 @@ func evalCmd(argv []string) error {
 	return classify.Eval(ctx, classify.NewStore(pool), router, cfg, labels, os.Stdout)
 }
 
+// subjectHashShape is the only shape classify.SubjectHash produces: 16
+// lowercase hex characters.
+var subjectHashShape = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
 // loadLabels reads the JSONL fixture. It refuses a line carrying message
 // CONTENT: the file is committed, and a subject or body in it would put personal
 // mail into git — the whole reason the format is ids plus a subject hash.
-func loadLabels(path string) ([]classify.Label, error) {
+//
+// It also refuses a label outside the LANE's vocabulary (SWT-33 criterion 23):
+// its contract's positive token, or "not". Same shape, same keys, same hash —
+// the token is the only thing that tells an inquiry file from a personal one,
+// and scoring one as the other would print numbers for a different question.
+func loadLabels(path string, lane classify.Lane) ([]classify.Label, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open labels: %w", err)
@@ -329,6 +348,14 @@ func loadLabels(path string) ([]classify.Label, error) {
 		if text == "" || strings.HasPrefix(text, "#") {
 			continue
 		}
+		// Repeated keys FIRST: json.Unmarshal keeps only the last value, so a
+		// repeat could hide client text behind an allowed value (Codex round 10).
+		if k, err := classify.DuplicateLabelKey([]byte(text)); err != nil {
+			return nil, fmt.Errorf("%s:%d does not parse as one JSON object: %w", path, line, err)
+		} else if k != "" {
+			return nil, fmt.Errorf("%s:%d repeats the key %q; JSON keeps only the last value, so an earlier one "+
+				"could carry text past every check while it sits in the committed file", path, line, k)
+		}
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(text), &probe); err != nil {
 			return nil, fmt.Errorf("%s:%d does not parse as JSON: %w", path, line, err)
@@ -339,12 +366,44 @@ func loadLabels(path string) ([]classify.Label, error) {
 					"NO message content — ids, labels and a subject hash only", path, line, banned)
 			}
 		}
+		// A CLOSED record (SWT-33, Codex round 8): exactly the keys the format
+		// defines, so no new field can smuggle content in, and the note is a
+		// closed vocabulary rather than free text.
+		for k := range probe {
+			switch k {
+			case "message_id", "label", "subject_sha256", "stratum", "note":
+			default:
+				return nil, fmt.Errorf("%s:%d carries an unexpected key %q; a label line is message_id, label, "+
+					"subject_sha256 and optionally stratum and note — nothing else", path, line, k)
+			}
+		}
 		var l classify.Label
 		if err := json.Unmarshal([]byte(text), &l); err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, line, err)
 		}
-		if l.Label != "actionable" && l.Label != "not" {
-			return nil, fmt.Errorf(`%s:%d label = %q, want "actionable" or "not"`, path, line, l.Label)
+		if !classify.LabelNoteAllowed(l.Note) {
+			return nil, fmt.Errorf("%s:%d carries a note outside the closed vocabulary; notes are never free "+
+				"text — the file is committed and a free-text note is one paste from a client's message in git",
+				path, line)
+		}
+		// Every other allowed field is constrained too (Codex round 9): the hash
+		// is exactly what classify.SubjectHash produces, and the stratum is the
+		// closed vocabulary — neither can carry text.
+		if !subjectHashShape.MatchString(l.SubjectSHA256) {
+			return nil, fmt.Errorf("%s:%d subject_sha256 is not 16 lowercase hex characters (classify.SubjectHash's "+
+				"output); the field holds a hash, never text", path, line)
+		}
+		if !classify.LabelStratumAllowed(l.Stratum) {
+			return nil, fmt.Errorf(`%s:%d stratum is outside the closed vocabulary (uniform | enriched | `+
+				`domain_gate)`, path, line)
+		}
+		if l.Stratum != "" && lane.Name == classify.LanePersonal.Name {
+			return nil, fmt.Errorf("%s:%d carries a stratum on the personal lane, whose labelled set has none — "+
+				"one stray key would switch its eval onto the stratified breakdown", path, line)
+		}
+		if pos := lane.Contract.PositiveLabel; l.Label != pos && l.Label != "not" {
+			return nil, fmt.Errorf(`%s:%d label = %q, want %q or "not" — the %s lane's vocabulary; a file `+
+				`labelled for another lane answers a different question`, path, line, l.Label, pos, lane.Name)
 		}
 		out = append(out, l)
 	}

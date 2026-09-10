@@ -113,6 +113,74 @@
   <h2>Classify shadow summary</h2>
   {{range .Lanes}}
   <h3>{{.Name}} lane</h3>
+  {{if .Inquiry}}
+  <div class="headline">
+    <div><strong>{{.Summary.Classified}}</strong> classified</div>
+    <div><strong>{{.Summary.Flagged}}</strong> flagged</div>
+    <div><strong>{{.Summary.Open}}</strong> open</div>
+    <div><strong>{{.Summary.AnsweredInThread}}</strong> answered in thread</div>
+    <div><strong>{{.Summary.SpokeInConversationSince}}</strong> spoke in conversation since</div>
+    <div><strong>{{.Summary.Skipped}}</strong> skipped</div>
+  </div>
+  {{if .Summary.ByKind}}
+  <ul class="reasons">
+    {{range $k, $v := .Summary.ByKind}}<li>{{$k}} — {{$v}}</li>{{end}}
+  </ul>
+  {{end}}
+  {{if .Summary.ByChannel}}
+  <h4>By channel</h4>
+  <table>
+    <tr><th>Channel</th><th class="num">Classified</th><th class="num">Flagged</th><th class="num">Open</th>
+      <th class="num">Answered in thread</th><th class="num">Spoke in conversation since</th>
+      <th class="num">Skipped</th></tr>
+    {{range $ch, $c := .Summary.ByChannel}}
+    <tr>
+      <td>{{$ch}}</td>
+      <td class="num">{{$c.Classified}}</td>
+      <td class="num">{{$c.Flagged}}</td>
+      <td class="num">{{$c.Open}}</td>
+      <td class="num">{{$c.AnsweredInThread}}</td>
+      <td class="num">{{$c.SpokeInConversationSince}}</td>
+      <td class="num">{{$c.Skipped}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+  {{if .Summary.Skipped}}
+  <ul class="reasons">
+    {{range $k, $v := .Summary.ByAvailReason}}<li>lane refused: <code>{{$k}}</code> — {{$v}}</li>{{end}}
+    {{range $k, $v := .Summary.ByClassReason}}<li>restricted: <code>{{$k}}</code> — {{$v}}</li>{{end}}
+  </ul>
+  <p class="muted">An all-skipped pass is expected when the local model is not running; this lane's class is
+    pinned to restricted, so it is only ever classified locally.</p>
+  {{end}}
+  {{if .Summary.Flags}}
+  <table>
+    <tr><th>When</th><th>Msg</th><th>Ask kind</th><th>Channel</th><th>Sender</th><th>Subject</th><th>Ask</th>
+      <th>Asker</th><th><code>thread_scope</code></th><th>State</th></tr>
+    {{range .Summary.Flags}}
+    <tr>
+      <td>{{.At.Format "2006-01-02 15:04"}}</td>
+      <td>#{{.MessageID}}</td>
+      <td>{{.Kind}}</td>
+      <td>{{.Channel}}</td>
+      <td>{{.Sender}}</td>
+      <td>{{.Subject}}</td>
+      <td>{{.Title}}</td>
+      <td>{{.Asker}}</td>
+      <td><code>{{.ThreadScope}}</code></td>
+      <td>{{if eq .State "open"}}<span class="warn">open</span>{{else}}{{.State}}{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+  <p class="muted"><em>open</em> — no outbound message on the thread since. <em>answered in thread</em> — a
+    later outbound on a thread-exact key (a Slack thread, a Jira issue, a mail thread), which is a reply in
+    that thread. <em>spoke in conversation since</em> — a later outbound anywhere in an unthreaded Slack
+    channel or DM: a weaker claim, never counted as answered. <code>thread_scope</code> is
+    <code>thread</code>, <code>conversation</code> or <code>none</code> (no thread at all). Computed at
+    read time from stored verdicts; nothing is created or sent.</p>
+  {{else}}
   <div class="headline">
     <div><strong>{{.Summary.Classified}}</strong> classified</div>
     <div><strong>{{.Summary.Flagged}}</strong> flagged</div>
@@ -150,6 +218,7 @@
     </tr>
     {{end}}
   </table>
+  {{end}}
   {{end}}
   {{else}}
   <p class="muted">No lane data.</p>

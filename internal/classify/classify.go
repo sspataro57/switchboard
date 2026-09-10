@@ -1,15 +1,17 @@
-// Package classify is the LOCAL actionability classifier for personal mail
-// (SWT-22), in SHADOW MODE: it interprets messages into structured verdicts and
-// creates NOTHING — no tasks, no task_events, no deliveries. The Store interface
-// deliberately has no task-write method; going live ADDS an executor create_task
-// call later, it does not remove a guard here.
+// Package classify is the LOCAL classifier (SWT-22), in SHADOW MODE: it
+// interprets messages into structured verdicts and creates NOTHING — no tasks,
+// no task_events, no deliveries. The Store interface deliberately has no
+// task-write method; going live ADDS an executor create_task call later, it does
+// not remove a guard here. Three lanes (lane.go): personal and residue ask
+// whether mail is actionable; inquiry (SWT-33) asks whether a client message
+// needs a reply from Salvador.
 //
 // THE HONESTY LABEL (SWT-22 criterion 13, RE-STATED for two lanes by SWT-23
-// criterion 15), at the top because it governs how this package must be read
-// and tested.
+// criterion 15 and for three by SWT-33 criterion 11), at the top because it
+// governs how this package must be read and tested.
 //
-// EVERY message either lane sees is provider.ClassRestricted, and the two
-// lanes get there by DIFFERENT mechanisms — two reasons, one outcome:
+// EVERY message any lane routes is provider.ClassRestricted, and the three
+// lanes get there by DIFFERENT mechanisms — three reasons, one outcome:
 //
 //   - The PERSONAL lane's inbox selects messages attributed to a project whose
 //     ai_locality is 'local_only' (and whose ai_classify flag opts it into
@@ -22,18 +24,30 @@
 //     that rule completeness is never load-bearing for containment. Do not
 //     "fix" the residue's class to general to save GPU time: unclassified is
 //     not less sensitive, it is unclassified.
+//   - The INQUIRY lane's messages are restricted by nothing they ARE: the one
+//     armed project, collaboratory, is ai_locality='any', so their own class
+//     is ClassGeneral. The LANE restricts them — routedClass PINS the routed
+//     class to ClassRestricted whatever the message's own class. Required
+//     twice over: the prompt carries thread-neighbour bodies as well as the
+//     target's, and without the pin cmd/classify's nil general client skips
+//     every message as no_general_provider in a pass that exits 0. The pin is
+//     the refusal to widen, not a downgrade of anything.
 //
-// The class fold below therefore cannot change an outcome on either lane: it
-// is not a guard, and a unit test that supplied a class and then asserted on
-// it would be proving its own fixture — this repo's seventh instance of "a
-// predicate whose discriminating column is a constant in production".
+// The class fold below therefore cannot change an outcome on the personal or
+// residue lane, and the inquiry lane never consults it: it is not a guard, and
+// a unit test that supplied a class and then asserted on it would be proving
+// its own fixture — this repo's seventh instance of "a predicate whose
+// discriminating column is a constant in production".
 //
-// Two things DO protect this worker, and both are pinned where they can fail:
+// What DOES protect this worker is pinned where it can fail:
 //   - the INBOX FILTER, in store_integration_test.go, where Postgres produces
 //     the populations and an ai_locality='any' fixture is the control that dies
-//     if the join is dropped; and
+//     if the join is dropped (inquiry_integration_test.go does the same for the
+//     ai_inquiry clause, with an identical-but-unarmed project);
 //   - the Router's refusal, in worker_test.go's zero-hosted-calls test, which
-//     has a control proving the same fixture CAN be classified.
+//     has a control proving the same fixture CAN be classified; and
+//   - on the inquiry lane, the pin itself, in inquiry_test.go — zero hosted
+//     calls, with a personal-lane control that does reach the hosted client.
 //
 // The fold is kept anyway, spelled exactly as triage and drafts spell it, so the
 // three workers cannot drift into three readings of one rule — and so that a
@@ -107,12 +121,25 @@ type PendingMessage struct {
 	MessageID       int64
 	RawSourceItemID int64
 	ThreadID        int64
-	SentAt          time.Time
-	Sender          string
-	Subject         string
-	Channel         string
-	BodyText        string
-	Direction       string
+	// ThreadKey is normalized_threads.thread_key VERBATIM, and
+	// ExternalMessageID the message's own provider id (SWT-33 criterion 13).
+	// Both are recorded on an inquiry verdict so a later drafting ticket can
+	// aim a reply at the EXACT thread — or, when the message is not in a thread
+	// at all, root a new one at the asking message — without re-deriving
+	// anything. Nothing in this package parses either: the one spelling of the
+	// slack key's shape lives in internal/connector/slackweb.
+	ThreadKey         string
+	ExternalMessageID string
+	// ThreadContext is the PRIOR window the inquiry prompt shows, already
+	// selected by InquiryContext (oldest -> newest, never a later message).
+	// Empty for the other two lanes, which classify one message alone.
+	ThreadContext []ThreadMessage
+	SentAt        time.Time
+	Sender        string
+	Subject       string
+	Channel       string
+	BodyText      string
+	Direction     string
 
 	ProjectID        int64
 	ProjectSlug      string
@@ -211,6 +238,17 @@ func Run(ctx context.Context, store Store, router *provider.Router, cfg Config) 
 			"Pass --since (e.g. --since 720h for the last month), " +
 			"or --since 87600h deliberately if a full historical sweep is what you want")
 	}
+	// SWT-33 D6: the same refusal for the inquiry lane, for a different reason.
+	// An inquiry has a shelf life of days, so a verdict on a six-month-old
+	// message is GPU spent on nothing — and the armed projects' history is
+	// unbounded from here.
+	if cfg.Lane.Name == LaneInquiry.Name && cfg.Since <= 0 {
+		return Stats{}, fmt.Errorf("the inquiry lane refuses an unbounded pass: an inquiry goes stale in days, " +
+			"and the armed projects' history is unbounded from here. collaboratory alone is ~34 inbound " +
+			"messages/day x the measured 4.5 s median per verdict on the z4 (2026-09-10, with thread context) " +
+			"= ~2.5 GPU-minutes per day of history. Pass --since (e.g. --since 168h for the last week, " +
+			"--since 24h on a twice-daily cadence)")
+	}
 	pending, err := store.PendingMessages(ctx, cfg)
 	if err != nil {
 		return Stats{}, fmt.Errorf("list pending messages: %w", err)
@@ -231,13 +269,14 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 	routeSkipped := 0
 	skipReasons := map[string]int{}
 	skipClasses := map[string]int{}
+	skipChannels := map[string]int{}
 	skipSample := make([]int64, 0, skipSampleMax)
 
 	restrictedAttempts := 0
 	restrictedUnclassified := 0
 
 	for _, m := range pending {
-		class := classOf(m)
+		class := routedClass(cfg.Lane, m)
 
 		lane, decision, reason := router.Route(ctx, class)
 		if decision != provider.DecideAllow {
@@ -246,7 +285,8 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 			stats.Skipped++
 			routeSkipped++
 			skipReasons[string(reason)]++
-			skipClasses[classReasonOf(m)]++
+			skipClasses[classReasonOf(cfg.Lane, m)]++
+			skipChannels[m.Channel]++
 			if len(skipSample) < skipSampleMax {
 				skipSample = append(skipSample, m.MessageID)
 			}
@@ -258,7 +298,7 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 			restrictedAttempts++
 		}
 
-		user := renderUser(m)
+		user := renderUser(cfg.Lane, m)
 		input := runInput(m, user, cfg.Lane.PromptVersion)
 		laneName := lane.Describe().Name
 
@@ -266,17 +306,26 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 			Model:      cfg.Model,
 			System:     cfg.Lane.System,
 			User:       user,
-			SchemaName: SchemaName,
-			Schema:     VerdictSchema,
+			SchemaName: cfg.Lane.Contract.SchemaName,
+			Schema:     cfg.Lane.Contract.Schema,
 			MaxTokens:  cfg.MaxTokens,
 			Think:      cfg.Think,
 			NumCtx:     cfg.NumCtx,
 		})
 
+		// Decoded through the LANE's contract (D1). An inquiry answer read into
+		// the actionability struct decodes to a zero verdict — "nothing to do" —
+		// rather than an error, so the wrong struct fails silently.
+		inquiry := cfg.Lane.Name == LaneInquiry.Name
 		var v verdict
+		var iv inquiryVerdict
 		parseErr := callErr
 		if parseErr == nil {
-			if err := json.Unmarshal(resp.Raw, &v); err != nil {
+			var dst any = &v
+			if inquiry {
+				dst = &iv
+			}
+			if err := json.Unmarshal(resp.Raw, dst); err != nil {
 				parseErr = fmt.Errorf("parse verdict JSON: %w", err)
 			}
 		}
@@ -300,6 +349,7 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 					"avail_reason":          string(skipReason),
 					"normalized_message_id": m.MessageID,
 					"raw_source_item_id":    m.RawSourceItemID,
+					"channel":               m.Channel,
 					"error":                 parseErr.Error(),
 				})
 				if _, err := store.RecordRun(ctx, AIRun{
@@ -344,40 +394,50 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 		// wanted them would have to join back to normalized_messages — and the
 		// verdict would then describe a message that may since have been
 		// re-normalised. What was classified is what should be shown.
-		fields := map[string]any{
-			"actionable":            v.Actionable,
-			"kind":                  v.Kind,
-			"title":                 v.Title,
-			"reason":                v.Reason,
-			"sender":                m.Sender,
-			"subject":               m.Subject,
-			"project_id":            m.ProjectID,
-			"project_slug":          m.ProjectSlug,
-			"normalized_message_id": m.MessageID,
-			// Recorded on EVERY verdict (SWT-25 criterion 21): without the
-			// count, "no candidates" and "the model declined" are the same row
-			// and the report cannot tell an operator which.
-			"link_candidates": len(m.Links),
-		}
-		// The four link states, never collapsed. link_url is a value the
-		// APPLICATION resolved against the message's own stored candidates —
-		// never a string the model produced.
-		chosen, linkStatus := ResolveLink(m.Links, v.LinkIndex)
-		switch linkStatus {
-		case LinkResolved:
-			fields["link_index"] = *v.LinkIndex
-			fields["link_url"] = chosen.URL
-			fields["link_text"] = chosen.Text
-			stats.Linked++
-		case LinkNotChosen:
-			// An explicit null: "the model declined" is a recorded answer,
-			// not an absent one.
-			fields["link_index"] = nil
-		case LinkRejected:
-			// Kept VERBATIM so a pattern of nonsense is visible in the
-			// report. Never an error, never a skip, never fails the message.
-			fields["link_index_rejected"] = *v.LinkIndex
-			stats.LinkRejected++
+		var fields map[string]any
+		flagged := false
+		if inquiry {
+			// The inquiry contract (SWT-33 criterion 13): the model's five plus
+			// the thread identity. No link fields — the contract has none.
+			fields = inquiryFields(m, iv)
+			flagged = iv.NeedsReply
+		} else {
+			fields = map[string]any{
+				"actionable":            v.Actionable,
+				"kind":                  v.Kind,
+				"title":                 v.Title,
+				"reason":                v.Reason,
+				"sender":                m.Sender,
+				"subject":               m.Subject,
+				"project_id":            m.ProjectID,
+				"project_slug":          m.ProjectSlug,
+				"normalized_message_id": m.MessageID,
+				// Recorded on EVERY verdict (SWT-25 criterion 21): without the
+				// count, "no candidates" and "the model declined" are the same
+				// row and the report cannot tell an operator which.
+				"link_candidates": len(m.Links),
+			}
+			// The four link states, never collapsed. link_url is a value the
+			// APPLICATION resolved against the message's own stored candidates
+			// — never a string the model produced.
+			chosen, linkStatus := ResolveLink(m.Links, v.LinkIndex)
+			switch linkStatus {
+			case LinkResolved:
+				fields["link_index"] = *v.LinkIndex
+				fields["link_url"] = chosen.URL
+				fields["link_text"] = chosen.Text
+				stats.Linked++
+			case LinkNotChosen:
+				// An explicit null: "the model declined" is a recorded answer,
+				// not an absent one.
+				fields["link_index"] = nil
+			case LinkRejected:
+				// Kept VERBATIM so a pattern of nonsense is visible in the
+				// report. Never an error, never a skip, never fails the message.
+				fields["link_index_rejected"] = *v.LinkIndex
+				stats.LinkRejected++
+			}
+			flagged = v.Actionable
 		}
 		fieldsJSON, _ := json.Marshal(fields)
 		if err := store.RecordExtraction(ctx, runID, m.RawSourceItemID, fieldsJSON); err != nil {
@@ -385,7 +445,7 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 		}
 
 		stats.Processed++
-		if v.Actionable {
+		if flagged {
 			stats.Flagged++
 		}
 	}
@@ -393,7 +453,7 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 	// Flush BEFORE the raising return: a pass that raises still refused messages,
 	// and losing that record is how a real refusal becomes invisible behind an
 	// unrelated error.
-	flushErr := flushSkips(ctx, store, cfg, routeSkipped, skipReasons, skipClasses, skipSample)
+	flushErr := flushSkips(ctx, store, cfg, routeSkipped, skipReasons, skipClasses, skipChannels, skipSample)
 
 	if restrictedAttempts >= restrictedErrorFloor && restrictedUnclassified*2 > restrictedAttempts {
 		err := fmt.Errorf("local lane failed %d of %d attempts with unclassified errors; "+
@@ -425,10 +485,45 @@ func classOf(m PendingMessage) provider.Class {
 	return provider.MostRestrictive(classes...)
 }
 
+// routedClass is the class a message is ROUTED under. For the personal and
+// residue lanes it is the fold above — constant in production, see the package
+// comment. For the inquiry lane it is PINNED to ClassRestricted, whatever the
+// message's own class (SWT-33 criterion 11): its armed project is
+// ai_locality='any', so the fold returns ClassGeneral, and with cmd/classify's
+// nil general client every message would come back no_general_provider — a pass
+// that exits 0 and reads as an empty inbox. The pin is the refusal to WIDEN, not
+// a downgrade: the prompt carries thread-neighbour bodies as well as the
+// target's.
+func routedClass(lane Lane, m PendingMessage) provider.Class {
+	if lane.Name == LaneInquiry.Name {
+		return provider.ClassRestricted
+	}
+	return classOf(m)
+}
+
+// decodeDecision reads a raw verdict's decision boolean through the lane's
+// contract — needs_reply on the inquiry lane, actionable on the other two.
+func decodeDecision(lane Lane, raw []byte) (bool, error) {
+	if lane.Name == LaneInquiry.Name {
+		var v inquiryVerdict
+		err := json.Unmarshal(raw, &v)
+		return v.NeedsReply, err
+	}
+	var v verdict
+	err := json.Unmarshal(raw, &v)
+	return v.Actionable, err
+}
+
 // classReasonOf names WHY a message was restricted, for the skip record.
-// Constant here (always project_local_only), and the skip test says so rather
-// than pretending it discriminates.
-func classReasonOf(m PendingMessage) string {
+// Constant per lane (project_local_only on the personal lane, unmatched on the
+// residue, lane_local_only on the inquiry lane), and the skip tests say so
+// rather than pretending it discriminates.
+func classReasonOf(lane Lane, m PendingMessage) string {
+	if lane.Name == LaneInquiry.Name {
+		// The LANE pins the class; filing this under thread_context would
+		// describe a different mechanism in the one column an operator reads.
+		return "lane_local_only"
+	}
 	switch m.Attribution {
 	case provider.AttrUnseen:
 		return "unseen"
@@ -444,11 +539,14 @@ func classReasonOf(m PendingMessage) string {
 
 // flushSkips writes the pass's ONE aggregate route-refusal row.
 func flushSkips(ctx context.Context, store Store, cfg Config, routeSkipped int,
-	reasons, classes map[string]int, sample []int64) error {
+	reasons, classes, channels map[string]int, sample []int64) error {
 	if routeSkipped == 0 {
 		return nil
 	}
 	payload, _ := json.Marshal(map[string]any{
+		// channels (SWT-33 criterion 30): the inquiry report breaks its skips
+		// down by channel like every other count it prints.
+		"channels": channels,
 		// avail_reason is the dominant one, which the report groups by;
 		// avail_reasons carries the full breakdown, because a pass can refuse for
 		// more than one reason and filing the whole count under the dominant one
@@ -484,20 +582,15 @@ func dominantReason(reasons map[string]int) string {
 	return best
 }
 
-// renderUser builds the message half of the prompt.
-//
-// Sender and subject are enough for most senders (measured), but the BODY is
-// required for the templated ones — the HOA manager wraps its subject in
-// "[#XN######] Message from <Association> - …" with the topic truncated away, so
-// the subject alone carries no signal at all.
-func renderUser(m PendingMessage) string {
-	body := m.BodyText
-	const maxBody = 4000
-	if len(body) > maxBody {
-		body = body[:maxBody] + "\n…(truncated)"
+// renderUser builds the message half of the prompt, for the lane asking. The
+// inquiry lane's is a transcript plus the message, with no link block
+// (renderInquiryUser); the other two lanes render the message and, when it has
+// candidates, the numbered link list their contract answers with.
+func renderUser(lane Lane, m PendingMessage) string {
+	if lane.Name == LaneInquiry.Name {
+		return renderInquiryUser(m)
 	}
-	base := fmt.Sprintf("From: %s\nSubject: %s\nDate: %s\n\n%s",
-		m.Sender, m.Subject, m.SentAt.UTC().Format(time.RFC3339), body)
+	base := renderMessage(m)
 
 	// The candidate list (SWT-25 criterion 17): anchor TEXTS ONLY, 1-based, in
 	// document order, AFTER the body — the body is truncated above, so a list
@@ -514,6 +607,22 @@ func renderUser(m PendingMessage) string {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, l.Text)
 	}
 	return b.String()
+}
+
+// renderMessage is the one rendering of a message every lane shares.
+//
+// Sender and subject are enough for most senders (measured), but the BODY is
+// required for the templated ones — the HOA manager wraps its subject in
+// "[#XN######] Message from <Association> - …" with the topic truncated away, so
+// the subject alone carries no signal at all.
+func renderMessage(m PendingMessage) string {
+	body := m.BodyText
+	const maxBody = 4000
+	if len(body) > maxBody {
+		body = body[:maxBody] + "\n…(truncated)"
+	}
+	return fmt.Sprintf("From: %s\nSubject: %s\nDate: %s\n\n%s",
+		m.Sender, m.Subject, m.SentAt.UTC().Format(time.RFC3339), body)
 }
 
 // runInput is the ai_runs.input bookkeeping: prompt version, ids, and the

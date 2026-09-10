@@ -111,8 +111,13 @@ func TestEval_PrintsTheStrataApart(t *testing.T) {
 	}
 
 	recall := stLine(t, text, `(?i)recall`, "criterion 20's first line: recall over ALL labels")
-	if !strings.Contains(recall, "0.50") {
-		t.Errorf("recall line = %q, want 0.50 (2 of 4 actionable caught, counting every stratum). Recall "+
+	// AMENDED BY SWT-33 (Codex re-review, 2026-09-10): at n=10, below
+	// classify.EvalResultThreshold, Eval prints COUNTS on every lane and no
+	// ratio. The strata semantics this test defends are unchanged — recall over
+	// all strata, precision and base rate from the uniform stratum only — and
+	// are asserted on the counts (2 of 4, 1 of 3) instead of 0.50 / 0.33.
+	if !strings.Contains(recall, "2 of 4") {
+		t.Errorf("recall line = %q, want 2 of 4 (actionable caught, counting every stratum). Recall "+
 			"uses ALL the labels because the enriched stratum IS the recall denominator — without it a "+
 			"uniform 200 at a ~2%% base rate yields four positives and a recall that is noise", recall)
 	}
@@ -123,13 +128,16 @@ func TestEval_PrintsTheStrataApart(t *testing.T) {
 			"only. That label is the whole mechanism: a precision measured over a deliberately enriched "+
 			"sample is not production precision, and it WILL be quoted as if it were", precision)
 	}
-	if !strings.Contains(precision, "0.33") {
-		t.Errorf("precision line = %q, want 0.33 — 1 of the 3 flagged UNIFORM messages was actionable. "+
-			"0.50 is the all-labels number and it is the wrong one to print: it flatters the classifier "+
+	if !strings.Contains(precision, "1 of 3") {
+		t.Errorf("precision line = %q, want 1 of 3 — 1 of the 3 flagged UNIFORM messages was actionable. "+
+			"2 of 4 is the all-labels count and it is the wrong one to print: it flatters the classifier "+
 			"with a denominator that was drawn to contain positives", precision)
 	}
-	if strings.Contains(precision, "0.50") {
-		t.Errorf("precision line = %q and carries 0.50, the all-labels figure", precision)
+	if strings.Contains(precision, "2 of 4") {
+		t.Errorf("precision line = %q and carries 2 of 4, the all-labels count", precision)
+	}
+	if ratioShaped.MatchString(text) {
+		t.Errorf("a 10-label eval printed a ratio-shaped number; below the threshold it prints counts:\n%s", text)
 	}
 
 	base := stLine(t, text, `(?i)base rate`,
@@ -182,9 +190,14 @@ func TestEval_PrintsTheStrataApart(t *testing.T) {
 // quoted out of the context that produced it.
 func TestEval_WithoutStrata_PrintsTodaysOutputByteForByte(t *testing.T) {
 	const golden = "classify eval — model qwen3:8b — n=3 scored (3 labels in the file)\n" +
-		"  recall    0.50   (1 of 2 actionable messages caught)\n" +
-		"  precision 1.00   (1 of 1 flagged were actionable)\n" +
+		// AMENDED BY SWT-33 (Codex re-review): n=3 is below
+		// classify.EvalResultThreshold, so the strata-less shape prints COUNTS
+		// and the marker. The byte-identical ratio form at and above the
+		// threshold is pinned by TestEval_AtThreshold_PersonalLaneOutputIsByteIdenticalToToday.
+		"  recall    1 of 2 labelled actionable caught (counts only, see below)\n" +
+		"  precision 1 of 1 flagged were labelled actionable\n" +
 		"  median latency 380 ms\n" +
+		"  INDICATIVE ONLY — this is not a measurement (n=3 < 120)\n" +
 		"\n" +
 		"false negatives (1) — labelled actionable, classified not:\n" +
 		"  message 22  [#XN123456] Message from Pines Association - First Notice\n" +

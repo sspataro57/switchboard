@@ -2,9 +2,11 @@
 
 # inquiry-classify — the inquiry lane (does this message need a reply from Salvador?)
 
-**STATUS: READY for `test-author`.** All three open questions were answered 2026-09-10 and
+**STATUS: DELIVERED 2026-09-10.** All three open questions were answered 2026-09-10 and
 are folded in below; `docs/tickets/inquiry-classify_OPEN_QUESTIONS.md` keeps each answer
-with its date and rationale. This SPEC is no longer provisional.
+with its date and rationale. Where the build departed from this SPEC, or learned what it
+did not know, is recorded in "Implementation notes" near the end — read those before
+trusting a number above them (e.g. the ~10 s planning figure: the measured one is 4.3–4.5 s).
 
 ## Source
 
@@ -680,6 +682,96 @@ Before commit, in this order:
 11. `/ticket-review inquiry-classify` (go-reviewer) before commit — this diff touches a
     provider boundary and a fold that decides what a human sees, so the adversarial pass is
     worth it.
+
+## Implementation notes (2026-09-10)
+
+Where the build departed from, or learned something the SPEC did not know:
+
+1. **Criterion 31's refusal is enforced inside `Eval`, on EVERY lane, on the
+   SCORED n.** Two earlier cuts scoped it (inquiry lane only, then inquiry plus
+   a caller-set `LabelsOverride` flag); the Codex adversarial re-review showed
+   any non-CLI caller of the exported function could leave the flag unset. The
+   measured lanes' own fixtures (280 and 874; the personal file's
+   structure-test minimum was raised from 100 to
+   `classify.EvalResultThreshold`) sit above the threshold, so their published
+   output is unchanged — pinned byte for byte at n=120. The SWT-22/23
+   small-fixture characterization tests (strata, strata-less golden,
+   checkpoint resume) were REWRITTEN to the count-only form; the strata
+   semantics they defend are unchanged, asserted on counts instead of ratios.
+2. **Two test-author guards were amended, not deleted.** (a)
+   `TestInquiryFilter_HasNoLocalityClauseAndTheReasonIsInTheComment` ran "no
+   ai_locality clause" and "the comment explains the absent ai_locality clause"
+   over one window, which contradict each other; the clause is now judged on the
+   SQL literal and the reason on the doc comment. (b) SWT-29's
+   `TestClassifySummary_OwnsTheQueriesAndTheFolds` banned any
+   `normalized_messages` in summary.go, while criterion 30 requires the
+   replied-since join; it is now carved out BY NAME — the constants
+   `repliedSinceSQL` (joins) and `repliedSinceCol` (column) — held to an
+   ALLOWLIST of identifiers (thread_id, direction, sent_at, id), with the table
+   name, its aliases and any third SELECT banned everywhere else in the file.
+3. **The replied-since fold is set-based** (latest outbound `sent_at` per thread,
+   one scan per report). A correlated EXISTS measured 21.5 s over 1,806 verdicts
+   on prod — `normalized_messages` has NO index on `thread_id`. An index
+   migration is a candidate follow-up, not bundled here.
+4. **Measured cost: 4.5 s median / 5.3 s p90 per verdict** (first shadow pass,
+   50 verdicts, full six-message context) — not the planning figure of ~10 s.
+5. **Jira never reaches this inbox for collaboratory.** 14-day inquiry inbox on
+   2026-09-10: slack 247, gmail 7, jira 0 — collaboratory's jira messages carry
+   `task`/`task_log` latest decisions (capture rule 10), which criterion 9
+   excludes by design.
+6. **Verification step 4's query cannot see outbound**: it counts ATTRIBUTED
+   messages, and capture never decides an outbound one. Measured on the
+   collaboratory THREADS instead (30 days): slack 793 outbound / 1,681, jira 25 /
+   105, gmail 1 / 447 — the fold is near-inert for gmail on this project.
+7. **Migration numbering**: 0024 was applied to prod after 0025 (SWT-34 merged
+   first); the runner keys on version, so order is irrelevant.
+8. **Observed, out of scope**: a capture rule attributes an Avviato channel
+   (`T0360B84U:C1C1TSLJH`) to collaboratory.
+9. **Timestamp ties FAIL CLOSED in the fold** — a strictly later `sent_at`, as
+   criterion 17 wrote it. Codex's first round asked for a `(sent_at, id)`
+   tie-break; its second showed `normalized_messages.id` is a BIGSERIAL
+   insertion key, so a backfilled older message can carry a higher id and a
+   tie-break would hide a real open inquiry. A same-instant reply therefore
+   reads `open` (pinned by two integration tests). **Accepted residual:** the
+   transcript loader keeps criterion 16's explicit `(sent_at, id)` bound, so a
+   same-instant message ingested earlier can appear as "prior" context — and
+   the transcript decides whether a message is flagged at all, so a
+   same-instant lower-id outbound could push the model to `needs_reply=false`,
+   and an unflagged verdict never reaches the fold. Measured 2026-09-10
+   (read-only, prod): 47,098 of 47,957 Slack `sent_at` values carry sub-second
+   precision, and only 8 Slack thread/instant groups mix inbound and outbound —
+   all in Avviato (`T0360B84U`), unrooted, dated 2020-01 to 2021-10, none in
+   `T0HPR78RX` or any `--since` window. Accepted on that measurement, not on
+   "ties are rare".
+10. **Eval checkpoints are bound to their evaluation** (Codex rounds 3–4):
+    every line carries worker_type / prompt version / a fingerprint of the
+    system prompt + schema / configured model / think / max tokens / context
+    size, checked at load before any request; unkeyed legacy lines are refused.
+    Not bound, by decision: the label-set fingerprint (verdicts do not depend
+    on labels). Not yet bound, a follow-up: the USER-prompt template
+    (`renderInquiryUser` / `renderMessage`) and the provider URL / model digest
+    — so any template change MUST bump `PromptVersion`, or a resume would mix
+    renderings.
+11. **Out of scope, reported by Salvador 2026-09-10:** HOC and LlamaSite work
+    is not his. The `a-millon` channel (hotfix announcements, team chatter) is
+    attributed to collaboratory and produced several of the first pass's false
+    flags; its attribution is a capture-rule follow-up.
+12. **The label record is closed** (Codex adversarial review, rounds 6 and 8):
+    `Eval` refuses a repeated `message_id` before any I/O (a duplicated set
+    would otherwise cross the ratio threshold with no new judgement), and
+    `loadLabels` plus the structure test refuse any key outside
+    `message_id | label | subject_sha256 | stratum | note` and any `note`
+    outside `classify.LabelNoteAllowed` — criterion 22's "optional note" is a
+    closed vocabulary, not free text, because the file is committed. Every
+    other allowed field is constrained too (round 9): `subject_sha256` must be
+    exactly 16 lowercase hex (`classify.SubjectHash`'s shape), `stratum` must
+    be in `classify.LabelStratumAllowed`, and the personal lane refuses any
+    stratum. A repeated key is refused (round 10: `encoding/json` keeps only
+    the last value, so an earlier one could carry text past every check) by
+    `classify.DuplicateLabelKey`, which compares keys decoded, in the loader
+    and the structure test alike. Blanket-labelled rows carry
+    `classify.OwnerBlanketNote`, and `Eval` reports them on
+    their own line (with the uniform-stratum share on a stratified set).
 
 ## Future work (not this ticket)
 

@@ -107,3 +107,26 @@ func validateObservationIdentity(observation rawObservation) error {
 func channelThreadKey(workspaceID, conversationID string) string {
 	return "slack:" + workspaceID + ":" + conversationID
 }
+
+// IsRootedThreadKey reports whether a slack thread key names ONE thread
+// (slack:{ws}:{conv}:{root}, which NormalizeMessage builds for a message with a
+// thread root) rather than a whole channel or DM (slack:{ws}:{conv}, which
+// channelThreadKey builds). It is the ONE reading of that difference (SWT-33
+// criterion 14): no SQL and no other package may pick the key apart, because a
+// second spelling drifts from the builder with no error anywhere.
+//
+// Segment COUNT decides, as upworkcrm's ParseThreadKey does — no workspace,
+// conversation or message id contains a colon. A non-slack key is not rooted by
+// this rule; the caller decides what a jira or gmail thread is.
+func IsRootedThreadKey(threadKey string) bool {
+	parts := strings.Split(threadKey, ":")
+	if len(parts) != 4 || parts[0] != "slack" {
+		return false
+	}
+	for _, p := range parts[1:] {
+		if p == "" {
+			return false
+		}
+	}
+	return true
+}
