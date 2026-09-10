@@ -1236,11 +1236,21 @@ func TestTicketStatus_CountersCoverTheWholeVocabulary(t *testing.T) {
 	s.fake.put(tsIssue{"ILK-DONE", "done", tsLookupID, true})
 	st, _ := s.run(t, ctx, ticketstatus.Config{})
 
+	// AMENDED by SWT-34 criterion 25: the vocabulary gained
+	// closed_ticket_delivered, and this line is the compile-time fact that says
+	// so. The MECHANICAL half — every Stats field appears in both printed
+	// counter lines, derived by reflection rather than from a list a test
+	// supplies — is
+	// delivered_structure_test.go's TestTicketStatus_EveryStatsFieldIsPrintedIn
+	// BothCounterLines; this one keeps the human-readable line beside the
+	// assertions that read it.
 	line := fmt.Sprintf(
-		"considered=%d closed_ticket_done=%d closed_not_assigned=%d reopened=%d refused_active=%d "+
+		"considered=%d closed_ticket_done=%d closed_ticket_delivered=%d closed_not_assigned=%d "+
+			"reopened=%d refused_active=%d "+
 			"suppressed_dismissed=%d converged=%d unpolled=%d ambiguous=%d unreadable=%d "+
 			"fetched=%d fetch_skipped_ttl=%d fetch_failed=%d",
-		st.Considered, st.ClosedTicketDone, st.ClosedNotAssigned, st.Reopened, st.RefusedActive,
+		st.Considered, st.ClosedTicketDone, st.ClosedTicketDelivered, st.ClosedNotAssigned,
+		st.Reopened, st.RefusedActive,
 		st.SuppressedDismissed, st.Converged, st.Unpolled, st.Ambiguous, st.Unreadable,
 		st.Fetched, st.FetchSkippedTTL, st.FetchFailed)
 

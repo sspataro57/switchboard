@@ -64,10 +64,10 @@ type Config struct {
 
 // Stats is criterion 43's counter vocabulary, one field per printed name.
 type Stats struct {
-	Considered, ClosedTicketDone, ClosedNotAssigned, Reopened int
-	RefusedActive, SuppressedDismissed, Converged             int
-	Unpolled, Ambiguous, Unreadable                           int
-	Fetched, FetchSkippedTTL, FetchFailed                     int
+	Considered, ClosedTicketDone, ClosedTicketDelivered, ClosedNotAssigned, Reopened int
+	RefusedActive, SuppressedDismissed, Converged                                    int
+	Unpolled, Ambiguous, Unreadable                                                  int
+	Fetched, FetchSkippedTTL, FetchFailed                                            int
 }
 
 // candidate is one external_refs row joined to its task and project.
@@ -77,6 +77,7 @@ type candidate struct {
 	taskID    int64
 	taskStat  string
 	gateOn    bool
+	delivered []string // projects.ticket_delivered_statuses (SWT-34), from the COLUMN
 	dismissed bool
 	state     *State
 }
@@ -255,16 +256,17 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			return stats, fmt.Errorf("ticketstatus: stored snapshot for %s is unreadable: %w", c.key, err)
 		}
 		obs := Observation{
-			TicketKey:      c.key,
-			StatusCategory: facts.StatusCategory,
-			StatusName:     facts.StatusName,
-			StatusKnown:    facts.StatusKnown,
-			Assignee:       facts.Assignee,
-			AssigneeKnown:  facts.AssigneeKnown,
-			OwnAccountID:   snap.ownAccountID,
-			GateOn:         c.gateOn,
-			TaskStatus:     c.taskStat,
-			Dismissed:      c.dismissed,
+			TicketKey:         c.key,
+			StatusCategory:    facts.StatusCategory,
+			StatusName:        facts.StatusName,
+			StatusKnown:       facts.StatusKnown,
+			Assignee:          facts.Assignee,
+			AssigneeKnown:     facts.AssigneeKnown,
+			OwnAccountID:      snap.ownAccountID,
+			GateOn:            c.gateOn,
+			TaskStatus:        c.taskStat,
+			Dismissed:         c.dismissed,
+			DeliveredStatuses: c.delivered,
 		}
 		d := Decide(obs, c.state)
 
@@ -344,10 +346,18 @@ func count(stats *Stats, d Decision) {
 	}
 	switch d.Action {
 	case "closed":
-		if d.DropReason == "not_assigned" {
-			stats.ClosedNotAssigned++
-		} else {
+		// A SWITCH on the reason, not an if/else (SWT-34 criterion 26): drop_reason
+		// and its counter are one vocabulary, so a fourth value must be a visible
+		// GAP rather than a wrong number silently folded into ticket_done. The
+		// CHECK in migration 0025 is what stops such a row existing at all; this
+		// switch's job is to make the day it happens legible.
+		switch d.DropReason {
+		case "ticket_done":
 			stats.ClosedTicketDone++
+		case "ticket_delivered":
+			stats.ClosedTicketDelivered++
+		case "not_assigned":
+			stats.ClosedNotAssigned++
 		}
 	case "reopened":
 		stats.Reopened++
@@ -480,8 +490,10 @@ func upsertState(ctx context.Context, pool *pgxpool.Pool, c candidate, obs Obser
 func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candidate, error) {
 	q := `
 	SELECT r.id, r.external_key, t.id, t.status, p.ticket_assignee_gate,
+	       p.ticket_delivered_statuses,
 	       EXISTS (SELECT 1 FROM task_dismissals d WHERE d.task_id = t.id) AS dismissed,
-	       s.last_action, s.closed_from_status, s.status_category, s.assignee_account_id
+	       s.last_action, s.closed_from_status, s.status_category, s.assignee_account_id,
+	       s.status_name
 	  FROM external_refs r
 	  JOIN tasks t ON t.id = r.task_id
 	  JOIN projects p ON p.id = t.project_id
@@ -502,9 +514,9 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 	var out []candidate
 	for rows.Next() {
 		var c candidate
-		var lastAction, closedFrom, category, assignee *string
-		if err := rows.Scan(&c.refID, &c.key, &c.taskID, &c.taskStat, &c.gateOn, &c.dismissed,
-			&lastAction, &closedFrom, &category, &assignee); err != nil {
+		var lastAction, closedFrom, category, assignee, statusName *string
+		if err := rows.Scan(&c.refID, &c.key, &c.taskID, &c.taskStat, &c.gateOn, &c.delivered, &c.dismissed,
+			&lastAction, &closedFrom, &category, &assignee, &statusName); err != nil {
 			return nil, fmt.Errorf("ticketstatus: scan candidate: %w", err)
 		}
 		if lastAction != nil {
@@ -517,6 +529,11 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 			}
 			if assignee != nil {
 				c.state.Assignee = *assignee
+			}
+			// E6: the drop-triggering NAME is part of the "unchanged
+			// observation" key once a configured name can cause the drop.
+			if statusName != nil {
+				c.state.StatusName = *statusName
 			}
 		}
 		out = append(out, c)

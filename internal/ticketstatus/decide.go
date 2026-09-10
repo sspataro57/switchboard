@@ -2,7 +2,8 @@
 // reference (SWT-32, docs/tickets/jira-status-sync_SPEC.md): a ticket that
 // stops warranting its task — moved to Done, or assigned away under a gated
 // project — drops the task from the board, and a ticket that warrants it again
-// brings it back. One predicate, two facts, both directions (D15).
+// brings it back. One predicate, THREE facts since SWT-34 (status category, a per-project
+// configured delivered status, the assignee gate), both directions (D15).
 //
 // The DECISION in this file is pure: a function of (observation, recorded
 // state) with zero I/O, in the internal/orchestrator/rules.go discipline
@@ -26,6 +27,13 @@ type Observation struct {
 	GateOn         bool   // projects.ticket_assignee_gate — from the COLUMN (criterion 33)
 	TaskStatus     string // tasks.status as it stands right now
 	Dismissed      bool   // a task_dismissals row exists for this task (D4)
+	// DeliveredStatuses is the per-project set of status NAMES meaning "I
+	// delivered; the ball is in someone else's court" (SWT-34). A VALUE the
+	// driver read from the projects column — if Decide could look it up
+	// itself, the decision table would stop proving anything (invariant 7),
+	// which is also why the column is named in the driver's query and nowhere
+	// else.
+	DeliveredStatuses []string
 }
 
 // State is the ticket_status_syncs row for this external_ref, or nil when this
@@ -35,6 +43,11 @@ type State struct {
 	ClosedFromStatus string // the status the task held when THIS pass closed it
 	StatusCategory   string // the facts as last recorded — what makes "the same
 	Assignee         string // unchanged observation" decidable (criterion 24)
+	// StatusName joins that key for SWT-34's E6: once a NAME can trigger the
+	// drop, a claimed task whose ticket moves between two delivered statuses of
+	// the same category and assignee would otherwise get no second log line —
+	// and its existing log would name a status the ticket has left.
+	StatusName string
 }
 
 // Decision is what one observation becomes. Action is spelled as
@@ -86,14 +99,28 @@ func Decide(obs Observation, state *State) Decision {
 		return Decision{Action: "unreadable"}
 	}
 
-	// D15: one predicate, two facts. drop_reason records WHICH fact dropped it,
-	// with status precedence — a done ticket is 'ticket_done' even when it is
-	// ours.
-	warranted := obs.StatusCategory != "done" && (!obs.GateOn || obs.Assignee == obs.OwnAccountID)
+	// D15 as SWT-34 extends it: one predicate, now THREE facts. drop_reason
+	// records WHICH fact dropped it, chosen by ONE ordered list (E7):
+	// ticket_done > ticket_delivered > not_assigned.
+	//
+	// The order's argument: `done` keeps the top slot because the strongest
+	// statement about a ticket is that it is finished (an admin may give a
+	// done-category status a QA-sounding name, and it is still done). `delivered` sits
+	// directly beneath it because it is the same KIND of fact — the ticket's own
+	// lifecycle — and a weaker version of it; a QA ticket also assigned to a QA
+	// engineer was dropped because he delivered it, and recording that as
+	// `not_assigned` would make the counter he reads to judge a capture rule
+	// wrong. Inserting it between the two leaves SWT-32's done > not_assigned
+	// relation byte-identical.
+	delivered := IsDeliveredStatus(obs.StatusName, obs.DeliveredStatuses)
+	warranted := obs.StatusCategory != "done" && !delivered &&
+		(!obs.GateOn || obs.Assignee == obs.OwnAccountID)
 	drop := ""
 	switch {
 	case obs.StatusCategory == "done":
 		drop = "ticket_done"
+	case delivered:
+		drop = "ticket_delivered"
 	case obs.GateOn && obs.Assignee != obs.OwnAccountID:
 		drop = "not_assigned"
 	}
@@ -107,7 +134,11 @@ func Decide(obs Observation, state *State) Decision {
 			// fact the task's log has not recorded yet; an unchanged one is 96
 			// identical lines a day (criterion 24).
 			act := state == nil || state.LastAction != "refused_active" ||
-				state.StatusCategory != obs.StatusCategory || state.Assignee != obs.Assignee
+				state.StatusCategory != obs.StatusCategory || state.Assignee != obs.Assignee ||
+				// E6: the NAME is part of the observation once it can trigger
+				// the drop — a move between two delivered statuses of one
+				// category is new information the task's log has not recorded.
+				state.StatusName != obs.StatusName
 			return Decision{Warranted: false, Action: "refused_active", DropReason: drop, Act: act}
 		default: // closed
 			if state != nil && state.LastAction == "closed" {

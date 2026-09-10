@@ -239,7 +239,27 @@ func TestTicketStatus_HasNoNameListNoEmailNoDisplayName(t *testing.T) {
 	}
 
 	email := regexp.MustCompile(`"[^"\s]+@[^"\s]+\.[a-z]{2,}"`)
-	statusNames := []string{`"Done"`, `"Closed"`, `"Resolved"`, `"Won't Do"`, `"In Progress"`, `"To Do"`}
+	// SWT-34 criterion 30 STRENGTHENS this list rather than softening it. The
+	// qa-delivered-drop ticket adds a per-project CONFIGURED set of status
+	// names — which does NOT overturn D2, it relocates the knowledge: a
+	// workflow-shaped fact belongs in configuration, never in code. So the three
+	// REAL Treetop names join the generic six, and the very strings the runbook
+	// seeds into projects.ticket_delivered_statuses are the ones no source file
+	// here may contain. The names live in the database or they do not exist.
+	statusNames := []string{`"Done"`, `"Closed"`, `"Resolved"`, `"Won't Do"`, `"In Progress"`, `"To Do"`,
+		`"TT-In QA"`, `"TT-In Review"`, `"TT-Verified"`}
+
+	// Positive control for the widening: a scan whose needles no longer match
+	// anything passes every file for the wrong reason. Each banned literal must
+	// be found in a probe that CONTAINS it — cheap, and it is the only thing
+	// standing between this list and a quoting change that silently disarms it.
+	for _, name := range statusNames {
+		probe := "\t\tcase " + name + ": // a hypothetical hardcoded workflow name\n"
+		if !strings.Contains(probe, name) {
+			t.Fatalf("the scan's needle %s does not match its own probe %q; the ban has stopped "+
+				"matching anything", name, probe)
+		}
+	}
 
 	for _, rel := range files {
 		src := tsRepoFile(t, rel)
@@ -397,7 +417,15 @@ func TestAdvisoryLockKey_IsThisPackagesAlone(t *testing.T) {
 			"the key belongs in ONE place", len(literals), literals)
 	}
 
-	// (2) the convention: the same four hex digits as this ticket's migration.
+	// (2) the convention: the same four hex digits as the migration of the
+	// ticket that CREATED the lock — SWT-32's 0023, and it stays 0023 forever.
+	//
+	// DO NOT "align" this to a newer number. SWT-34 adds migration 0025 to this
+	// same package and deliberately leaves the assertion here alone: the key is
+	// LIVE, a pass running the old code holds 0x5157_0023, and changing the
+	// literal would let two passes run concurrently once and then read as a
+	// fresh collision to internal/classify's repo-wide scan. The convention
+	// names the lock's birth, not the newest migration to touch the package.
 	if digits != "0023" {
 		t.Errorf("the advisory-lock key's low four hex digits are %q, want \"0023\" — the established "+
 			"convention is the ticket's migration number, which is what makes the collision scan mechanical. "+

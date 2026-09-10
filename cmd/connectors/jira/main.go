@@ -138,11 +138,12 @@ func run(full, normalizeOnly, all bool) error {
 	// block's recorded reason: zeros included, "found nothing" and "never ran"
 	// are different lines.
 	ts, err := ticketstatus.Run(ctx, pool, ex, ticketstatus.Config{Lookup: factory})
-	fmt.Printf("ticket_status: {\"considered\":%d,\"closed_ticket_done\":%d,\"closed_not_assigned\":%d,"+
+	fmt.Printf("ticket_status: {\"considered\":%d,\"closed_ticket_done\":%d,\"closed_ticket_delivered\":%d,"+
+		"\"closed_not_assigned\":%d,"+
 		"\"reopened\":%d,\"refused_active\":%d,\"suppressed_dismissed\":%d,\"converged\":%d,"+
 		"\"unpolled\":%d,\"ambiguous\":%d,\"unreadable\":%d,"+
 		"\"fetched\":%d,\"fetch_skipped_ttl\":%d,\"fetch_failed\":%d}\n",
-		ts.Considered, ts.ClosedTicketDone, ts.ClosedNotAssigned,
+		ts.Considered, ts.ClosedTicketDone, ts.ClosedTicketDelivered, ts.ClosedNotAssigned,
 		ts.Reopened, ts.RefusedActive, ts.SuppressedDismissed, ts.Converged,
 		ts.Unpolled, ts.Ambiguous, ts.Unreadable,
 		ts.Fetched, ts.FetchSkippedTTL, ts.FetchFailed)
