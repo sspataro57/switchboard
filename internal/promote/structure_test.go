@@ -217,8 +217,11 @@ func TestPromote_CannotReachAModelProvider(t *testing.T) {
 // capture_decisions precedent — so the ban names four tables, not "any INSERT".
 func TestPromote_NeverWritesToolActionTablesDirectly(t *testing.T) {
 	files := prSources(t, "internal/promote")
-	banned := regexp.MustCompile(`(?is)insert\s+into\s+(tasks|task_events|deliveries|external_refs)\b`)
-	updateBanned := regexp.MustCompile(`(?is)update\s+(tasks|task_events|deliveries|external_refs)\b`)
+	// SWT-36 criterion 20: task_dismissals joins the ban. The promote pass
+	// requests the reopen; the executor verb (task_reopen) is the ONLY writer of
+	// the dismissal stamp, under the tasks row lock task_dismiss also takes.
+	banned := regexp.MustCompile(`(?is)insert\s+into\s+(tasks|task_events|deliveries|external_refs|task_dismissals)\b`)
+	updateBanned := regexp.MustCompile(`(?is)update\s+(tasks|task_events|deliveries|external_refs|task_dismissals)\b`)
 	for _, rel := range files {
 		src := prRepoFile(t, rel)
 		if m := banned.FindString(src); m != "" {

@@ -248,8 +248,8 @@ func captureRulesConfig() capture.RulesConfig {
 // printCaptureRules emits the pass's counts, always, including all zeros.
 func printCaptureRules(cfg capture.RulesConfig, stats capture.RulesStats) {
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
-		"\"tasks_created\":%d,\"appended\":%d}\n",
-		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended)
+		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d}\n",
+		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened)
 }
 
 // newExecutor is the four-line block cmd/connectors/github/main.go established:

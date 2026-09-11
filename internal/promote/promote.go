@@ -64,18 +64,29 @@ type Verdict struct {
 // ExistingTask is the thread's oldest task that is NOT closed/delivered, or —
 // for the Q3 fall-through — the closed/delivered one that was found instead.
 // Decide takes the STATUS as an input and stays pure (Q3 answer, 2026-09-09).
+//
+// DismissalID is SWT-36's input, the ticketstatus.Observation.Dismissed
+// pattern: the task's OPEN task_dismissals row (status='closed' AND
+// reopened_at IS NULL, D3), 0 = none. DismissalCode is its reason code, for
+// the promotion row's prose only — Decide never branches on it.
 type ExistingTask struct {
-	ID     int64
-	Status string
+	ID            int64
+	Status        string
+	DismissalID   int64
+	DismissalCode string
 }
 
 // Decision is what one verdict becomes. Action is classify_promotions.action
 // ('task' | 'review' | 'attached'); Status is create_task's status argument
 // ('ready' | 'holding', empty when attaching); TaskID is the attach target.
+// ReopenDismissalID, when non-zero, means attach AND request a guarded
+// task_reopen against that dismissal (SWT-36 D4) — whether the dismissal is
+// overtaken is the HANDLER's call, under the row lock, never this package's.
 type Decision struct {
-	Action string
-	Status string
-	TaskID int64
+	Action            string
+	Status            string
+	TaskID            int64
+	ReopenDismissalID int64
 }
 
 // open reports whether a task can still absorb a follow-up. Q3's answer is
@@ -89,8 +100,11 @@ func open(status string) bool {
 // Decide is the whole rule set, in order (criterion 6):
 //
 //  1. an OPEN task on the message's thread  -> attach (Q3)
-//  2. a whitelisted kind (payment_due|deadline) -> ready task
-//  3. anything else -> holding, the review lane
+//  2. a DISMISSED task on the thread (SWT-36) -> attach + request a reopen
+//     against its open dismissal, whatever the kind (D8: never a duplicate of
+//     what the human just dismissed)
+//  3. a whitelisted kind (payment_due|deadline) -> ready task
+//  4. anything else -> holding, the review lane
 //
 // Pure: a function of (verdict, existing task) with zero I/O, unit-tested with
 // no pgx, no net and no provider (invariant 7). The attach rule is evaluated
@@ -99,6 +113,9 @@ func open(status string) bool {
 func Decide(v Verdict, existing *ExistingTask) Decision {
 	if existing != nil && open(existing.Status) {
 		return Decision{Action: "attached", TaskID: existing.ID}
+	}
+	if existing != nil && existing.DismissalID != 0 {
+		return Decision{Action: "attached", TaskID: existing.ID, ReopenDismissalID: existing.DismissalID}
 	}
 	if whitelist[v.Kind] {
 		return Decision{Action: "task", Status: "ready"}

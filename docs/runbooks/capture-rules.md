@@ -273,3 +273,18 @@ The status_changed event's prose reason is for humans reading a task's history �
 never GROUP BY it, never parse it in a report. The two sanctioned label queries
 (dismissals joined back to the classify verdict, and per-capture-rule dismissal
 counts) are pinned verbatim in the SWT-31 SPEC and its integration tests.
+
+**A dismissed ticket comes back on new inbound activity (SWT-36).** When a live
+pass logs a new INBOUND message onto a task that is `closed` with an OPEN
+dismissal (`task_dismissals.reopened_at IS NULL`), it appends the log line as
+always and THEN calls `task_reopen` guarded with `{dismissal_id, message_id}`
+as `capture:{connector}`. The handler reopens — to the status the task was
+dismissed from, else `ready` — only if the message was INGESTED after the
+dismissal (`normalized_messages.created_at > task_dismissals.created_at`; the
+send time is never read), and stamps the dismissal row
+(`reopened_at/_by/_by_message_id`) instead of deleting it. The decision row
+stays `task_log`; its reason gains `task N was dismissed (code); reopen
+requested against dismissal D`, and the printed stats gain `"reopened"`. Every
+reason code reopens (owner's decision). Plain `task_close`d tasks never do.
+Shadow reopens nothing. To keep a task down for good after it came back,
+dismiss it again: that writes a second, open row.

@@ -43,7 +43,7 @@
     {{range .Tasks}}
     <tr>
       <td><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
-      <td><a href="/tasks/{{.ID}}">{{.Title}}</a></td>
+      <td><a href="/tasks/{{.ID}}">{{.Title}}</a>{{if .ReopenedAfterDismissal}} <span class="muted">reopened after dismissal ({{.ReopenedAfterDismissal}})</span>{{end}}</td>
       <td>{{.Project}}</td>
       <td>{{.Subproject}}</td>
       <td>{{.AssigneeType}}{{if .WorkerType}} / {{.WorkerType}}{{end}}</td>

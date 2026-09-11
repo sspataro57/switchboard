@@ -29,6 +29,10 @@ type taskRow struct {
 	Priority     int
 	PlanOrder    string
 	UpdatedAt    string
+	// ReopenedAfterDismissal is the D12 marker's reason code (SWT-36): set
+	// when the task is not closed and its NEWEST dismissal was overtaken by
+	// an inbound message. Board-only — never an export column.
+	ReopenedAfterDismissal string
 }
 
 type statusColumn struct {
@@ -110,6 +114,11 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	markers, err := s.reopenMarkers(r, rows)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	byStatus := map[string][]taskRow{}
 	for _, t := range rows {
@@ -117,6 +126,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			ID: t.ID, Project: t.Project, Subproject: t.Subproject,
 			Title: t.Title, Status: t.Status, AssigneeType: t.AssigneeType,
 			WorkerType: t.WorkerType, Priority: t.Priority, UpdatedAt: t.UpdatedAt,
+			ReopenedAfterDismissal: markers[t.ID],
 		}
 		if t.ParentID != nil {
 			tr.ParentID = fmt.Sprintf("%d", *t.ParentID)
@@ -156,6 +166,45 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	if err := s.tmpl.ExecuteTemplate(w, "tasks.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// reopenMarkers is D12's separate read (SWT-36): for the board's NOT-closed
+// rows, the reason code of each task whose NEWEST dismissal was overtaken by an
+// inbound message (reopened_by_message_id IS NOT NULL). Keyed on the message
+// column, not reopened_at: a human's plain reopen (the mis-click undo) is not
+// "reopened after dismissal". Deliberately NOT in boardQuery, which the CSV and
+// JSON exports share and whose header is pinned.
+func (s *Server) reopenMarkers(r *http.Request, rows []TaskExportRow) (map[int64]string, error) {
+	out := map[int64]string{}
+	var ids []int64
+	for _, t := range rows {
+		if t.Status != "closed" {
+			ids = append(ids, t.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	q, err := s.pool.Query(r.Context(),
+		`SELECT n.task_id, n.reason_code
+		   FROM (SELECT DISTINCT ON (d.task_id) d.task_id, d.reason_code, d.reopened_by_message_id
+		           FROM task_dismissals d
+		          WHERE d.task_id = ANY($1)
+		          ORDER BY d.task_id, d.id DESC) n
+		  WHERE n.reopened_by_message_id IS NOT NULL`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("select reopen markers: %w", err)
+	}
+	defer q.Close()
+	for q.Next() {
+		var id int64
+		var code string
+		if err := q.Scan(&id, &code); err != nil {
+			return nil, fmt.Errorf("scan reopen marker: %w", err)
+		}
+		out[id] = code
+	}
+	return out, q.Err()
 }
 
 // ---- /tasks/{id} detail ---------------------------------------------------------

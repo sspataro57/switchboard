@@ -1484,3 +1484,51 @@ credits return — the freshness gate and the cadence have to be decided
 together. The durable fix is to take calendar READS off Pipedream entirely
 (private iCal feed, or the Google Calendar API) and keep Pipedream for the rare
 booking write.
+
+### Dismissals reopen on new inbound activity (SWT-36)
+
+A dismissed task (`status='closed'` AND an OPEN `task_dismissals` row) comes
+back when a NEW inbound message reaches it through one of the two existing
+attach paths — promote's `threadTask` (same thread + project) or capture's
+`taskForExternalRef` (same external ref). The pass logs first, then calls the
+GUARDED `task_reopen {task_id, dismissal_id, message_id, reason}`; the handler
+decides under the tasks row lock and restores `closed_from_status` (else
+`ready`). Three things to know before touching it:
+
+- **Partial-index landmine, again.** 0026 replaced the TOTAL
+  `task_dismissals_task_uniq` with the PARTIAL `task_dismissals_open_uniq
+  (task_id) WHERE reopened_at IS NULL` — one OPEN dismissal per task, any
+  number over time. Every `ON CONFLICT` against `task_dismissals` must restate
+  `WHERE reopened_at IS NULL` or Postgres raises "no unique or exclusion
+  constraint matching the ON CONFLICT specification" at runtime, on a human's
+  Dismiss click (the capture_decisions_live_uniq / 0013 precedent; a
+  structural test scans internal/ for it). Rows are never deleted: a reopen
+  STAMPS `reopened_at/_by`, plus `reopened_by_message_id` when activity did it
+  (NULL = a human's plain reopen, the only mis-click signal). Count rows, not
+  tasks, when reading labels.
+- **The clock is INGEST time.** Reopen iff `normalized_messages.created_at >
+  task_dismissals.created_at`, strictly, compared in SQL inside the handler —
+  never `sent_at`. Both are Postgres `now()` (one clock, no skew allowance),
+  both survive re-normalization (sink upserts never touch `created_at`), and
+  it catches the lag case (sent before the dismissal, ingested after). Cost:
+  a long-suspended connector's backlog is stamped "now" and can reopen for
+  old mail, bounded by capture's 720h live horizon. Callers pass IDS only; the
+  handler also refuses a non-inbound `message_id` with an ERROR (invariant 5).
+- **D3's scope.** Only a DISMISSAL reopens. Plain `task_close` (orchestrator,
+  hand-run), R8's Deliver-task close, reconciler closes and `delivered` tasks
+  keep their old behaviour (promote's Q3 fall-through; capture's silent log).
+  The reconciler's D4 suppression reads OPEN dismissals only, so an
+  activity-reopened task is ordinary to it again.
+- **0026 needs a coordinated CUTOVER, not migrate-then-roll** (Codex review).
+  Pre-SWT-36 code's `ON CONFLICT (task_id) DO NOTHING` cannot infer the
+  partial index, so every OLD dismiss writer (dashboard, installed
+  ops-mcp-user, opsctl, open `ops` sessions) errors after 0026; new code needs
+  0026 first. Drain the old writers (dashboard to 0, close sessions), apply
+  0026, deploy the new images and re-install ops-mcp-user/opsctl, then scale
+  back up. SPEC Verification step 5 has the sequence. Generalises: dropping a
+  total unique index that an old `ON CONFLICT (cols)` infers is a breaking
+  change for the old binary — plan a drain or an expand/contract.
+- **Reading dismissal labels:** "a human undid this" is `reopened_by` being a
+  HUMAN actor (dashboard:/opsctl:/manual:), not merely
+  `reopened_by_message_id IS NULL` — a reconciler reopen racing a fresh human
+  dismissal can stamp it with a NULL message id (pre-existing, seconds wide).
