@@ -56,6 +56,11 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 	// test sets the field on its own fixture. That is the repo's recurring
 	// landmine (a predicate whose discriminating column is constant in
 	// production), and it shipped inert in the first cut of this ticket.
+	//
+	// SWT-37 (Q1 = b): only a parent still in done_locally is drafted for. A
+	// parent closed or marked delivered by hand (swb close / swb delivered, or
+	// opsctl) leaves its Deliver #N child open; without this clause the worker
+	// drafts a delivery for work that is already done.
 	q := `SELECT t.id, t.parent_id, p.slug,
 	             COALESCE(parent.title,''),
 	             COALESCE(NULLIF(p.client,''), p.name),
@@ -69,6 +74,7 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 	      JOIN tasks parent ON parent.id = t.parent_id
 	      JOIN projects p ON p.id = t.project_id
 	      WHERE t.title LIKE 'Deliver #%' AND t.status IN ('ready','holding')
+	        AND parent.status = 'done_locally'
 	        AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.task_id = t.parent_id)
 	      ORDER BY t.id`
 	if cfg.Limit > 0 {

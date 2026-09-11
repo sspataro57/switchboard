@@ -31,6 +31,12 @@ type closeArgs struct {
 // second spelling is how the two verbs drift.
 var openStatuses = []string{"holding", "ready", "blocked", "done_locally", "delivered"}
 
+// activeWorkRefusal is close's ONE refusal phrase for work that must not be
+// closed out from under its holder or its live send. The Jira reconciler
+// matches it as a non-fatal skip (ticketstatus.activeWorkRefusal, pinned by its
+// statusset_test), so every such refusal must carry it verbatim.
+const activeWorkRefusal = "refusing to close active work"
+
 // closeTransition is the ONE transition helper all three close-family verbs
 // share (SWT-31 D3, SWT-32 criterion 37): one row lock, one active-work
 // refusal, one status_changed writer. `to` is either "closed" (close/dismiss)
@@ -56,7 +62,44 @@ func closeTransition(ctx context.Context, tx pgx.Tx, taskID int64, to, reason st
 		case "closed":
 			return status, false, nil // idempotent
 		case "claimed", "in_progress", "needs_feedback":
-			return status, false, fmt.Errorf("task %d is %s; refusing to close active work", taskID, status)
+			return status, false, fmt.Errorf("task %d is %s; %s", taskID, status, activeWorkRefusal)
+		}
+		// SWT-37 (Codex pass 4): a send reserves 'sending' in a committed phase 1
+		// and dispatches after its transaction ends, so a close that lands in
+		// between would let words reach a client for CLOSED work. Phase 1 takes a
+		// SHARE lock on this task (refuseClosedTask) before writing 'sending', and
+		// this close holds the exclusive row lock taken above, so exactly one of
+		// them wins: close first → the send refuses; send first → this refuses
+		// until the delivery settles.
+		//
+		// Only a LIVE attempt counts (Codex pass 5, go-reviewer): gmail, Jira and
+		// calendar commit 'sending' before the network call, so a crash there
+		// leaves the row in 'sending' with no settle path, and an unbounded fence
+		// would make the task uncloseable forever. Live = unsettled
+		// (send_settled_at IS NULL: a settled Slack attempt can put no new words
+		// anywhere) and started within sendAttemptLease — the SAME lease
+		// mark_delivery_failed honours. The attempt clock is send_attempted_at
+		// (gmail, calendar, Slack stamp it) else updated_at (Jira's phase 1 sets
+		// only that); nothing refreshes either on a 'sending' row except its own
+		// settlement or loop-closure confirmation.
+		//
+		// The message carries activeWorkRefusal on purpose: it is the substring
+		// the Jira reconciler treats as a non-fatal refusal, so one task's live
+		// send cannot abort a whole reconciliation pass.
+		var inFlight int64
+		var channel, attemptedAt string
+		err := tx.QueryRow(ctx,
+			`SELECT id, channel, COALESCE(send_attempted_at, updated_at)::text FROM deliveries
+			  WHERE task_id=$1 AND status='sending' AND send_settled_at IS NULL
+			    AND COALESCE(send_attempted_at, updated_at) > now() - make_interval(secs => $2)
+			  ORDER BY id LIMIT 1`, taskID, sendAttemptLease.Seconds()).Scan(&inFlight, &channel, &attemptedAt)
+		if err == nil {
+			return status, false, fmt.Errorf("task %d has %s delivery %d in flight (sending since %s); %s until it "+
+				"settles or its %s send lease runs out", taskID, channel, inFlight, attemptedAt, activeWorkRefusal,
+				sendAttemptLease)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return status, false, fmt.Errorf("check in-flight deliveries for task %d: %w", taskID, err)
 		}
 	} else if status != "closed" {
 		return status, false, nil // reopen replay: already open, no event
@@ -176,6 +219,11 @@ func reopenTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, e
 // the validator so a code that would violate the constraint is refused before
 // a policy check and two audit rows.
 var dismissCodes = []string{"not_actionable", "wrong_kind", "duplicate", "handled_elsewhere"}
+
+// DismissReasonCodes returns a copy of task_dismiss's reason codes, in order:
+// the one source of the MCP schema's enum (SWT-37 V5), pinned there by
+// TestTaskVerbSchemas. A copy, so no caller can rewrite the validator's set.
+func DismissReasonCodes() []string { return append([]string(nil), dismissCodes...) }
 
 type dismissArgs struct {
 	TaskID     int64  `json:"task_id"`

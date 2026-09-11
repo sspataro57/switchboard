@@ -73,6 +73,9 @@ func bookCalendarBlock(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]
 	}
 
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		if err := refuseClosedTask(ctx, tx, a.DeliveryID); err != nil {
+			return err
+		}
 		var channel, status string
 		var extID *string
 		if err := tx.QueryRow(ctx,
@@ -225,6 +228,9 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 			}
 		}
 
+		if err := refuseClosedTask(ctx, tx, deliveryID); err != nil {
+			return err
+		}
 		var txStatus string
 		var txExtID *string
 		var txApprovalSource *string

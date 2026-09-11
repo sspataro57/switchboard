@@ -498,18 +498,24 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `OPENAI_API_KEY` in `/proc/<pid>/environ`; `.mcp.json` sets none), and
   `~/.bashrc` exports them. Never treat "we didn't pass the secret" as a
   boundary — gate in the binary.
-- Hence a separate READ-ONLY binary, `cmd/ops-mcp-read`
-  (`mcpserver.NewWithProfile(…, ProfileRead)`): lists/accepts only
-  `project_list`, `task_list`, `task_get_next`; its main calls no `tools.Set*`
-  seam, so NO sender is wired (connector code is linked via internal/tools but
-  stays nil). Not an env setting on ops-mcp: that was tried and fails open (unset
-  had to mean full for existing launchers). `task_context` is not in the read
-  profile: the claim holder's fetch flips claimed → in_progress.
-- Installed once at Claude Code USER scope as `ops` → `ops-mcp-read` (runbook
-  `docs/runbooks/ops-mcp-user-scope.md`): a `go install` binary from `main`,
+- Hence a separate narrow binary. SWT-35 shipped it READ-ONLY as
+  `cmd/ops-mcp-read`; SWT-37 RENAMED it `cmd/ops-mcp-user`
+  (`mcpserver.NewWithProfile(…, ProfileUser)`) and it is no longer read-only:
+  it lists/accepts `project_list`, `task_list`, `task_get_next` PLUS
+  `task_dismiss`, `task_close`, `task_mark_delivered` (see "Task verbs over
+  MCP"). Its main still calls no `tools.Set*` seam, so NO sender is wired
+  (connector code is linked via internal/tools but stays nil). Not an env
+  setting on ops-mcp: that was tried and fails open (unset had to mean full for
+  existing launchers). `ProfileRead` survives only as the fail-closed floor an
+  unknown profile lands on. `task_context` is in neither narrow profile: the
+  claim holder's fetch flips claimed → in_progress.
+- Installed once at Claude Code USER scope as `ops` → `ops-mcp-user` (runbook
+  `docs/runbooks/ops-mcp-user-scope.md`, which also carries the migration from
+  the old `ops-mcp-read` registration): a `go install` binary from `main`,
   `OPS_WORKER_ID=manual:salvo`. Never install `ops-mcp` (full) at user scope.
-  Re-run `go install ./cmd/ops-mcp-read` after any merge touching
-  `cmd/ops-mcp-read`, `internal/mcpserver` or `internal/tools`. In this repo
+  Re-run `go install ./cmd/ops-mcp-user` after any merge touching
+  `cmd/ops-mcp-user`, `internal/mcpserver`, `internal/tools` or
+  `internal/policy`, then open a NEW session. In this repo
   `.mcp.json`'s project-scope `ops` (full) shadows it. Installed 2026-09-10:
   `DATABASE_URL='${OPS_DATABASE_URL}'` DOES expand in a user-scope entry
   (Connected on first `claude mcp get ops`); no literal DSN needed.
@@ -519,8 +525,8 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   queue" → task_list. The server NAME stays `ops` (the precedence trick needs
   the same name as `.mcp.json`'s).
 - **LANDMINE: `claude mcp get/list` lie about same-name precedence.** Inside
-  this repo they show the user-scope `ops` (ops-mcp-read), yet a session here
-  loads `.mcp.json`'s full `ops` (19 tools; a session in `kube` gets 3).
+  this repo they show the user-scope `ops`, yet a session here loads
+  `.mcp.json`'s full `ops` (22 tools since SWT-37; a session in `kube` gets 6).
   Verify precedence from inside a session, never from the CLI listing.
 - `claude -p` from a shell uses `ANTHROPIC_API_KEY` (exported, no credit) over
   the claude.ai login: prefix `env -u ANTHROPIC_API_KEY` for smoke sessions.
@@ -530,6 +536,80 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   whatever model the calling session runs, including for `personal`; and in
   the full profile `task_context` still returns any task's body by id with no
   client or locality clause.
+
+### Task verbs over MCP (SWT-37, mcp-task-verbs)
+
+- **Owner decision, 2026-09-10:** `task_dismiss`, `task_close` and
+  `task_mark_delivered` are callable from EVERY repo's Claude Code session
+  (the user-scope `ops-mcp-user`) and from this repo's full `ops`. Accepted
+  risk: untrusted text read in any session (mail, Slack, a web page) can tell
+  it to dismiss/close/deliver any task in any project, and policy sees
+  `mcp:manual:salvo`, a human. Nothing is sent and no delivery is touched;
+  recovery is `task_reopen` (and, once SWT-36 ships, a dismissal reopens on
+  the next inbound message routed to it). The Instructions' "only when Salvador asks" line is a
+  prompt rule, not a boundary.
+- **`mcp_human_only` (policy rule, `mcpHumanOnly` map):** deny `task_close`
+  / `task_mark_delivered` iff the actor carries the MCP prefix AND is not
+  human. It is a TRANSPORT rule, not a trust boundary: it keeps worker
+  consoles (`mcp:{client}`) off these two verbs and changes NOTHING for
+  in-process callers (orchestrator R2/R8, `ticketstatus:jira`), whose
+  decision stays `allow / static-default` byte for byte. It cannot be
+  `humanOnly` — the spine calls both verbs. `task_dismiss` stays `humanOnly`
+  (its only gate for workers now that it is MCP-listed). "Arrived over MCP"
+  has ONE spelling: `policy.ViaMCPActor`, which `executor.ViaMCP` calls.
+- **Pre-existing, not closed here:** a worker console runs with
+  `--dangerously-skip-permissions` and inherits `DATABASE_URL`, so it can shell
+  out to opsctl (`opsctl:$USER` counts as human) or psql. Every actor gate is
+  bypassable by a worker; recorded under the SPEC's Future work.
+- **Dismissal provenance:** `task_dismissals.dismissed_by` keeps the raw actor.
+  `dashboard:…` = Salvador picked the code; `mcp:…` = a model mapped his words
+  to a code. A precision/eval pass can split on `dismissed_by LIKE 'mcp:%'`.
+- **MCP audit rows carry a NULL `task_id`** (the adapter sets only Tool, Actor,
+  Args) — pre-existing.
+- **LANDMINE (integration tests):** `audit_events.task_id` has no cascade, and
+  the tools cleanup deletes audit rows only by `itest-mcp-tools-` actor. A test
+  that writes `mcp:…` actors must delete its `policy_decisions` + `audit_events`
+  by `task_id` BEFORE `cleanupToolsData`, or the next run's task delete fails
+  the FK. And use `queueMatrixExecutor` (real matrix): `newExecutor` is
+  static-only and allows every worker call.
+- `closeTransition` refuses only `claimed`, `in_progress` and `needs_feedback`
+  — so `task_close` also closes `pr_open` / `awaiting_ci` / `awaiting_merge`
+  work, whatever the `openStatuses` comment in close.go implies.
+- The full profile's `Instructions` (incl. the swb verb lines) reach worker
+  consoles too; a worker acting on one costs a denied audit row.
+- `drafts.DeliverTasks` drafts only for a parent still in `done_locally`
+  (SWT-37 Q1 = b): a parent closed or marked delivered by hand leaves its
+  `Deliver #N` child open but no longer drafted. That filter is only a READ
+  before a model call, so the write re-checks under the task row lock:
+  `draft_delivery` refuses a `closed` task for every caller, and refuses when
+  the caller's `expect_task_status` (the drafts worker sends `done_locally`)
+  no longer holds (Codex review).
+- **Closed work never gets a delivery approved or sent** (`refuseClosedTask`,
+  first in approve / every send / calendar book): lock order is task →
+  delivery everywhere. `delivered` is deliberately NOT refused — R8 marks a
+  task delivered after its FIRST send and a sibling delivery must still go
+  out; a stale draft on a hand-delivered task stays behind human approval.
+  `prefill_delivery` runs the same guard (it fills a real Slack composer).
+  Known residual: a send already committed to `sending` still goes out if the
+  task is hand-marked DELIVERED during its network call (needs a
+  delivery-set model to fix; Future work in the SWT-37 SPEC).
+- **`task_close` / `task_dismiss` refuse while a delivery's send is LIVE**
+  (closeTransition): send phase 1 dispatches after its tx ends, so a close in
+  that gap would let words reach a client for closed work. Live = `sending`,
+  unsettled (`send_settled_at IS NULL`) and started within `sendAttemptLease`
+  (15m; clock `COALESCE(send_attempted_at, updated_at)`, Jira stamps only
+  `updated_at`). Past the lease a crashed gmail/Jira/calendar phase 1 (no
+  settle path) stops blocking. The refusal carries "refusing to close active
+  work" — the reconciler's non-fatal skip marker (`activeWorkRefusal`) — so a
+  live send never aborts a reconciliation pass.
+- `prefill_delivery` runs the Slack bridge call INSIDE its tx while holding the
+  task SHARE lock, so a close/mark-delivered/draft on THAT task waits for the
+  bridge (bounded by the caller's timeout: 60s dashboard, 30s opsctl). A wait
+  on one task, not a deadlock.
+- **Worker ids are validated at launch** (`worker.ValidateWorkerID`, called by
+  `WriteMCPConfig`): an id that would read as human (`manual:`/`dashboard:`/
+  `opsctl:`) or carries `mcp:` is refused. Before this, `opsworker --client
+  manual:foo` passed every human gate as `mcp:manual:foo`.
 
 ### Link preservation (SWT-25)
 

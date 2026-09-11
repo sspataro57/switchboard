@@ -1,15 +1,17 @@
-// ops-mcp-read is the READ-ONLY stdio MCP server: the switchboard install Claude
-// Code sees at user scope, in every repo on the workstation (SWT-35,
-// docs/runbooks/ops-mcp-user-scope.md). It serves exactly the read profile —
-// project_list, task_list, task_get_next — through the same executor pipeline
-// as ops-mcp (validate → policy → audit → handler).
+// ops-mcp-user is the stdio MCP server Claude Code sees at user scope, in every
+// repo on the workstation (SWT-35, renamed from ops-mcp-read by SWT-37;
+// docs/runbooks/ops-mcp-user-scope.md). It serves exactly the user profile —
+// project_list, task_list, task_get_next, task_dismiss, task_close and
+// task_mark_delivered — through the same executor pipeline as ops-mcp
+// (validate → policy → audit → handler). Policy refuses the three verbs to
+// worker identities (human_only / mcp_human_only).
 //
 // It is a separate binary, not a setting on ops-mcp, so that nothing can fall
-// back to the write surface: there is no variable whose absence restores it.
+// back to the full surface: there is no variable whose absence restores it.
 // It wires NO sender: main never imports a connector or calls a tools.Set* seam,
 // so the send seams stay nil (the connector code is linked, via internal/tools,
 // but never wired) and no secret inherited from the launching shell (~/.bashrc
-// exports OPS_TOKEN_KEY) can arm one. The read profile lists no tool that would
+// exports OPS_TOKEN_KEY) can arm one. The user profile lists no tool that would
 // reach a seam anyway.
 //
 //	DATABASE_URL   ops db, required
@@ -35,7 +37,7 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	if err := run(); err != nil {
-		slog.Error("ops-mcp-read failed", "err", err)
+		slog.Error("ops-mcp-user failed", "err", err)
 		os.Exit(1)
 	}
 }
@@ -58,7 +60,7 @@ func run() error {
 	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
 	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 
-	adapter := mcpserver.NewWithProfile(ex, workerID, mcpserver.ProfileRead)
-	slog.Info("ops-mcp-read serving", "worker_id", workerID, "tools", len(adapter.ListTools()))
-	return adapter.Serve(ctx, "ops-mcp-read")
+	adapter := mcpserver.NewWithProfile(ex, workerID, mcpserver.ProfileUser)
+	slog.Info("ops-mcp-user serving", "worker_id", workerID, "tools", len(adapter.ListTools()))
+	return adapter.Serve(ctx, "ops-mcp-user")
 }

@@ -289,6 +289,13 @@ func TestDrafts_CreatesDraftViaExecutor(t *testing.T) {
 	if got, _ := args["thread_id"].(float64); int64(got) != 70 {
 		t.Errorf("draft_delivery thread_id = %v, want the resolved thread 70", args["thread_id"])
 	}
+	// SWT-37 (Q1 = b): the worker read the parent as done_locally before its
+	// model call; this arg makes draft_delivery re-check it under the task row
+	// lock, so a hand close or "delivered" in between gets no draft.
+	if args["expect_task_status"] != "done_locally" {
+		t.Errorf("draft_delivery expect_task_status = %v, want done_locally (the status DeliverTasks read)",
+			args["expect_task_status"])
+	}
 	// From is resolved server-side by the tool; the worker must not pass it.
 	for _, banned := range []string{"from_account_id", "from", "to", "recipient"} {
 		if _, ok := args[banned]; ok {

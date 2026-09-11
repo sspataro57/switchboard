@@ -34,16 +34,25 @@ const (
 	// ProfileFull serves the whole agentTools allowlist: cmd/ops-mcp (worker
 	// consoles and this repo's .mcp.json).
 	ProfileFull Profile = "full"
-	// ProfileRead serves the queue reads only: cmd/ops-mcp-read, the user-scope
-	// install every other repo's session sees (SWT-35). A session in an
-	// unrelated repo reads untrusted content all day; it can look at the queues
-	// and change nothing.
+	// ProfileUser serves the queue reads plus task_dismiss, task_close and
+	// task_mark_delivered: cmd/ops-mcp-user, the user-scope install every other
+	// repo's session sees (SWT-37 V3; Salvador's decision of 2026-09-10). It
+	// can look at the queues and dismiss, close or mark delivered — nothing that
+	// creates, claims, drafts, approves, sends, books, links, logs, decides,
+	// reads mail or reopens. Policy refuses the three verbs to worker identities.
+	ProfileUser Profile = "user"
+	// ProfileRead serves the queue reads only. No binary builds it since
+	// SWT-37; it is the named fail-closed floor an unknown profile lands on.
 	ProfileRead Profile = "read"
 )
 
 // readProfileTools write nothing but their audit row. task_context is left out
 // deliberately: fetched by the claim holder it flips claimed → in_progress.
 var readProfileTools = []string{"project_list", "task_list", "task_get_next"}
+
+// userProfileTools is the read slice plus the three task verbs (SWT-37 V3).
+var userProfileTools = append(append([]string(nil), readProfileTools...),
+	"task_dismiss", "task_close", "task_mark_delivered")
 
 // Server adapts MCP tool calls onto the executor for one worker identity.
 type Server struct {
@@ -59,14 +68,19 @@ func New(ex Executor, workerID string) *Server {
 	return NewWithProfile(ex, workerID, ProfileFull)
 }
 
-// NewWithProfile builds the adapter serving profile p. The read profile's
-// tools are taken FROM agentTools, so their schemas cannot drift.
+// NewWithProfile builds the adapter serving profile p. A narrow profile's tools
+// are taken FROM agentTools, so their schemas cannot drift. Anything but
+// ProfileFull and ProfileUser gets the read slice: fail closed to the smallest.
 func NewWithProfile(ex Executor, workerID string, p Profile) *Server {
 	s := &Server{ex: ex, workerID: workerID, allowed: map[string]bool{}}
 	keep := agentToolNames
 	if p != ProfileFull {
+		names := readProfileTools
+		if p == ProfileUser {
+			names = userProfileTools
+		}
 		keep = map[string]bool{}
-		for _, n := range readProfileTools {
+		for _, n := range names {
 			keep[n] = true
 		}
 	}

@@ -313,7 +313,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 				// status and logs the refusal properly. Anything else stays
 				// loud and fatal.
 				if strings.Contains(err.Error(), activeWorkRefusal) {
-					slog.Warn("ticketstatus: task became active mid-pass; skipping",
+					slog.Warn("ticketstatus: task is active (claimed mid-pass, or a live send in flight); skipping",
 						"key", c.key, "task", c.taskID, "err", err)
 					none := Decision{Warranted: d.Warranted, Action: "none", DropReason: d.DropReason}
 					if err := upsertState(ctx, pool, c, obs, none, reason); err != nil {

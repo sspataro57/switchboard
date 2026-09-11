@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -90,6 +91,12 @@ type draftDeliveryArgs struct {
 	// RFC3339. Calendar-only: they add no rule to any other channel.
 	Start string `json:"start,omitempty"`
 	End   string `json:"end,omitempty"`
+	// ExpectTaskStatus (SWT-37, Q1 = b) is the task status the caller READ
+	// before composing the draft. The handler re-checks it under the task row
+	// lock and refuses on a mismatch, closing the read-then-write window. The
+	// drafts worker sets "done_locally"; it can only narrow, never widen, so it
+	// is harmless on the MCP surface and deliberately absent from its schema.
+	ExpectTaskStatus string `json:"expect_task_status,omitempty"`
 }
 
 func validateDraftDelivery(args []byte) error {
@@ -99,6 +106,9 @@ func validateDraftDelivery(args []byte) error {
 	}
 	if a.TaskID == 0 {
 		return errors.New("missing task_id")
+	}
+	if a.ExpectTaskStatus != "" && !slices.Contains(taskStatuses, a.ExpectTaskStatus) {
+		return fmt.Errorf("expect_task_status %q is not a task status", a.ExpectTaskStatus)
 	}
 	switch a.Channel {
 	case "gmail", "upwork_chat", "jira_comment", "slack_reply", "calendar":
@@ -184,6 +194,12 @@ func prefillDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 	}
 
 	if err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		// SWT-37 (Codex pass 3): prefilling puts the words in a real Slack
+		// composer one click from a send, so closed work is refused here too —
+		// task row first, like every approve and send path.
+		if err := refuseClosedTask(ctx, tx, a.DeliveryID); err != nil {
+			return err
+		}
 		var status, channel, targetRef, body string
 		if err := tx.QueryRow(ctx,
 			`SELECT status, channel, COALESCE(target_ref,''), body
@@ -399,21 +415,85 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		fromAccountID = &acctID
 	}
 
+	// SWT-37 (Q1 = b, Codex review): no caller may draft for CLOSED work, and a
+	// caller that read the task's status first (the drafts worker, before its
+	// model call) gets a refusal if it moved on. Both checks run HERE, under the
+	// task row lock closeTransition also takes: drafts.DeliverTasks' filter is a
+	// read, so a hand close or "delivered" in the window would otherwise still
+	// get a draft. `delivered` alone is not refused for every caller — a sibling
+	// delivery (a Jira final comment after the email) is legitimate.
 	var deliveryID int64
-	err := pool.QueryRow(ctx,
-		`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
-		                         from_account_id, thread_id, target_client_ref, created_by,
-		                         starts_at, ends_at)
-		 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9, $10, $11)
-		 RETURNING id`,
-		a.TaskID, a.Channel, a.TargetRef,
-		google.ScrubAIAttribution(a.Body), google.ScrubAIAttribution(a.Subject),
-		fromAccountID, a.ThreadID, targetClientRef, executor.ActorFrom(ctx),
-		startsAt, endsAt).Scan(&deliveryID)
+	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		var status string
+		if err := tx.QueryRow(ctx,
+			`SELECT status FROM tasks WHERE id=$1 FOR UPDATE`, a.TaskID).Scan(&status); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("task %d not found", a.TaskID)
+			}
+			return fmt.Errorf("lock task %d: %w", a.TaskID, err)
+		}
+		if status == "closed" {
+			return fmt.Errorf("task %d is closed: switchboard never drafts a delivery for closed work", a.TaskID)
+		}
+		if a.ExpectTaskStatus != "" && status != a.ExpectTaskStatus {
+			return fmt.Errorf("task %d is %s, not %s as the caller read it: the work moved on, so no draft",
+				a.TaskID, status, a.ExpectTaskStatus)
+		}
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
+			                         from_account_id, thread_id, target_client_ref, created_by,
+			                         starts_at, ends_at)
+			 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9, $10, $11)
+			 RETURNING id`,
+			a.TaskID, a.Channel, a.TargetRef,
+			google.ScrubAIAttribution(a.Body), google.ScrubAIAttribution(a.Subject),
+			fromAccountID, a.ThreadID, targetClientRef, executor.ActorFrom(ctx),
+			startsAt, endsAt).Scan(&deliveryID); err != nil {
+			return fmt.Errorf("insert delivery: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("insert delivery: %w", err)
+		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": deliveryID})
+}
+
+// refuseClosedTask SHARE-locks the delivery's TASK row and refuses a closed
+// task (SWT-37, Codex re-review). It runs FIRST in every approve, send and
+// prefill transaction. Both orderings of the draft/close race then end
+// refused: a close that commits first makes the draft refuse, and a draft that
+// commits first can no longer be approved or sent once the task is closed.
+//
+// FOR SHARE, not FOR UPDATE (go-reviewer): SHARE still conflicts with
+// closeTransition's FOR UPDATE, so close-vs-send is serialised in both orders,
+// but it does NOT conflict with the FOR KEY SHARE a task_events insert takes on
+// its parent task. mark_delivery_sent/failed, the gmail loop-closure sink and
+// the Upwork reconciler lock a delivery THEN insert a task event (delivery →
+// task); a FOR UPDATE here (task → delivery) would close a deadlock cycle with
+// them. Sibling sends on one task no longer queue behind each other either.
+//
+// `delivered` is deliberately NOT refused here: R8 marks a task delivered after
+// its FIRST send, and a sibling delivery drafted beside it (an email plus a Jira
+// final comment) must still go out. A stale draft on a task marked delivered by
+// hand stays behind the human approval gate.
+func refuseClosedTask(ctx context.Context, tx pgx.Tx, deliveryID int64) error {
+	var taskID int64
+	var status string
+	err := tx.QueryRow(ctx,
+		`SELECT t.id, t.status FROM deliveries d JOIN tasks t ON t.id = d.task_id
+		  WHERE d.id=$1 FOR SHARE OF t`, deliveryID).Scan(&taskID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("delivery %d not found", deliveryID)
+	}
+	if err != nil {
+		return fmt.Errorf("lock task of delivery %d: %w", deliveryID, err)
+	}
+	if status == "closed" {
+		return fmt.Errorf("delivery %d's task %d is closed: switchboard never approves or sends a delivery for "+
+			"closed work; reopen the task first", deliveryID, taskID)
+	}
+	return nil
 }
 
 func splitGmailThreadKey(key string) (email, gmailThreadID string, err error) {
@@ -503,6 +583,9 @@ func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 	}
 
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		if err := refuseClosedTask(ctx, tx, a.DeliveryID); err != nil {
+			return err
+		}
 		var status string
 		var extID *string
 		if err := tx.QueryRow(ctx,
@@ -590,6 +673,9 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
 		var status string
 		var extID *string
+		if err := refuseClosedTask(ctx, tx, a.DeliveryID); err != nil {
+			return err
+		}
 		var fromAcct *int64
 		var sendEnabled *bool
 		err := tx.QueryRow(ctx,
@@ -982,6 +1068,9 @@ func sendJiraComment(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) 
 		var target *string
 		var fromAcct *int64
 		var sendEnabled *bool
+		if err := refuseClosedTask(ctx, tx, deliveryID); err != nil {
+			return err
+		}
 		var fromEmail string
 		err := tx.QueryRow(ctx,
 			`SELECT d.task_id, d.body, d.status, d.sent_external_id, d.target_ref,
@@ -1069,6 +1158,9 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 	var body, targetRef string
 	var attemptedAt time.Time
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		if err := refuseClosedTask(ctx, tx, deliveryID); err != nil {
+			return err
+		}
 		var status string
 		var extID, target *string
 		var approvalSource *string

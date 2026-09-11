@@ -7,8 +7,8 @@
 //	               spawning claude; interactive sessions use manual:<user>)
 //
 // This binary serves the FULL allowlist and wires the senders: worker consoles
-// and this repo's .mcp.json. The install every other repo sees is the read-only
-// cmd/ops-mcp-read (SWT-35).
+// and this repo's .mcp.json. The install every other repo sees is
+// cmd/ops-mcp-user (SWT-35, renamed by SWT-37): the user profile, no sender.
 package main
 
 import (

@@ -27,6 +27,12 @@ type Snapshot struct {
 // transport. Any future transport wrapper belongs here too.
 const MCPTransportPrefix = "mcp:"
 
+// ViaMCPActor reports whether an actor arrived over the MCP transport — the ONE
+// spelling of "arrived over MCP". executor.ViaMCP and the mcp_human_only rule
+// both call it (SWT-37 V1), so the two layers cannot drift. Case-sensitive and
+// anchored: the adapter writes the prefix, a model never does.
+func ViaMCPActor(actor string) bool { return strings.HasPrefix(actor, MCPTransportPrefix) }
+
 // sendShaped tools transition a delivery toward the outside world, so they need
 // the channel/rate snapshot. Both belong here; they differ only in whether the
 // kill switch can stop them — see freezeGated.
@@ -84,6 +90,16 @@ var humanOnly = map[string]bool{
 	"task_dismiss": true,
 }
 
+// mcpHumanOnly tools require a human identity WHEN THEY ARRIVE OVER MCP
+// (SWT-37 V1, rule mcp_human_only). They cannot be humanOnly: the orchestrator
+// calls task_close (R2, R8) and task_mark_delivered (R8), and the Jira
+// reconciler closes as ticketstatus:jira — in-process Go with fixed call sites,
+// none taking a tool name from a model. The callers a model CAN steer are MCP
+// sessions, so this is a transport rule ("this transport's non-human identities
+// may not make these transitions"), not a trust boundary: an actor prefix is a
+// label. Keep this map apart from humanOnly — folding them stalls the spine.
+var mcpHumanOnly = map[string]bool{"task_close": true, "task_mark_delivered": true}
+
 // snapshotGated tools need the loader (channel/rate/freeze state).
 var snapshotGated = sendShaped
 
@@ -114,6 +130,13 @@ func Decide(req Request, snap Snapshot) Decision {
 	if humanOnly[req.Tool] && !HumanActor(req.Actor) {
 		return Decision{Decision: "deny", Rule: "human_only",
 			Reason: fmt.Sprintf("%s requires a human actor (dashboard:/opsctl:/manual:); got %q", req.Tool, req.Actor)}
+	}
+	// SWT-37 V1: a worker console (mcp:{client}) may not close or deliver over
+	// MCP; every non-MCP caller keeps today's decision. Its own rule string, so
+	// an audit tells it apart from human_only.
+	if mcpHumanOnly[req.Tool] && ViaMCPActor(req.Actor) && !HumanActor(req.Actor) {
+		return Decision{Decision: "deny", Rule: "mcp_human_only",
+			Reason: fmt.Sprintf("%s over MCP requires a human session identity (mcp:manual:/mcp:dashboard:/mcp:opsctl:); got %q", req.Tool, req.Actor)}
 	}
 	// book_calendar_block is denied BY NAME on every channel but calendar,
 	// BEFORE the channel switch (SWT-28 criterion 15). Once the verb is
@@ -229,6 +252,15 @@ func NewMatrix(loader SnapshotLoader, fallback Checker) Checker {
 func (m *matrix) Check(ctx context.Context, req Request) (Decision, error) {
 	if humanOnly[req.Tool] && !HumanActor(req.Actor) {
 		return Decide(req, Snapshot{}), nil
+	}
+	// SWT-37 V1: deny through Decide, otherwise fall through to the static
+	// allow-list so every allowed call keeps its static-default audit row byte
+	// for byte. The snapshot loader never runs: nothing here is send-shaped.
+	if mcpHumanOnly[req.Tool] {
+		if d := Decide(req, Snapshot{}); d.Decision == "deny" {
+			return d, nil
+		}
+		return m.fallback.Check(ctx, req)
 	}
 	if !snapshotGated[req.Tool] {
 		if humanOnly[req.Tool] {

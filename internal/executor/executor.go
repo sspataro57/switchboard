@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/policy"
@@ -127,9 +126,11 @@ func ActorFrom(ctx context.Context) string {
 // Handlers use it for restrictions policy structurally cannot express: policy
 // decides on (tool, actor, snapshot) and never sees a row's state, so "this
 // transport may only make this state transition" has to live with the state
-// machine. The audit row keeps the full unmodified actor either way.
+// machine. The audit row keeps the full unmodified actor either way. It is
+// policy.ViaMCPActor, so the mcp_human_only rule and handlers share ONE
+// spelling of "arrived over MCP" (SWT-37 V1).
 func ViaMCP(ctx context.Context) bool {
-	return strings.HasPrefix(ActorFrom(ctx), policy.MCPTransportPrefix)
+	return policy.ViaMCPActor(ActorFrom(ctx))
 }
 
 // auditFailure writes a start+terminal audit pair for calls that fail before
