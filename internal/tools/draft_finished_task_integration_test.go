@@ -159,6 +159,40 @@ func TestApproveSend_Integration_RefuseClosedTask(t *testing.T) {
 		setTaskStatus(t, ctx, s, "done_locally")
 	})
 
+	// Codex pass 4, the other ordering: send phase 1 committed 'sending' and
+	// dispatches after its transaction ends. A close landing in that gap would
+	// let words reach a client for CLOSED work, so task_close refuses while a
+	// delivery is in flight and succeeds once it settles. MUTATION: drop the
+	// in-flight check from closeTransition → this subtest goes red.
+	t.Run("close refuses an in-flight send", func(t *testing.T) {
+		id := s.draft(t, ctx, "itest in flight")
+		s.call(t, ctx, "approve_delivery", id)
+		if _, err := s.pool.Exec(ctx, `UPDATE deliveries SET status='sending' WHERE id=$1`, id); err != nil {
+			t.Fatalf("simulate send phase 1: %v", err)
+		}
+		_, err := s.ex.Execute(ctx, executor.Call{Tool: "task_close", Actor: sdsActor, TaskID: &s.taskID,
+			Args: json.RawMessage(`{"task_id":` + itoa(s.taskID) + `,"reason":"itest close during send"}`)})
+		if err == nil || !strings.Contains(err.Error(), "in flight") {
+			t.Errorf("task_close with a delivery in 'sending' = %v, want a refusal naming the in-flight delivery", err)
+		}
+		var st string
+		if err := s.pool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, s.taskID).Scan(&st); err != nil {
+			t.Fatal(err)
+		}
+		if st == "closed" {
+			t.Errorf("the task closed while its delivery was in flight")
+		}
+		// Once the delivery settles, the close goes through.
+		if _, err := s.pool.Exec(ctx, `UPDATE deliveries SET status='failed' WHERE id=$1`, id); err != nil {
+			t.Fatalf("settle the delivery: %v", err)
+		}
+		if _, err := s.ex.Execute(ctx, executor.Call{Tool: "task_close", Actor: sdsActor, TaskID: &s.taskID,
+			Args: json.RawMessage(`{"task_id":` + itoa(s.taskID) + `,"reason":"itest close after settle"}`)}); err != nil {
+			t.Errorf("task_close after the delivery settled = %v, want ok", err)
+		}
+		setTaskStatus(t, ctx, s, "done_locally")
+	})
+
 	// POSITIVE CONTROL: a delivered task's sibling delivery still approves and
 	// sends — `delivered` is not a refusal (R8 marks it after the first send).
 	t.Run("delivered sibling still sends", func(t *testing.T) {

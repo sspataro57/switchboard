@@ -591,8 +591,17 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   out; a stale draft on a hand-delivered task stays behind human approval.
   `prefill_delivery` runs the same guard (it fills a real Slack composer).
   Known residual: a send already committed to `sending` still goes out if the
-  task is hand-marked delivered during its network call (needs a
+  task is hand-marked DELIVERED during its network call (needs a
   delivery-set model to fix; Future work in the SWT-37 SPEC).
+- **`task_close` / `task_dismiss` refuse while a delivery is `sending`**
+  (closeTransition): send phase 1 dispatches after its tx ends, so a close in
+  that gap would let words reach a client for closed work. A Slack reply
+  wedged in `sending` blocks its task's close until resolved with
+  mark_delivery_sent / mark_delivery_failed.
+- `prefill_delivery` runs the Slack bridge call INSIDE its tx while holding the
+  task SHARE lock, so a close/mark-delivered/draft on THAT task waits for the
+  bridge (bounded by the caller's timeout: 60s dashboard, 30s opsctl). A wait
+  on one task, not a deadlock.
 - **Worker ids are validated at launch** (`worker.ValidateWorkerID`, called by
   `WriteMCPConfig`): an id that would read as human (`manual:`/`dashboard:`/
   `opsctl:`) or carries `mcp:` is refused. Before this, `opsworker --client

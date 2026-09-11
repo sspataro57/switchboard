@@ -58,6 +58,23 @@ func closeTransition(ctx context.Context, tx pgx.Tx, taskID int64, to, reason st
 		case "claimed", "in_progress", "needs_feedback":
 			return status, false, fmt.Errorf("task %d is %s; refusing to close active work", taskID, status)
 		}
+		// SWT-37 (Codex pass 4): a send reserves 'sending' in a committed phase 1
+		// and dispatches after its transaction ends, so a close that lands in
+		// between would let words reach a client for CLOSED work. Phase 1 takes a
+		// SHARE lock on this task (refuseClosedTask) before writing 'sending', and
+		// this close holds FOR UPDATE, so exactly one of them wins: close first →
+		// the send refuses; send first → this refuses until the delivery settles.
+		var inFlight int64
+		err := tx.QueryRow(ctx,
+			`SELECT id FROM deliveries WHERE task_id=$1 AND status='sending' ORDER BY id LIMIT 1`, taskID).Scan(&inFlight)
+		if err == nil {
+			return status, false, fmt.Errorf("task %d has delivery %d in flight (sending); refusing to close until it "+
+				"settles — a Slack reply left in 'sending' is resolved with mark_delivery_sent or mark_delivery_failed",
+				taskID, inFlight)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return status, false, fmt.Errorf("check in-flight deliveries for task %d: %w", taskID, err)
+		}
 	} else if status != "closed" {
 		return status, false, nil // reopen replay: already open, no event
 	}
