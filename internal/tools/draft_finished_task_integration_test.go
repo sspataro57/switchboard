@@ -222,6 +222,48 @@ func TestApproveSend_Integration_RefuseClosedTask(t *testing.T) {
 		setTaskStatus(t, ctx, s, "done_locally")
 	})
 
+	// go-reviewer: the lease clock is send_attempted_at FIRST. A loop-closure
+	// confirm that bumps updated_at on an old gmail attempt must not re-arm the
+	// fence. MUTATION: swap the COALESCE order (or GREATEST it) → red.
+	t.Run("a fresh updated_at does not re-arm an old attempt", func(t *testing.T) {
+		id := s.draft(t, ctx, "itest old attempt, fresh confirm")
+		s.call(t, ctx, "approve_delivery", id)
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE deliveries SET status='sending', send_attempted_at=now()-interval '1 hour', updated_at=now()
+			  WHERE id=$1`, id); err != nil {
+			t.Fatalf("simulate: %v", err)
+		}
+		if _, err := s.ex.Execute(ctx, executor.Call{Tool: "task_close", Actor: sdsActor, TaskID: &s.taskID,
+			Args: json.RawMessage(`{"task_id":` + itoa(s.taskID) + `,"reason":"itest"}`)}); err != nil {
+			t.Errorf("task_close with an hour-old attempt but a fresh updated_at = %v, want ok", err)
+		}
+		if _, err := s.pool.Exec(ctx, `UPDATE deliveries SET status='failed' WHERE id=$1`, id); err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+		setTaskStatus(t, ctx, s, "done_locally")
+	})
+
+	// A settled Slack attempt (send_settled_at set, row left in 'sending' as
+	// ambiguous) can put no new words anywhere, so it must not block a close
+	// even inside the lease. MUTATION: drop `send_settled_at IS NULL` → red.
+	t.Run("a settled attempt inside the lease does not block", func(t *testing.T) {
+		id := s.draft(t, ctx, "itest settled ambiguous")
+		s.call(t, ctx, "approve_delivery", id)
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE deliveries SET status='sending', send_attempted_at=now(), send_settled_at=now() WHERE id=$1`,
+			id); err != nil {
+			t.Fatalf("simulate: %v", err)
+		}
+		if _, err := s.ex.Execute(ctx, executor.Call{Tool: "task_close", Actor: sdsActor, TaskID: &s.taskID,
+			Args: json.RawMessage(`{"task_id":` + itoa(s.taskID) + `,"reason":"itest"}`)}); err != nil {
+			t.Errorf("task_close with a settled attempt inside the lease = %v, want ok", err)
+		}
+		if _, err := s.pool.Exec(ctx, `UPDATE deliveries SET status='failed' WHERE id=$1`, id); err != nil {
+			t.Fatalf("settle: %v", err)
+		}
+		setTaskStatus(t, ctx, s, "done_locally")
+	})
+
 	// POSITIVE CONTROL: a delivered task's sibling delivery still approves and
 	// sends — `delivered` is not a refusal (R8 marks it after the first send).
 	t.Run("delivered sibling still sends", func(t *testing.T) {

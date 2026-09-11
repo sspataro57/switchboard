@@ -626,7 +626,10 @@ These live in the new `internal/tools/mcp_verbs_integration_test.go`, built with
     - **Accepted residual (Codex pass 3, "high"):** a send whose phase 1 already committed
       `sending` goes out even if Salvador marks the task DELIVERED by hand during its network
       call — `delivered` is indistinguishable from R8's sibling case without a delivery-set
-      model. (The CLOSED variant is fenced by criterion 30.)
+      model. It needs a human to approve a send and, within that send's seconds-long window,
+      also declare the work delivered by hand; it predates this ticket. Recorded under Future
+      work ("a delivery-set model so a hand `task_mark_delivered` can retire outstanding
+      approved deliveries"), not fixed here. (The CLOSED variant is fenced by criterion 30.)
 30. **A close cannot land under a LIVE send** (Codex passes 4–5, go-reviewer). Send phase 1
     commits `sending` and dispatches after its transaction ends, so a `task_close` in that gap
     would let words reach a client for CLOSED work.
@@ -643,10 +646,10 @@ These live in the new `internal/tools/mcp_verbs_integration_test.go`, built with
       skip (`ticketstatus.activeWorkRefusal`, pinned by `statusset_test`), so one task's live send
       cannot abort a reconciliation pass.
     - Pinned by the "close refuses an in-flight send" and "close proceeds past a stale in-flight
-      attempt" subtests; mutations: drop the check, or drop the lease clause → red. It needs a human to approve a send and, within that send's seconds-long window,
-      also declare the work delivered by hand; it predates this ticket. Recorded under Future
-      work ("a delivery-set model so a hand `task_mark_delivered` can retire outstanding
-      approved deliveries"), not fixed here.
+      attempt" subtests, plus "a fresh updated_at does not re-arm an old attempt" (the clock is
+      `send_attempted_at` first) and "a settled attempt inside the lease does not block";
+      mutations: drop the check, drop or unbound the lease clause, swap the COALESCE, or drop
+      `send_settled_at IS NULL` → red.
 
 ### Runbook and IK
 
