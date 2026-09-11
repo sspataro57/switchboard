@@ -36,6 +36,25 @@
   <p class="bad">section failed — {{.}}</p>
   {{end}}
 
+  <h2>Orchestrator</h2>
+  {{if .OrchLoaded}}
+  <table>
+    <tr><th>verdict</th><th>backlog</th><th>oldest unprocessed</th><th>cursor</th><th>cursor moved</th><th>head</th></tr>
+    <tr>
+      <td class="{{if eq .Orch.Verdict "ok"}}ok{{else}}bad{{end}}">{{.Orch.Verdict}}</td>
+      <td>{{.Orch.Backlog}}</td>
+      <td>{{if .Orch.OldestUnprocessedAt.IsZero}}—{{else}}{{.Orch.OldestUnprocessedAt.Format "2006-01-02 15:04:05"}}{{end}}</td>
+      <td>{{.Orch.Cursor}}</td>
+      <td>{{.Orch.CursorUpdatedAt.Format "2006-01-02 15:04"}}</td>
+      <td>{{.Orch.Head}}</td>
+    </tr>
+  </table>
+  <p class="muted">Judged from Postgres, not the process: is the orchestrator's advisory lock held, and is any
+    event past the cursor older than five minutes. See docs/runbooks/orchestrator.md.</p>
+  {{else}}
+  <p class="muted">unavailable (see the failed-section line above)</p>
+  {{end}}
+
   <h2>Connector health</h2>
   <table>
     <tr><th>Provider</th><th>Account</th><th>Phase</th><th>Last successful sync</th><th>Age</th>

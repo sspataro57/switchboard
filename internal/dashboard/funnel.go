@@ -17,6 +17,7 @@ package dashboard
 // inline error line naming its section while the other three still show.
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/availability"
 	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/classify"
+	"github.com/sspataro57/switchboard/internal/orchestrator"
 	"github.com/sspataro57/switchboard/internal/promote"
 	"github.com/sspataro57/switchboard/internal/tools"
 )
@@ -157,6 +159,11 @@ type funnelPage struct {
 	Capture    []capture.DayAttribution
 	Lanes      []funnelLane
 	Promotions []promote.LaneCounters
+	// SWT-41 D5: the orchestrator's health, read from Postgres (pg_locks +
+	// backlog age), never from the process. OrchLoaded is false when the
+	// section's query failed; the inline error names it.
+	Orch       orchestrator.HealthState
+	OrchLoaded bool
 	Generated  string
 }
 
@@ -167,6 +174,16 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 	page := funnelPage{Days: days, Generated: now.Format("2006-01-02 15:04:05")}
 
 	page.Errors = runSections([]funnelSection{
+		{Name: "orchestrator health", Load: func() error {
+			hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			h, err := orchestrator.Health(hctx, s.pool, now)
+			if err != nil {
+				return err
+			}
+			page.Orch, page.OrchLoaded = h, true
+			return nil
+		}},
 		{Name: "connector health", Load: func() error {
 			// The calendar seams first: the same value and predicate
 			// propose_slots uses (criterion 5). An unparseable
