@@ -119,6 +119,33 @@ var agentTools = []Tool{
 		Description: "Record a project-scoped decision; it is injected into every future task context for the project.",
 		InputSchema: schema(`{"type":"object","properties":{"project":{"type":"string","description":"project slug"},"title":{"type":"string"},"body":{"type":"string"}},"required":["project","title"]}`),
 	},
+	// SWT-37 (mcp-task-verbs): dismiss, close and mark delivered from any
+	// Claude Code session (V0, Salvador's decision of 2026-09-10). Listing them
+	// removes the transport allowlist as a refusal for worker consoles, so the
+	// POLICY gates keep workers out: task_dismiss is humanOnly (rule human_only)
+	// and task_close / task_mark_delivered are mcp_human_only. The reason_code
+	// enum must equal tools.DismissReasonCodes() (TestTaskVerbSchemas).
+	{
+		Name: "task_dismiss",
+		Description: "Dismiss a task that should never have existed: closes it AND records why as a labelled training example (reason_code). " +
+			"For a task that is wrong, not one that is finished (that is task_close). Refuses claimed, in-progress and needs-feedback work. " +
+			"Human sessions only: a worker console is refused by policy. Nothing is sent, and a closed task can be reopened.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"reason_code":{"type":"string","enum":["not_actionable","wrong_kind","duplicate","handled_elsewhere"],"description":"why the task should not exist: handled_elsewhere when someone else is doing the work"},"note":{"type":"string"}},"required":["task_id","reason_code"]}`),
+	},
+	{
+		Name: "task_close",
+		Description: "Close finished or no-longer-needed work, with a short reason. If the task should never have existed, use task_dismiss. " +
+			"Refuses claimed, in_progress and needs_feedback work. Human sessions only over MCP: a worker console is refused by policy. Nothing is sent.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"reason":{"type":"string","description":"short human reason, recorded on the status change"}},"required":["task_id","reason"]}`),
+	},
+	{
+		Name: "task_mark_delivered",
+		Description: "Record that a task already finished locally (status done_locally) was delivered outside switchboard. " +
+			"Only done_locally moves; delivered or closed is a no-op success; anything else is refused. " +
+			"It sends nothing and creates no delivery, and its pending Deliver #N task is no longer drafted. " +
+			"Human sessions only over MCP: a worker console is refused by policy.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"reason":{"type":"string"}},"required":["task_id"]}`),
+	},
 }
 
 var agentToolNames = func() map[string]bool {

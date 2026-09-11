@@ -4,15 +4,24 @@ package mcpserver_test
 // install runbook. A test on prose earns its place the way
 // internal/ticketstatus's TestRunbook_DocumentsTheReconciler does — nothing in
 // code can stop the next session installing ops-mcp with `go run` from a ticket
-// branch, or installing the full ops-mcp instead of ops-mcp-read so that every
-// repo's session gets the write surface.
+// branch, or installing the full ops-mcp instead of the user binary so that
+// every repo's session gets the whole write surface.
 //
 // AMENDED after review (2026-09-10): the runbook first claimed that omitting
 // OPS_TOKEN_KEY from the -e flags kept sends out of other repos. It does not — a
 // stdio server inherits the launching shell's environment, and ~/.bashrc exports
-// the key. The boundary is now the read-only binary cmd/ops-mcp-read (a
-// separate binary, after Codex's re-review: a profile SETTING on ops-mcp would
-// have had to default to full), and the runbook must say both.
+// the key. The boundary is the separate binary (a profile SETTING on ops-mcp
+// would have had to default to full), and the runbook must say both.
+//
+// AMENDED for SWT-37 (docs/tickets/mcp-task-verbs_SPEC.md) criteria 24 and 25:
+// the binary is renamed cmd/ops-mcp-read → cmd/ops-mcp-user (V4) and serves the
+// user profile, six tools including task_dismiss, task_close and
+// task_mark_delivered (V3). The runbook keeps its path and must now carry the
+// migration from the old registration, the accepted risk (V0) with its recovery
+// (task_reopen), the swb verb lines, the dismissal provenance note (V7), the
+// full profile's new count (22), and no `claude mcp add` line naming
+// ops-mcp-read. EXPECTED RED until docs/runbooks/ops-mcp-user-scope.md is
+// rewritten.
 
 import (
 	"os"
@@ -32,59 +41,96 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 	doc := string(b)
 	lower := strings.ToLower(doc)
 
-	// ---- criterion 22: the tokens, exactly as spelled -----------------------
+	// ---- the tokens, exactly as spelled ------------------------------------
 	for _, want := range []struct{ tok, why string }{
 		{"--scope user", "the install is USER scope, so every repo's session sees the `ops` server"},
 		{"OPS_WORKER_ID=manual:salvo", "REQUIRED: ops-mcp refuses to start without it (fact 4), and a manual install is manual:salvo"},
-		{"go install ./cmd/ops-mcp-read", "a BUILT binary from main, never `go run` of whatever branch is checked out (L13)"},
+		{"go install ./cmd/ops-mcp-user", "a BUILT binary from main, never `go run` of whatever branch is checked out (L13); SWT-37 renamed it"},
 		{"OPS_TOKEN_KEY", "named, so the reader learns that omitting it is NOT the boundary (L13)"},
-		{"ops-mcp-read", "the boundary: the read-only binary lists only the queue reads and wires no sender (L13)"},
+		{"ops-mcp-user", "the boundary: the user binary lists six tools and wires no sender (SWT-37 V4)"},
+		// SWT-37 criterion 24: the six tools.
 		{"project_list", "the directory a session confirms a slug against"},
 		{"task_list", "the queue read itself"},
+		{"task_get_next", "the third queue read"},
+		{"task_dismiss", "SWT-37: a user-profile verb"},
+		{"task_close", "SWT-37: a user-profile verb"},
+		{"task_mark_delivered", "SWT-37: a user-profile verb"},
 		{"delivered", "the default hides delivered work, unlike the board (L4)"},
+		// SWT-37 criterion 25.
+		{"claude mcp remove", "the migration removes the old registration before re-adding (V4)"},
+		{"task_reopen", "the recovery for a wrong close or dismiss (V0)"},
 	} {
 		if !strings.Contains(doc, want.tok) {
-			t.Errorf("%s never mentions %q — %s (criterion 22)", rel, want.tok, want.why)
+			t.Errorf("%s never mentions %q — %s", rel, want.tok, want.why)
 		}
 	}
 
-	// ---- criterion 21: the rest of the runbook's content --------------------
+	// ---- literal lines ----------------------------------------------------
 	for _, want := range []struct{ re, why string }{
 		{`claude mcp add --scope user ops`, "the `claude mcp add` line, server name `ops` (L13: the name is what makes precedence work)"},
 		{`-e DATABASE_URL=`, "the first of the two -e flags"},
 		{`-e OPS_WORKER_ID=manual:salvo`, "the second -e flag"},
-		{`-- "$(go env GOPATH)/bin/ops-mcp-read"`, "the registered command is the READ binary (criterion 25)"},
+		{`-- "$(go env GOPATH)/bin/ops-mcp-user"`, "the registered command is the USER binary (SWT-37 criterion 25)"},
+		{`claude mcp remove --scope user ops`, "SWT-37 V4 migration step 2"},
 		{`mcp:manual:salvo`, "verification: the audit rows carry the manual actor"},
 		{`claude mcp get ops`, "verification step 4"},
-		{`/mcp`, "verification step 5: `/mcp` shows `ops` connected from another repo, and ONE `ops` in this one"},
+		{`/mcp`, "verification: `/mcp` shows `ops` connected from another repo, and ONE `ops` in this one"},
 	} {
 		if !strings.Contains(doc, want.re) {
-			t.Errorf("%s does not contain %q — %s (criterion 21)", rel, want.re, want.why)
+			t.Errorf("%s does not contain %q — %s", rel, want.re, want.why)
 		}
 	}
 
+	// ---- prose, case-insensitive --------------------------------------------
 	for _, want := range []struct{ re, why string }{
 		{`\.mcp\.json`, "the precedence note names the project-scope entry that shadows the user one in this repo"},
 		{`shadow|precedence|local\s*(→|->)\s*project\s*(→|->)\s*user`,
 			"the precedence note: Claude Code resolves a same-name server local → project → user (L13)"},
 		{`(?s)ops_token_key.{0,300}not a boundary.{0,400}inherit`,
 			"WHY omitting OPS_TOKEN_KEY protects nothing: the server inherits the launching shell's environment"},
-		{`(?s)ops-mcp-read. is the boundary.{0,600}wires no mail sender`,
-			"WHAT the read binary does: whatever the environment holds, no sender is wired"},
-		{`(?s)ops-mcp-read. is the boundary.{0,100}project_list.{0,40}task_list.{0,40}task_get_next`,
-			"…and it lists exactly the three queue reads"},
-		{`never install .ops-mcp. itself at user scope`, "the full binary is named as the thing NOT to install"},
+		{`(?s)ops-mcp-user. is the boundary.{0,600}wires no mail sender`,
+			"WHAT the user binary does: whatever the environment holds, no sender is wired (SWT-37 criterion 25)"},
+		{`never install .ops-mcp. itself at user scope`, "the full binary is named as the thing NOT to install (kept verbatim)"},
 		{`re-?run|re-?install`, "the re-install rule: re-run `go install` after any merge touching the server"},
-		{`cmd/ops-mcp`, "…naming what triggers it: cmd/ops-mcp"},
+		{`cmd/ops-mcp-user`, "…naming what triggers it: cmd/ops-mcp-user"},
 		{`internal/mcpserver`, "…internal/mcpserver"},
-		{`internal/tools`, "…and internal/tools"},
+		{`internal/tools`, "…internal/tools"},
+		{`internal/policy`, "…and internal/policy, which now holds the gate on the three verbs (SWT-37 criterion 24)"},
 		{`remember|memori[sz]e`, "the memorise-a-slug usage line: the per-repo binding lives in Claude Code's memory (L2)"},
 		{`(?s)closed.{0,300}delivered|delivered.{0,300}closed`,
 			"one sentence: task_list hides closed AND delivered by default…"},
 		{`board`, "…unlike the board, which hides only closed"},
+		// SWT-37 criterion 24/25.
+		{`new session`, "tools and Instructions are fetched at initialize: open a NEW session after re-registering"},
+		{`(?s)(email|web page).{0,300}(dismiss|close).{0,400}reopen`,
+			"the ACCEPTED RISK (V0): untrusted text read in any repo can dismiss or close a task; recovery is a reopen"},
+		{`(?s)go install \./cmd/ops-mcp-user.{0,600}claude mcp remove --scope user ops.{0,600}claude mcp add --scope user ops.{0,600}rm -f .{0,80}ops-mcp-read`,
+			"the V4 migration in its fail-safe ORDER: install → remove → add → delete the old binary last"},
+		{`swb dismiss`, "the usage line for task_dismiss"},
+		{`swb close`, "the usage line for task_close"},
+		{`swb delivered`, "the usage line for task_mark_delivered"},
+		{`dismissed_by`, "the dismissal provenance note (V7): mcp:… labels were mapped by a model, dashboard:… picked by Salvador"},
+		{`\b22 tools\b`, "the full profile's tool count, 19 → 22 (SWT-37 criterion 24)"},
 	} {
 		if !regexp.MustCompile(want.re).MatchString(lower) {
-			t.Errorf("%s does not match /%s/ — %s (criterion 21)", rel, want.re, want.why)
+			t.Errorf("%s does not match /%s/ — %s", rel, want.re, want.why)
 		}
+	}
+
+	// SWT-37 criterion 25: the OLD binary may appear only in the migration's
+	// clean-up, never as what a `claude mcp add` registers.
+	adds := 0
+	for _, line := range strings.Split(doc, "\n") {
+		if !strings.Contains(line, "claude mcp add") {
+			continue
+		}
+		adds++
+		if strings.Contains(line, "ops-mcp-read") {
+			t.Errorf("%s has a `claude mcp add` line naming ops-mcp-read: %q — the old read-only binary is gone "+
+				"(SWT-37 V4)", rel, line)
+		}
+	}
+	if adds == 0 {
+		t.Errorf("POSITIVE CONTROL: %s has no `claude mcp add` line at all", rel)
 	}
 }

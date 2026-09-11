@@ -44,6 +44,12 @@ package mcpserver_test
 // never happened. That handler-level restriction is covered by
 // TestSlackReview_Integration_MCPMayOnlyResolveASendingRow in internal/tools;
 // what this file pins is the listing and the worker-denial.
+//
+// SWT-37 (mcp-task-verbs) criteria 7 and 17: task_dismiss, task_close and
+// task_mark_delivered join wantAgentTools; task_dismiss leaves spineTools;
+// TestMCPListing_DoesNotMakeTaskVerbsWorkerCallable pins that listing them does
+// not make them worker-callable. GREENFIELD — EXPECTED RED until schemas.go
+// gains the three entries and internal/policy gains mcp_human_only.
 
 import (
 	"context"
@@ -108,6 +114,20 @@ var wantAgentTools = []string{
 	// (L14, a prompt rule).
 	"task_list",
 	"project_list",
+	// SWT-37 (mcp-task-verbs) criterion 7. V0, Salvador's decision of
+	// 2026-09-10: dismiss, close and mark delivered from ANY Claude Code
+	// session ("Every repo's session", taken with the stated prompt-injection
+	// risk). Listing them here removes the transport allowlist as a refusal for
+	// worker consoles, which share this full profile, so the POLICY gates are
+	// what keep workers out now: task_dismiss by policy.humanOnly (V2, rule
+	// human_only) and task_close / task_mark_delivered by the transport rule
+	// mcp_human_only (V1). Neither verb can be humanOnly: the orchestrator (R2,
+	// R8) and the Jira reconciler call them in-process.
+	// TestMCPListing_DoesNotMakeTaskVerbsWorkerCallable pins the refusal for
+	// the real worker shapes.
+	"task_dismiss",
+	"task_close",
+	"task_mark_delivered",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.
@@ -141,13 +161,18 @@ var spineTools = []string{
 	// IS agent-facing, with a free-text external_key). Same shape as the capture
 	// rule tools: the transport, not an actor prefix, is the boundary.
 	"task_set_source_thread",
-	// SWT-31 criterion 10, asserted deliberately rather than by omission (the
-	// SWT-20 precedent above). task_dismiss closes a task AND writes a typed
-	// label; an agent that could call it could clear its own queue and record
-	// that the work never needed doing. The gate is the transport allowlist here
-	// and policy.humanOnly in the matrix — two independent refusals, because the
-	// actor prefix alone is a transport label, not a trust boundary.
-	"task_dismiss",
+	// task_dismiss WAS here (SWT-31 criterion 10) and MOVED to wantAgentTools
+	// in SWT-37 (mcp-task-verbs, criterion 7; V0, the owner decision of
+	// 2026-09-10). SWT-31 gave a worker two independent refusals: absence from
+	// this transport allowlist, plus policy.humanOnly. The move was safe because
+	// humanOnly still refuses EVERY worker shape — mcp:{client},
+	// mcp:{client}.{sub}, mcp:worker:*, and every non-MCP automated caller —
+	// pinned by internal/policy TestDecide_TaskDismiss_FullActorCorpus
+	// (criterion 3). What was given up (V2's honest delta): for a worker
+	// console, humanOnly is now the ONLY gate, and an actor prefix is a
+	// transport label, not a trust boundary. The SWT-11
+	// approve_delivery/send_delivery precedent: listed, human-gated.
+	//
 	// SWT-32 criterion 39, asserted deliberately rather than by omission (the
 	// SWT-20 / SWT-31 precedent). task_reopen moves a task OUT of `closed`, the
 	// one status nothing else can leave; an agent that could call it could
@@ -280,6 +305,47 @@ func TestMCPListing_DoesNotMakeMarkDeliverySentWorkerCallable(t *testing.T) {
 	if d.Decision != "deny" || d.Rule != "human_only" {
 		t.Fatalf("policy on the MCP-listed mark_delivery_sent by %q = %q/%q, want deny/human_only — "+
 			"MCP-listing must not make a spine verb worker-callable (SWT-12 Q1)", fx.lastCall.Actor, d.Decision, d.Rule)
+	}
+}
+
+// SWT-37 criterion 17, the mark_delivery_sent shape above applied to the three
+// task verbs. The worker ids are the REAL console shapes: opsworker sets
+// OPS_WORKER_ID to the bare --client value, so a console arrives as mcp:acme or
+// mcp:acme.main (mcp:worker:* exists only in tests). The adapter forwards each
+// verb with that identity, because listing means forwarding. Policy must then
+// refuse it: human_only for task_dismiss (V2, unchanged) and mcp_human_only for
+// task_close and task_mark_delivered (V1). If the rule is folded into humanOnly
+// the rule string changes and this fails, and so does the spine
+// (internal/policy criterion 21).
+func TestMCPListing_DoesNotMakeTaskVerbsWorkerCallable(t *testing.T) {
+	verbs := []struct{ tool, args, rule string }{
+		{"task_dismiss", `{"task_id":412,"reason_code":"duplicate"}`, "human_only"},
+		{"task_close", `{"task_id":412,"reason":"it's done"}`, "mcp_human_only"},
+		{"task_mark_delivered", `{"task_id":412}`, "mcp_human_only"},
+	}
+	for _, workerID := range []string{"acme", "acme.main"} {
+		for _, v := range verbs {
+			workerID, v := workerID, v
+			t.Run(workerID+"/"+v.tool, func(t *testing.T) {
+				fx := &fakeExec{result: executor.Result{Output: json.RawMessage(`{}`)}}
+				srv := mcpserver.New(fx, workerID)
+				if _, err := srv.CallTool(context.Background(), v.tool, json.RawMessage(v.args)); err != nil {
+					t.Fatalf("CallTool(%s) as worker %q: %v — the full profile must LIST the verb (criterion 7); "+
+						"the refusal belongs to policy, not to the adapter", v.tool, workerID, err)
+				}
+				if !fx.called || fx.lastCall.Tool != v.tool {
+					t.Fatalf("forwarded %+v, want %s", fx.lastCall, v.tool)
+				}
+				if want := "mcp:" + workerID; fx.lastCall.Actor != want {
+					t.Fatalf("forwarded Actor = %q, want %q (identity is never model-chosen)", fx.lastCall.Actor, want)
+				}
+				d := policy.Decide(policy.Request{Tool: v.tool, Actor: fx.lastCall.Actor}, policy.Snapshot{})
+				if d.Decision != "deny" || d.Rule != v.rule {
+					t.Errorf("policy on the MCP-listed %s by %q = %s/%s, want deny/%s — MCP-listing must not "+
+						"make a task verb worker-callable (SWT-37 V1/V2)", v.tool, fx.lastCall.Actor, d.Decision, d.Rule, v.rule)
+				}
+			})
+		}
 	}
 }
 

@@ -155,3 +155,39 @@ func TestValidateDismiss_ReadsTheArgumentsAsTheExecutorSendsThem(t *testing.T) {
 		t.Fatalf("validateDismiss with a numeric task_id = %v, want nil", err)
 	}
 }
+
+// SWT-37 (docs/tickets/mcp-task-verbs_SPEC.md) criterion 19: the exported
+// DismissReasonCodes is the ONE source of task_dismiss's MCP schema enum
+// (internal/mcpserver TestTaskVerbSchemas asserts set-equality against it).
+//
+// IMPOSED SURFACE (SPEC V5):
+//
+//	func DismissReasonCodes() []string // a COPY of dismissCodes, in dismissCodes order
+//
+// GREENFIELD NOTE — EXPECTED RED. DismissReasonCodes does not exist, so
+// internal/tools's tests compile-FAIL until close.go declares it.
+//
+// A COPY, because a caller that appended to or overwrote the returned slice
+// would otherwise rewrite the validator's allowed set, and the error message
+// that is the enum's only written-down form for a caller.
+func TestDismissReasonCodes_ReturnsACopyInOrder(t *testing.T) {
+	got := DismissReasonCodes()
+	if strings.Join(got, ",") != strings.Join(dismissReasonCodes, ",") {
+		t.Fatalf("DismissReasonCodes() = %v, want %v in dismissCodes order (migration 0022's CHECK)", got, dismissReasonCodes)
+	}
+
+	for i := range got {
+		got[i] = "mutated"
+	}
+	if err := validateDismiss([]byte(`{"task_id":7,"reason_code":"not_actionable"}`)); err != nil {
+		t.Errorf("after mutating DismissReasonCodes()'s result, validateDismiss(not_actionable) = %v: the "+
+			"function returned dismissCodes itself, not a copy", err)
+	}
+	if err := validateDismiss([]byte(`{"task_id":7,"reason_code":"mutated"}`)); err == nil {
+		t.Errorf("after mutating DismissReasonCodes()'s result, validateDismiss accepts reason_code \"mutated\": " +
+			"the caller rewrote the validator's allowed set")
+	}
+	if again := DismissReasonCodes(); strings.Join(again, ",") != strings.Join(dismissReasonCodes, ",") {
+		t.Errorf("a second DismissReasonCodes() = %v after the first result was mutated, want %v", again, dismissReasonCodes)
+	}
+}

@@ -63,7 +63,7 @@ var allToolNames = []string{
 	"task_add_dependency",
 	"task_block",
 	"task_unblock",
-	"task_close",
+	"task_close", // MCP-listed since mcp-task-verbs; mcp_human_only
 	"record_orchestration",
 	// SWT-7 availability tool (registered, reachable via opsctl call):
 	"propose_slots",
@@ -74,7 +74,7 @@ var allToolNames = []string{
 	"send_delivery",       // spine-facing
 	"mark_delivery_sent",  // spine-facing
 	"prefill_delivery",    // spine-facing, Slack assisted composer draft
-	"task_mark_delivered", // spine-facing
+	"task_mark_delivered", // MCP-listed since mcp-task-verbs; mcp_human_only
 	"set_sending_frozen",  // spine-facing
 	// SWT-9 tools (SPEC 09-jira-github-connectors, API changes):
 	"link_external_ref",  // agent-facing (MCP-listed): {task_id, system, external_key}
@@ -92,7 +92,12 @@ var allToolNames = []string{
 	// deliberately ABSENT from internal/mcpserver/schemas.go — an agent that could
 	// dismiss tasks could clear its own queue. The absence is asserted, not merely
 	// relied on: internal/mcpserver/adapter_test.go's spineTools.
-	"task_dismiss",
+	//
+	// AMENDED by SWT-37: MCP-listed since mcp-task-verbs (full and user profiles,
+	// V0, the owner decision of 2026-09-10). The schemas.go absence above no longer
+	// holds; the gate is policy.humanOnly alone (V2), and adapter_test.go lists it in
+	// wantAgentTools. task_close and task_mark_delivered carry mcp_human_only instead.
+	"task_dismiss", // MCP-listed since mcp-task-verbs; humanOnly (rule human_only)
 	// SWT-32 criterion 35: the return path's verb, registered beside task_close
 	// and sharing its transition helper. Deliberately ABSENT from
 	// internal/mcpserver/schemas.go — an agent that could reopen tasks could

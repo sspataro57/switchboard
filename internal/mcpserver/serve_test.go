@@ -1,10 +1,16 @@
 package mcpserver
 
 // The wiring behind the "swb" shorthand: what a real MCP client receives at
-// initialize, for BOTH profiles (ops-mcp and ops-mcp-read share this path).
-// TestInstructions_TeachTheSwbShorthand checks the text of the const; this
-// checks the const is what goes over the wire — a nil ServerOptions would pass
-// the text test and silently drop the shorthand from every session.
+// initialize, for EVERY profile (ops-mcp and ops-mcp-user share this path;
+// ProfileRead is kept as the fail-closed floor although no binary builds it
+// since SWT-37). TestInstructions_TeachTheSwbShorthand checks the text of the
+// const; this checks the const is what goes over the wire — a nil
+// ServerOptions would pass the text test and silently drop the shorthand from
+// every session.
+//
+// SWT-37 criterion 15 adds the {ProfileUser, len(userProfileTools)} row.
+// GREENFIELD — EXPECTED RED: ProfileUser and userProfileTools do not exist, so
+// package mcpserver's tests compile-FAIL until adapter.go declares them.
 
 import (
 	"context"
@@ -30,6 +36,7 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 	}{
 		{ProfileFull, len(agentTools)},
 		{ProfileRead, len(readProfileTools)},
+		{ProfileUser, len(userProfileTools)},
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()

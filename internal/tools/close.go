@@ -177,6 +177,11 @@ func reopenTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, e
 // a policy check and two audit rows.
 var dismissCodes = []string{"not_actionable", "wrong_kind", "duplicate", "handled_elsewhere"}
 
+// DismissReasonCodes returns a copy of task_dismiss's reason codes, in order:
+// the one source of the MCP schema's enum (SWT-37 V5), pinned there by
+// TestTaskVerbSchemas. A copy, so no caller can rewrite the validator's set.
+func DismissReasonCodes() []string { return append([]string(nil), dismissCodes...) }
+
 type dismissArgs struct {
 	TaskID     int64  `json:"task_id"`
 	ReasonCode string `json:"reason_code"`
