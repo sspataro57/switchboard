@@ -3,8 +3,15 @@
 The switchboard session writes this. The code is merged and the image is pushed; the cluster state
 is yours.
 
-**Image:** `192.168.50.20:5000/switchboard:<tag>`. The tag and digest are filled in at build time,
-along with the commit it was built from on `main`. It is the first image that carries
+**Image (built and pushed — do not rebuild):**
+
+```
+192.168.50.20:5000/switchboard:0.7.8
+digest sha256:1801e40804403a64b21ef94810f81206fc61b3c22002117372be147bd665abaa
+built from main efd17bd (Merge ticket-orchestrator-deploy, clean tree)
+```
+
+`orchestratord` verified in the image: with no env it exits `MQTT_BROKER is not set`. It is the first image that carries
 `/usr/local/bin/orchestratord`: the Dockerfile build line never included it before SWT-41.
 
 ## Order matters: do not apply until told the cursor is advanced
