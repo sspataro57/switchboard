@@ -9,6 +9,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/policy"
 )
 
 // ClaimTTL is stamped on task_claims.expires_at. Enforcement (reaping expired
@@ -47,14 +50,25 @@ func claimTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, er
 	var expiresAt time.Time
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
 		var id int64
+		var assignee string
 		err := tx.QueryRow(ctx,
-			`SELECT id FROM tasks WHERE id = $1 AND status = 'ready' FOR UPDATE SKIP LOCKED`,
-			a.TaskID).Scan(&id)
+			`SELECT id, assignee_type FROM tasks WHERE id = $1 AND status = 'ready' FOR UPDATE SKIP LOCKED`,
+			a.TaskID).Scan(&id, &assignee)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("task %d cannot be claimed (not ready, already claimed, or locked)", a.TaskID)
 		}
 		if err != nil {
 			return fmt.Errorf("lock task %d: %w", a.TaskID, err)
+		}
+		// SWT-38 (Codex review): task_get_next only routes claude tasks, but a
+		// claim by id would let a worker console take a HUMAN task — including one
+		// a user-scope session created from content read in another repo — and
+		// load its body into a worker prompt. Over MCP, a non-human identity may
+		// claim only claude tasks; human sessions (mcp:manual:…) and in-process
+		// callers keep claiming anything, as before.
+		if assignee != "claude" && executor.ViaMCP(ctx) && !policy.HumanActor(executor.ActorFrom(ctx)) {
+			return fmt.Errorf("task %d is assigned to %s; a worker console claims only claude tasks (task_get_next routes them)",
+				a.TaskID, assignee)
 		}
 
 		if _, err := tx.Exec(ctx,
