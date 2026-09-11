@@ -17,6 +17,7 @@ package dashboard
 // inline error line naming its section while the other three still show.
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -174,7 +175,9 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 
 	page.Errors = runSections([]funnelSection{
 		{Name: "orchestrator health", Load: func() error {
-			h, err := orchestrator.Health(ctx, s.pool, now)
+			hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			h, err := orchestrator.Health(hctx, s.pool, now)
 			if err != nil {
 				return err
 			}

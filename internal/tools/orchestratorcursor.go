@@ -82,6 +82,21 @@ func orchestratorCursorAdvance(ctx context.Context, pool *pgxpool.Pool, args []b
 				"stop orchestratord first — the cursor only moves while no engine drains")
 		}
 
+		// Codex (SWT-41 review): BIGSERIAL allocation and commit order are
+		// independent. A writer holding id 100 uncommitted while id 101 commits
+		// would leave max(id)=101, and the cursor set there would skip 100 forever
+		// once it commits. SHARE mode conflicts with every inserting transaction's
+		// ROW EXCLUSIVE lock: it waits for in-flight inserts to finish and blocks
+		// new ones until this transaction commits, so max(id) below is a watermark
+		// with nothing uncommitted beneath it. Bounded, so a stuck writer refuses
+		// the advance instead of hanging it.
+		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '10s'`); err != nil {
+			return fmt.Errorf("set lock timeout: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `LOCK TABLE task_events IN SHARE MODE`); err != nil {
+			return fmt.Errorf("wait for in-flight task_events writers (retry when they finish): %w", err)
+		}
+
 		var cur int64
 		if err := tx.QueryRow(ctx,
 			`SELECT last_event_id FROM orchestrator_cursor WHERE name='orchestrator' FOR UPDATE`).Scan(&cur); err != nil {

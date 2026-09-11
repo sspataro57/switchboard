@@ -142,6 +142,21 @@ func run(tick time.Duration, once bool, exit func(code int)) error {
 
 	engine := orchestrator.NewEngine(pool, ex, spine, cfg)
 
+	var lastTick atomic.Int64
+	markTick := func() { lastTick.Store(time.Now().UnixNano()) }
+	markTick()
+	// A catch-up drain marks progress per event, so /healthz sees a busy loop,
+	// not a wedged one; and it re-checks the lock before every batch.
+	engine.SetDrainHooks(orchestrator.DrainHooks{
+		Progress: markTick,
+		Guard: func(ctx context.Context) error {
+			if !checkLockOrExit(ctx, lock, exit) {
+				return errors.New("orchestrator lock lost")
+			}
+			return nil
+		},
+	})
+
 	if once {
 		n, err := engine.DrainOnce(ctx)
 		if err != nil {
@@ -153,10 +168,6 @@ func run(tick time.Duration, once bool, exit func(code int)) error {
 		slog.Info("once pass complete", "events_processed", n)
 		return nil
 	}
-
-	var lastTick atomic.Int64
-	markTick := func() { lastTick.Store(time.Now().UnixNano()) }
-	markTick()
 
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", newHealthHandler(tick, time.Now,
@@ -192,15 +203,21 @@ func run(tick time.Duration, once bool, exit func(code int)) error {
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 	for {
+		ticked := false
 		select {
 		case <-ctx.Done():
 			slog.Info("orchestratord stopping")
 			return nil
 		case <-wake:
 		case <-ticker.C:
-			if !checkLockOrExit(ctx, lock, exit) {
-				return nil
-			}
+			ticked = true
+		}
+		// Before ANY mutation — a notification wake as much as a tick — the lock
+		// must still be ours (SWT-41 review; D3).
+		if !checkLockOrExit(ctx, lock, exit) {
+			return nil
+		}
+		if ticked {
 			if err := engine.TickOnce(ctx, time.Now()); err != nil {
 				slog.Error("tick failed", "err", err)
 			}

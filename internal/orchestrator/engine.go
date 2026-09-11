@@ -33,11 +33,25 @@ type Publisher interface {
 // applies actions through the executor + publisher. NOTIFY is a wake-up only;
 // the drain is the sole delivery path.
 type Engine struct {
-	pool *pgxpool.Pool
-	ex   *executor.Executor
-	pub  Publisher
-	cfg  Config
+	pool  *pgxpool.Pool
+	ex    *executor.Executor
+	pub   Publisher
+	cfg   Config
+	hooks DrainHooks
 }
+
+// DrainHooks lets the daemon watch and stop a drain (SWT-41 review). Progress
+// runs after every processed event, so a long catch-up counts as alive for
+// the liveness probe instead of being restarted mid-drain. Guard runs before
+// every batch; an error stops the drain before it applies anything more — a
+// process whose lock is gone must not keep mutating. Both optional.
+type DrainHooks struct {
+	Progress func()
+	Guard    func(ctx context.Context) error
+}
+
+// SetDrainHooks installs the hooks. Call before the first drain.
+func (e *Engine) SetDrainHooks(h DrainHooks) { e.hooks = h }
 
 func NewEngine(pool *pgxpool.Pool, ex *executor.Executor, pub Publisher, cfg Config) *Engine {
 	return &Engine{pool: pool, ex: ex, pub: pub, cfg: cfg}
@@ -49,6 +63,11 @@ func NewEngine(pool *pgxpool.Pool, ex *executor.Executor, pub Publisher, cfg Con
 func (e *Engine) DrainOnce(ctx context.Context) (int, error) {
 	processed := 0
 	for {
+		if e.hooks.Guard != nil {
+			if err := e.hooks.Guard(ctx); err != nil {
+				return processed, fmt.Errorf("drain stopped: %w", err)
+			}
+		}
 		var cursor int64
 		if err := e.pool.QueryRow(ctx,
 			`SELECT last_event_id FROM orchestrator_cursor WHERE name='orchestrator'`).Scan(&cursor); err != nil {
@@ -96,6 +115,9 @@ func (e *Engine) DrainOnce(ctx context.Context) (int, error) {
 				return processed, fmt.Errorf("advance cursor: %w", err)
 			}
 			processed++
+			if e.hooks.Progress != nil {
+				e.hooks.Progress()
+			}
 		}
 	}
 }

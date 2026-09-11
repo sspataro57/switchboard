@@ -7,6 +7,7 @@ package dashboard
 // executor (invariant 3).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -170,9 +171,13 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if h, err := orchestrator.Health(r.Context(), s.pool, time.Now()); err == nil && h.Verdict != orchestrator.VerdictOK {
+	// Bounded: a slow or hung health read degrades to "no line", never a
+	// stalled board (SWT-41 review).
+	hctx, hcancel := context.WithTimeout(r.Context(), 2*time.Second)
+	if h, err := orchestrator.Health(hctx, s.pool, time.Now()); err == nil && h.Verdict != orchestrator.VerdictOK {
 		data.OrchAlert = &h
 	}
+	hcancel()
 
 	if err := s.tmpl.ExecuteTemplate(w, "tasks.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
