@@ -589,6 +589,10 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   delivery everywhere. `delivered` is deliberately NOT refused — R8 marks a
   task delivered after its FIRST send and a sibling delivery must still go
   out; a stale draft on a hand-delivered task stays behind human approval.
+  `prefill_delivery` runs the same guard (it fills a real Slack composer).
+  Known residual: a send already committed to `sending` still goes out if the
+  task is hand-marked delivered during its network call (needs a
+  delivery-set model to fix; Future work in the SWT-37 SPEC).
 - **Worker ids are validated at launch** (`worker.ValidateWorkerID`, called by
   `WriteMCPConfig`): an id that would read as human (`manual:`/`dashboard:`/
   `opsctl:`) or carries `mcp:` is refused. Before this, `opsworker --client

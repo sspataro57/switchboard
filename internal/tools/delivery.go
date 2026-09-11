@@ -194,6 +194,12 @@ func prefillDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 	}
 
 	if err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		// SWT-37 (Codex pass 3): prefilling puts the words in a real Slack
+		// composer one click from a send, so closed work is refused here too —
+		// task row first, like every approve and send path.
+		if err := refuseClosedTask(ctx, tx, a.DeliveryID); err != nil {
+			return err
+		}
 		var status, channel, targetRef, body string
 		if err := tx.QueryRow(ctx,
 			`SELECT status, channel, COALESCE(target_ref,''), body
@@ -453,13 +459,19 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 	return marshalResult(map[string]any{"delivery_id": deliveryID})
 }
 
-// refuseClosedTask locks the delivery's TASK row and refuses a closed task
-// (SWT-37, Codex re-review). It runs FIRST in every approve and send
-// transaction, so the lock order is task → delivery everywhere —
-// draft_delivery and closeTransition take the task lock, and nothing locks a
-// delivery before its task. Both orderings of the draft/close race then end
+// refuseClosedTask SHARE-locks the delivery's TASK row and refuses a closed
+// task (SWT-37, Codex re-review). It runs FIRST in every approve, send and
+// prefill transaction. Both orderings of the draft/close race then end
 // refused: a close that commits first makes the draft refuse, and a draft that
 // commits first can no longer be approved or sent once the task is closed.
+//
+// FOR SHARE, not FOR UPDATE (go-reviewer): SHARE still conflicts with
+// closeTransition's FOR UPDATE, so close-vs-send is serialised in both orders,
+// but it does NOT conflict with the FOR KEY SHARE a task_events insert takes on
+// its parent task. mark_delivery_sent/failed, the gmail loop-closure sink and
+// the Upwork reconciler lock a delivery THEN insert a task event (delivery →
+// task); a FOR UPDATE here (task → delivery) would close a deadlock cycle with
+// them. Sibling sends on one task no longer queue behind each other either.
 //
 // `delivered` is deliberately NOT refused here: R8 marks a task delivered after
 // its FIRST send, and a sibling delivery drafted beside it (an email plus a Jira
@@ -470,7 +482,7 @@ func refuseClosedTask(ctx context.Context, tx pgx.Tx, deliveryID int64) error {
 	var status string
 	err := tx.QueryRow(ctx,
 		`SELECT t.id, t.status FROM deliveries d JOIN tasks t ON t.id = d.task_id
-		  WHERE d.id=$1 FOR UPDATE OF t`, deliveryID).Scan(&taskID, &status)
+		  WHERE d.id=$1 FOR SHARE OF t`, deliveryID).Scan(&taskID, &status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("delivery %d not found", deliveryID)
 	}

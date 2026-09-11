@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 func setTaskStatus(t *testing.T, ctx context.Context, s slackSuite, status string) {
@@ -135,6 +136,25 @@ func TestApproveSend_Integration_RefuseClosedTask(t *testing.T) {
 		}
 		if st := draftRowStatus(t, ctx, s, id); st != "approved" {
 			t.Errorf("refused send left the delivery %s, want approved", st)
+		}
+		setTaskStatus(t, ctx, s, "done_locally")
+	})
+
+	// Codex pass 3: prefill_delivery fills a REAL Slack composer, one click from
+	// a send, so it runs the same guard. MUTATION: drop refuseClosedTask from
+	// prefillDelivery → this subtest goes red (the drafter is called).
+	t.Run("prefill", func(t *testing.T) {
+		drafter := &fakeSlackDrafter{}
+		tools.SetSlackDrafter(drafter)
+		id := s.draft(t, ctx, "itest approved then closed before prefill")
+		s.call(t, ctx, "approve_delivery", id)
+		setTaskStatus(t, ctx, s, "closed")
+		err := s.tryCall(ctx, "prefill_delivery", id)
+		if err == nil || !strings.Contains(err.Error(), "closed work") {
+			t.Errorf("prefill_delivery on a closed task's approved delivery = %v, want a refusal", err)
+		}
+		if drafter.calls != 0 {
+			t.Errorf("the Slack composer was prefilled %d time(s) for a closed task", drafter.calls)
 		}
 		setTaskStatus(t, ctx, s, "done_locally")
 	})

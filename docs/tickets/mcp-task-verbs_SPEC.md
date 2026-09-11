@@ -621,6 +621,15 @@ These live in the new `internal/tools/mcp_verbs_integration_test.go`, built with
       → approve refused, and approve then close → send refused with the sender never called;
       a delivered task's sibling still approves and sends (positive control); the drafts
       worker's `expect_task_status` refusal. Mutations named in the file.
+    - `prefill_delivery` (the assisted Slack tier, which fills a real composer) runs the same
+      guard first (Codex pass 3).
+    - **Accepted residual (Codex pass 3, "high"):** a send whose phase 1 already committed
+      `sending` goes out even if Salvador marks the task delivered by hand during its network
+      call — `delivered` is indistinguishable from R8's sibling case without a delivery-set
+      model. It needs a human to approve a send and, within that send's seconds-long window,
+      also declare the work delivered by hand; it predates this ticket. Recorded under Future
+      work ("a delivery-set model so a hand `task_mark_delivered` can retire outstanding
+      approved deliveries"), not fixed here.
 
 ### Runbook and IK
 
