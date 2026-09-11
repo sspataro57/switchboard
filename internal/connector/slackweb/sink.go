@@ -20,6 +20,50 @@ type PGSink struct {
 
 func NewSink(pool *pgxpool.Pool) *PGSink { return &PGSink{pool: pool} }
 
+// KnownConversations lists every conversation:{id} raw row of a slack_web
+// account, with the workspace id from its raw JSON, its name, and the greatest
+// message id among THAT account's message:{conv}:* rows (SWT-39). Greatest by
+// id, never by ingested_at: every upsert rewrite bumps ingested_at, so the
+// latest-ingested row is routinely an old message. Message ids are "p" + ts
+// digits, so length-then-lexical order is numeric order.
+func (s *PGSink) KnownConversations(ctx context.Context) ([]KnownConversationRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH newest AS (
+		  SELECT m.source_account_id,
+		         split_part(m.external_id, ':', 2) AS conversation_id,
+		         (array_agg(split_part(m.external_id, ':', 3)
+		                    ORDER BY length(split_part(m.external_id, ':', 3)) DESC,
+		                             split_part(m.external_id, ':', 3) DESC))[1] AS message_id
+		    FROM raw_source_items m
+		    JOIN source_accounts a ON a.id = m.source_account_id AND a.provider = $1
+		   WHERE m.external_id LIKE 'message:%'
+		   GROUP BY 1, 2
+		)
+		SELECT COALESCE(c.raw_json->'workspace'->>'id', ''),
+		       split_part(c.external_id, ':', 2),
+		       COALESCE(c.raw_json->'conversation'->>'name', ''),
+		       COALESCE(n.message_id, '')
+		  FROM raw_source_items c
+		  JOIN source_accounts a ON a.id = c.source_account_id AND a.provider = $1
+		  LEFT JOIN newest n ON n.source_account_id = c.source_account_id
+		                    AND n.conversation_id = split_part(c.external_id, ':', 2)
+		 WHERE c.external_id LIKE 'conversation:%'
+		 ORDER BY 1, 2`, Provider)
+	if err != nil {
+		return nil, fmt.Errorf("load known Slack conversations: %w", err)
+	}
+	defer rows.Close()
+	var out []KnownConversationRow
+	for rows.Next() {
+		var r KnownConversationRow
+		if err := rows.Scan(&r.WorkspaceID, &r.ConversationID, &r.Name, &r.NewestMessageID); err != nil {
+			return nil, fmt.Errorf("scan known Slack conversation: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *PGSink) EnsureAccount(ctx context.Context, workspace Workspace) (int64, error) {
 	scopes := make([]string, 0, len(workspace.Conversations))
 	for _, conversation := range workspace.Conversations {

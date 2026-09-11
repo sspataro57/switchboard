@@ -50,6 +50,7 @@
       <td class="num">{{.Runs}}</td>
       <td>{{if eq .Verdict "ok"}}<span class="ok">ok</span>
           {{else if eq .Verdict "stale"}}<span class="bad">stale</span>
+          {{else if eq .Verdict "partial"}}<span class="warn">partial</span>
           {{else}}<span class="warn">never</span>{{end}}</td>
     </tr>
     {{else}}

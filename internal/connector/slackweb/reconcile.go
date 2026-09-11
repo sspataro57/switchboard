@@ -108,13 +108,19 @@ func ReconcileUnconfirmed(ctx context.Context, sink *PGSink, passes int) (int, e
 		// Only runs that STARTED after the click can have observed the message.
 		// A run already in flight at send time may have scraped the channel
 		// before the message existed, so counting it would flag early.
+		// SWT-39: and only runs that READ the target conversation. The leaf
+		// exports a subset per run; a pass that never opened the conversation
+		// could not have seen the message. `ok` and `partial` runs both count,
+		// under that rule. Runs recorded before coverage existed carry no `read`
+		// key and keep counting as they always did.
 		var observed int
 		if err := sink.pool.QueryRow(ctx,
 			`SELECT count(*) FROM sync_runs r
 			   JOIN source_accounts a ON a.id = r.source_account_id
 			  WHERE a.provider=$1 AND a.account_email=$2
-			    AND r.status='ok' AND r.started_at > $3`,
-			Provider, accountEmail, c.since).Scan(&observed); err != nil {
+			    AND r.status IN ('ok','partial') AND r.started_at > $3
+			    AND (NOT (r.stats ? 'read') OR (r.stats->'read') ? $4)`,
+			Provider, accountEmail, c.since, target.ConversationID).Scan(&observed); err != nil {
 			return flagged, fmt.Errorf("count export passes for %s: %w", accountEmail, err)
 		}
 		if observed < passes {

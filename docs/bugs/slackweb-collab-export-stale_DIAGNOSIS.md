@@ -333,3 +333,22 @@ mechanism inside the scrape, and so the exact shape of fix B.
 None of the existing landmines. **New landmine recorded:** "slackweb `status='ok'` and
 `conversations_seen` are not coverage", added to `.claude/INSTITUTIONAL_KNOWLEDGE.md`
 under Known landmines. I updated INSTITUTIONAL_KNOWLEDGE.md.
+
+## Fix — data model (switchboard half, 2026-09-11)
+
+- **`migrations/0027_sync_runs_partial.sql`** widens `sync_runs_status_check` to
+  `('running','ok','partial','error')`. It is additive and changes no rows. A Slack export whose leaf
+  deferred or could not read in-scope conversations, or ran out of budget, finishes `partial`.
+  **Deploy order:** apply 0027 to prod BEFORE any image that writes `partial`.
+- **`sync_runs.stats`** (jsonb, no schema change) gains, per Slack workspace run:
+  - `read`: the conversation ids actually read, written as `[]` when the run read nothing;
+  - `deferred`;
+  - `unreadable` (`{id,name,code,reason}`);
+  - `coverage`: the leaf's counts.
+
+  An old-leaf run carries none of these keys.
+- **Readers changed:**
+  - `ReconcileUnconfirmed` counts a pass only if it read the target conversation. Legacy runs
+    without a `read` key keep counting, and `ok` and `partial` both count.
+  - The `/funnel` connector-health row treats `partial` as a successful sync for freshness, and
+    says `partial` when the latest run was partial.
