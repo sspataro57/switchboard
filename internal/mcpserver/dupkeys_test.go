@@ -30,6 +30,11 @@ func TestCallTool_RefusesFoldDuplicateKeys(t *testing.T) {
 			`{"project":"p","title":"t","parent_id":123,"PARENT_ID":null}`, mcpserver.ProfileUser},
 		{"parent_id case pair, full profile", "create_task",
 			`{"project":"p","title":"t","PARENT_ID":null,"parent_id":123}`, mcpserver.ProfileFull},
+		// go-reviewer: the order that actually bypassed rejectSessionKind — the
+		// Kelvin-sign key FIRST, so the guard's last-wins decode read "log" while
+		// the key-sorted re-marshal put "session" last for the handler.
+		{"kind Kelvin pair, Kelvin first (the real bypass)", "task_append_log",
+			`{"task_id":1,"message":"m","\u212aind":"session","kind":"log"}`, mcpserver.ProfileFull},
 		{"kind Kelvin pair", "task_append_log",
 			`{"task_id":1,"message":"m","kind":"log","\u212aind":"session"}`, mcpserver.ProfileFull},
 	} {
