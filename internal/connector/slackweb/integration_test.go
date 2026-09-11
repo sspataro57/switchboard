@@ -33,7 +33,7 @@ const (
 
 type fixtureSource struct{}
 
-func (fixtureSource) Export(context.Context) (slackweb.Export, error) {
+func (fixtureSource) Export(context.Context, slackweb.ExportRequest) (slackweb.Export, error) {
 	return slackweb.Export{
 		SchemaVersion: slackweb.SchemaVersion,
 		Workspaces: []slackweb.Workspace{{

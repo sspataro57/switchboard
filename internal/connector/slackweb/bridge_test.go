@@ -82,7 +82,7 @@ func TestCommandBridgeExportRejectsSchemaDrift(t *testing.T) {
 	// The sibling repo can change independently; a version bump must fail
 	// closed rather than normalize a shape we no longer understand.
 	bridge := stubBridge(t, "printf '%s' "+shellQuote(`{"schema_version":99,"workspaces":[]}`))
-	if _, err := bridge.Export(context.Background()); err == nil ||
+	if _, err := bridge.Export(context.Background(), ExportRequest{}); err == nil ||
 		!strings.Contains(err.Error(), "schema_version") {
 		t.Fatalf("Export error = %v, want an unsupported schema_version refusal", err)
 	}
@@ -91,7 +91,7 @@ func TestCommandBridgeExportRejectsSchemaDrift(t *testing.T) {
 func TestCommandBridgeExportParsesWorkspaces(t *testing.T) {
 	bridge := stubBridge(t, "printf '%s' "+shellQuote(
 		`{"schema_version":1,"workspaces":[{"id":"T1","name":"Avviato","url":"https://app.slack.com/client/T1","own_user_id":"U1","conversations":[]}]}`))
-	exported, err := bridge.Export(context.Background())
+	exported, err := bridge.Export(context.Background(), ExportRequest{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestCommandBridgeExportParsesWorkspaces(t *testing.T) {
 
 func TestCommandBridgeSurfacesStderrOnFailure(t *testing.T) {
 	bridge := stubBridge(t, `printf 'chrome not reachable on 9222' >&2; exit 1`)
-	_, err := bridge.Export(context.Background())
+	_, err := bridge.Export(context.Background(), ExportRequest{})
 	if err == nil || !strings.Contains(err.Error(), "chrome not reachable") {
 		t.Fatalf("Export error = %v, want the leaf's stderr surfaced", err)
 	}

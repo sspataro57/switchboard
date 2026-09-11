@@ -29,7 +29,7 @@ func TestHTTPBridgeExportRejectsTruncatedBodyThatStaysValidJSON(t *testing.T) {
 	}
 	bridge.maxBytes = cap
 
-	_, err = bridge.Export(context.Background())
+	_, err = bridge.Export(context.Background(), ExportRequest{})
 	if err == nil {
 		t.Fatal("expected a truncated export to be refused, not ingested as complete")
 	}
@@ -52,7 +52,7 @@ func TestHTTPBridgeExportAcceptsBodyExactlyAtCap(t *testing.T) {
 	// Exactly the cap must still pass: the guard rejects overflow, not fullness.
 	bridge.maxBytes = int64(len(doc))
 
-	if _, err := bridge.Export(context.Background()); err != nil {
+	if _, err := bridge.Export(context.Background(), ExportRequest{}); err != nil {
 		t.Fatalf("a body exactly at the cap must be accepted, got %v", err)
 	}
 }
@@ -89,7 +89,7 @@ func TestHTTPBridgeExportSendsBearerAndChecksSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exported, err := bridge.Export(context.Background())
+	exported, err := bridge.Export(context.Background(), ExportRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestHTTPBridgeExportRejectsWrongSchemaVersion(t *testing.T) {
 	defer server.Close()
 
 	bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
-	if _, err := bridge.Export(context.Background()); err == nil {
+	if _, err := bridge.Export(context.Background(), ExportRequest{}); err == nil {
 		t.Fatal("expected a schema version mismatch to fail closed")
 	}
 }
@@ -124,7 +124,7 @@ func TestHTTPBridgeSurfacesNonOKStatus(t *testing.T) {
 	defer server.Close()
 
 	bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
-	_, err := bridge.Export(context.Background())
+	_, err := bridge.Export(context.Background(), ExportRequest{})
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("expected a 401 to surface, got %v", err)
 	}
