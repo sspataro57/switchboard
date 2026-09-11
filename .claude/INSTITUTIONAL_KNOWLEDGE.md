@@ -513,6 +513,11 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `.mcp.json`'s project-scope `ops` (full) shadows it. Installed 2026-09-10:
   `DATABASE_URL='${OPS_DATABASE_URL}'` DOES expand in a user-scope entry
   (Connected on first `claude mcp get ops`); no literal DSN needed.
+- "swb" = switchboard (Salvador's shorthand, 2026-09-10): taught by
+  `mcpserver.Instructions` (sent at initialize → session system prompt) and
+  both queue-tool descriptions. "list swb projects" → project_list, "swb
+  queue" → task_list. The server NAME stays `ops` (the precedence trick needs
+  the same name as `.mcp.json`'s).
 - **LANDMINE: `claude mcp get/list` lie about same-name precedence.** Inside
   this repo they show the user-scope `ops` (ops-mcp-read), yet a session here
   loads `.mcp.json`'s full `ops` (19 tools; a session in `kube` gets 3).

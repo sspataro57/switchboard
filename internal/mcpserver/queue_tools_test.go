@@ -110,6 +110,7 @@ func TestListTools_IncludesQueueReadTools(t *testing.T) {
 			{`status`, "and that an explicit status returns them"},
 			{`slug`, "project is the caller's slug"},
 			{`project_list`, "…which project_list lists (L10's error names it too)"},
+			{`\bswb\b`, "Salvador's shorthand: 'swb queue' must resolve to this tool"},
 		} {
 			if !regexp.MustCompile(want.re).MatchString(d) {
 				t.Errorf("task_list description does not match /%s/ — %s. Description: %q", want.re, want.why, tl.Description)
@@ -143,12 +144,30 @@ func TestListTools_IncludesQueueReadTools(t *testing.T) {
 			{`slug`, "it lists project slugs"},
 			{`memori[sz]|remember`, "…so a session can confirm one before memorising it (L0)"},
 			{`confirm`, "the confirmation is the tool's reason to exist"},
+			{`\bswb\b`, "Salvador's shorthand: 'list swb projects' must resolve to this tool"},
 		} {
 			if !regexp.MustCompile(want.re).MatchString(d) {
 				t.Errorf("project_list description does not match /%s/ — %s. Description: %q", want.re, want.why, tl.Description)
 			}
 		}
 	})
+}
+
+// The server instructions (sent at initialize, placed in the session's system
+// prompt by Claude Code) teach the "swb" shorthand: "list swb projects" is
+// project_list and "swb queue" is task_list, in every repo's session.
+func TestInstructions_TeachTheSwbShorthand(t *testing.T) {
+	d := strings.ToLower(mcpserver.Instructions)
+	for _, want := range []struct{ re, why string }{
+		{`"swb"`, "names the alias"},
+		{`list swb projects.{0,40}project_list`, "'list swb projects' → project_list"},
+		{`swb queue.{0,80}task_list`, "'swb queue' → task_list"},
+		{`memori[sz]ed`, "…with the repo's memorised slug"},
+	} {
+		if !regexp.MustCompile(want.re).MatchString(d) {
+			t.Errorf("mcpserver.Instructions does not match /%s/ — %s. Instructions: %q", want.re, want.why, mcpserver.Instructions)
+		}
+	}
 }
 
 // forwardedKeys returns the sorted top-level keys of the args the adapter
