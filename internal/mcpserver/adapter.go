@@ -132,6 +132,9 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 	if !s.allowed[name] {
 		return nil, fmt.Errorf("tool %q is not available over MCP", name)
 	}
+	if err := rejectFoldDuplicateKeys(args); err != nil {
+		return nil, err
+	}
 	if name == "task_append_log" {
 		if err := rejectSessionKind(args); err != nil {
 			return nil, err
@@ -191,6 +194,38 @@ func rejectParentID(args json.RawMessage) error {
 	}
 	if a.ParentID != nil {
 		return fmt.Errorf("parent_id is reserved for the spine; use create_child_task")
+	}
+	return nil
+}
+
+// rejectFoldDuplicateKeys refuses an args object carrying two keys that
+// encoding/json would read as the SAME struct field (it matches field names
+// case-insensitively, with Unicode folding: "PARENT_ID", "worKer_id").
+// Codex (SWT-38): the reservation guards (rejectParentID, rejectSessionKind)
+// decode the caller's original key order, where the last duplicate wins, but
+// the args are then re-marshalled as a map with SORTED keys before the handler
+// decodes them again — so {"parent_id":123,"PARENT_ID":null} passed the guard
+// yet reached create_task as parent_id=123. Refusing the ambiguity up front
+// means every later decode sees one value per field. Exact repeated keys need no
+// check: map and struct decoding both keep the last, so they cannot diverge.
+func rejectFoldDuplicateKeys(args json.RawMessage) error {
+	if len(args) == 0 {
+		return nil
+	}
+	m := map[string]json.RawMessage{}
+	if err := json.Unmarshal(args, &m); err != nil {
+		return fmt.Errorf("args are not a JSON object: %w", err)
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	for i := range keys {
+		for j := i + 1; j < len(keys); j++ {
+			if strings.EqualFold(keys[i], keys[j]) {
+				return fmt.Errorf("ambiguous arguments: keys %q and %q name the same field", keys[i], keys[j])
+			}
+		}
 	}
 	return nil
 }

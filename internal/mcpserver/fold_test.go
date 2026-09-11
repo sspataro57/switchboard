@@ -6,14 +6,14 @@ package mcpserver_test
 // key when the adapter re-marshals the args, wins:
 //   - "require_a\u017fsignee_type" (U+017F LATIN SMALL LETTER LONG S folds to s)
 //   - "wor\u212aer_id" (U+212A KELVIN SIGN folds to k)
-// The adapter must strip every fold-equivalent key, so the decoder sees only
-// the value the server set. The keys below are written as JSON \u escapes in
-// Go raw strings, so this file is plain ASCII and the decoder produces the real
-// characters.
+// These tests send ONE such variant (two or more are refused outright as
+// ambiguous, see dupkeys_test.go): the adapter must strip it when it sets the
+// pinned or injected value, so the decoder sees only the server's value. Keys
+// are JSON \u escapes in Go raw strings, so this file is plain ASCII.
 //
 // MUTATION THAT MUST TURN THIS RED: drop the EqualFold delete loop in
 // overwriteArgs → both tests fail (the pin reads "claude", worker_id reads
-// "spoof").
+// "spoof"), because both variants sort after the exact key.
 
 import (
 	"context"
@@ -24,12 +24,10 @@ import (
 	"github.com/sspataro57/switchboard/internal/mcpserver"
 )
 
-func TestPins_FoldEquivalentKeysCannotOverrideThePin(t *testing.T) {
+func TestPins_FoldEquivalentKeyCannotOverrideThePin(t *testing.T) {
 	fx := &fakeExec{}
 	srv := mcpserver.NewWithProfile(fx, "manual:salvo", mcpserver.ProfileUser)
-	args := `{"project":"p","title":"t","assignee_type":"claude",` +
-		`"require_a\u017f\u017fignee_type":"claude","require_a\u017fsignee_type":"",` +
-		`"REQUIRE_ASSIGNEE_TYPE":"claude"}`
+	args := `{"project":"p","title":"t","assignee_type":"claude","require_a\u017fsignee_type":"claude"}`
 	if _, err := srv.CallTool(context.Background(), "create_task", json.RawMessage(args)); err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
@@ -57,7 +55,7 @@ func TestWorkerID_FoldEquivalentKeyCannotSpoofIdentity(t *testing.T) {
 	fx := &fakeExec{}
 	srv := mcpserver.New(fx, "acme")
 	if _, err := srv.CallTool(context.Background(), "task_get_next",
-		json.RawMessage(`{"client":"acme","wor\u212aer_id":"spoof","WORKER_ID":"spoof2"}`)); err != nil {
+		json.RawMessage(`{"client":"acme","wor\u212aer_id":"spoof"}`)); err != nil {
 		t.Fatalf("CallTool: %v", err)
 	}
 	var got struct {
