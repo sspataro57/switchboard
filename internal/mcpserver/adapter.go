@@ -34,12 +34,15 @@ const (
 	// ProfileFull serves the whole agentTools allowlist: cmd/ops-mcp (worker
 	// consoles and this repo's .mcp.json).
 	ProfileFull Profile = "full"
-	// ProfileUser serves the queue reads plus task_dismiss, task_close and
-	// task_mark_delivered: cmd/ops-mcp-user, the user-scope install every other
-	// repo's session sees (SWT-37 V3; Salvador's decision of 2026-09-10). It
-	// can look at the queues and dismiss, close or mark delivered — nothing that
-	// creates, claims, drafts, approves, sends, books, links, logs, decides,
-	// reads mail or reopens. Policy refuses the three verbs to worker identities.
+	// ProfileUser serves the queue reads, task_dismiss, task_close and
+	// task_mark_delivered (SWT-37 V3), plus create_task, task_append_log and
+	// task_set_priority (SWT-38): cmd/ops-mcp-user, the user-scope install every
+	// other repo's session sees (Salvador's decisions of 2026-09-10). It can
+	// look at the queues, dismiss, close or mark delivered, create HUMAN tasks,
+	// log on human tasks and set priority. It cannot claim, create or log on
+	// worker (claude) tasks — the profile pins below refuse both — draft,
+	// approve, send, book, link, decide, read mail or reopen. Policy refuses
+	// the verbs and task_set_priority to worker identities.
 	ProfileUser Profile = "user"
 	// ProfileRead serves the queue reads only. No binary builds it since
 	// SWT-37; it is the named fail-closed floor an unknown profile lands on.
@@ -50,9 +53,23 @@ const (
 // deliberately: fetched by the claim holder it flips claimed → in_progress.
 var readProfileTools = []string{"project_list", "task_list", "task_get_next"}
 
-// userProfileTools is the read slice plus the three task verbs (SWT-37 V3).
+// userProfileTools is the read slice plus the three task verbs (SWT-37 V3)
+// and the three capture tools (SWT-38 C3/C5).
 var userProfileTools = append(append([]string(nil), readProfileTools...),
-	"task_dismiss", "task_close", "task_mark_delivered")
+	"task_dismiss", "task_close", "task_mark_delivered",
+	"create_task", "task_append_log", "task_set_priority")
+
+// userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
+// by OVERWRITE, after injectWorkerID. require_assignee_type:"human" makes the
+// create_task validator refuse a claude task and the task_append_log handler
+// refuse a line on a claude task: work from another repo's session stays in
+// Salvador's lane, which no worker console routes. The enforcement lives in the
+// validator and handler (inside the executor path); this only injects. It
+// also marks a user-scope call in audit_events.args.
+var userProfilePins = map[string]map[string]string{
+	"create_task":     {"require_assignee_type": "human"},
+	"task_append_log": {"require_assignee_type": "human"},
+}
 
 // Server adapts MCP tool calls onto the executor for one worker identity.
 type Server struct {
@@ -60,6 +77,9 @@ type Server struct {
 	workerID string
 	tools    []Tool
 	allowed  map[string]bool
+	// pins is fixed by NewWithProfile from the profile alone — no environment
+	// input. ProfileFull and ProfileRead have none.
+	pins map[string]map[string]string
 }
 
 // New builds the full-profile adapter. workerID comes from OPS_WORKER_ID —
@@ -78,6 +98,7 @@ func NewWithProfile(ex Executor, workerID string, p Profile) *Server {
 		names := readProfileTools
 		if p == ProfileUser {
 			names = userProfileTools
+			s.pins = userProfilePins
 		}
 		keep = map[string]bool{}
 		for _, n := range names {
@@ -103,7 +124,9 @@ func (s *Server) ListTools() []Tool {
 }
 
 // CallTool maps one MCP tools/call onto the executor. A model-supplied
-// worker_id is force-overwritten from the server's identity.
+// worker_id is force-overwritten from the server's identity, and then the
+// profile's pins (SWT-38 C4) are force-overwritten the same way — last, so no
+// earlier injection can undo them.
 func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage) (json.RawMessage, error) {
 	if !s.allowed[name] {
 		return nil, fmt.Errorf("tool %q is not available over MCP", name)
@@ -122,6 +145,11 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 	injected, err := injectWorkerID(args, s.workerID)
 	if err != nil {
 		return nil, fmt.Errorf("prepare args for %s: %w", name, err)
+	}
+	if pins := s.pins[name]; len(pins) > 0 {
+		if injected, err = overwriteArgs(injected, pins); err != nil {
+			return nil, fmt.Errorf("prepare args for %s: %w", name, err)
+		}
 	}
 
 	res, err := s.ex.Execute(ctx, executor.Call{
@@ -168,16 +196,24 @@ func rejectParentID(args json.RawMessage) error {
 
 // injectWorkerID overwrites (or sets) the worker_id field in the args object.
 func injectWorkerID(args json.RawMessage, workerID string) (json.RawMessage, error) {
+	return overwriteArgs(args, map[string]string{"worker_id": workerID})
+}
+
+// overwriteArgs sets each string field in set on the args object, replacing
+// any value the model supplied.
+func overwriteArgs(args json.RawMessage, set map[string]string) (json.RawMessage, error) {
 	m := map[string]json.RawMessage{}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &m); err != nil {
 			return nil, fmt.Errorf("args are not a JSON object: %w", err)
 		}
 	}
-	quoted, err := json.Marshal(workerID)
-	if err != nil {
-		return nil, fmt.Errorf("marshal worker id: %w", err)
+	for k, v := range set {
+		quoted, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("marshal %s: %w", k, err)
+		}
+		m[k] = quoted
 	}
-	m["worker_id"] = quoted
 	return json.Marshal(m)
 }

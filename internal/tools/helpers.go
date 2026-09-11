@@ -21,7 +21,8 @@ type querier interface {
 
 // insertTaskEvent writes one task_events row. The event-type vocabulary this
 // step ships: claimed, status_changed, log, session, feedback_requested,
-// feedback_answered, done_local, child_created, released.
+// feedback_answered, done_local, child_created, released; SWT-38 adds
+// priority_changed {from, to, reason} (task_set_priority).
 func insertTaskEvent(ctx context.Context, q querier, taskID int64, eventType string, payload map[string]any) (int64, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {

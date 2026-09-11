@@ -88,6 +88,12 @@ var humanOnly = map[string]bool{
 	// neither the kill switch nor the rate limit has any claim on it (the
 	// mark_delivery_failed argument, verbatim).
 	"task_dismiss": true,
+	// SWT-38 C6: reordering the queue is choosing work, and a worker must never
+	// choose its own. humanOnly, NOT mcpHumanOnly: no spine caller writes
+	// priority after creation, so the orchestrator is refused too. A future
+	// rule that needs it (triage escalation, say) must move it to mcpHumanOnly
+	// deliberately. Not send-shaped: nothing leaves the system.
+	"task_set_priority": true,
 }
 
 // mcpHumanOnly tools require a human identity WHEN THEY ARRIVE OVER MCP

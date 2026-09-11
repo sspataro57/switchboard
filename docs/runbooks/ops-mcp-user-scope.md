@@ -1,13 +1,15 @@
-# Runbook — the switchboard MCP at Claude Code user scope (SWT-35, SWT-37)
+# Runbook — the switchboard MCP at Claude Code user scope (SWT-35, SWT-37, SWT-38)
 
 Install `ops-mcp-user` once for Claude Code at USER scope, so a session opened in
-any repo on the workstation can read switchboard's queues and dismiss, close or
-mark delivered a task — and nothing else. The per-repo binding — which switchboard
-project is this repo's queue — lives in Claude Code's own per-project memory, not in
-switchboard.
+any repo on the workstation can read switchboard's queues, dismiss, close or mark
+delivered a task, log the work Salvador hands it as a swb task in his own lane,
+write progress on that task, and reorder any task's priority — and nothing else.
+The per-repo binding — which switchboard project is this repo's queue — lives in
+Claude Code's own per-project memory, not in switchboard.
 
-It serves six tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
-`task_close` and `task_mark_delivered`.
+It serves nine tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
+`task_close`, `task_mark_delivered`, `create_task`, `task_append_log` and
+`task_set_priority`.
 
 ## Fresh install (once, from `main`)
 
@@ -18,6 +20,17 @@ claude mcp get ops
 ```
 
 Then open a NEW session: tools and instructions are fetched when a session starts.
+
+## Upgrading from SWT-37
+
+The registration is unchanged — no `claude mcp remove` / `add`. Rebuild the binary
+on `main` and open a new session:
+
+```bash
+cd ~/projects/personal/switchboard && git switch main && go install ./cmd/ops-mcp-user
+```
+
+Then open a NEW session, and `/mcp` shows `ops` with the nine tools.
 
 ## Migrating from `ops-mcp-read` (SWT-35's install)
 
@@ -36,37 +49,65 @@ Then open a NEW session.
 
 ## What the install can and cannot do
 
-- **`ops-mcp-user` is the boundary.** It lists exactly the six tools above, refuses
+- **`ops-mcp-user` is the boundary.** It lists exactly the nine tools above, refuses
   every other tool at the MCP layer, and wires no mail sender and no calendar
   booker: its `main` never calls a sender seam, so whatever the environment holds
-  arms nothing. It cannot create, claim, draft, approve, send, book, link, log,
-  decide, read mail or reopen. It is a separate binary rather than a setting on
-  `ops-mcp`, so there is no variable whose absence falls back to the full surface.
+  arms nothing. It is a separate binary rather than a setting on `ops-mcp`, so
+  there is no variable whose absence falls back to the full surface.
+- **What it can do.** Read the queues; dismiss, close or mark delivered a task;
+  create HUMAN tasks (`assignee_type='human'`, status `ready` — Salvador's own
+  lane); log on human tasks; and set any task's priority.
+- **What it cannot do.** It cannot claim, create worker (`claude`) tasks, log on
+  worker tasks, draft, approve, send, book, link, decide, read mail or reopen.
+  The binary pins `require_assignee_type:"human"` onto every `create_task` and
+  `task_append_log` call (overwriting any value the model passes), so a request
+  for a `claude` task or a log line on a `claude` task is refused by the tool
+  itself, with an audit row. No worker console picks up what a session creates:
+  a console's `task_get_next` routes only `claude` tasks, whatever the priority.
 - **Omitting `OPS_TOKEN_KEY` is NOT a boundary.** A stdio MCP server inherits the
   environment of the shell that launched `claude`, and `~/.bashrc` exports
   `OPS_TOKEN_KEY`, so leaving it out of the `-e` flags withholds nothing: an
   `ops-mcp` (full) install there could approve and send mail as
   `mcp:manual:salvo`. Never install `ops-mcp` itself at user scope.
 - **Workers are refused by policy, not by the tool list.** The full `ops-mcp` (worker
-  consoles, this repo's `.mcp.json`) also lists the three verbs now, 22 tools in
-  all. A worker console (`mcp:{client}`) is refused `task_dismiss` by `human_only`
-  and `task_close` / `task_mark_delivered` by `mcp_human_only`; the orchestrator and
-  the Jira reconciler keep closing and delivering as before.
+  consoles, this repo's `.mcp.json`) also lists the three verbs and
+  `task_set_priority`, 23 tools in all. A worker console (`mcp:{client}`) is
+  refused `task_dismiss` and `task_set_priority` by `human_only` and `task_close` /
+  `task_mark_delivered` by `mcp_human_only`; the orchestrator and the Jira
+  reconciler keep closing and delivering as before. `task_set_priority` refuses
+  the orchestrator too: no automated caller chooses work. The full profile keeps
+  creating `claude` tasks and logging on them — the pin is the user binary's only.
 
 ## Accepted risk (Salvador, 2026-09-10)
 
 Every session reads untrusted text — an email, a Slack message, a web page, a file
 in a cloned repo. Such text can tell a session to dismiss, close or mark delivered
 ANY switchboard task in ANY project — undone with a reopen (below) — and the policy
-sees `mcp:manual:salvo`, a human. The session instructions say to act only when Salvador asks for that task id;
+sees `mcp:manual:salvo`, a human. Since SWT-38 it can also tell a session to:
+
+1. **create tasks** in any project — always `human` + `ready`, so no worker picks
+   them up and nothing is sent; their titles later show up in `task_list` in other
+   sessions. Damage: queue and board clutter;
+2. **append log lines to human tasks** — never to a `claude` task, so they never
+   reach a worker prompt. Damage: misleading notes in Salvador's own lane;
+3. **reorder any task's priority** (`task_set_priority`), worker queues included — a console then takes
+   a different ready task next. It only reorders existing work. Damage: urgent
+   work delayed, or old work jumped ahead.
+
+The session instructions say to act only when Salvador asks for that task id;
 that is a prompt rule, not a boundary. What cannot happen: nothing is sent, and no
-delivery is created or changed. A wrong close or dismiss drops the task from the
-queue and unblocks its dependents; a wrong dismiss also writes a training label
-and stops the Jira status sync from reopening a Jira-linked task.
+delivery is created or changed; no worker is dispatched onto attacker-authored
+work; no claim is taken; no status other than `ready` is created. A wrong close or
+dismiss drops the task from the queue and unblocks its dependents; a wrong dismiss
+also writes a training label and stops the Jira status sync from reopening a
+Jira-linked task. Every call leaves an audit row with its full args, and every
+priority change a `priority_changed {from,to}` event.
 Recovery:
 
 - a wrong close or dismiss: `opsctl call --tool task_reopen --args '{"task_id":N,"reason":"…"}'`;
 - a wrong "delivered": `task_close`, then `task_reopen` with `"status":"done_locally"`;
+- a wrong priority: one `task_set_priority` back to the event's `from`;
+- a planted task: `task_close`, or `task_dismiss` with `not_actionable`;
 - once SWT-36 (`dismiss-reopen-on-activity`) ships, a dismissed task also reopens
   by itself on the next inbound message routed to it (by a classify promotion or a
   capture rule).
@@ -75,6 +116,10 @@ Recovery:
 unmodified: `dashboard:…` means Salvador picked the reason code from the board's
 select; `mcp:…` means a model mapped his words to a code. A precision or eval pass
 over dismissals can split on `dismissed_by LIKE 'mcp:%'` and weigh that tier lower.
+
+**Capture provenance.** A user-scope `create_task` / `task_append_log` carries
+`require_assignee_type:"human"` in `audit_events.args`; a call from this repo's
+full `ops` does not, although both arrive as `mcp:manual:salvo`.
 
 ## Notes
 
@@ -107,15 +152,15 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
 1. `claude mcp get ops` shows the user-scope entry, its `ops-mcp-user` command and
    both `-e` values.
 2. In another repo (e.g. `cd ~/projects/personal/kube && claude`), `/mcp` shows
-   `ops` connected with exactly six tools.
+   `ops` connected with exactly nine tools.
 3. In `~/projects/personal/switchboard`, a SESSION gets ONE `ops` — the
-   project-scope `go run` entry with the full tool list (22 tools). Check this
+   project-scope `go run` entry with the full tool list (23 tools). Check this
    inside a session, NOT with `claude mcp get ops` / `claude mcp list`: run inside
    this repo, those CLI commands display the user-scope entry even though a session
    loads `.mcp.json`'s (verified 2026-09-10).
 4. From the other repo, `project_list` and `task_list(project=<slug>)` answer.
 5. `psql -h 192.168.50.49 -U ops -d ops -c "SELECT actor, tool, status FROM
-   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered')
+   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered','create_task','task_append_log','task_set_priority')
    ORDER BY id DESC LIMIT 5"` shows those calls with actor `mcp:manual:salvo`.
 
 ## Use
@@ -128,6 +173,8 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
   of tasks in play. Confirm the slug here before memorising it.
 - "remember this repo's switchboard project is `saka`" → Claude Code saves the slug
   to that repo's memory. Switchboard does nothing.
+- A repo with no swb project: say so once and the session remembers; it then
+  creates nothing there.
 - "swb queue" (or "what's in my swb queue") → `task_list(project=<the remembered slug>)`;
   "swb queue saka" names the slug directly. Either way it returns the project's
   work in the order a worker would take it, as compact rows plus counts by status.
@@ -138,6 +185,30 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
   longer needed.
 - "swb delivered 412" → `task_mark_delivered`: a `done_locally` task was delivered
   outside switchboard; its pending Deliver task is no longer drafted.
+- "swb add fix the flaky ingress check" (or "swb log this") → `create_task` in the
+  repo's remembered project: a terse title, a one- or two-line body in the
+  session's own words plus the repo path, `assignee_type` left unset (human). The
+  session says "logged as swb #N".
+- **Work requests log themselves.** When you ask a session to take on a piece of
+  work (a change, a fix, an investigation — not a question), it checks the swb
+  queue first, uses a task that already covers it, or else creates one before
+  starting and names its id.
+- "swb log 412 found the cause" → `task_append_log` on a human task. While working
+  on a swb task, the session logs meaningful steps, blockers and decisions; they
+  show on the dashboard's task page under "Events".
+- "swb done 412" → `task_close` with a one-line outcome as the reason. A session
+  that finishes work it logged closes the task the same way and says so.
+- "swb prioritize 412 [level]" → `task_set_priority`. No level means urgent;
+  "swb deprioritize 412" means normal. The session says the old and new level.
+
+  | level    | value |
+  |----------|-------|
+  | normal   | 0     |
+  | elevated | 1     |
+  | high     | 2     |
+  | urgent   | 3     |
+
+  Higher runs first in `task_get_next` and `task_list`.
 
 `task_list` hides closed and delivered tasks by default — unlike the dashboard
 board, which hides only closed — because every finished row in a model context is

@@ -1,10 +1,13 @@
 // ops-mcp-user is the stdio MCP server Claude Code sees at user scope, in every
 // repo on the workstation (SWT-35, renamed from ops-mcp-read by SWT-37;
 // docs/runbooks/ops-mcp-user-scope.md). It serves exactly the user profile —
-// project_list, task_list, task_get_next, task_dismiss, task_close and
-// task_mark_delivered — through the same executor pipeline as ops-mcp
-// (validate → policy → audit → handler). Policy refuses the three verbs to
-// worker identities (human_only / mcp_human_only).
+// project_list, task_list, task_get_next, task_dismiss, task_close,
+// task_mark_delivered and, since SWT-38, create_task, task_append_log and
+// task_set_priority — through the same executor pipeline as ops-mcp
+// (validate → policy → audit → handler). Policy refuses the verbs and
+// task_set_priority to worker identities (human_only / mcp_human_only); the
+// profile's require_assignee_type:"human" pin keeps create_task and
+// task_append_log to human (Salvador's-lane) tasks.
 //
 // It is a separate binary, not a setting on ops-mcp, so that nothing can fall
 // back to the full surface: there is no variable whose absence restores it.

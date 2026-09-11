@@ -175,8 +175,10 @@ func TestLifecycle_Integration_FullWalk(t *testing.T) {
 	var created struct {
 		TaskID int64 `json:"task_id"`
 	}
+	// priority 3 (was 5): SWT-38 C7 range-checks create_task to 0..3; no
+	// assertion here reads the value.
 	out := callOK(t, ctx, ex, actor, "create_task",
-		`{"project":"`+slug+`","title":"lifecycle task","body":"do the thing","assignee_type":"claude","priority":5}`)
+		`{"project":"`+slug+`","title":"lifecycle task","body":"do the thing","assignee_type":"claude","priority":3}`)
 	mustUnmarshal(t, out, &created)
 	if created.TaskID == 0 {
 		t.Fatal("create_task returned task_id 0")
