@@ -357,6 +357,24 @@ func reopenGuarded(ctx context.Context, pool *pgxpool.Pool, a reopenArgs) ([]byt
 				break
 			}
 		}
+		// Codex re-review: a task dismissed while BLOCKED may have had its
+		// dependencies satisfied while it was closed. Their completion events
+		// could not unblock a closed task, and closed → blocked fires no R5, so a
+		// verbatim restore would strand it. Restore blocked only while a
+		// dependency is still unmet (depUnsatisfiedPredicate, the tools
+		// package's one spelling), else ready.
+		if target == "blocked" {
+			var unmet bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM task_dependencies d
+				   JOIN tasks dt ON dt.id = d.depends_on_task_id
+				   WHERE d.task_id=$1 AND dt.status `+depUnsatisfiedPredicate+`)`, a.TaskID).Scan(&unmet); err != nil {
+				return fmt.Errorf("check dependencies of task %d: %w", a.TaskID, err)
+			}
+			if !unmet {
+				target = "ready"
+			}
+		}
 		reason := fmt.Sprintf("reopened after dismissal (%s, dismissed %s by %s): message %d from %s, ingested %s — %s",
 			code, dismissedAt.UTC().Format(time.RFC3339), dismissedBy,
 			a.MessageID, orNoneStr(sender), ingestedAt.UTC().Format(time.RFC3339), a.Reason)

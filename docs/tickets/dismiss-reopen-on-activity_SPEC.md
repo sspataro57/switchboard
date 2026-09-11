@@ -136,8 +136,14 @@ the row lock.**
 - **Why not always `ready`:** a promote review-lane task (`holding`) would go live on an inbound
   email. That would widen autonomy by message, bypassing the whitelist SWT-30 made a Go constant.
 - **Why not always `holding`:** a ready task would be hidden in the review lane.
-- **Carry-over, stated:** restoring `blocked` does not re-run R4. That is SWT-32's accepted
-  behaviour, and a dismissed blocked task is rare (plan tasks).
+- **Blocked is re-checked (amended after the Codex re-review, 2026-09-10).** A task dismissed
+  while `blocked` may have had its dependencies satisfied while it was closed: their completion
+  events could not unblock a closed task (R5 only unblocks BLOCKED dependents), and
+  closed → blocked fires no R5, so a verbatim restore would strand it. The guarded reopen
+  restores `blocked` only while a dependency is still unmet (`depUnsatisfiedPredicate`, the
+  tools package's one spelling), else `ready`. Pinned by
+  `TestDismissalReopen_BlockedRestoreRechecksDependencies`. (A human's plain `task_reopen`
+  with an explicit `status` is unchanged: the caller chose it.)
 
 **D6: dismissal rows are kept. A reopen stamps them, and one task may hold several rows over
 time.**
@@ -481,7 +487,6 @@ None.
   shows churn.
 - **A dismissals panel on `/funnel`,** and the precision report over `task_dismissals` (SWT-31
   future work).
-- **Re-running R4 on a restored `blocked` task** (the D5 carry-over).
 
 ## Invariants that apply
 
@@ -643,6 +648,5 @@ before go-live.
 - Narrowing D1 by sender class, if §4(f) shows notification churn.
 - A dismissal-precision report reading D6's semantics: rows, not tasks; message-reopened vs
   human-reopened.
-- Re-evaluating R4 when a reopen restores `blocked`.
 - Capture thread-matching for attribution-only rules, so a dismissed task with no external ref
   can also come back.
