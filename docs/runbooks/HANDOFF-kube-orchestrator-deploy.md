@@ -6,12 +6,18 @@ is yours.
 **Image (built and pushed — do not rebuild):**
 
 ```
-192.168.50.20:5000/switchboard:0.7.8
-digest sha256:1801e40804403a64b21ef94810f81206fc61b3c22002117372be147bd665abaa
-built from main efd17bd (Merge ticket-orchestrator-deploy, clean tree)
+192.168.50.20:5000/switchboard:0.7.9
+digest sha256:fd9118888220da632f8b81501176d0b487b0ca634aabf9ebac15bc6cb1998a86
+built from main 69f8e2d (SWT-41 orchestrator + SWT-39 Slack coverage, clean tree)
 ```
 
-`orchestratord` verified in the image: with no env it exits `MQTT_BROKER is not set`. It is the first image that carries
+It supersedes `0.7.8` (SWT-41 only). Verified: `orchestratord` exits `MQTT_BROKER is not set`,
+`slackweb` and `dashboard` exit `DATABASE_URL is not set` with no env.
+
+**0.7.9 carries SWT-39, which needs migration 0027 on prod BEFORE any workload runs it.** The
+Slack connector checks this before exporting and refuses with "apply migration 0027 before
+running this image" otherwise. Apply 0027 first (a `migrate` Job on this image, or
+`go run ./cmd/tools/migrate` against prod), then bump the connectors and the dashboard to 0.7.9. It is the first image that carries
 `/usr/local/bin/orchestratord`: the Dockerfile build line never included it before SWT-41.
 
 ## Order matters: do not apply until told the cursor is advanced
