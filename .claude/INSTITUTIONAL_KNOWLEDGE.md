@@ -1528,3 +1528,7 @@ decides under the tasks row lock and restores `closed_from_status` (else
   back up. SPEC Verification step 5 has the sequence. Generalises: dropping a
   total unique index that an old `ON CONFLICT (cols)` infers is a breaking
   change for the old binary — plan a drain or an expand/contract.
+- **Reading dismissal labels:** "a human undid this" is `reopened_by` being a
+  HUMAN actor (dashboard:/opsctl:/manual:), not merely
+  `reopened_by_message_id IS NULL` — a reconciler reopen racing a fresh human
+  dismissal can stamp it with a NULL message id (pre-existing, seconds wide).

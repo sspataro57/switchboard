@@ -295,8 +295,10 @@ The observer is untouched and calls no reopen.
 11. On a reopen decision, `Run`:
     - claims (reason per D7);
     - calls `task_append_log` (existing text);
-    - calls `task_reopen` with `{task_id, dismissal_id, message_id, reason}` as `promote:classify`;
-    - records `task_id`.
+    - records `task_id` (amended at review: BEFORE the reopen, the create path's "record before
+      provenance" rule — the claim is already spent, so a failed reopen must not also lose the
+      task pointer);
+    - calls `task_reopen` with `{task_id, dismissal_id, message_id, reason}` as `promote:classify`.
 
     `Stats` gains `Reopened` (counted from `reopened:true`). Dry-run prints the request and
     writes nothing.
@@ -606,6 +608,12 @@ None.
         is the kube session's; the image build happens here), and re-install
         `go install ./cmd/ops-mcp-user` and `./cmd/opsctl` from `main`.
      5. Scale the dashboard back up; open a new session.
+     6. Re-run Verification §4 query (b); expect 0 rows. A row means an old `task_reopen` ran in
+        the window and left an open dismissal on an open task — stamp it by hand (`reopened_at`,
+        `reopened_by='cutover'`).
+   - Do not dismiss anything during the window. (A zero-downtime alternative — keep the total
+     index in 0026 and drop it in a later 0027 — was weighed at review and rejected: with 17
+     dismissals in production the drain costs a minute.)
    - The IK drift landmine ("apply the migration BEFORE any image carrying the code") still
      holds for step 3 vs step 4; this ticket adds the drain in step 2 because the migration also
      breaks the OLD code.
