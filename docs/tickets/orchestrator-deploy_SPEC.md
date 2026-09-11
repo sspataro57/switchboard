@@ -2,9 +2,8 @@
 
 # orchestrator-deploy — run orchestratord for real, start from now, and make its absence visible
 
-**STATUS: PROVISIONAL — four owner questions open** (`docs/tickets/orchestrator-deploy_OPEN_QUESTIONS.md`).
-Q1–Q3 change only cutover steps and one env value, not code. Q4 changes only the wording of the
-"Stage contract" section, which ships as text.
+**STATUS: FINAL, ready for `test-author`.** All four owner questions were answered 2026-09-11 and are
+folded in below as O1–O4 (`docs/tickets/orchestrator-deploy_OPEN_QUESTIONS.md` keeps the record).
 
 ## Source
 
@@ -19,17 +18,44 @@ Ad-hoc. Salvador, verbatim, 2026-09-11:
 >
 > "yes spec it, start from now" (answering: on first deploy, start from the current event rather
 > than replaying the backlog)
+>
+> "yes to 1, 2 and 3 off, a for 4" (the four open questions)
 
 Prod evidence (coordinator, read-only, 2026-09-11):
 - `orchestrator_cursor.last_event_id = 75`, `updated_at` 2026-07-12 01:01Z. There are 17
   `audit_events` rows with actor `orchestrator`, the last one 2026-07-12 01:01Z (that was the SWT-5
   `--once` smoke).
-- **866 `task_events` sit past the cursor** (2026-09-07..11): log 794, status_changed 69,
-  delivery_sent 1, delivery_confirmed 1, priority_changed 1.
+- **866 `task_events` sat past the cursor** (2026-09-07..11): log 794, status_changed 69,
+  delivery_sent 1, delivery_confirmed 1, priority_changed 1. This was measured before the O1/O2
+  closes, which added more `status_changed` events past the cursor.
 - No Deployment or CronJob for orchestratord, fleetd or hooksd exists in
   `~/projects/personal/kube/switchboard`. No process runs on the workstation or on 192.168.50.30.
-- July leftovers in project `switchboard`: #4–#6 `done_locally`; #10–13, 15, 16, 18–20 `blocked`;
-  #8 "Deliver #6" `ready`.
+- **July leftovers, now closed** (O1, O2): #4–#6 and #8 (smoke), #9–#20 (plan import 1).
+
+## Owner decisions (answered 2026-09-11)
+
+- **O1 (was Q1) — the July smoke tasks are closed before switch-on. DONE.** On 2026-09-11 the
+  coordinator closed #4, #5, #6 and #8 through the executor (`opsctl call --tool task_close`,
+  audited, reason citing SWT-41 Q1).
+- **O2 (was Q2) — all twelve July plan tasks are closed before switch-on. DONE.** #9–#20 were
+  closed the same way (reason citing SWT-41 Q2).
+  - These closes wrote `status_changed` events AFTER the cursor (75) and BEFORE the cursor advance
+    (V4 step 2). So they fall inside the skipped range and the orchestrator never evaluates them.
+    No R5 unblock can fire from them.
+  - The advance must run after them, and it will: V4 orders it so. The cutover keeps them only as
+    a verify item (V3 P0), not an action.
+- **O3 (was Q3) — the morning brief stays OFF for this deploy.** `ORCH_BRIEF_PROJECT` is left
+  unset, which disables R7 (`cmd/orchestratord/main.go`). **Turning it on later** takes one
+  setting on the Deployment:
+  - set `ORCH_BRIEF_PROJECT=<project slug>`;
+  - optionally add `ORCH_BRIEF_HOUR` (default 7);
+  - add `TZ=America/New_York` if the hour should be Eastern, because the container clock is UTC
+    and 7 would otherwise be 03:00 EDT.
+
+  The runbook records this (criterion 12).
+- **O4 (was Q4) — (a): each pipeline step wakes the next; the orchestrator keeps managing tasks
+  once they exist.** This is SWT-40's E-D2 exactly, so the message-level contract belongs to
+  SWT-40 Part E and SWT-41 defines none of it (D6).
 
 ## What exists today (verified in code, this session)
 
@@ -40,8 +66,8 @@ Prod evidence (coordinator, read-only, 2026-09-11):
   artifact".
 - **"First deploy seeds at max(id)" is no longer true.** Migration 0003 seeded the cursor once, at
   apply time (2026-07). `Engine.DrainOnce` reads the existing row and drains `WHERE id > cursor`.
-  It has no re-seed and no "skip" path. **A plain deploy today replays all 866 events.** Step 05's
-  line ~227 describes the migration, not the binary.
+  It has no re-seed and no "skip" path. **A plain deploy today replays every event since 75.**
+  Step 05's line ~227 describes the migration, not the binary.
 - **What a replay would actually do** (rules × today's facts): `log`, `priority_changed` and
   `delivery_confirmed` match no rule (`Evaluate` default, pinned by
   `TestEvaluate_CaptureEventsFireNothing`). `status_changed` fires R5 only when `to ∈
@@ -79,14 +105,14 @@ an answer task, and answering it publishes `resume` over MQTT. Expired claims ar
 minute, and dependency gating runs. If the process is missing, crashed or wedged, `/tasks` shows a
 red line saying so. That is the silent two-month gap, made loud.
 
-## Decisions (unilateral, rationale attached; flag in review if wrong)
+## Decisions (unilateral unless marked owner-answered; flag in review if wrong)
 
 **D1 — Start-from-now is a new executor tool, `orchestrator_cursor_advance`, run once by hand.**
 - **Not a hand-typed `UPDATE`.** Step 05 shipped `task_add_dependency` for exactly this reason:
   "psql-as-workflow would dodge the executor". Moving the cursor is how a human decides to discard
   lifecycle events, so it gets an audit row, a policy decision and a guard.
 - **Not a migration.** A migration fires whenever migrate runs, including against a live engine,
-  and would collide with SWT-40's 0027/0028.
+  and would collide with SWT-40's migration numbers.
 - **Not an orchestratord flag.** A flag makes skipping one typo away on every restart.
 
 The tool's contract:
@@ -102,16 +128,14 @@ The tool's contract:
   transaction.
 - **Gating:** `humanOnly` (`internal/policy`), NOT in `internal/mcpserver/schemas.go`. It is
   reachable via `opsctl call --tool orchestrator_cursor_advance --args '{…}'`.
-- Only forward. Reversing is `expect` = current and a lower target, which this tool does not
-  offer. Replaying history is a different, deliberate act (Future work).
+- Only forward. Replaying history is a different, deliberate act (Future work).
 - **Lock key, one spelling:** `internal/orchestrator/integration_test.go` imports `internal/tools`,
   so `internal/tools` must NOT import `internal/orchestrator` (cycle in the test build). Put the
   constant in a leaf both can import, or keep two constants pinned equal by a unit test. Never two
   unpinned literals.
 
 **D2 — Least privilege for the pod.**
-- **Env:** `DATABASE_URL` and `MQTT_BROKER` only, plus `ORCH_HEALTH_ADDR` (D5), plus `ORCH_BRIEF_*`
-  only if Q3 says yes.
+- **Env:** `DATABASE_URL`, `MQTT_BROKER` and `ORCH_HEALTH_ADDR` (D5) only. No `ORCH_BRIEF_*` (O3).
 - **No secrets beyond the db:** no `OPS_TOKEN_KEY`, no Slack bridge, no Pipedream, no
   `OPS_LOCAL_*`.
 - **Senders stay unwired:** main keeps calling no `tools.Set*`. That is the structural guarantee
@@ -123,7 +147,7 @@ The tool's contract:
 
 **D3 — The lock connection is checked every tick; losing it exits the process.**
 `TryAdvisoryLock` returns a handle with `Alive(ctx) error` (a `SELECT 1` on the held connection).
-The main loop calls it on each tick, and an error → `os.Exit(1)` after logging. Kubernetes restarts
+The main loop calls it on each tick, and an error → exit non-zero after logging. Kubernetes restarts
 the pod, and the new process re-takes the lock or exits on contention. This turns "CNPG switchover →
 unlocked engine" into a restart.
 
@@ -131,8 +155,8 @@ unlocked engine" into a restart.
 - orchestratord needs nothing from it: R2 resolves the resume target from `task_claims`, not
   `worker_heartbeats`, and publishing needs only the broker.
 - Nothing consumes `worker_heartbeats` for a decision, and no worker console runs in-cluster.
-- Heartbeats are retained on the broker, so a later fleetd rebuilds current state on first connect.
-  Deferring loses nothing.
+- Heartbeats are retained on the broker, so a later fleetd rebuilds current state on first connect
+  (including SWT-40's `pipeline.{stage}` heartbeats). Deferring loses nothing.
 - fleetd ships with the first always-on worker console or a dashboard fleet view, whichever comes
   first.
 
@@ -166,16 +190,24 @@ unlocked engine" into a restart.
 - **No push alert in this ticket.** No notification channel exists in the codebase, and building
   one is its own ticket (Future work).
 
-**D6 — The MQTT stage contract ships as TEXT in this SPEC, not code** (see "Stage contract").
-- It has no publisher and no subscriber in this ticket.
-- Step 05 declined to define `dispatch` for the same reason: a contract with no consumer binds
-  future steps to a guess.
-- The first code lands with its first consumer, the "convert the classify CronJobs" follow-up.
+**D6 — Owner-answered (O4 = a): SWT-41 defines NO pipeline contract.** The message-level contract
+has one spelling, SWT-40 Part E:
+- `internal/pipeline/contract.go`, topic `ops/pipeline/{event}`, QoS 1, not retained;
+- the event vocabulary `captured`, `gated`, `route_classified`, `routed`, `inquiry_classified`,
+  `promoted`;
+- `cmd/pipelined` with a 5-minute sweep and `ops/workers/pipeline.{stage}/status` heartbeats.
 
-**D7 — The one skipped `delivery_sent` and any missed R5 unblocks are surfaced, not silently
-dropped.** P3/P4 list them before the advance. The recommended handling is to apply R8's effect by
-hand (`task_mark_delivered` + `task_close` of its Deliver task) only if the parent is still
-`done_locally`. R5 is covered by Q2.
+SWT-41 adds no topic, constant, text contract or subscriber. Writing its own would be a second
+spelling of the same boundary (the repo's recurring defect). What SWT-41 owns is the **task
+boundary** E-D2 hands to the orchestrator: once a stage creates or changes a task through the
+executor, the resulting `task_events` reach the running orchestratord, whose R-rules own that
+task's lifecycle. That half has been dead in prod since July, and this ticket is what makes it
+live.
+
+**D7 — The skipped `delivery_sent` is surfaced, not silently dropped.** P3 lists it before the
+advance. The recommended handling is to apply R8's effect by hand (`task_mark_delivered` +
+`task_close` of its Deliver task) only if the parent is still `done_locally`. The R5 side of the
+skipped range is moot after O2 (every formerly blocked task is closed); P4 confirms it.
 
 ## What each rule does the moment it runs (today's data, new events only)
 
@@ -183,35 +215,32 @@ hand (`task_mark_delivered` + `task_close` of its Deliver task) only if the pare
 |---|---|---|
 | R1 feedback task | new `feedback_requested` | Only when a console or manual session calls `request_feedback`. None is running, so nothing until one does. |
 | R2 resume | new `feedback_answered` | Publishes `resume` to the claim holder's `ops/workers/{id}/cmd` (not retained, so it is lost if no wrapper listens) and closes the R1 answer task. With no live claim it records `skipped:no_active_claim`. |
-| R3 Deliver task | new `done_local` | Fires on `mark_done_local` or `pr_merged → done_locally`, for projects with `delivery ≠ console`. **#4–#6 never re-fire:** a task cannot re-reach `done_locally` by an event already past the cursor. |
+| R3 Deliver task | new `done_local` | Fires on `mark_done_local` or `pr_merged → done_locally`, for projects with `delivery ≠ console`. The July `done_locally` tasks are closed (O1), and events already skipped never re-fire. |
 | R8 delivery lifecycle | new `delivery_sent` | Marks the parent delivered and closes its Deliver task. This is live behaviour the dashboard and assisted tier have been missing since SWT-8, so expect it on the next real send. |
 | R4 block | new `dependency_added` / `released` | Only plan import or `task_add_dependency` add deps. Quiet today. |
-| R5 unblock | new `done_local`, or `status_changed` to delivered/closed | **This is the one that touches the July leftovers.** Closing a plan root (#9, #14, #17) AFTER cutover flips its blocked dependents to `ready`. If they are `assignee_type='claude'`, a `switchboard` console could then claim them. Q2. |
+| R5 unblock | new `done_local`, or `status_changed` to delivered/closed | Only for tasks with blocked dependents. After O2 prod has none from July; P4 confirms zero. Quiet until a new plan import. |
 | R6 claim expiry | every tick, **current state** | Releases any unreleased claim past `expires_at` on a `claimed`/`in_progress` task on the FIRST tick. Start-from-now does not protect against it, because it reads state, not events. P2 lists them. `needs_feedback` stays exempt. |
-| R7 morning brief | every tick, **current state** | Only if `ORCH_BRIEF_PROJECT` is set (Q3). Then one "Morning brief YYYY-MM-DD" human task per day, which nothing closes. Hour is container-local, i.e. UTC unless `TZ` is set. |
+| R7 morning brief | every tick, **current state** | OFF (O3): `ORCH_BRIEF_PROJECT` unset. |
 | R9–R11 PR/CI | new `pr_*` / `ci_*` | hooksd is undeployed and the github poller is not scheduled, so these are quiet. |
 
-**The July leftovers** (project `switchboard`): #4, #5, #6 `done_locally` (smoke; #8 "Deliver #6"
-is `ready`); #10–13, 15, 16, 18–20 `blocked` (plan import 1, "switchboard follow-ups", roots #9 /
-#14 / #17). Without a new event, none of them triggers a rule. Stale test and plan data is the risk
-only through R5 (a human close after cutover), R6 (a stale claim) and the morning brief's counts.
-**Recommendation:** close the smoke leftovers and whichever plan tasks are dead **before** the
-advance, so their `status_changed` events land before the new cursor and are never evaluated (Q1,
-Q2).
+**Interaction with SWT-40 once it ships:** its gate and promoter create tasks through the executor
+(`create_task` writes no creation event; SWT-38 IK), append `log` events and reopen through
+`task_reopen` (`status_changed`). All of these are R-rule no-ops or R5 no-ops. Its promoted tasks
+enter the R-rules' scope when Salvador moves them (a `done_local` → R3, a send → R8).
 
 ## Acceptance criteria
 
-1. The `Dockerfile` build line includes `./cmd/orchestratord`. A plain unit test
-   (`cmd/orchestratord/dockerfile_test.go` or a repo-level structural test) reads the `Dockerfile`
-   and fails if `./cmd/orchestratord` is missing from the `go build` line. It exists because this
-   bug class is exactly "built, never shipped".
+1. The `Dockerfile` build line includes `./cmd/orchestratord`. A plain unit test (in
+   `cmd/orchestratord` or a repo-level structural test) reads the `Dockerfile` and fails if
+   `./cmd/orchestratord` is missing from the `go build` line. It exists because this bug class is
+   exactly "built, never shipped".
 2. `orchestrator_cursor_advance` (D1), integration-tested on the compose db:
    - with the cursor at X < head and `expect=X` → cursor = head, and the output's
      `skipped_by_type` equals an independent `GROUP BY` over `(X, head]`;
    - a second call with `expect=X` → refused, naming the current value, cursor unchanged;
    - with the orchestrator lock held on another connection → refused, cursor unchanged;
-   - an `audit_events` row exists (`tool='orchestrator_cursor_advance'`, status `ok`/`error`) plus
-     a `policy_decisions` row;
+   - an `audit_events` row exists (`tool='orchestrator_cursor_advance'`) plus a `policy_decisions`
+     row;
    - validation: `reason` empty → refused, and `expect < 0` → refused.
 3. Policy: `orchestrator_cursor_advance` is in `humanOnly`. The test enumerates the IK's actor
    shapes:
@@ -220,10 +249,12 @@ Q2).
      `worker:x` → denied.
 
    `internal/mcpserver/schemas.go` is unchanged, and its adapter test still pins the listed set.
-4. **Start-from-now, end to end** (integration): seed events past a cursor, advance, then
-   `DrainOnce` processes **0** events. Insert a new `done_local` on a `delivery='dashboard'` task,
-   and `DrainOnce` processes exactly 1 and creates exactly one `Deliver #N` task. Mutation: skip the
-   advance and the drain creates tasks for the seeded events (red).
+4. **Start-from-now, end to end** (integration): seed events past a cursor, including a
+   `status_changed` to `closed` on a task with a blocked dependent (the O2 shape). Advance, then
+   `DrainOnce` processes **0** events and the dependent stays `blocked`. Insert a new `done_local`
+   on a `delivery='dashboard'` task, and `DrainOnce` processes exactly 1 and creates exactly one
+   `Deliver #N` task. Mutation: skip the advance, and the drain unblocks the dependent and creates
+   tasks for the seeded events (red).
 5. Lock liveness (D3):
    - `Alive` returns nil while held;
    - after `pg_terminate_backend(<lock conn pid>)` on the compose db, `Alive` returns an error
@@ -252,16 +283,18 @@ Q2).
    - the funnel's existing sections and suites stay untouched and green.
 10. `cmd/orchestratord` still calls no `tools.Set*` seam (a structural test scanning `main.go`,
     like `ops-mcp-user`'s). `internal/orchestrator` still imports no provider adapter (existing
-    check).
+    check). SWT-41 adds nothing under `internal/pipeline` and no `ops/pipeline/` topic (D6).
 11. `go test ./...` and `make integration` are green. No migration is added (the ledger is
     unchanged).
 12. `docs/runbooks/HANDOFF-kube-orchestrator-deploy.md` exists with the hand-off list below, and
     `docs/runbooks/orchestrator.md` covers:
-    - the cutover sequence (P1–P5);
+    - the cutover sequence (V3–V4);
     - how to read the health section;
     - when `orchestrator_cursor_advance` is and is not appropriate (never as a routine restart
       step; downtime catch-up is the default and correct behaviour);
-    - the pre-cutover SQL.
+    - the pre-cutover SQL;
+    - **how to turn the morning brief on later** (O3: `ORCH_BRIEF_PROJECT`, the optional
+      `ORCH_BRIEF_HOUR`, and why `TZ` is needed).
 13. The IK entries in "Notes for the IK" are written by the delivering session.
 
 ## Data model changes
@@ -269,7 +302,7 @@ Q2).
 **None.** No migration.
 - `orchestrator_cursor` (0003) is written by the engine and, now, by the one humanOnly tool.
 - Health reads `pg_locks`, `task_events` and `orchestrator_cursor`.
-- SWT-40's 0027/0028 are unaffected.
+- SWT-40's migrations are unaffected.
 
 ## API / MCP tool changes
 
@@ -281,7 +314,8 @@ Q2).
 - **Changed binary** `cmd/orchestratord`: `ORCH_HEALTH_ADDR` (default `:8091`), `/healthz`, lock
   liveness. The rules, facts, apply, drain and `--once` are unchanged.
 - **Changed** `internal/orchestrator/engine.go`: `TryAdvisoryLock` returns a lock handle
-  (`Alive`, `Release`); new `health.go` (`Health`, `HealthVerdict`, `HealthStallAfter`).
+  (`Alive`, `Release`); new `internal/orchestrator/health.go` (`Health`, `HealthVerdict`,
+  `HealthStallAfter`).
 - **Dashboard**: read-only additions only (D5).
 
 ## MQTT topics
@@ -290,57 +324,18 @@ Q2).
 |---|---|---|---|
 | `ops/workers/{worker_id}/cmd` | orchestratord publishes `resume {"task_id":N,"feedback_request_id":M}` (R2, unchanged from step 05) | no | 1 |
 
-Client id is `switchboard-orchestratord`, publish only, no will. No new topic is implemented. The
-future contract is below, as text.
-
-## Stage contract (normative text for the follow-up; no code in SWT-41)
-
-Salvador's target: **only capture stays on cron; everything after it is woken, not scheduled.**
-Q4 decides one sentence of this section (who rings the bell).
-
-1. **Postgres stays the queue of record** (CLAUDE.md, decided). Every stage's inbox is already a
-   SQL query with a NOT EXISTS dedup:
-   - capture's pending filter;
-   - the classify lanes' inboxes keyed on `worker_type`;
-   - promote's claim table.
-
-   **MQTT is the doorbell, never the letter.** No payload field is ever read as work.
-2. **Topic:** `ops/pipeline/{stage}/done`. It is **not retained**: a retained doorbell re-rings on
-   every reconnect, the same reason `cmd` is not retained. QoS 1. Payload
-   `{"stage":"capture","at":"<RFC3339>","count":N}`, where `count` is advisory (logging only).
-   Stage vocabulary: `capture`, `classify_personal`, `classify_inquiry`, `classify_route`,
-   `promote`. The spellings live in `internal/fleet` as one set of constants when the code lands.
-3. **Publisher:** a stage publishes after its transaction COMMITS, and only if it wrote something
-   the next stage reads (count > 0). Connectors publish `capture` at the end of their capture pass.
-   A publish failure is logged and never fails the pass: the sweep covers it.
-4. **Consumer:** a long-running Deployment per stage group, subscribed to its upstream topics.
-   - On a message it runs one pass, debounced, so ten rings during a pass mean one more pass.
-   - It **also runs a pass on a sweep timer** (e.g. 15 min). That is what makes a lost message
-     harmless, exactly as the cursor drain makes a lost NOTIFY harmless (step 05's rule, restated
-     for MQTT).
-   - Single instance per stage keeps using the stage's existing advisory lock (classify
-     `0x5157_0022` shared by lanes, promote `0x5157_0021`).
-   - Client id `switchboard-{stage}` via `fleet.NewSpineClient`, never the mirror id.
-5. **Where the orchestrator sits:** it owns the TASK lifecycle (`task_events`, LISTEN/NOTIFY +
-   cursor). The message pipeline owns message → task. They meet at `tasks`: promote and capture
-   create tasks through the executor, and those tasks' later events reach the orchestrator on
-   their own. Q4: whether the orchestrator also rings the pipeline's bells.
-6. **GPU stages stay fail-closed:** a ring while the z4 is down skips exactly as a CronJob tick
-   does today. The shared classify lock means rings serialize the lanes; they never overlap.
-
-**In SWT-41:** this text and the IK pointer to it. **Out:** constants, publish helpers,
-subscribers, connector changes, and converting any CronJob. SWT-40 is unchanged and ships its
-CronJobs as written. Its "Scheduling and cost" table is the input to the conversion follow-up.
+Client id is `switchboard-orchestratord`, publish only, no will. No new topic. `ops/pipeline/*` is
+SWT-40 Part E's (D6).
 
 ## Hand-off to the kube session (spec only; the kube repo is not edited here)
 
-1. **Image:** a new tag built from `main` after this merges, e.g. `0.7.8` (the next free tag at
-   build time), with `/usr/local/bin/orchestratord` present. Verify each entrypoint starts and
-   fails on its own missing config (the SWT-18 handoff's check), and that orchestratord in
-   particular exits with `MQTT_BROKER is not set`. Bump the dashboard to the same tag (it carries
-   the health section). Bumping the rest is uniformity, the kube session's call.
+1. **Image:** a new tag built from `main` after this merges (the next free tag at build time), with
+   `/usr/local/bin/orchestratord` present. Verify each entrypoint starts and fails on its own
+   missing config (the SWT-18 handoff's check), and that orchestratord in particular exits with
+   `MQTT_BROKER is not set`. Bump the dashboard to the same tag (it carries the health section).
+   Bumping the rest is uniformity, the kube session's call.
 2. **Migrations:** SWT-41 adds none. Before pushing, still compare prod `schema_migrations` against
-   `ls migrations/` (IK landmine). If SWT-40 merged first, 0027/0028 must be applied before any
+   `ls migrations/` (IK landmine). If SWT-40 merged first, its migrations must be applied before any
    workload runs the new tag.
 3. **New manifest `kube/switchboard/orchestrator.yaml`**, a Deployment `orchestratord` in `ops`:
    - `replicas: 1`, `strategy: Recreate`. Two replicas would fight over the advisory lock, and
@@ -350,10 +345,10 @@ CronJobs as written. Its "Scheduling and cost" table is the input to the convers
    - env:
      - `DATABASE_URL` from `secret/switchboard-db`;
      - `MQTT_BROKER=tcp://192.168.50.45:1883`;
-     - `ORCH_HEALTH_ADDR=:8091`;
-     - `ORCH_BRIEF_PROJECT` / `ORCH_BRIEF_HOUR` / `TZ=America/New_York` **only if Q3 = yes**.
-       Distroless `static` ships tzdata; confirm with a one-off run printing `time.Local`.
-   - **No** `OPS_TOKEN_KEY`, Slack, Pipedream or `OPS_LOCAL_*` env (D2).
+     - `ORCH_HEALTH_ADDR=:8091`.
+   - **No** `ORCH_BRIEF_*` (O3; a commented-out block in the manifest shows the later switch-on:
+     `ORCH_BRIEF_PROJECT`, `ORCH_BRIEF_HOUR`, `TZ=America/New_York`). **No** `OPS_TOKEN_KEY`,
+     Slack, Pipedream or `OPS_LOCAL_*` env (D2).
    - `livenessProbe: httpGet /healthz :8091`, `initialDelaySeconds: 20`, `periodSeconds: 30`,
      `failureThreshold: 3`. No readinessProbe, no Service (nothing calls it).
    - resources `requests {cpu: 10m, memory: 32Mi}`, `limits {cpu: 200m, memory: 128Mi}`, and the
@@ -361,13 +356,14 @@ CronJobs as written. Its "Scheduling and cost" table is the input to the convers
    - Header comment: single-instance by advisory lock `0x5157_0005`. An exit with "another
      orchestratord holds the advisory lock" right after a rollout is expected, not an incident. It
      clears within one restart.
-4. **Order:** do not apply the Deployment until Salvador reports P4 done (the cursor advanced). The
-   advance refuses while an orchestratord runs, and a Deployment applied first would replay the
-   backlog.
+4. **Order:** do not apply the Deployment until Salvador or the coordinator reports V4 step 2 done
+   (the cursor advanced). The advance refuses while an orchestratord runs, and a Deployment applied
+   first would replay the backlog.
 5. Update `connectors.yaml`'s header comment and `README.md` ("orchestrator … NOT deployed yet") to
    match.
 6. **Rollback:** scale to 0. The cursor stays wherever it was, and restarting later catches up
    (the default behaviour). Nothing to undo in the db.
+7. Separate from SWT-40's `pipelined` Deployment. Neither depends on the other to start.
 
 ## Files likely to touch
 
@@ -395,30 +391,30 @@ CronJobs as written. Its "Scheduling and cost" table is the input to the convers
 - `orchestrator_cursor_advance`;
 - lock liveness, `/healthz`, and the dashboard health section plus board line;
 - the runbook and kube hand-off;
-- the cutover (P1–P5) and the smoke;
-- the stage contract as text.
+- the cutover (V3–V4) and the smoke (V5).
 
 **Out of scope (do not bundle):**
+- **Anything under SWT-40**, especially Part E's pipeline contract, `internal/pipeline`,
+  `cmd/pipelined` and connector publishes (D6), and converting the classify CronJobs (SWT-40's
+  named follow-up).
 - **fleetd and hooksd deployment** (D4; hooksd also needs public exposure, SWT-9).
-- **The stage contract's code** and **converting the classify CronJobs** to MQTT-woken consumers.
-  That is the follow-up, and it needs its own SPEC.
-- **SWT-40** (inquiry-promote) in any part. Its CronJobs ship as it specifies.
+- **The morning brief** (O3; switch-on is a later env change, no code).
 - New orchestrator rules, changes to R1–R11, `dispatch` semantics, and a `delivery_failed` rule
   (IK: failing after R8 is its own analysis).
 - A push alert channel (email/Slack/HA). Replaying history, or a backward cursor move.
 - A narrower db role, OIDC for the dashboard, and the drafts/triage workers' deployment.
-- Build-order step 8/9 work that R3/R8/R9 would make more useful.
 
 ## Invariants that apply
 
 1. **Raw-first:** no surface. Nothing is ingested.
-2. **One funnel:** Deliver, answer and brief tasks are `tasks` rows. `orchestrator_cursor` is one
-   integer of bookkeeping. Health is a read, not a table.
+2. **One funnel:** Deliver and answer tasks are `tasks` rows. `orchestrator_cursor` is one integer
+   of bookkeeping. Health is a read, not a table.
 3. **Everything through the executor:**
    - the cursor advance is a registered, humanOnly, audited tool, not psql;
    - the engine's own mutations are unchanged (executor calls as `orchestrator`, plus its
      cursor bookkeeping);
-   - health and dashboard additions are SELECT-only with no tool call.
+   - health and dashboard additions are SELECT-only with no tool call;
+   - O1/O2's closes already went through `task_close`.
 4. **Nothing external without a delivery row:** orchestratord wires no sender seam and gets no
    `OPS_TOKEN_KEY`, so it structurally cannot send (criterion 10). Its only broker write is internal
    `resume`.
@@ -427,7 +423,8 @@ CronJobs as written. Its "Scheduling and cost" table is the input to the convers
 6. **Stealth attribution:** no client-visible surface.
 7. **Orchestrator purity:** `rules.go` is unchanged. `HealthVerdict` is pure and tested offline.
    Every action the deployed engine takes writes executor audit rows plus `orchestrated` records,
-   as step 05 built. The cursor advance is itself an audited decision.
+   as step 05 built. The cursor advance is itself an audited decision. Per O4, the orchestrator
+   stays task-scoped: it gains no message-level events.
 
 ## Sibling patterns to copy
 
@@ -451,26 +448,32 @@ CronJobs as written. Its "Scheduling and cost" table is the input to the convers
 against 192.168.50.49. Mutations from criteria 4 and 8: apply, see red, revert.
 **V3. Pre-cutover, prod, read-only** (`BEGIN READ ONLY … ROLLBACK`; record results in the runbook,
 freeze none in a test):
+- **P0 (verify O1/O2, not an action)**
+  `SELECT id, status FROM tasks WHERE id IN (4,5,6,8,9,10,11,12,13,14,15,16,17,18,19,20) AND
+  status <> 'closed'` → **zero rows**. Also record the max `task_events.id` of their closing
+  `status_changed` events. It must be ≤ the `to` the advance reports in V4 step 2 (the closes land
+  inside the skipped range, so the orchestrator never evaluates them).
 - **P1** `SELECT last_event_id, updated_at FROM orchestrator_cursor` → expect 75. Take `max(id)`
   and the `event_type` histogram past it, to compare with the tool's output later.
 - **P2** Expired unreleased claims on `claimed`/`in_progress` tasks (R6's own predicate from
   `loadTickFacts`) → R6 releases these on tick one. List them.
 - **P3** The `delivery_sent` event(s) past the cursor: task id, its status, and whether its
   Deliver task is open (D7).
-- **P4** `blocked` tasks whose dependencies are ALL in `done_locally|delivered|closed` right now.
-  These are R5 unblocks the replay would have done and start-from-now will not.
+- **P4** `blocked` tasks whose dependencies are ALL in `done_locally|delivered|closed` → expect
+  zero after O2. Any row is an R5 unblock that start-from-now forgoes; handle it by hand with
+  `task_unblock` or `task_close`.
 - **P5** `SELECT slug, delivery FROM projects WHERE slug IN ('smoke','switchboard')`, to pick the
   smoke project (needs `delivery ≠ console`).
 
 **V4. Cutover, in order:**
-1. Q1/Q2 closes through the dashboard or `task_close`, BEFORE the advance. D7's by-hand R8 if P3
-   says so.
+1. P0 passes. D7's by-hand R8 if P3 says so.
 2. From the merged `main`: `DATABASE_URL="$OPS_DATABASE_URL" go run ./cmd/opsctl call --tool
    orchestrator_cursor_advance --args '{"expect_last_event_id":75,"reason":"SWT-41 start from
    now"}'`. Its `skipped_by_type` must match P1 plus whatever arrived since. Paste the output into
    the runbook.
 3. Kube session applies the Deployment. Then check:
-   - `kubectl -n ops logs deploy/orchestratord` shows `orchestratord running`;
+   - `kubectl -n ops logs deploy/orchestratord` shows `orchestratord running` and
+     `brief_project` empty;
    - `/funnel` shows `ok`, backlog 0;
    - `/tasks` shows no red line.
 
@@ -487,7 +490,8 @@ freeze none in a test):
 6. Then check:
    - `audit_events` rows with actor `orchestrator` for each action;
    - the cursor ≥ the smoke's last event id;
-   - `/funnel` `ok`.
+   - `/funnel` `ok`;
+   - no `Morning brief` task created (O3).
 7. **Stall check:** `kubectl -n ops scale deploy/orchestratord --replicas=0` → `/tasks` shows the
    red `not_running` line on the next load. Scale back to 1 → `ok`, and any events written
    meanwhile drain (catch-up).
@@ -508,30 +512,39 @@ a human verb that discards lifecycle events and turns on the first always-on spi
 - **The cursor row outlives its seed.** 0003's "seed at max(id)" happened once. Any later first
   start drains from wherever the row is. Skipping is `orchestrator_cursor_advance` (humanOnly,
   CAS, refuses while running). Downtime catch-up is the default and the right behaviour, so do not
-  advance as a routine restart step.
+  advance as a routine restart step. SWT-41 advanced from 75 (record `to` and the date).
 - **Health = `pg_locks` + backlog age, not cursor age** (an idle system never moves the cursor).
-- **Stage contract (SWT-41 text, not yet code):** Postgres is the letter, MQTT the doorbell, and a
-  sweep timer the fallback. Pointer to this SPEC's section.
+- **Boundary split (O4, 2026-09-11):** message-level stages wake each other over `ops/pipeline/*`
+  (SWT-40 Part E, the one spelling); the orchestrator owns the task boundary only and gains no
+  message-level events.
+- Morning brief is OFF (O3). Switch-on is `ORCH_BRIEF_PROJECT` on the Deployment, plus `TZ` for an
+  Eastern hour.
 - Update "Still not deployed" in Environment facts: orchestrator deployed (date, tag). fleetd,
   hooksd, triage and drafts are still not deployed.
 
 ## Coordination with in-flight work
 
-- **SWT-40 (inquiry-promote):** no shared migration. Both touch `internal/policy` `humanOnly`
-  (merge-level only) and the IK. Its promote passes write `log` and `status_changed` (via
-  `task_reopen`) events that the live orchestrator drains as no-ops or R5 no-ops, and its `holding`
-  and `ready` human tasks match no rule. Its CronJobs are unchanged by this ticket. The stage
-  contract above is written to absorb them later without changing SWT-40's code.
+- **SWT-40 (inquiry-promote)** names "deploy orchestratord" as its precondition ticket and leaves
+  the backlog decision to it. SWT-41 decides it: start from now (D1).
+  - The contract split is E-D2's, confirmed by O4.
+  - No shared migration: SWT-41 adds none.
+  - Shared files, merge-level only: `internal/policy` `humanOnly` entries and the IK. SWT-41 does
+    not touch `internal/fleet/client.go`, where SWT-40 may add a generic `Publish`.
+  - Two separate Deployments (`orchestratord`, `pipelined`) with distinct MQTT client ids
+    (`switchboard-orchestratord` vs `switchboard-pipeline-{stage}` / `switchboard-capture-{connector}`).
 
 ## Future work
 
-- **The stage-contract implementation:** constants and helpers in `internal/fleet`, connector
-  publishes, and classify/promote as MQTT-woken Deployments with sweep fallback. It replaces the
-  `classify-*` CronJobs.
-- fleetd deployment plus a dashboard fleet view. A spine heartbeat topic (`ops/spine/{service}/status`,
-  retained, LWT) shared by orchestratord and the future stage consumers.
+- fleetd deployment plus a dashboard fleet view. An orchestratord MQTT heartbeat in the same
+  dotted `ops/workers/…/status` shape SWT-40 E-D4 uses for `pipelined` stages, if the fleet view
+  wants spine services too.
 - A push alert when the health verdict ≠ `ok` for longer than N minutes (needs a notification
   channel decision).
 - A narrower db role per workload. A deliberate history-replay verb with a dry-run (Evaluate is
   pure, so a read-only "what would fire" report over a range is cheap).
-- Closing old morning briefs automatically, if Q3 turns them on.
+- Closing old morning briefs automatically, before O3's brief is ever turned on.
+
+---
+
+No open questions remain: Q1–Q4 were answered by Salvador on 2026-09-11 and are folded in as O1–O4.
+This SPEC is ready for `test-author`.

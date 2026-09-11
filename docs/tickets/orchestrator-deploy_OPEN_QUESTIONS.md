@@ -1,9 +1,9 @@
 > Jira: SWT-41
 
-# orchestrator-deploy — open questions
+# orchestrator-deploy — open questions (ALL ANSWERED 2026-09-11)
 
-Four decisions. None of them changes the code. Q1–Q3 decide what happens on switch-on day, and Q4
-decides one sentence of the written plan for later.
+Salvador, verbatim, 2026-09-11: "yes to 1, 2 and 3 off, a for 4". Folded into
+`orchestrator-deploy_SPEC.md` as owner decisions O1–O4.
 
 ---
 
@@ -17,7 +17,9 @@ Closing them **before** the switch-on means the orchestrator never even sees tho
 
 **Recommended:** yes, close all four before switching on.
 
-Answer:
+**ANSWERED 2026-09-11: yes. DONE.** The coordinator closed #4, #5, #6 and #8 on 2026-09-11 through
+`opsctl call --tool task_close` (audited, reason citing SWT-41 Q1), before switch-on. SPEC: O1, and
+the cutover keeps it as verify check P0.
 
 ---
 
@@ -33,7 +35,9 @@ Closing them **before** switching on avoids that entirely.
 **Recommended:** close all twelve before switching on. Most of that list was overtaken by later
 tickets. If any are still real, name them and they stay.
 
-Answer:
+**ANSWERED 2026-09-11: yes, close all twelve. DONE.** The coordinator closed #9–#20 the same way
+(reason citing SWT-41 Q2). The closes landed before the cursor advance, so the orchestrator never
+evaluates them. SPEC: O2, and verify check P0.
 
 ---
 
@@ -46,7 +50,8 @@ closes old briefs, so they pile up unless you close them. The dashboard's `/brie
 **Recommended:** leave it off for this deploy. Turn it on later with one setting once you know you
 want it. If yes now: which project, and what hour (Eastern)?
 
-Answer:
+**ANSWERED 2026-09-11: off.** To turn it on later, set `ORCH_BRIEF_PROJECT` on the Deployment,
+optionally with `ORCH_BRIEF_HOUR` and `TZ=America/New_York`. SPEC: O3.
 
 ---
 
@@ -68,8 +73,6 @@ case a message is missed.
 **Recommended:** (a). It is fewer moving parts. A step that is down does not stall the
 orchestrator's task work, and the orchestrator stays small enough to test without a database.
 
-Answer:
-
----
-
-Answer by editing the entries. Say 'questions answered' and I'll fold them into the SPEC.
+**ANSWERED 2026-09-11: (a).** This matches SWT-40 Part E (E-D2), which owns the step-to-step
+contract. SWT-41 defines none of it and owns only the task side. SWT-40's sweep is 5 minutes, not
+the 15 written above. SPEC: O4 and D6.
