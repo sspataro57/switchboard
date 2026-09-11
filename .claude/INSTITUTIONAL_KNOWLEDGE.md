@@ -1519,3 +1519,12 @@ decides under the tasks row lock and restores `closed_from_status` (else
   keep their old behaviour (promote's Q3 fall-through; capture's silent log).
   The reconciler's D4 suppression reads OPEN dismissals only, so an
   activity-reopened task is ordinary to it again.
+- **0026 needs a coordinated CUTOVER, not migrate-then-roll** (Codex review).
+  Pre-SWT-36 code's `ON CONFLICT (task_id) DO NOTHING` cannot infer the
+  partial index, so every OLD dismiss writer (dashboard, installed
+  ops-mcp-user, opsctl, open `ops` sessions) errors after 0026; new code needs
+  0026 first. Drain the old writers (dashboard to 0, close sessions), apply
+  0026, deploy the new images and re-install ops-mcp-user/opsctl, then scale
+  back up. SPEC Verification step 5 has the sequence. Generalises: dropping a
+  total unique index that an old `ON CONFLICT (cols)` infers is a breaking
+  change for the old binary — plan a drain or an expand/contract.

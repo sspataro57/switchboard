@@ -588,10 +588,27 @@ None.
      - (g) promote is live for `personal` only (since 2026-09-09 13:03 UTC), with 0 Q3
        duplicates so far.
      - `schema_migrations` max is 0025, as step 5 requires.
-5. **Deploy order:**
-   - Run `SELECT max(version) FROM schema_migrations`. It must be 25 before 0026 is applied.
-   - Apply 0026 BEFORE any image carrying this code (IK drift landmine).
-   - The image build happens here. The CronJob tag bump is the kube session's.
+5. **Deploy order — a coordinated CUTOVER, not migrate-then-roll (Codex review, 2026-09-10):**
+   - **Why neither order is safe on its own.** Pre-SWT-36 code dismisses with
+     `ON CONFLICT (task_id) DO NOTHING`; after 0026 that target cannot infer the now-PARTIAL
+     index, so every old writer's dismiss fails at runtime. New code writes
+     `closed_from_status` and restates `WHERE reopened_at IS NULL`, so it fails before 0026.
+     The errors are loud (no row is corrupted), but the dismiss button breaks during skew.
+   - **The old `task_dismiss` writers** are: the dashboard deployment; the installed
+     user-scope `ops-mcp-user` binary (SWT-37); any installed `opsctl`; any running
+     `ops-mcp` session. Worker consoles cannot dismiss (humanOnly).
+   - **The sequence:**
+     1. Run `SELECT max(version) FROM schema_migrations`; it must be 25.
+     2. Stop the old writers: scale the dashboard to 0 (kube session); close open Claude Code
+        sessions that load `ops`.
+     3. Apply 0026.
+     4. Deploy the new dashboard image and the CronJob images carrying this code (the tag bump
+        is the kube session's; the image build happens here), and re-install
+        `go install ./cmd/ops-mcp-user` and `./cmd/opsctl` from `main`.
+     5. Scale the dashboard back up; open a new session.
+   - The IK drift landmine ("apply the migration BEFORE any image carrying the code") still
+     holds for step 3 vs step 4; this ticket adds the drain in step 2 because the migration also
+     breaks the OLD code.
 6. **Live smoke (after deploy):**
    - Pick a dismissed task from (c) whose ticket or thread is active. Wait for, or ask for, one
      inbound message.
