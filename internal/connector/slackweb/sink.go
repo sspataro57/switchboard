@@ -20,6 +20,86 @@ type PGSink struct {
 
 func NewSink(pool *pgxpool.Pool) *PGSink { return &PGSink{pool: pool} }
 
+// KnownConversations lists every conversation:{id} raw row of a slack_web
+// account, with the workspace id from its raw JSON, its name, and when this
+// account last VISITED it: the start of the latest completed run (ok or
+// partial, last 30 days) whose stats.read OR stats.unreadable lists it
+// (SWT-39). A failed read counts as a visit: it cost a slot and time, and a
+// conversation that can never be read would otherwise sort first forever.
+// Zero when no such run exists — the leaf then reads it first.
+func (s *PGSink) KnownConversations(ctx context.Context) ([]KnownConversationRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH runs AS (
+		  SELECT r.source_account_id, r.started_at, r.stats
+		    FROM sync_runs r
+		    JOIN source_accounts a ON a.id = r.source_account_id AND a.provider = $1
+		   WHERE r.status IN ('ok','partial') AND r.started_at > now() - interval '30 days'
+		), visited AS (
+		  SELECT runs.source_account_id, rd.conversation_id, runs.started_at
+		    FROM runs CROSS JOIN LATERAL jsonb_array_elements_text(runs.stats->'read') AS rd(conversation_id)
+		   WHERE jsonb_typeof(runs.stats->'read') = 'array'
+		  UNION ALL
+		  SELECT runs.source_account_id, u->>'id', runs.started_at
+		    FROM runs CROSS JOIN LATERAL jsonb_array_elements(runs.stats->'unreadable') AS u
+		   WHERE jsonb_typeof(runs.stats->'unreadable') = 'array'
+		), last_read AS (
+		  SELECT source_account_id, conversation_id, max(started_at) AS at
+		    FROM visited GROUP BY 1, 2
+		)
+		SELECT COALESCE(c.raw_json->'workspace'->>'id', ''),
+		       split_part(c.external_id, ':', 2),
+		       COALESCE(c.raw_json->'conversation'->>'name', ''),
+		       lr.at
+		  FROM raw_source_items c
+		  JOIN source_accounts a ON a.id = c.source_account_id AND a.provider = $1
+		  LEFT JOIN last_read lr ON lr.source_account_id = c.source_account_id
+		                        AND lr.conversation_id = split_part(c.external_id, ':', 2)
+		 WHERE c.external_id LIKE 'conversation:%'
+		 ORDER BY 1, 2`, Provider)
+	if err != nil {
+		return nil, fmt.Errorf("load known Slack conversations: %w", err)
+	}
+	defer rows.Close()
+	var out []KnownConversationRow
+	for rows.Next() {
+		var r KnownConversationRow
+		var at *time.Time
+		if err := rows.Scan(&r.WorkspaceID, &r.ConversationID, &r.Name, &at); err != nil {
+			return nil, fmt.Errorf("scan known Slack conversation: %w", err)
+		}
+		if at != nil {
+			r.LastReadAt = *at
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate known Slack conversations: %w", err)
+	}
+	return out, nil
+}
+
+// CheckPartialStatus fails fast when migration 0027 is missing: every run of
+// this code can finish 'partial', and without 0027 each one would fail its
+// FinishRun after a full browser export, leave its run row 'running' and stop
+// the pipeline (SWT-39 review). Milliseconds, before any browser time.
+func (s *PGSink) CheckPartialStatus(ctx context.Context) error {
+	var def string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT pg_get_constraintdef(oid) FROM pg_constraint
+		  WHERE conname = 'sync_runs_status_check' AND conrelid = 'sync_runs'::regclass`).Scan(&def); err != nil {
+		return fmt.Errorf("read sync_runs_status_check: %w", err)
+	}
+	return partialStatusAdmitted(def)
+}
+
+// partialStatusAdmitted judges the CHECK's definition text.
+func partialStatusAdmitted(constraintDef string) error {
+	if !strings.Contains(constraintDef, "'partial'") {
+		return fmt.Errorf("sync_runs does not admit status 'partial' — apply migration 0027 before running this image")
+	}
+	return nil
+}
+
 func (s *PGSink) EnsureAccount(ctx context.Context, workspace Workspace) (int64, error) {
 	scopes := make([]string, 0, len(workspace.Conversations))
 	for _, conversation := range workspace.Conversations {

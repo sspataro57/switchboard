@@ -352,6 +352,39 @@ polling status is not "the run ended". The session task_event lands only after
 the run's envelope is parsed; don't read "parked but no session event" as a
 loss until the wrapper logs park.
 
+### slackweb `status='ok'` and `conversations_seen` are not coverage
+**Location:** leaf `slackconnector/src/slack/slack-web-adapter.ts`
+`collectDmConversations` / `listConversationsOnPage`, plus
+`internal/connector/slackweb/ingest.go:58-85`. Bit 2026-09-10/11 (SWT-39,
+`docs/bugs/slackweb-collab-export-stale_DIAGNOSIS.md`).
+
+**Which conversations get exported.** The leaf exports only the conversations it
+can scrape from the Slack UI in that run: the Home sidebar plus the `/dms` view's
+virtual list. switchboard sends no cursor or conversation list (`/export` has an
+empty body) and marks every run `ok` whatever subset arrives.
+
+**How much that is.** Measured 2026-09-11:
+- Collaboratory (542): 6–8 of 38 known conversations per run.
+- Avviato (539): 16 of 45.
+- Occasional "wide" runs (33–43 conversations, 12–16 min) sweep in messages
+  that 340+ `ok` runs never saw, in BOTH workspaces.
+
+**What that means.** A message lands only when its conversation happens to be
+scraped. That is why messages arrive hours or days late while the runs read
+`ok`, `raw_inserted=0`.
+
+**Consequences:**
+- A zero-insert streak is not evidence that nothing happened.
+- `ReconcileUnconfirmed` counting `ok` runs as "passes that could have observed"
+  a send is false for any conversation outside the scraped set.
+- The bridge logs at `info`. Enumeration lines are `debug` and carry counts
+  only, so the mini log cannot tell you which conversations a run covered.
+
+**Rule:** before reasoning from slackweb `sync_runs`, check which conversations
+the run actually exported. Last-written `raw_source_items` rows per run window
+plus `messages_seen` arithmetic is the only record until coverage telemetry
+ships.
+
 ---
 
 ## The seven invariants (review checklist form)

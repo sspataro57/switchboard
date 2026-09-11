@@ -209,10 +209,14 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 
 			rows, err := s.pool.Query(ctx, `
 				SELECT a.provider, a.account_email,
-				       COALESCE(p.phase, ''), p.last_ok, COALESCE(wnd.runs, 0)
+				       COALESCE(p.phase, ''), p.last_ok, COALESCE(p.latest_status, ''), COALESCE(wnd.runs, 0)
 				  FROM source_accounts a
 				  LEFT JOIN (SELECT source_account_id, COALESCE(stats->>'phase','') AS phase,
-				                    max(finished_at) FILTER (WHERE status='ok' AND finished_at IS NOT NULL) AS last_ok
+				                    -- SWT-39: a 'partial' run synced (it read what it could); it counts
+				                    -- for freshness, and the row says partial when it is the latest.
+				                    max(finished_at) FILTER (WHERE status IN ('ok','partial') AND finished_at IS NOT NULL) AS last_ok,
+				                    (array_agg(status ORDER BY finished_at DESC)
+				                       FILTER (WHERE status IN ('ok','partial') AND finished_at IS NOT NULL))[1] AS latest_status
 				               FROM sync_runs GROUP BY 1,2) p ON p.source_account_id = a.id
 				  LEFT JOIN (SELECT source_account_id, COALESCE(stats->>'phase','') AS phase, count(*) AS runs
 				               FROM sync_runs
@@ -227,7 +231,8 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				var h funnelHealthRow
 				var phase *string
 				var lastOK *time.Time
-				if err := rows.Scan(&h.Provider, &h.Email, &phase, &lastOK, &h.Runs); err != nil {
+				var latestStatus string
+				if err := rows.Scan(&h.Provider, &h.Email, &phase, &lastOK, &latestStatus, &h.Runs); err != nil {
 					return fmt.Errorf("scan health row: %w", err)
 				}
 				name := "(none)"
@@ -256,6 +261,11 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 					}
 				} else {
 					h.Verdict = funnelFreshness(last, now, funnelDisplayStaleAfter)
+					if h.Verdict == "ok" && latestStatus == "partial" {
+						// SWT-39: fresh, but the latest run did not read everything in
+						// scope. A green ok over a 7-of-38 export hid a 17-hour delay.
+						h.Verdict = "partial"
+					}
 				}
 				page.Health = append(page.Health, h)
 			}
