@@ -31,8 +31,8 @@ itself.
 the old pod still held the lock. It clears within one restart. `strategy: Recreate` makes it rare.
 
 A **lost lock connection** (for example a CNPG switchover) makes the process exit non-zero before
-its next tick or drain — the lock is checked before every one, and again before every 200-event
-batch inside a drain. Kubernetes restarts it, and it takes the lock again. That's by design: an engine that
+its next tick or drain — the lock is checked before every one, and again before every event
+inside a drain. Kubernetes restarts it, and it takes the lock again. That's by design: an engine that
 kept draining without the lock could double-apply.
 
 ## `orchestrator_cursor_advance` — when to use it, and when not

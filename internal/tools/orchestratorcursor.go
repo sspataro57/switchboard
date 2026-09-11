@@ -94,6 +94,12 @@ func orchestratorCursorAdvance(ctx context.Context, pool *pgxpool.Pool, args []b
 		if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '10s'`); err != nil {
 			return fmt.Errorf("set lock timeout: %w", err)
 		}
+		// lock_timeout bounds the WAIT for SHARE; this bounds how long it is HELD
+		// (Codex re-review): each statement below — head, histogram, cursor update
+		// — is cut off at 15s, so task_events writers are never blocked for long.
+		if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '15s'`); err != nil {
+			return fmt.Errorf("set statement timeout: %w", err)
+		}
 		if _, err := tx.Exec(ctx, `LOCK TABLE task_events IN SHARE MODE`); err != nil {
 			return fmt.Errorf("wait for in-flight task_events writers (retry when they finish): %w", err)
 		}
