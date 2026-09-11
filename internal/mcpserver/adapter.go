@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/sspataro57/switchboard/internal/executor"
 )
@@ -209,6 +210,17 @@ func overwriteArgs(args json.RawMessage, set map[string]string) (json.RawMessage
 		}
 	}
 	for k, v := range set {
+		// go-reviewer (SWT-38): encoding/json matches struct fields
+		// case-insensitively with Unicode folding, so a model-supplied
+		// "require_aſsignee_type" (U+017F folds to s) or a Kelvin-sign
+		// "worKer_id" decodes as the real field — and, sorting after the exact
+		// key when this map is marshalled, it wins. Delete every fold-equivalent
+		// key so only the value set here can reach the decoder.
+		for mk := range m {
+			if mk != k && strings.EqualFold(mk, k) {
+				delete(m, mk)
+			}
+		}
 		quoted, err := json.Marshal(v)
 		if err != nil {
 			return nil, fmt.Errorf("marshal %s: %w", k, err)
