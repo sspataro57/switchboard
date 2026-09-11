@@ -623,18 +623,27 @@ These live in the new `internal/tools/mcp_verbs_integration_test.go`, built with
       worker's `expect_task_status` refusal. Mutations named in the file.
     - `prefill_delivery` (the assisted Slack tier, which fills a real composer) runs the same
       guard first (Codex pass 3).
-30. **A close cannot land under an in-flight send** (Codex pass 4). Send phase 1 commits
-    `sending` and dispatches after its transaction ends, so a `task_close` in that gap would let
-    words reach a client for CLOSED work. `closeTransition` (close and dismiss) now refuses while
-    the task has a delivery in `sending`, naming it; phase 1 SHARE-locks the task before writing
-    `sending` and the close holds FOR UPDATE, so exactly one wins in either order. A Slack reply
-    wedged in `sending` must be resolved (`mark_delivery_sent` / `mark_delivery_failed`) before
-    its task can close. Pinned by the "close refuses an in-flight send" subtest; mutation: drop
-    the check → red.
     - **Accepted residual (Codex pass 3, "high"):** a send whose phase 1 already committed
       `sending` goes out even if Salvador marks the task DELIVERED by hand during its network
       call — `delivered` is indistinguishable from R8's sibling case without a delivery-set
-      model. (The CLOSED variant is fenced by criterion 30.) It needs a human to approve a send and, within that send's seconds-long window,
+      model. (The CLOSED variant is fenced by criterion 30.)
+30. **A close cannot land under a LIVE send** (Codex passes 4–5, go-reviewer). Send phase 1
+    commits `sending` and dispatches after its transaction ends, so a `task_close` in that gap
+    would let words reach a client for CLOSED work.
+    - `closeTransition` (close and dismiss) refuses while the task has a delivery in `sending`
+      whose attempt is still LIVE: unsettled (`send_settled_at IS NULL`) and started within the
+      send-attempt lease (`COALESCE(send_attempted_at, updated_at)`; Jira's phase 1 stamps only
+      `updated_at`). Phase 1 SHARE-locks the task before writing `sending` and the close holds
+      the exclusive row lock, so exactly one wins in either order.
+    - Past the lease, or once a Slack attempt has settled, the row no longer blocks: a crashed
+      gmail/Jira/calendar phase 1 has no settle path, and an unbounded fence would make its task
+      uncloseable forever.
+    - The refusal names the delivery, its channel and its attempt time, and carries
+      "refusing to close active work" — the substring the Jira reconciler treats as a non-fatal
+      skip (`ticketstatus.activeWorkRefusal`, pinned by `statusset_test`), so one task's live send
+      cannot abort a reconciliation pass.
+    - Pinned by the "close refuses an in-flight send" and "close proceeds past a stale in-flight
+      attempt" subtests; mutations: drop the check, or drop the lease clause → red. It needs a human to approve a send and, within that send's seconds-long window,
       also declare the work delivered by hand; it predates this ticket. Recorded under Future
       work ("a delivery-set model so a hand `task_mark_delivered` can retire outstanding
       approved deliveries"), not fixed here.

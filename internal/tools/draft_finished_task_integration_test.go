@@ -175,6 +175,12 @@ func TestApproveSend_Integration_RefuseClosedTask(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "in flight") {
 			t.Errorf("task_close with a delivery in 'sending' = %v, want a refusal naming the in-flight delivery", err)
 		}
+		// Codex pass 5: the Jira reconciler skips (non-fatal) only on this exact
+		// phrase; any other wording would abort its whole pass.
+		if err != nil && !strings.Contains(err.Error(), "refusing to close active work") {
+			t.Errorf("the in-flight refusal %q lacks \"refusing to close active work\", the reconciler's "+
+				"non-fatal marker (ticketstatus.activeWorkRefusal)", err)
+		}
 		var st string
 		if err := s.pool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, s.taskID).Scan(&st); err != nil {
 			t.Fatal(err)
@@ -189,6 +195,29 @@ func TestApproveSend_Integration_RefuseClosedTask(t *testing.T) {
 		if _, err := s.ex.Execute(ctx, executor.Call{Tool: "task_close", Actor: sdsActor, TaskID: &s.taskID,
 			Args: json.RawMessage(`{"task_id":` + itoa(s.taskID) + `,"reason":"itest close after settle"}`)}); err != nil {
 			t.Errorf("task_close after the delivery settled = %v, want ok", err)
+		}
+		setTaskStatus(t, ctx, s, "done_locally")
+	})
+
+	// Codex pass 5: a phase-1 crash leaves 'sending' with no settle path for
+	// gmail/Jira/calendar. Past the in-flight window the attempt is abandoned and
+	// must not make the task uncloseable. MUTATION: drop the window clause from
+	// the fence query → this subtest goes red.
+	t.Run("close proceeds past a stale in-flight attempt", func(t *testing.T) {
+		id := s.draft(t, ctx, "itest crashed send")
+		s.call(t, ctx, "approve_delivery", id)
+		if _, err := s.pool.Exec(ctx,
+			`UPDATE deliveries SET status='sending', send_attempted_at=now()-interval '1 hour',
+			        updated_at=now()-interval '1 hour' WHERE id=$1`, id); err != nil {
+			t.Fatalf("simulate a crashed phase 1: %v", err)
+		}
+		if _, err := s.ex.Execute(ctx, executor.Call{Tool: "task_close", Actor: sdsActor, TaskID: &s.taskID,
+			Args: json.RawMessage(`{"task_id":` + itoa(s.taskID) + `,"reason":"itest close past a stale attempt"}`)}); err != nil {
+			t.Errorf("task_close past a 1h-old 'sending' attempt = %v, want ok (an abandoned attempt must not "+
+				"block the close forever)", err)
+		}
+		if _, err := s.pool.Exec(ctx, `UPDATE deliveries SET status='failed' WHERE id=$1`, id); err != nil {
+			t.Fatalf("settle: %v", err)
 		}
 		setTaskStatus(t, ctx, s, "done_locally")
 	})

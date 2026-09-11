@@ -593,11 +593,15 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   Known residual: a send already committed to `sending` still goes out if the
   task is hand-marked DELIVERED during its network call (needs a
   delivery-set model to fix; Future work in the SWT-37 SPEC).
-- **`task_close` / `task_dismiss` refuse while a delivery is `sending`**
+- **`task_close` / `task_dismiss` refuse while a delivery's send is LIVE**
   (closeTransition): send phase 1 dispatches after its tx ends, so a close in
-  that gap would let words reach a client for closed work. A Slack reply
-  wedged in `sending` blocks its task's close until resolved with
-  mark_delivery_sent / mark_delivery_failed.
+  that gap would let words reach a client for closed work. Live = `sending`,
+  unsettled (`send_settled_at IS NULL`) and started within `sendAttemptLease`
+  (15m; clock `COALESCE(send_attempted_at, updated_at)`, Jira stamps only
+  `updated_at`). Past the lease a crashed gmail/Jira/calendar phase 1 (no
+  settle path) stops blocking. The refusal carries "refusing to close active
+  work" — the reconciler's non-fatal skip marker (`activeWorkRefusal`) — so a
+  live send never aborts a reconciliation pass.
 - `prefill_delivery` runs the Slack bridge call INSIDE its tx while holding the
   task SHARE lock, so a close/mark-delivered/draft on THAT task waits for the
   bridge (bounded by the caller's timeout: 60s dashboard, 30s opsctl). A wait
