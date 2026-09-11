@@ -470,12 +470,15 @@ func swt39Raw(t *testing.T, ctx context.Context, pool *pgxpool.Pool, accountID i
 	}
 }
 
-// Fixed run instants, so expected LastReadAt values are exact.
+// Run instants relative to now (the loader only looks back 30 days), truncated
+// to the second so they survive a Postgres round trip exactly.
 var (
-	swt39T1 = time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
-	swt39T2 = time.Date(2026, 9, 11, 11, 0, 0, 0, time.UTC)
-	swt39T3 = time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
-	swt39T4 = time.Date(2026, 9, 11, 13, 0, 0, 0, time.UTC)
+	swt39Base = time.Now().UTC().Truncate(time.Second)
+	swt39T1   = swt39Base.Add(-6 * time.Hour)
+	swt39T2   = swt39Base.Add(-5 * time.Hour)
+	swt39T3   = swt39Base.Add(-4 * time.Hour)
+	swt39T4   = swt39Base.Add(-3 * time.Hour)
+	swt39Old  = swt39Base.Add(-40 * 24 * time.Hour) // outside the 30-day window
 )
 
 func swt39SeedRunAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, accountID int64, at time.Time, status, stats string) {
@@ -497,6 +500,11 @@ func swt39SeedRunAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, accou
 //   - GSWT39KB1: never read -> zero. TSWT39KB's own run at T4 reads DSWT39KN1,
 //     another account's conversation id, and must not leak into TSWT39KN.
 //   - A message row for DSWT39KN1 exists and is irrelevant to the answer.
+//   - CSWT39KN3 is never READ, only listed UNREADABLE at T3 (a partial run whose
+//     `read` is a malformed scalar): a failed read is a visit -> T3. The same
+//     run's scalar `read` is ignored, so DSWT39KN1 stays T2.
+//   - A run with "read": null at T4 counts for nothing; a run 40 days old that
+//     read CSWT39KN4 is outside the window -> zero.
 func swt39SeedKnownCorpus(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	swt39RequirePartialStatus(t, ctx, pool)
@@ -504,10 +512,16 @@ func swt39SeedKnownCorpus(t *testing.T, ctx context.Context, pool *pgxpool.Pool)
 	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "DSWT39KN1", "asunda45", "", "3 hours")
 	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "DSWT39KN1", "asunda45", "p1799999999999999", "1 minute")
 	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "CSWT39KN2", "rd-asu-collaboratory", "", "3 hours")
+	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "CSWT39KN3", "left-channel", "", "3 hours")
+	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "CSWT39KN4", "old-channel", "", "3 hours")
 	swt39SeedRunAt(t, ctx, pool, kn, swt39T1, "ok", `{"phase":"slack_web","read":["DSWT39KN1","CSWT39KN2"]}`)
 	swt39SeedRunAt(t, ctx, pool, kn, swt39T2, "partial", `{"phase":"slack_web","read":["DSWT39KN1"],"deferred":["CSWT39KN2"]}`)
 	swt39SeedRunAt(t, ctx, pool, kn, swt39T3, "error", `{"phase":"slack_web","read":["CSWT39KN2"]}`)
+	swt39SeedRunAt(t, ctx, pool, kn, swt39T3, "partial",
+		`{"phase":"slack_web","read":"DSWT39KN1","unreadable":[{"id":"CSWT39KN3","name":"left-channel","reason":"not a member"}]}`)
 	swt39SeedRunAt(t, ctx, pool, kn, swt39T4, "ok", `{"phase":"slack_web"}`)
+	swt39SeedRunAt(t, ctx, pool, kn, swt39T4, "ok", `{"phase":"slack_web","read":null}`)
+	swt39SeedRunAt(t, ctx, pool, kn, swt39Old, "ok", `{"phase":"slack_web","read":["CSWT39KN4"]}`)
 
 	kb := swt39Account(t, ctx, pool, "slack_web", swt39KBAccount)
 	swt39Raw(t, ctx, pool, kb, swt39KBWorkspace, "GSWT39KB1", "avviato-ops", "", "3 hours")
@@ -544,6 +558,8 @@ func TestRegression_SWT39_KnownConversationsLoadsEveryConversationWithLastRead(t
 	want := []slackweb.KnownConversationRow{
 		{WorkspaceID: swt39KBWorkspace, ConversationID: "GSWT39KB1", Name: "avviato-ops"},
 		{WorkspaceID: swt39KNWorkspace, ConversationID: "CSWT39KN2", Name: "rd-asu-collaboratory", LastReadAt: swt39T1},
+		{WorkspaceID: swt39KNWorkspace, ConversationID: "CSWT39KN3", Name: "left-channel", LastReadAt: swt39T3},
+		{WorkspaceID: swt39KNWorkspace, ConversationID: "CSWT39KN4", Name: "old-channel"},
 		{WorkspaceID: swt39KNWorkspace, ConversationID: "DSWT39KN1", Name: "asunda45", LastReadAt: swt39T2},
 	}
 	if len(mine) != len(want) {

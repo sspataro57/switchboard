@@ -22,18 +22,29 @@ func NewSink(pool *pgxpool.Pool) *PGSink { return &PGSink{pool: pool} }
 
 // KnownConversations lists every conversation:{id} raw row of a slack_web
 // account, with the workspace id from its raw JSON, its name, and when this
-// account last READ it: the start of the latest completed run (ok or partial)
-// whose stats.read contains the conversation id (SWT-39). Zero when no run
-// recorded reading it — runs before coverage existed carry no read list.
+// account last VISITED it: the start of the latest completed run (ok or
+// partial, last 30 days) whose stats.read OR stats.unreadable lists it
+// (SWT-39). A failed read counts as a visit: it cost a slot and time, and a
+// conversation that can never be read would otherwise sort first forever.
+// Zero when no such run exists — the leaf then reads it first.
 func (s *PGSink) KnownConversations(ctx context.Context) ([]KnownConversationRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		WITH last_read AS (
-		  SELECT r.source_account_id, rd.conversation_id, max(r.started_at) AS at
+		WITH runs AS (
+		  SELECT r.source_account_id, r.started_at, r.stats
 		    FROM sync_runs r
 		    JOIN source_accounts a ON a.id = r.source_account_id AND a.provider = $1
-		    CROSS JOIN LATERAL jsonb_array_elements_text(r.stats->'read') AS rd(conversation_id)
-		   WHERE r.status IN ('ok','partial') AND jsonb_typeof(r.stats->'read') = 'array'
-		   GROUP BY 1, 2
+		   WHERE r.status IN ('ok','partial') AND r.started_at > now() - interval '30 days'
+		), visited AS (
+		  SELECT runs.source_account_id, rd.conversation_id, runs.started_at
+		    FROM runs CROSS JOIN LATERAL jsonb_array_elements_text(runs.stats->'read') AS rd(conversation_id)
+		   WHERE jsonb_typeof(runs.stats->'read') = 'array'
+		  UNION ALL
+		  SELECT runs.source_account_id, u->>'id', runs.started_at
+		    FROM runs CROSS JOIN LATERAL jsonb_array_elements(runs.stats->'unreadable') AS u
+		   WHERE jsonb_typeof(runs.stats->'unreadable') = 'array'
+		), last_read AS (
+		  SELECT source_account_id, conversation_id, max(started_at) AS at
+		    FROM visited GROUP BY 1, 2
 		)
 		SELECT COALESCE(c.raw_json->'workspace'->>'id', ''),
 		       split_part(c.external_id, ':', 2),
@@ -78,7 +89,12 @@ func (s *PGSink) CheckPartialStatus(ctx context.Context) error {
 		  WHERE conname = 'sync_runs_status_check' AND conrelid = 'sync_runs'::regclass`).Scan(&def); err != nil {
 		return fmt.Errorf("read sync_runs_status_check: %w", err)
 	}
-	if !strings.Contains(def, "'partial'") {
+	return partialStatusAdmitted(def)
+}
+
+// partialStatusAdmitted judges the CHECK's definition text.
+func partialStatusAdmitted(constraintDef string) error {
+	if !strings.Contains(constraintDef, "'partial'") {
 		return fmt.Errorf("sync_runs does not admit status 'partial' — apply migration 0027 before running this image")
 	}
 	return nil

@@ -18,9 +18,10 @@ type Sink interface {
 	// END time. ReconcileUnconfirmed counts passes that could have OBSERVED a
 	// message, which is a question about when the scrape began.
 	StartRun(ctx context.Context, accountID int64, startedAt time.Time) (runID int64, err error)
-	// KnownConversations lists every conversation already ingested, with its
-	// newest stored message id, so the export can read them by URL instead of
-	// depending on what the Slack UI happens to render (SWT-39).
+	// KnownConversations lists every conversation already ingested, with when
+	// a run last visited it (read or failed to read), so the export can read
+	// them by URL least-recently-visited first instead of depending on what the
+	// Slack UI happens to render (SWT-39).
 	KnownConversations(ctx context.Context) ([]KnownConversationRow, error)
 	RawHash(ctx context.Context, accountID int64, externalID string) (hash string, exists bool, err error)
 	InsertRaw(ctx context.Context, accountID int64, externalID string, raw json.RawMessage, hash string) error

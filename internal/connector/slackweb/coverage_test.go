@@ -247,6 +247,9 @@ func swt39CoverageFields(t *testing.T, workspaceID string, read, deferred []stri
 	for _, id := range read {
 		add(id, "conv-"+strings.ToLower(id))
 	}
+	for i := range enumerated {
+		enumerated[i]["rank"] = i + 1 // the DMs view's 1-based recency position
+	}
 	for _, id := range deferred {
 		add(id, "conv-"+strings.ToLower(id))
 	}
@@ -514,8 +517,9 @@ func TestRegression_SWT39_IngestRecordsCoverageInRunStats(t *testing.T) {
 		t.Errorf("stats has no `enumerated` key; which conversations the leaf listed is recorded nowhere")
 	} else if err := json.Unmarshal(raw, &enumerated); err != nil {
 		t.Errorf("stats.enumerated = %s: %v", raw, err)
-	} else if len(enumerated) != 4 || enumerated[0]["id"] == nil || enumerated[0]["source"] != "dms" {
-		t.Errorf("stats.enumerated = %v, want the leaf's 4 entries with id and source", enumerated)
+	} else if len(enumerated) != 4 || enumerated[0]["id"] == nil || enumerated[0]["source"] != "dms" ||
+		enumerated[0]["rank"] != float64(1) {
+		t.Errorf("stats.enumerated = %v, want the leaf's 4 entries with id, source and rank", enumerated)
 	}
 
 	var cov map[string]any
