@@ -145,7 +145,14 @@ the row lock.**
   or `blocked`, the guarded reopen picks `blocked` while any dependency is unmet
   (`depUnsatisfiedPredicate`, the tools package's one spelling), else `ready`. Other targets
   (`holding`, `done_locally`, `delivered`) restore as stored. Pinned by
-  `TestDismissalReopen_BlockedRestoreRechecksDependencies` (four cases). (A human's plain `task_reopen`
+  `TestDismissalReopen_BlockedRestoreRechecksDependencies` (four cases).
+  - **Accepted residual (Codex pass 4):** `task_add_dependency` does not lock the dependent
+    task, so a dependency committed between the reopen's check and its commit can leave the
+    task `ready` with an unmet dependency until R4 (asynchronous) blocks it. This is the SAME
+    window every `ready` task already has whenever a dependency is added to it; the reopen check
+    narrows it rather than widening it. Closing it for good means making dependency addition
+    block a ready task atomically, or gating `task_claim` on dependencies: a change to
+    dependency handling, recorded under Future work, not this ticket. (A human's plain `task_reopen`
   with an explicit `status` is unchanged: the caller chose it.)
 
 **D6: dismissal rows are kept. A reopen stamps them, and one task may hold several rows over
@@ -647,6 +654,7 @@ before go-live.
 
 ## Future work
 
+- Atomic dependency gating: `task_add_dependency` blocks a ready task in the same transaction, or `task_claim` refuses a task with an unmet dependency (closes the async-R4 window every ready task has; see D5's accepted residual).
 - A board Reopen button (the human mis-click remedy, today `opsctl call task_reopen`).
 - Narrowing D1 by sender class, if §4(f) shows notification churn.
 - A dismissal-precision report reading D6's semantics: rows, not tasks; message-reopened vs
