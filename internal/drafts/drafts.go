@@ -250,6 +250,10 @@ func Run(ctx context.Context, store Store, router *provider.Router, exec Executo
 			"task_id": dt.ParentTaskID,
 			"channel": dt.Channel,
 			"body":    draft.Body,
+			// SWT-37 (Q1 = b): DeliverTasks read the parent as done_locally
+			// before the model call; the handler re-checks it under the task row
+			// lock, so a hand close or "delivered" in between gets no draft.
+			"expect_task_status": "done_locally",
 		}
 		if dt.Channel == "gmail" {
 			args["subject"] = draft.Subject

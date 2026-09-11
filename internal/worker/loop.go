@@ -457,8 +457,10 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 
 // WriteMCPConfig generates the subprocess MCP config pointing at ops-mcp.
 func WriteMCPConfig(dir, opsMCPBin, databaseURL, workerID string) (string, error) {
-	// SWT-37 (Codex review): this is the only place a worker's OPS_WORKER_ID is
-	// set, so a human-shaped id is refused here, before any config is written.
+	// SWT-37 (Codex review): the MCP config is where a worker's ops-mcp gets its
+	// OPS_WORKER_ID, so a human-shaped id is refused here, before any config is
+	// written. (Loop also exports the same client as OPS_WORKER_ID to the claude
+	// process; cmd/opsworker passes one value to both, so this check covers it.)
 	if err := ValidateWorkerID(workerID); err != nil {
 		return "", fmt.Errorf("refusing worker identity: %w", err)
 	}

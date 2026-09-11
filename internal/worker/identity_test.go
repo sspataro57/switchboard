@@ -1,10 +1,11 @@
 package worker
 
-// SWT-37 criterion 27 (Codex review): a worker console cannot pose as a human
-// session. The adapter's Actor is "mcp:" + OPS_WORKER_ID and WriteMCPConfig is
-// the only place a worker's OPS_WORKER_ID is set, so refusing the reserved
-// shapes there closes `opsworker --client manual:foo`. ZERO I/O beyond a temp
-// dir.
+// SWT-37 criterion 27 (Codex review): a worker console cannot be CONFIGURED to
+// pose as a human session. The adapter's Actor is "mcp:" + OPS_WORKER_ID, and
+// WriteMCPConfig is where a worker's ops-mcp gets it, so refusing the reserved
+// shapes there closes `opsworker --client manual:foo`. It is an operator
+// misconfiguration guard, not a boundary against a hostile model (a worker runs
+// with full permissions and DATABASE_URL). ZERO I/O beyond a temp dir.
 
 import (
 	"os"

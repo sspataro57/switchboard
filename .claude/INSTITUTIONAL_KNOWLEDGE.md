@@ -580,9 +580,15 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - `drafts.DeliverTasks` drafts only for a parent still in `done_locally`
   (SWT-37 Q1 = b): a parent closed or marked delivered by hand leaves its
   `Deliver #N` child open but no longer drafted. That filter is only a READ
-  before a model call, so `draft_delivery` itself locks the task row and
-  refuses a `closed`/`delivered` task for every caller (Codex review): the
-  write-time check is what closes the race.
+  before a model call, so the write re-checks under the task row lock:
+  `draft_delivery` refuses a `closed` task for every caller, and refuses when
+  the caller's `expect_task_status` (the drafts worker sends `done_locally`)
+  no longer holds (Codex review).
+- **Closed work never gets a delivery approved or sent** (`refuseClosedTask`,
+  first in approve / every send / calendar book): lock order is task →
+  delivery everywhere. `delivered` is deliberately NOT refused — R8 marks a
+  task delivered after its FIRST send and a sibling delivery must still go
+  out; a stale draft on a hand-delivered task stays behind human approval.
 - **Worker ids are validated at launch** (`worker.ValidateWorkerID`, called by
   `WriteMCPConfig`): an id that would read as human (`manual:`/`dashboard:`/
   `opsctl:`) or carries `mcp:` is refused. Before this, `opsworker --client

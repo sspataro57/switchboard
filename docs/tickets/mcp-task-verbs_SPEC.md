@@ -588,7 +588,8 @@ These live in the new `internal/tools/mcp_verbs_integration_test.go`, built with
 
 ### Added after the Codex review (2026-09-10)
 
-27. **A worker identity cannot pose as a human session.** Codex (high): `opsworker --client
+27. **A worker cannot be configured to pose as a human session** (an operator-misconfiguration
+    guard, not a boundary against a hostile model, which already has DATABASE_URL). Codex (high): `opsworker --client
     manual:foo` exports `OPS_WORKER_ID=manual:foo`, the adapter builds `mcp:manual:foo`, and
     `HumanActor` trusts it, so the console passed every human gate (approve/send since SWT-11,
     the three verbs here).
@@ -599,15 +600,27 @@ These live in the new `internal/tools/mcp_verbs_integration_test.go`, built with
       nothing on refusal, so such a console fails at launch.
     - `internal/worker/identity_test.go` pins both; every accepted id must produce a non-human
       actor.
-28. **`draft_delivery` refuses finished work under the task row lock.** Codex (medium): Q1 (b)'s
-    `DeliverTasks` filter is a read before a model call, so a hand close in that window still
-    got a draft.
+28. **`draft_delivery` refuses closed work, and a stale read, under the task row lock.** Codex
+    (medium): Q1 (b)'s `DeliverTasks` filter is a read before a model call, so a hand close in
+    that window still got a draft.
     - Inside one transaction the handler locks the task (`SELECT … FOR UPDATE`, the lock
-      `closeTransition` takes) and refuses a `closed` or `delivered` task by name, for every
-      caller. The `DeliverTasks` predicate stays as the cheap first filter.
-    - An integration test drafts for a `done_locally` task (allowed), then for a `closed` and a
-      `delivered` one (refused, no `deliveries` row). Mutation: drop the status check, and it
-      goes red.
+      `closeTransition` takes) and refuses a `closed` task for every caller.
+    - A new optional arg, `expect_task_status`, is the status the caller read; a mismatch under
+      the lock is refused. The drafts worker passes `"done_locally"`, so a hand close OR
+      "delivered" in its window gets no draft. It only narrows, so it is harmless over MCP and
+      is left out of the schema.
+    - `delivered` is NOT refused for a plain caller: R8 marks a task delivered after its first
+      send, and a sibling delivery (a Jira final comment after the email) is legitimate.
+29. **Approve and send refuse a closed task** (Codex re-review: the other ordering, draft first
+    then close, left a sendable draft). `refuseClosedTask` locks the delivery's task row FIRST
+    in `approve_delivery`, the gmail/Jira/Slack sends, `book_calendar_block` and the calendar
+    send, so the lock order is task → delivery everywhere and nothing deadlocks. `delivered` is
+    again not refused (sibling sends); a stale draft on a task marked delivered by hand stays
+    behind the human approval gate.
+    - `draft_finished_task_integration_test.go` pins: close first → draft refused; draft first
+      → approve refused, and approve then close → send refused with the sender never called;
+      a delivered task's sibling still approves and sends (positive control); the drafts
+      worker's `expect_task_status` refusal. Mutations named in the file.
 
 ### Runbook and IK
 
