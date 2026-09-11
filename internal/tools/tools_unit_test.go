@@ -27,6 +27,13 @@ package tools_test
 //   executor.NewRegistry / (*Registry).Names / (*Registry).Register
 //   executor.New / (*Executor).Execute / executor.Call
 //   policy.NewStatic / audit.NewMemStore
+//
+// SWT-38 (docs/tickets/mcp-task-capture_SPEC.md) criteria 2 and 4:
+// task_set_priority joins allToolNames and toolsUnderTest. EXPECTED RED until
+// tools.Register wires it: TestRegister_AllToolsRegistered reports it missing,
+// and TestValidate_RejectsMissingRequiredArgs/task_set_priority gets "unknown
+// tool". (priority_test.go, in package tools, additionally compile-fails the
+// package's test binary until priority.go exists.)
 
 import (
 	"context"
@@ -114,6 +121,12 @@ var allToolNames = []string{
 	// comment.
 	"task_list",
 	"project_list",
+	// SWT-38 (mcp-task-capture) criterion 4, C5/C6: reorder any task's
+	// priority on the 0..3 scale (tools.PriorityLevels). humanOnly (rule
+	// human_only): no spine caller writes priority after creation, so every
+	// automated actor is refused. MCP-listed: in agentTools (full profile) and,
+	// via userProfileTools, in the user profile. Also reachable via opsctl call.
+	"task_set_priority",
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -213,6 +226,12 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		// task_dismiss. project_list is DELIBERATELY ABSENT — see the amended
 		// header comment.
 		"task_list",
+		// SWT-38 criterion 2: task_set_priority needs task_id AND priority (a
+		// missing priority is NOT read as 0 — mutation M-i); {} is illegal.
+		// The accept half (0..3, reason optional) lives in priority_test.go,
+		// which calls validateSetPriority directly for the nil-pool reason
+		// given above for task_dismiss.
+		"task_set_priority",
 	}
 
 	for _, name := range toolsUnderTest {

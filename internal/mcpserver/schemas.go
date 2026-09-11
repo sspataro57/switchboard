@@ -10,8 +10,11 @@ func schema(s string) json.RawMessage { return json.RawMessage(s) }
 
 var agentTools = []Tool{
 	{
+		// SWT-38 criterion 14. One line on purpose: a multi-line Description
+		// makes gofmt drop the column-aligned Name key, which internal/tools
+		// TestMCPSchema_CreateTaskGainsNoStatusProperty locates by source text.
 		Name:        "create_task",
-		Description: "Create a new task in a project (status ready).",
+		Description: "Create a new task in a project (status ready). assignee_type routes it: human (the default) is Salvador's own lane, which no worker console picks up; claude puts it in the worker queue for that project's client, where a console will claim it. The user-scope install (sessions outside the switchboard repo) refuses claude. priority is 0 normal, 1 elevated, 2 high, 3 urgent (default 0); higher runs first.",
 		InputSchema: schema(`{"type":"object","properties":{"project":{"type":"string","description":"project slug"},"title":{"type":"string"},"body":{"type":"string"},"assignee_type":{"type":"string","enum":["human","claude"]},"priority":{"type":"integer"},"subproject":{"type":"string"}},"required":["project","title"]}`),
 	},
 	{
@@ -145,6 +148,19 @@ var agentTools = []Tool{
 			"It sends nothing and creates no delivery, and its pending Deliver #N task is no longer drafted. " +
 			"Human sessions only over MCP: a worker console is refused by policy.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"reason":{"type":"string"}},"required":["task_id"]}`),
+	},
+	// SWT-38 (mcp-task-capture) C5/C6: reorder any task. Listing it removes the
+	// transport allowlist as a refusal for worker consoles, so policy.humanOnly
+	// (rule human_only) is what keeps a worker from choosing its own work. The
+	// minimum/maximum and the level names must equal tools.PriorityMin,
+	// tools.PriorityMax and tools.PriorityLevels (TestTaskSetPrioritySchema).
+	{
+		Name: "task_set_priority",
+		Description: "Set a task's priority on the absolute scale 0 normal, 1 elevated, 2 high, 3 urgent — higher runs first " +
+			"in task_get_next and task_list. Any status is accepted: it only reorders, does not claim, never changes status, " +
+			"and nothing is sent. The same value again is a no-op. Returns the old and new level (from, to). " +
+			"Human sessions only: a worker console is refused by policy.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"priority":{"type":"integer","minimum":0,"maximum":3,"description":"0 normal, 1 elevated, 2 high, 3 urgent"},"reason":{"type":"string","description":"optional: why, in Salvador's words"}},"required":["task_id","priority"]}`),
 	},
 }
 

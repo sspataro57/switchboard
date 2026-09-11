@@ -29,6 +29,11 @@ type createTaskArgs struct {
 	// Deliberately NOT in internal/mcpserver/schemas.go — agents keep the
 	// ready-only surface, and holding is strictly less privileged anyway.
 	Status string `json:"status,omitempty"`
+	// RequireAssigneeType is the SWT-38 profile pin (C4): the user-scope MCP
+	// adapter force-sets it to "human", so a session in another repo can create
+	// only Salvador's-lane tasks. It only NARROWS — a caller that sets it
+	// restricts itself — and is deliberately absent from every MCP schema.
+	RequireAssigneeType string `json:"require_assignee_type,omitempty"`
 }
 
 // Register wires every internal tool into the registry. The registry is the
@@ -112,6 +117,10 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// could aim them itself. NOT humanOnly — the capture engine
 		// (capture:{connector}) is its main caller. See internal/tools/provenance.go.
 		{"task_set_source_thread", validateSetSourceThread, taskSetSourceThread},
+		// SWT-38 C5/C6: reorder any task on the 0..3 scale. humanOnly (rule
+		// human_only): no spine caller writes priority after creation, so every
+		// automated caller is refused. MCP-listed in both profiles. See priority.go.
+		{"task_set_priority", validateSetPriority, setPriority},
 	} {
 		t := t
 		reg.Register(executor.Tool{
@@ -159,6 +168,17 @@ func validateCreateTask(args []byte) error {
 		// that belongs to the orchestrator's tools, or a typo that would
 		// silently create the wrong thing.
 		return fmt.Errorf("status %q: must be ready or holding", a.Status)
+	}
+	// SWT-38 C4: the pin is compared against the PARSED assignee (default
+	// human). A refusal, never a silent rewrite, so the model is told the truth.
+	if a.RequireAssigneeType != "" && a.RequireAssigneeType != a.AssigneeType {
+		return fmt.Errorf("assignee_type %q is refused here: this session's tasks are assigned to human (Salvador's lane); worker tasks are created from the switchboard repo", a.AssigneeType)
+	}
+	// SWT-38 C7: only calls that pass priority are range-checked.
+	if a.Priority != nil {
+		if err := checkPriorityRange(*a.Priority); err != nil {
+			return err
+		}
 	}
 	return nil
 }

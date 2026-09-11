@@ -503,7 +503,9 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   (`mcpserver.NewWithProfile(…, ProfileUser)`) and it is no longer read-only:
   it lists/accepts `project_list`, `task_list`, `task_get_next` PLUS
   `task_dismiss`, `task_close`, `task_mark_delivered` (see "Task verbs over
-  MCP"). Its main still calls no `tools.Set*` seam, so NO sender is wired
+  MCP") and, since SWT-38, `create_task`, `task_append_log`,
+  `task_set_priority` (nine tools; see "Task capture over MCP"). Its main
+  still calls no `tools.Set*` seam, so NO sender is wired
   (connector code is linked via internal/tools but stays nil). Not an env
   setting on ops-mcp: that was tried and fails open (unset had to mean full for
   existing launchers). `ProfileRead` survives only as the fail-closed floor an
@@ -526,7 +528,7 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   the same name as `.mcp.json`'s).
 - **LANDMINE: `claude mcp get/list` lie about same-name precedence.** Inside
   this repo they show the user-scope `ops`, yet a session here loads
-  `.mcp.json`'s full `ops` (22 tools since SWT-37; a session in `kube` gets 6).
+  `.mcp.json`'s full `ops` (23 tools since SWT-38; a session in `kube` gets 9).
   Verify precedence from inside a session, never from the CLI listing.
 - `claude -p` from a shell uses `ANTHROPIC_API_KEY` (exported, no credit) over
   the claude.ai login: prefix `env -u ANTHROPIC_API_KEY` for smoke sessions.
@@ -548,6 +550,10 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   recovery is `task_reopen` (and, once SWT-36 ships, a dismissal reopens on
   the next inbound message routed to it). The Instructions' "only when Salvador asks" line is a
   prompt rule, not a boundary.
+- The user profile SWT-37 shipped had six tools; SWT-38 made it NINE
+  (`create_task`, `task_append_log`, `task_set_priority` — see "Task capture
+  over MCP (SWT-38)"), and the Instructions' closing rule now covers "these
+  write tools", not "these three".
 - **`mcp_human_only` (policy rule, `mcpHumanOnly` map):** deny `task_close`
   / `task_mark_delivered` iff the actor carries the MCP prefix AND is not
   human. It is a TRANSPORT rule, not a trust boundary: it keeps worker
@@ -610,6 +616,51 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `WriteMCPConfig`): an id that would read as human (`manual:`/`dashboard:`/
   `opsctl:`) or carries `mcp:` is refused. Before this, `opsworker --client
   manual:foo` passed every human gate as `mcp:manual:foo`.
+
+### Task capture over MCP (SWT-38, mcp-task-capture)
+
+- The user profile (`ops-mcp-user`, every other repo's session) gained
+  `create_task`, `task_append_log` and the new `task_set_priority`: a session
+  logs the work Salvador hands it as a swb task, writes progress on it, closes
+  it with `task_close`, and reorders any task. No claim, run or delivery power.
+- **`assignee_type` is a ROUTING field, not "who types".** `human` = Salvador's
+  lane (no worker console routes it — `getNext` selects only
+  `assignee_type='claude'`); `claude` = the console queue for the project's
+  client, where a running console would claim it. A session's own work is
+  `human` + `ready` for its whole life (never claimed: `task_close` refuses
+  claimed/in_progress).
+- **Profile pins** (`mcpserver.userProfilePins`, set by `NewWithProfile` from
+  the profile alone, no env input): the user profile force-sets
+  `require_assignee_type:"human"` on `create_task` and `task_append_log`,
+  AFTER `injectWorkerID`, by OVERWRITE. The field is hidden from every schema
+  and only narrows; the full profile has no pins. Enforcement is in the
+  executor path: `validateCreateTask` refuses a differing assignee (default
+  human counts), and `appendLog` checks the task's assignee under a `FOR SHARE`
+  lock in the same tx as the insert. `audit_events.args` carrying
+  `require_assignee_type` is the user-scope marker — the actor
+  (`mcp:manual:salvo`) cannot tell this repo's session from another repo's.
+- **Why log is pinned too:** `task_context` returns the last 50 events'
+  payloads, and a worker console feeds that into `claude -p
+  --dangerously-skip-permissions`. A log line on a `claude` task is text inside
+  a future worker prompt.
+- **The priority scale 0..3** — normal, elevated, high, urgent; higher runs
+  first (`taskQueueOrder`) — is spelled ONCE in `internal/tools/priority.go`
+  (`PriorityMin`, `PriorityMax`, `PriorityLevels`). `create_task` and
+  `task_set_priority` range-check against it; `create_child_task` and plan
+  import do not yet (Future work). The MCP schema's min/max are literals pinned
+  equal to the consts by `TestTaskSetPrioritySchema`.
+- `task_set_priority` writes a `priority_changed {from,to,reason}` event (none
+  when the value is unchanged — no-op success); it never touches status, a
+  claim or `plan_order`. The orchestrator fires nothing on it or on `log`
+  (pinned by `TestEvaluate_CaptureEventsFireNothing`).
+- `task_set_priority` is `humanOnly` (rule `human_only`), NOT `mcpHumanOnly`:
+  no spine caller writes priority after creation, so the orchestrator is
+  refused too. A future rule that must set priority (triage escalation) has to
+  MOVE it to `mcpHumanOnly` deliberately. `create_task` / `task_append_log`
+  stay ungated in policy (`static-default`): the pin, not policy, is the gate.
+- `create_task` writes NO creation `task_events` row, and the adapter passes no
+  `Call.TaskID`: a session-created task's origin is only in `audit_events.args`
+  (project + title), not on its own page.
 
 ### Link preservation (SWT-25)
 

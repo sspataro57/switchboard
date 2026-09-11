@@ -50,6 +50,11 @@ package mcpserver_test
 // TestMCPListing_DoesNotMakeTaskVerbsWorkerCallable pins that listing them does
 // not make them worker-callable. GREENFIELD — EXPECTED RED until schemas.go
 // gains the three entries and internal/policy gains mcp_human_only.
+//
+// SWT-38 (mcp-task-capture) criterion 11: task_set_priority joins
+// wantAgentTools, so the full profile lists 23 tools. EXPECTED RED until
+// schemas.go gains the entry. Its worker refusal is pinned in
+// task_capture_test.go (TestMCPListing_DoesNotMakeSetPriorityWorkerCallable).
 
 import (
 	"context"
@@ -128,6 +133,14 @@ var wantAgentTools = []string{
 	"task_dismiss",
 	"task_close",
 	"task_mark_delivered",
+	// SWT-38 (mcp-task-capture) criterion 11, C5/C6: reorder any task's
+	// priority (0..3). Listing it removes the transport allowlist as a refusal
+	// for worker consoles, which share this full profile, so policy.humanOnly
+	// (rule human_only) is what keeps a worker from choosing its own work. It
+	// is humanOnly, not mcp_human_only: no spine caller sets priority, so the
+	// orchestrator is refused too (C6). Pinned for the real worker shapes by
+	// TestMCPListing_DoesNotMakeSetPriorityWorkerCallable (task_capture_test.go).
+	"task_set_priority",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.
