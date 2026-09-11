@@ -10,8 +10,14 @@ package tools_test
 // blocked only while a dependency is still unmet (depUnsatisfiedPredicate),
 // else ready.
 //
-// MUTATION THAT MUST TURN THIS RED: drop the `if target == "blocked"` dependency
-// check in reopenTask → the "deps met" case comes back blocked.
+// The same holds the other way (Codex pass 3): a task dismissed from READY may
+// gain an unmet dependency while closed, and R4 only blocks READY tasks, so a
+// verbatim restore would hand a worker gated work. For ready|blocked targets
+// the reopen re-derives the gate from the dependencies.
+//
+// MUTATIONS THAT MUST TURN THIS RED: drop the dependency check in reopenTask →
+// "blocked-met" comes back blocked and "ready-unmet" comes back ready; narrow it
+// back to `target == "blocked"` → "ready-unmet" comes back ready.
 
 import (
 	"context"
@@ -23,17 +29,22 @@ func TestDismissalReopen_BlockedRestoreRechecksDependencies(t *testing.T) {
 	s := newDroSuite(t, ctx)
 
 	for _, tc := range []struct {
-		label, depStatus, want string
+		label, dismissedFrom, depStatus, want string
 	}{
-		{"blocked-met", "done_locally", "ready"}, // the dependency finished while the task was dismissed
-		{"blocked-unmet", "ready", "blocked"},    // still waiting: blocked is right
+		{"blocked-met", "blocked", "done_locally", "ready"}, // dependency finished while dismissed
+		{"blocked-unmet", "blocked", "ready", "blocked"},    // still waiting: blocked is right
+		// Codex pass 3: dismissed from READY, then an unmet dependency was added
+		// while closed (R4 only blocks READY tasks, so it never fired). A verbatim
+		// restore to ready would let a worker claim it early.
+		{"ready-unmet", "ready", "ready", "blocked"},
+		{"ready-met", "ready", "done_locally", "ready"},
 	} {
 		tc := tc
 		t.Run(tc.label, func(t *testing.T) {
 			dep := s.insID(t, ctx,
 				`INSERT INTO tasks (project_id, title, status) VALUES ($1,$2,'ready') RETURNING id`,
 				s.project, "itest-dreopen dep "+tc.label)
-			c := s.seedDismissed(t, ctx, tc.label, "blocked", "handled_elsewhere")
+			c := s.seedDismissed(t, ctx, tc.label, tc.dismissedFrom, "handled_elsewhere")
 			if _, err := s.pool.Exec(ctx,
 				`INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES ($1,$2)`, c.task, dep); err != nil {
 				t.Fatalf("seed dependency: %v", err)

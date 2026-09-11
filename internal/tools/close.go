@@ -357,13 +357,17 @@ func reopenGuarded(ctx context.Context, pool *pgxpool.Pool, a reopenArgs) ([]byt
 				break
 			}
 		}
-		// Codex re-review: a task dismissed while BLOCKED may have had its
-		// dependencies satisfied while it was closed. Their completion events
-		// could not unblock a closed task, and closed → blocked fires no R5, so a
-		// verbatim restore would strand it. Restore blocked only while a
-		// dependency is still unmet (depUnsatisfiedPredicate, the tools
-		// package's one spelling), else ready.
-		if target == "blocked" {
+		// Codex re-reviews: dependency gating is event-driven (R4 blocks a READY
+		// task when a dependency is added; R5 unblocks a BLOCKED one when its
+		// dependencies complete), and neither fires for a CLOSED task. So while
+		// it was dismissed, a task's dependencies may have been satisfied (a
+		// verbatim `blocked` would strand it) or a new unmet one added (a
+		// verbatim `ready` would let a worker claim it early), and
+		// closed → ready|blocked fires neither rule. For those two targets the
+		// guarded reopen therefore re-derives the gate from the dependencies
+		// themselves (depUnsatisfiedPredicate, the tools package's one
+		// spelling): blocked while any is unmet, else ready.
+		if target == "blocked" || target == "ready" {
 			var unmet bool
 			if err := tx.QueryRow(ctx,
 				`SELECT EXISTS (SELECT 1 FROM task_dependencies d
@@ -371,8 +375,9 @@ func reopenGuarded(ctx context.Context, pool *pgxpool.Pool, a reopenArgs) ([]byt
 				   WHERE d.task_id=$1 AND dt.status `+depUnsatisfiedPredicate+`)`, a.TaskID).Scan(&unmet); err != nil {
 				return fmt.Errorf("check dependencies of task %d: %w", a.TaskID, err)
 			}
-			if !unmet {
-				target = "ready"
+			target = "ready"
+			if unmet {
+				target = "blocked"
 			}
 		}
 		reason := fmt.Sprintf("reopened after dismissal (%s, dismissed %s by %s): message %d from %s, ingested %s — %s",

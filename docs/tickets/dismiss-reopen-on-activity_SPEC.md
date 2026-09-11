@@ -136,13 +136,16 @@ the row lock.**
 - **Why not always `ready`:** a promote review-lane task (`holding`) would go live on an inbound
   email. That would widen autonomy by message, bypassing the whitelist SWT-30 made a Go constant.
 - **Why not always `holding`:** a ready task would be hidden in the review lane.
-- **Blocked is re-checked (amended after the Codex re-review, 2026-09-10).** A task dismissed
-  while `blocked` may have had its dependencies satisfied while it was closed: their completion
-  events could not unblock a closed task (R5 only unblocks BLOCKED dependents), and
-  closed → blocked fires no R5, so a verbatim restore would strand it. The guarded reopen
-  restores `blocked` only while a dependency is still unmet (`depUnsatisfiedPredicate`, the
-  tools package's one spelling), else `ready`. Pinned by
-  `TestDismissalReopen_BlockedRestoreRechecksDependencies`. (A human's plain `task_reopen`
+- **The dependency gate is re-derived (amended after the Codex re-reviews, 2026-09-10).**
+  Dependency gating is event-driven: R4 blocks a READY task when a dependency is added, R5
+  unblocks a BLOCKED one when its dependencies complete, and neither fires for a CLOSED task.
+  While a task was dismissed its dependencies may have been satisfied (a verbatim `blocked`
+  would strand it) or a new unmet one added (a verbatim `ready` would let a worker claim it
+  early), and closed → ready|blocked fires neither rule. So when the restore target is `ready`
+  or `blocked`, the guarded reopen picks `blocked` while any dependency is unmet
+  (`depUnsatisfiedPredicate`, the tools package's one spelling), else `ready`. Other targets
+  (`holding`, `done_locally`, `delivered`) restore as stored. Pinned by
+  `TestDismissalReopen_BlockedRestoreRechecksDependencies` (four cases). (A human's plain `task_reopen`
   with an explicit `status` is unchanged: the caller chose it.)
 
 **D6: dismissal rows are kept. A reopen stamps them, and one task may hold several rows over
