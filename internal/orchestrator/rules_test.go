@@ -675,3 +675,67 @@ func TestEvaluate_NoRuleFires(t *testing.T) {
 		}
 	})
 }
+
+// ---- SWT-38: capture traffic fires nothing -----------------------------------
+
+// SWT-38 (docs/tickets/mcp-task-capture_SPEC.md) criterion 5, invariant 7. The
+// user-scope MCP install now writes two kinds of task_events traffic from ANY
+// repo's session: `log` (task_append_log) and the new `priority_changed`
+// (task_set_priority, payload {from, to, reason}). Neither may fire a rule: a
+// log line is a note, and a priority change only reorders the queue. Today
+// Evaluate's `default:` returns nil for both (SPEC fact 7). This pins it, so
+// that a case added for either later is a conscious edit. So is folding
+// priority_changed into the status_changed branch, whose payload also carries
+// a `to`.
+//
+// IMPOSED SURFACE: none. orchestrator.Evaluate is unchanged by SWT-38.
+//
+// GREEN TODAY BY DESIGN: a guard, not a spec-first red test. The mutations
+// that must turn it red: add `case "priority_changed":` or `case "log":`
+// returning any action, or route either type through the status_changed case.
+func TestEvaluate_CaptureEventsFireNothing(t *testing.T) {
+	now := time.Date(2026, 9, 10, 9, 30, 0, 0, time.Local)
+	// Facts under which the fact-driven rules WOULD fire: an unmet dependency
+	// (R4), a dependent ready to unblock (R5), an expired claim (R6), a prior
+	// orchestration and a brief to write (R7) — TestEvaluate_NoRuleFires' fixture.
+	f := orch.Facts{
+		Task:           orch.TaskFacts{ID: 1, ProjectSlug: "acme", ProjectDelivery: "dashboard", Status: "ready", HasUnmetDep: true},
+		Dependents:     []orch.DependentTask{{ID: 2, Status: "blocked", AllDepsSatisfied: true}},
+		ExpiredClaims:  []orch.ExpiredClaim{{TaskID: 3, WorkerID: "w", Status: "claimed"}},
+		Orchestrations: []orch.Orchestration{{Rule: "feedback_task", FeedbackRequestID: 9, TaskID: 1}},
+		BriefCounts:    []orch.ProjectCounts{{ProjectSlug: "acme", Ready: 1}},
+	}
+	cfg := orch.Config{BriefProject: "acme", BriefHour: 0}
+
+	// Positive control: these facts DO fire a rule for an event meant for them,
+	// so an empty result below is the event type's doing, not the fixture's.
+	control := orch.Event{ID: 800, TaskID: 1, Type: "status_changed",
+		Payload: map[string]any{"from": "ready", "to": "closed", "reason": "itest"}, Now: now}
+	if len(orch.Evaluate(control, f, cfg)) == 0 {
+		t.Fatal("POSITIVE CONTROL FAILED: status_changed→closed with an unblockable dependent fired nothing; " +
+			"this fixture cannot tell a no-op from a dead rule")
+	}
+
+	for _, tc := range []struct {
+		name string
+		ev   orch.Event
+	}{
+		{"priority_changed up", orch.Event{ID: 801, TaskID: 1, Type: "priority_changed",
+			Payload: map[string]any{"from": float64(0), "to": float64(3), "reason": "swb prioritize 1"}, Now: now}},
+		{"priority_changed down", orch.Event{ID: 802, TaskID: 1, Type: "priority_changed",
+			Payload: map[string]any{"from": float64(3), "to": float64(0), "reason": ""}, Now: now}},
+		{"log", orch.Event{ID: 803, TaskID: 1, Type: "log",
+			Payload: map[string]any{"message": "step 1", "kind": "log", "worker_id": "manual:salvo"}, Now: now}},
+		// A log line whose TEXT reads like a lifecycle event is still a note.
+		{"log that reads like a transition", orch.Event{ID: 804, TaskID: 1, Type: "log",
+			Payload: map[string]any{"message": "done_local", "kind": "log", "to": "closed"}, Now: now}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if actions := orch.Evaluate(tc.ev, f, cfg); len(actions) != 0 {
+				t.Fatalf("%q must fire nothing (SWT-38 criterion 5): session capture traffic is not a lifecycle "+
+					"event; got %s", tc.ev.Type, dump(actions))
+			}
+		})
+	}
+}

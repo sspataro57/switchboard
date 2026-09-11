@@ -22,6 +22,18 @@ package mcpserver_test
 // full profile's new count (22), and no `claude mcp add` line naming
 // ops-mcp-read. EXPECTED RED until docs/runbooks/ops-mcp-user-scope.md is
 // rewritten.
+//
+// AMENDED for SWT-38 (docs/tickets/mcp-task-capture_SPEC.md) criteria 22 and
+// 23: the user profile gains create_task, task_append_log and
+// task_set_priority (nine tools), and the full profile goes 22 → 23. The
+// runbook must name the three tools and the top level (urgent), extend the
+// accepted risk to creating tasks and reordering priority (C9) with its
+// recovery, say that no worker console picks up what a session creates (C1),
+// carry the new usage lines and an "Upgrading from SWT-37" block, and no longer
+// claim the install "cannot create, claim, … log". The one existing
+// requirement whose VALUE changes is the full-profile count (`22 tools` →
+// `23 tools`, criterion 22); every other SWT-35/37 requirement is unchanged.
+// EXPECTED RED until the runbook is rewritten.
 
 import (
 	"os"
@@ -59,6 +71,11 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		// SWT-37 criterion 25.
 		{"claude mcp remove", "the migration removes the old registration before re-adding (V4)"},
 		{"task_reopen", "the recovery for a wrong close or dismiss (V0)"},
+		// SWT-38 criterion 23: the three capture tools and the top level.
+		{"create_task", "SWT-38: the user profile creates HUMAN tasks (C1)"},
+		{"task_append_log", "SWT-38: progress lines, on human tasks only (C4)"},
+		{"task_set_priority", "SWT-38: reorder any task's priority (C5)"},
+		{"urgent", "SWT-38: the level table (normal 0, elevated 1, high 2, urgent 3)"},
 	} {
 		if !strings.Contains(doc, want.tok) {
 			t.Errorf("%s never mentions %q — %s", rel, want.tok, want.why)
@@ -110,11 +127,35 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{`swb close`, "the usage line for task_close"},
 		{`swb delivered`, "the usage line for task_mark_delivered"},
 		{`dismissed_by`, "the dismissal provenance note (V7): mcp:… labels were mapped by a model, dashboard:… picked by Salvador"},
-		{`\b22 tools\b`, "the full profile's tool count, 19 → 22 (SWT-37 criterion 24)"},
+		// Was `\b22 tools\b` (SWT-37 criterion 24, 19 → 22). SWT-38 criterion 22
+		// moves the full profile to 23 with task_set_priority.
+		{`\b23 tools\b`, "the full profile's tool count, 22 → 23 (SWT-38 criterion 22)"},
+		// SWT-38 criterion 23.
+		{`(?s)(email|web page).{0,600}(creat|priorit).{0,600}task_set_priority`,
+			"the ACCEPTED RISK extended (C9): untrusted text can also create tasks and reorder priority; one task_set_priority puts it back"},
+		{`(?i)no worker console`, "C1: what a session creates is human work, which no worker console picks up"},
+		// SWT-38 criterion 22: the tool count, the usage lines and the upgrade block.
+		{`swt-38`, "the title gains SWT-38"},
+		{`\bnine tools\b|\b9 tools\b`, "the user profile's tool list becomes nine"},
+		{`swb add`, "usage: 'swb add <title>' → create_task"},
+		{`swb log`, "usage: 'swb log <id> <text>' → task_append_log"},
+		{`swb done`, "usage: 'swb done <id>' → task_close with the outcome"},
+		{`swb prioritize`, "usage: 'swb prioritize <id> [level]' → task_set_priority"},
+		{`deprioritize`, "usage: 'swb deprioritize <id>' → normal"},
+		{`(?s)upgrading from swt-37.{0,600}go install \./cmd/ops-mcp-user.{0,600}new session`,
+			"the upgrade block: go install on main, then a NEW session — the registration is unchanged"},
 	} {
 		if !regexp.MustCompile(want.re).MatchString(lower) {
 			t.Errorf("%s does not match /%s/ — %s", rel, want.re, want.why)
 		}
+	}
+
+	// SWT-38 criterion 22: the boundary sentence "It cannot create, claim, …
+	// log, …" is REWRITTEN — since SWT-38 the install creates human tasks and
+	// logs on them, so the old sentence would be a false boundary claim.
+	if strings.Contains(lower, "cannot create, claim") {
+		t.Errorf("%s still says the install \"cannot create, claim, …\": SWT-38 lets it create HUMAN tasks, log on "+
+			"human tasks and set priority; the boundary paragraph must say what it can and cannot do now", rel)
 	}
 
 	// SWT-37 criterion 25: the OLD binary may appear only in the migration's

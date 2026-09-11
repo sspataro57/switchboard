@@ -31,6 +31,26 @@ package mcpserver_test
 // SWT-37 (V0, the owner decision) lets it dismiss, close and mark delivered,
 // and nothing else: it still cannot create, claim, draft, approve, send, book,
 // link, log, decide, read mail or reopen (criterion 11).
+//
+// SWT-38 (docs/tickets/mcp-task-capture_SPEC.md) criteria 11 and 16: the user
+// profile gains create_task, task_append_log and task_set_priority (nine
+// tools). A session in any repo can now log the work Salvador hands it as a
+// HUMAN task, write progress on human tasks and reorder priority. It still
+// cannot claim, create worker (claude) tasks, log on worker tasks, draft,
+// approve, send, book, link, decide, read mail or reopen. The two claude
+// refusals are the profile pin (require_assignee_type:"human", C4; see
+// task_capture_test.go), and a worker's refusal on task_set_priority is
+// policy.humanOnly (C6).
+//
+// IMPOSED SURFACE (SPEC "API / MCP tool changes"):
+//
+//	var userProfileTools = readProfileTools + {"task_dismiss", "task_close", "task_mark_delivered",
+//	                                           "create_task", "task_append_log", "task_set_priority"}
+//
+// EXPECTED RED until adapter.go's userProfileTools gains the three:
+// TestUserProfile_ListsExactly (six listed, nine wanted) and
+// TestUserProfile_NoToolReachesTheSendSnapshot (positive control: six checked,
+// nine wanted).
 
 import (
 	"context"
@@ -50,9 +70,16 @@ import (
 // claimed → in_progress.
 var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"}
 
-// The user profile, exactly (SWT-37 criterion 9), sorted.
+// The user profile, exactly, sorted. SWT-37 criterion 9 listed six; SWT-38
+// (mcp-task-capture) criterion 11 adds three, deliberately:
+//   - create_task: log the work Salvador hands a session as a swb task. Always
+//     assignee human (C1): the profile pin refuses claude (C4).
+//   - task_append_log: progress lines, on human tasks only (C4). A log line on
+//     a claude task is text inside a future worker prompt (SPEC fact 5).
+//   - task_set_priority: reorder any task (C5); humanOnly, so no worker can (C6).
 var wantUserProfileTools = []string{
-	"project_list", "task_close", "task_dismiss", "task_get_next", "task_list", "task_mark_delivered",
+	"create_task", "project_list", "task_append_log", "task_close", "task_dismiss",
+	"task_get_next", "task_list", "task_mark_delivered", "task_set_priority",
 }
 
 func TestReadProfile_ListsExactlyTheQueueReads(t *testing.T) {
@@ -142,7 +169,7 @@ func TestNewWithProfile_UnknownProfileIsTheReadSlice(t *testing.T) {
 
 // ---- SWT-37: the user profile -------------------------------------------------
 
-// Criterion 9. Exactly six names, and each entry is the full profile's entry
+// Criterion 9 (nine names since SWT-38 criterion 11). Each entry is the full profile's entry
 // byte for byte (name, description and schema): the user profile is a SLICE of
 // agentTools, never a second spelling.
 func TestUserProfile_ListsExactly(t *testing.T) {
@@ -199,19 +226,27 @@ func TestUserProfile_RefusesEveryOtherTool(t *testing.T) {
 	}
 }
 
-// Criterion 11. By NAME, so a later edit to userProfileTools fails with the
-// offending name rather than a count. Nothing that creates, claims, drafts,
-// approves, sends, books, links, logs, decides, reads mail or reopens.
+// Criterion 11 (SWT-37), AMENDED — not deleted — by SWT-38 criterion 16. By
+// NAME, so a later edit to userProfileTools fails with the offending name
+// rather than a count. Nothing that claims, creates child work, drafts,
+// approves, sends, books, links, decides, reads mail or reopens.
 func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 	listed := map[string]bool{}
 	for _, tool := range mcpserver.NewWithProfile(&fakeExec{}, testWorkerID, mcpserver.ProfileUser).ListTools() {
 		listed[tool.Name] = true
 	}
 	for _, name := range []string{
-		"create_task", "create_child_task", // creates
-		"task_claim",   // claims
-		"task_context", // flips claimed → in_progress for the holder
-		"task_append_log", "request_feedback", "mark_done_local",
+		// create_task and task_append_log LEFT this list in SWT-38 (C3/C4;
+		// Salvador, 2026-09-10: "if it's not in swb it should be able to log
+		// it"). The user profile now creates HUMAN tasks and logs on them. What
+		// keeps that away from the worker consoles is the profile pin
+		// (require_assignee_type:"human", enforced in the validator and
+		// handler), not this list: see TestUserProfile_PinsHumanAssignee and
+		// internal/tools criterion 20.
+		"create_child_task", // creates child work, any assignee (claude included)
+		"task_claim",        // claims
+		"task_context",      // flips claimed → in_progress for the holder
+		"request_feedback", "mark_done_local",
 		"record_decision",                                     // decides
 		"draft_delivery", "approve_delivery", "send_delivery", // drafts, approves, sends
 		"mark_delivery_sent",              // records a send
@@ -221,9 +256,9 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 		"task_reopen", // reopens (Future work)
 	} {
 		if listed[name] {
-			t.Errorf("the user profile lists %q. SWT-37 V3/criterion 11: the user-scope install sits in every "+
-				"repo's session and reads untrusted content; it may dismiss, close and mark delivered, and "+
-				"nothing else", name)
+			t.Errorf("the user profile lists %q. SWT-37 V3/criterion 11, SWT-38 criterion 16: the user-scope "+
+				"install sits in every repo's session and reads untrusted content; it may dismiss, close, mark "+
+				"delivered, create human tasks, log on them and set priority, and nothing else", name)
 		}
 	}
 	if len(listed) == 0 {

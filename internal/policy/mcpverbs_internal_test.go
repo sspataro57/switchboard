@@ -68,3 +68,54 @@ func TestPolicy_MCPHumanOnlyShape(t *testing.T) {
 			"full profile, humanOnly is the ONLY thing that refuses a worker console")
 	}
 }
+
+// SWT-38 (docs/tickets/mcp-task-capture_SPEC.md) criterion 10: the SHAPE of
+// the task-capture gate. task_set_priority is humanOnly (C6) and in none of the
+// other three maps: it transmits nothing, and no spine caller needs it (so not
+// mcpHumanOnly). create_task and task_append_log are in none of the four. Their
+// user-scope restriction is the profile pin (C4), enforced in the handler, not
+// in policy, because the spine and the worker consoles keep calling both.
+//
+// IMPOSED SURFACE: humanOnly["task_set_priority"] = true in matrix.go, and
+// nothing else. EXPECTED RED until matrix.go gains the entry.
+//
+// MUTATIONS THAT MUST TURN THIS RED: M-d (drop it from humanOnly), M-e (move it
+// to mcpHumanOnly; TestPolicy_MCPHumanOnlyShape above goes red too), making it
+// send-shaped or freeze-gated, and adding create_task or task_append_log to any
+// of the four maps.
+func TestPolicy_TaskCaptureShape(t *testing.T) {
+	if !humanOnly["task_set_priority"] {
+		t.Errorf("task_set_priority is not in humanOnly (C6): it is the only gate between a worker console " +
+			"and choosing its own work, and it must refuse the orchestrator too")
+	}
+	for _, m := range []struct {
+		name string
+		set  map[string]bool
+	}{
+		{"mcpHumanOnly", mcpHumanOnly},
+		{"sendShaped", sendShaped},
+		{"freezeGated", freezeGated},
+		{"snapshotGated", snapshotGated},
+	} {
+		if m.set["task_set_priority"] {
+			t.Errorf("task_set_priority is in %s. C6: humanOnly only — it is not a transport rule (no spine caller "+
+				"to exempt) and it sends nothing", m.name)
+		}
+	}
+	for _, tool := range []string{"create_task", "task_append_log"} {
+		for _, m := range []struct {
+			name string
+			set  map[string]bool
+		}{
+			{"humanOnly", humanOnly},
+			{"mcpHumanOnly", mcpHumanOnly},
+			{"sendShaped", sendShaped},
+			{"freezeGated", freezeGated},
+		} {
+			if m.set[tool] {
+				t.Errorf("%s is in %s. SWT-38 leaves it ungated in policy: the orchestrator, capture and worker "+
+					"consoles call it, and the user-scope gate is the profile pin (C4)", tool, m.name)
+			}
+		}
+	}
+}

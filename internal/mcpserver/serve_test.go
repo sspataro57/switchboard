@@ -11,6 +11,12 @@ package mcpserver
 // SWT-37 criterion 15 adds the {ProfileUser, len(userProfileTools)} row.
 // GREENFIELD — EXPECTED RED: ProfileUser and userProfileTools do not exist, so
 // package mcpserver's tests compile-FAIL until adapter.go declares them.
+//
+// SWT-38 (mcp-task-capture) criterion 19: the counts are now PINNED as literals
+// rather than len(agentTools)/len(userProfileTools), which were true of any
+// slice. Full: 22 (SWT-37) + task_set_priority = 23. User: 6 (SWT-37) +
+// create_task, task_append_log and task_set_priority = 9. Read: 3, unchanged.
+// EXPECTED RED until schemas.go and userProfileTools gain the new names.
 
 import (
 	"context"
@@ -34,9 +40,10 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		profile Profile
 		tools   int
 	}{
-		{ProfileFull, len(agentTools)},
-		{ProfileRead, len(readProfileTools)},
-		{ProfileUser, len(userProfileTools)},
+		// Literal counts (SWT-38 criterion 19): see the header.
+		{ProfileFull, 23},
+		{ProfileRead, 3},
+		{ProfileUser, 9},
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()
