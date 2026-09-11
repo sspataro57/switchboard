@@ -74,12 +74,14 @@ and every other repo gets the installed `ops-mcp-read`. `.mcp.json` is unchanged
 ## Use
 
 - **"swb" is the shorthand for switchboard.** The server's initialize instructions
-  and both tool descriptions teach it, so every session understands it.
+  and both tool descriptions teach it, so every session with the `ops` server
+  understands it (after a re-install, in a NEW session). Every trigger says "swb",
+  so an unrelated "my queue" elsewhere is left alone.
 - "list swb projects" → `project_list`: every slug with its client and its count
   of tasks in play. Confirm the slug here before memorising it.
 - "remember this repo's switchboard project is `saka`" → Claude Code saves the slug
   to that repo's memory. Switchboard does nothing.
-- "swb queue" (or "what's in my queue") → `task_list(project=<the remembered slug>)`;
+- "swb queue" (or "what's in my swb queue") → `task_list(project=<the remembered slug>)`;
   "swb queue saka" names the slug directly. Either way it returns the project's
   work in the order a worker would take it, as compact rows plus counts by status.
 

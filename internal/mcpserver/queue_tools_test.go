@@ -163,9 +163,18 @@ func TestInstructions_TeachTheSwbShorthand(t *testing.T) {
 		{`list swb projects.{0,40}project_list`, "'list swb projects' → project_list"},
 		{`swb queue.{0,80}task_list`, "'swb queue' → task_list"},
 		{`memori[sz]ed`, "…with the repo's memorised slug"},
+		{`if none is memori[sz]ed.{0,40}project_list.{0,20}ask`, "no memorised slug → project_list and ASK, never guess"},
+		{`swb queue <slug>.{0,40}task_list.{0,20}project=<slug>`, "'swb queue <slug>' names the project directly"},
 	} {
 		if !regexp.MustCompile(want.re).MatchString(d) {
 			t.Errorf("mcpserver.Instructions does not match /%s/ — %s. Instructions: %q", want.re, want.why, mcpserver.Instructions)
+		}
+	}
+	// Every trigger carries "swb": the user-scope server is in every repo's
+	// session, and a bare "my queue" would pull unrelated conversations here.
+	for _, q := range regexp.MustCompile(`"([^"]*)"`).FindAllStringSubmatch(d, -1) {
+		if q[1] != "swb" && !strings.Contains(q[1], "swb") {
+			t.Errorf("instructions trigger %q does not say swb — it would fire in unrelated conversations", q[1])
 		}
 	}
 }
