@@ -5,19 +5,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/fleet"
+	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 // Actor is the executor identity of every orchestrator action.
 const Actor = "orchestrator"
 
-// AdvisoryLockKey guards single-instance operation (pg_try_advisory_lock).
-const AdvisoryLockKey = 0x5157_0005 // "switchboard step 5"
+// AdvisoryLockKey guards single-instance operation (pg_try_advisory_lock). It
+// is spelled once, in internal/tools, because orchestrator_cursor_advance must
+// lock the same key to refuse while an engine runs (SWT-41 D1).
+const AdvisoryLockKey = tools.OrchestratorAdvisoryLockKey
 
 // Publisher is the fleet-command surface the applier needs. *fleet.Client
 // (via fleet.NewSpineClient) satisfies it.
@@ -179,24 +183,62 @@ func withCreatedTaskID(args map[string]any, id int64) map[string]any {
 	return out
 }
 
+// LockHandle is the held single-instance lock: the dedicated connection that
+// holds pg_advisory_lock(AdvisoryLockKey) for the process lifetime. SWT-41 D3:
+// that connection is checked every tick, because a CNPG switchover kills it
+// silently and an engine that kept draining would do so unlocked.
+type LockHandle struct {
+	mu       sync.Mutex // pgx conns are not safe for concurrent use: the loop and /healthz both call Alive
+	conn     *pgxpool.Conn
+	released bool
+}
+
+// Alive runs SELECT 1 on the held connection. An error means the lock is gone.
+func (l *LockHandle) Alive(ctx context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released {
+		return fmt.Errorf("orchestrator lock already released")
+	}
+	var one int
+	if err := l.conn.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil {
+		return fmt.Errorf("orchestrator lock connection: %w", err)
+	}
+	return nil
+}
+
+// Release unlocks and returns the connection. Idempotent.
+func (l *LockHandle) Release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released {
+		return
+	}
+	l.released = true
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var unlocked bool
+	_ = l.conn.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, AdvisoryLockKey).Scan(&unlocked)
+	l.conn.Release()
+}
+
 // TryAdvisoryLock takes the single-instance lock on a dedicated connection.
-// The returned release func must be called on shutdown (or the conn held for
-// process lifetime). ok=false means another orchestratord holds it.
-func TryAdvisoryLock(ctx context.Context, pool *pgxpool.Pool) (ok bool, release func(), err error) {
+// ok=false (nil handle) means another orchestratord holds it.
+func TryAdvisoryLock(ctx context.Context, pool *pgxpool.Pool) (lock *LockHandle, ok bool, err error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		return false, nil, fmt.Errorf("acquire lock conn: %w", err)
+		return nil, false, fmt.Errorf("acquire lock conn: %w", err)
 	}
 	if err := conn.QueryRow(ctx,
 		`SELECT pg_try_advisory_lock($1)`, AdvisoryLockKey).Scan(&ok); err != nil {
 		conn.Release()
-		return false, nil, fmt.Errorf("pg_try_advisory_lock: %w", err)
+		return nil, false, fmt.Errorf("pg_try_advisory_lock: %w", err)
 	}
 	if !ok {
 		conn.Release()
-		return false, nil, nil
+		return nil, false, nil
 	}
-	return true, conn.Release, nil
+	return &LockHandle{conn: conn}, true, nil
 }
 
 // Listen blocks on LISTEN task_events, invoking wake on every notification.

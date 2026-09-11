@@ -15,6 +15,7 @@
     form.filters { margin: .8rem 0 1rem; }
     form.filters input, form.filters select { font: inherit; margin-right: .5rem; }
     .muted { color: #777; font-size: .8rem; }
+    .orch-bad { background: #fde8e8; border: 1px solid #d66; color: #900; padding: .4rem .8rem; margin-bottom: 1rem; }
   </style>
 </head>
 <body>
@@ -22,6 +23,7 @@
     <a href="/export/tasks.csv">CSV</a> <a href="/export/tasks.json">JSON</a></nav>
   <h1>Board</h1>
   {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+  {{with .OrchAlert}}<p id="orchestrator-health" class="orch-bad">orchestrator {{.Verdict}}: backlog {{.Backlog}}, cursor {{.Cursor}} of {{.Head}} — lifecycle rules (Deliver tasks, unblocking, claim expiry) are not running. <a href="/funnel">funnel</a></p>{{end}}
 
   <form class="filters" method="get" action="/tasks">
     <select name="project" onchange="this.form.submit()">

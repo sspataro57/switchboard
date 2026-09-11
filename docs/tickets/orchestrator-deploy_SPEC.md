@@ -252,7 +252,9 @@ enter the R-rules' scope when Salvador moves them (a `done_local` → R3, a send
 4. **Start-from-now, end to end** (integration): seed events past a cursor, including a
    `status_changed` to `closed` on a task with a blocked dependent (the O2 shape). Advance, then
    `DrainOnce` processes **0** events and the dependent stays `blocked`. Insert a new `done_local`
-   on a `delivery='dashboard'` task, and `DrainOnce` processes exactly 1 and creates exactly one
+   on a `delivery='dashboard'` task, and `DrainOnce` processes every event past the pre-drain cursor
+   (the one new `done_local`, plus the `orchestrated` event R3's own `record_orchestration` writes —
+   2, not 1, as the test measures independently) and creates exactly one
    `Deliver #N` task. Mutation: skip the advance, and the drain unblocks the dependent and creates
    tasks for the seeded events (red).
 5. Lock liveness (D3):

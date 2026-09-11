@@ -13,6 +13,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/sspataro57/switchboard/internal/orchestrator"
 )
 
 // ---- /tasks board -------------------------------------------------------------
@@ -45,6 +48,10 @@ type boardData struct {
 	Projects []string
 	Filters  map[string]string
 	Flash    string
+	// OrchAlert is set only when the orchestrator verdict is not ok (SWT-41
+	// D5): the board is where Salvador looks, /funnel is where he investigates.
+	// A failing health query leaves it nil — the board never breaks on health.
+	OrchAlert *orchestrator.HealthState
 }
 
 // boardStatusOrder pins the column order to the status machine.
@@ -161,6 +168,10 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 				data.Projects = append(data.Projects, slug)
 			}
 		}
+	}
+
+	if h, err := orchestrator.Health(r.Context(), s.pool, time.Now()); err == nil && h.Verdict != orchestrator.VerdictOK {
+		data.OrchAlert = &h
 	}
 
 	if err := s.tmpl.ExecuteTemplate(w, "tasks.html", data); err != nil {
