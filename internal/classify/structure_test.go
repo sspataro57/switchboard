@@ -1159,7 +1159,10 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// (delivered statuses, merged first) — the two were built in parallel
 		// and this line is where their ledgers meet, exactly as SWT-34's review
 		// predicted. Both are owned by a SPEC's data-model section.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 {
+		// 26 is SWT-36's (dismiss-reopen-on-activity: task_dismissals'
+		// closed_from_status + reopened_* columns and the partial open-dismissal
+		// index), named by its SPEC's data-model section.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

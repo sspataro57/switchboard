@@ -103,6 +103,7 @@ func promoteCmd(argv []string) error {
 	out, err := json.Marshal(map[string]any{
 		"mode": mode, "considered": stats.Considered, "created": stats.Created,
 		"review": stats.Review, "attached": stats.Attached, "lost_claims": stats.Lost,
+		"reopened": stats.Reopened,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal stats: %w", err)

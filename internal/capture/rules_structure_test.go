@@ -75,8 +75,12 @@ func TestCaptureRules_NeverWritesToolActionTablesDirectly(t *testing.T) {
 		t.Fatalf("no rule-engine source files found in internal/capture (expected rules.go and rules_store.go); " +
 			"a scan with nothing to scan proves nothing")
 	}
-	banned := regexp.MustCompile(`(?is)insert\s+into\s+(tasks|external_refs|task_events)\b`)
-	updateBanned := regexp.MustCompile(`(?is)update\s+(tasks|external_refs|task_events)\b`)
+	// SWT-36 criterion 20: task_dismissals joins the ban. The activity reopen
+	// stamps the dismissal row, and ONLY the executor verb (task_reopen in
+	// internal/tools/close.go) may do that — a capture-side UPDATE would stamp a
+	// human label with no audit row and no row lock shared with task_dismiss.
+	banned := regexp.MustCompile(`(?is)insert\s+into\s+(tasks|external_refs|task_events|task_dismissals)\b`)
+	updateBanned := regexp.MustCompile(`(?is)update\s+(tasks|external_refs|task_events|task_dismissals)\b`)
 	for _, f := range files {
 		src := mustReadRepoFile(t, filepath.Join("internal/capture", f))
 		if m := banned.FindString(src); m != "" {

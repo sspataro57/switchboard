@@ -26,7 +26,11 @@ type Observation struct {
 	OwnAccountID   string // the STORING account's sync_cursor->>'own_account_id' (D12)
 	GateOn         bool   // projects.ticket_assignee_gate — from the COLUMN (criterion 33)
 	TaskStatus     string // tasks.status as it stands right now
-	Dismissed      bool   // a task_dismissals row exists for this task (D4)
+	// Dismissed: an OPEN task_dismissals row (reopened_at IS NULL) exists for
+	// this task (D4; SWT-36 D9). A dismissal overtaken by inbound activity, or
+	// undone by a human, no longer suppresses — the task is ordinary again,
+	// and a re-dismissal re-arms D4.
+	Dismissed bool
 	// DeliveredStatuses is the per-project set of status NAMES meaning "I
 	// delivered; the ball is in someone else's court" (SWT-34). A VALUE the
 	// driver read from the projects column — if Decide could look it up

@@ -569,6 +569,21 @@ A follow-up on a thread that already carries an OPEN task attaches as a log
 event instead of creating a duplicate; a thread whose task is already
 closed/delivered gets a NEW task (a re-raised obligation stays visible).
 
+**Except a DISMISSED one (SWT-36).** If the thread has no open task but has a
+`closed` task with an OPEN dismissal (`task_dismissals.reopened_at IS NULL`),
+the verdict attaches to THAT task, whatever its kind — never a duplicate of
+what you just dismissed. The pass appends the log line, then calls the guarded
+`task_reopen {task_id, dismissal_id, message_id}` as `promote:classify`; the
+task comes back at the status it was dismissed from (a review-lane `holding`
+task stays `holding`) only if the message was INGESTED after the dismissal —
+a message already in switchboard when you dismissed only logs. The promotion
+row stays `action='attached'` with the reason `thread's task N was dismissed
+(code); attached, reopen requested against dismissal D`; the typed outcome is
+`task_dismissals.reopened_by_message_id`. `--dry-run` prints the request
+(`reopen_dismissal=D`) and writes nothing; the stats line gains `"reopened"`.
+A task that was plain-closed after coming back falls through to a new task as
+before.
+
 **Arming it.** Promotion is OFF until a human sets the cutover — there is no
 flag, no default, and no deploy side effect:
 

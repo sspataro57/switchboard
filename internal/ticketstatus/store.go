@@ -491,7 +491,8 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 	q := `
 	SELECT r.id, r.external_key, t.id, t.status, p.ticket_assignee_gate,
 	       p.ticket_delivered_statuses,
-	       EXISTS (SELECT 1 FROM task_dismissals d WHERE d.task_id = t.id) AS dismissed,
+	       EXISTS (SELECT 1 FROM task_dismissals d
+	                WHERE d.task_id = t.id AND d.reopened_at IS NULL) AS dismissed,
 	       s.last_action, s.closed_from_status, s.status_category, s.assignee_account_id,
 	       s.status_name
 	  FROM external_refs r

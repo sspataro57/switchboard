@@ -94,13 +94,16 @@ type RulesConfig struct {
 }
 
 // RulesStats is one run's counters. Considered == Matched + Unmatched;
-// TasksCreated and Appended are zero in shadow mode, always.
+// TasksCreated, Appended and Reopened are zero in shadow mode, always.
+// Reopened (SWT-36) counts dismissed tasks the guarded task_reopen answered
+// reopened:true for; every one of them is also counted in Appended.
 type RulesStats struct {
 	Considered   int
 	Matched      int
 	Unmatched    int
 	TasksCreated int
 	Appended     int
+	Reopened     int
 }
 
 // RulesMode reads CAPTURE_RULES_MODE. Anything that is not exactly "live" —
@@ -202,6 +205,10 @@ type ruleDecision struct {
 	extKey         *string
 	taskID         *int64
 	reason         string
+	// dismissalID is the linked task's OPEN task_dismissals row (SWT-36
+	// criterion 13), 0 = none. Carried, never written to capture_decisions:
+	// the typed outcome lives in task_dismissals.reopened_by_message_id (D7).
+	dismissalID int64
 }
 
 // Actions, spelled exactly as capture_decisions.action's CHECK (SPEC §4).
@@ -327,6 +334,18 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 				return stats, err
 			}
 			stats.Appended++
+			// SWT-36 D10: log first, THEN the guarded reopen — a crash between
+			// the two leaves exactly today's behaviour (logged, still closed).
+			if decision.dismissalID != 0 {
+				reopened, err := reopenRuleTask(ctx, ex, cfg.Actor, pm, *decision.taskID, decision.dismissalID,
+					*decision.extSystem, *decision.extKey)
+				if err != nil {
+					return stats, err
+				}
+				if reopened {
+					stats.Reopened++
+				}
+			}
 		}
 	}
 	return stats, nil
@@ -574,10 +593,16 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, pm pendingMessage,
 		return d, winner, err
 	}
 	if found {
+		taskID := existing.taskID
 		d.action = actionTaskLog
-		d.taskID = &existing
+		d.taskID = &taskID
 		d.reason = fmt.Sprintf("rule %d (%s): %s %s already linked to task %d; append a log",
-			winner.rule.ID, winner.rule.Kind, system, key, existing)
+			winner.rule.ID, winner.rule.Kind, system, key, taskID)
+		if existing.dismissalID != 0 {
+			d.dismissalID = existing.dismissalID
+			d.reason += fmt.Sprintf("; task %d was dismissed (%s); reopen requested against dismissal %d",
+				taskID, existing.dismissalCode, existing.dismissalID)
+		}
 		return d, winner, nil
 	}
 	d.action = actionTask
@@ -654,19 +679,44 @@ func withoutRule(rules []Rule, id int64) []Rule {
 // the report is what collapses those to one per ticket. Deduping inside a shadow
 // run instead would make the report's DISTINCT redundant and hide the volume the
 // diff exists to show.
-func taskForExternalRef(ctx context.Context, pool *pgxpool.Pool, system, key string) (int64, bool, error) {
-	var taskID int64
+//
+// SWT-36 criterion 13: it also returns the task's OPEN dismissal — present iff
+// tasks.status='closed' AND a task_dismissals row with reopened_at IS NULL
+// exists (D3). The partial unique index allows at most one open row per task,
+// so the LEFT JOINs cannot multiply the ref row. A task whose dismissal was
+// overtaken and which was then plain-closed carries none: plain-closed.
+func taskForExternalRef(ctx context.Context, pool *pgxpool.Pool, system, key string) (refTask, bool, error) {
+	var rt refTask
+	var dismissalID *int64
+	var dismissalCode *string
 	err := pool.QueryRow(ctx,
-		`SELECT task_id FROM external_refs
-		  WHERE system = $1 AND external_key = $2
-		  ORDER BY created_at DESC, id DESC LIMIT 1`, system, key).Scan(&taskID)
+		`SELECT r.task_id, d.id, d.reason_code
+		   FROM external_refs r
+		   LEFT JOIN tasks t ON t.id = r.task_id
+		   LEFT JOIN task_dismissals d ON d.task_id = t.id AND t.status = 'closed' AND d.reopened_at IS NULL
+		  WHERE r.system = $1 AND r.external_key = $2
+		  ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, system, key).Scan(&rt.taskID, &dismissalID, &dismissalCode)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
+		return refTask{}, false, nil
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("resolve task for %s %s: %w", system, key, err)
+		return refTask{}, false, fmt.Errorf("resolve task for %s %s: %w", system, key, err)
 	}
-	return taskID, true, nil
+	if dismissalID != nil {
+		rt.dismissalID = *dismissalID
+	}
+	if dismissalCode != nil {
+		rt.dismissalCode = *dismissalCode
+	}
+	return rt, true, nil
+}
+
+// refTask is taskForExternalRef's answer: the linked task and, when it is
+// dismissed, its open dismissal (0 / "" = none).
+type refTask struct {
+	taskID        int64
+	dismissalID   int64
+	dismissalCode string
 }
 
 // insertDecision writes the capture_decisions row and reports whether it won the
@@ -832,6 +882,40 @@ func appendRuleLog(ctx context.Context, ex *executor.Executor, actor string,
 		return fmt.Errorf("append capture log to task %d (message %d): %w", taskID, pm.msg.ID, err)
 	}
 	return nil
+}
+
+// reopenRuleTask is the guarded task_reopen (SWT-36 criterion 14) through the
+// executor as the configured capture:{connector} actor: ids only — the handler
+// reads both instants and the message direction from columns, under the row
+// lock, and answers reopened:true or a skip. It fails the pass on error, the
+// linkRuleRef policy: the live claim is spent, and a silently swallowed
+// failure would leave the dismissed task down with nothing saying why.
+func reopenRuleTask(ctx context.Context, ex *executor.Executor, actor string,
+	pm pendingMessage, taskID, dismissalID int64, system, key string) (bool, error) {
+	args, err := json.Marshal(map[string]any{
+		"task_id":      taskID,
+		"dismissal_id": dismissalID,
+		"message_id":   pm.msg.ID,
+		"reason": fmt.Sprintf("capture: new inbound %s message %d on %s %s",
+			ruleOrNone(pm.channel), pm.msg.ID, system, key),
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal task_reopen args for task %d: %w", taskID, err)
+	}
+	res, err := ex.Execute(ctx, executor.Call{
+		Tool: "task_reopen", Actor: actor, Args: args, TaskID: &taskID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("reopen dismissed task %d (dismissal %d, message %d): %w",
+			taskID, dismissalID, pm.msg.ID, err)
+	}
+	var out struct {
+		Reopened bool `json:"reopened"`
+	}
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		return false, fmt.Errorf("parse task_reopen result for task %d: %w", taskID, err)
+	}
+	return out.Reopened, nil
 }
 
 // ruleTaskTitle is SPEC §7's "{external_key} — {subject-or-first-line}", truncated

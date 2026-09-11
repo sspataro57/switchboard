@@ -73,10 +73,20 @@ lookup half loudly and the status half still reconciles.
 
 ## Dismissals outrank the reconciler
 
-A task with a `task_dismissals` row (SWT-31) never resurfaces: when its ticket
-warrants a task again, the pass appends one log line to the closed task and
-stops — recorded once, never repeated. Reopening a dismissal by hand is
-deliberate: `opsctl call --tool task_reopen --args '{"task_id":N,"reason":"..."}'`.
+A task with an OPEN `task_dismissals` row (SWT-31; `reopened_at IS NULL`
+since SWT-36) never resurfaces: when its ticket warrants a task again, the pass
+appends one log line to the closed task and stops — recorded once, never
+repeated. Reopening a dismissal by hand is deliberate:
+`opsctl call --tool task_reopen --args '{"task_id":N,"reason":"..."}'`.
+
+**D4 now means an OPEN dismissal (SWT-36 D9).** A dismissal that was overtaken
+by new inbound activity (capture or promote reopened the task and stamped the
+row), or undone by a human's plain reopen, no longer suppresses: the task is
+ordinary again. If its ticket is Done or assigned away, this pass closes it in
+the same jira tick (capture runs first), so it ends closed with a log line —
+intended, the ticket's state outranks a comment — and because that close is
+the pass's own, it reopens later if the ticket warrants it. A human
+re-dismissal writes a new open row and re-arms the suppression.
 
 ## One-off reconciliation
 

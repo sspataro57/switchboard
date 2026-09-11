@@ -117,6 +117,18 @@ func TestMigration0022_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 	}
 
 	// (4) criterion 13's idempotency, structurally: the unique index is TOTAL.
+	//
+	// AMENDED 2026-09-10 (SWT-36, docs/tickets/dismiss-reopen-on-activity_SPEC.md
+	// D6): migration 0026 DROPS this total index and replaces it with the PARTIAL
+	// task_dismissals_open_uniq (task_id) WHERE reopened_at IS NULL — one OPEN
+	// dismissal per task, several over time, because under the total index a
+	// re-dismissal after an activity reopen was a silent label loss. This guard
+	// stays as it is: it scopes to 0022's OWN file, and 0022 as written is still
+	// total and still correct for the ticket that shipped it (migrations are
+	// forward-only; 0022 is never edited). The live shape is pinned by
+	// TestMigration0026_DismissalReopenShape in dismissal_reopen_structure_test.go,
+	// and every ON CONFLICT against the table must now restate the predicate
+	// (TestDismissals_EveryOnConflictRestatesThePartialPredicate).
 	uniq := regexp.MustCompile(`(?s)create\s+unique\s+index\s+\S+\s+on\s+task_dismissals\s*\(\s*task_id\s*\)([^;]*)`)
 	um := uniq.FindStringSubmatch(sql)
 	if um == nil {

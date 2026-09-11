@@ -48,8 +48,9 @@ type Stats struct {
 	Considered int // verdicts the inbox produced
 	Created    int // live tasks (action=task)
 	Review     int // holding tasks (action=review)
-	Attached   int // log appends onto an open task
+	Attached   int // log appends onto an open (or dismissed) task
 	Lost       int // claims lost to a concurrent or earlier row
+	Reopened   int // dismissed tasks task_reopen answered reopened:true for (SWT-36)
 }
 
 // verdictRow is Verdict plus what the executor calls need but Decide does not.
@@ -110,12 +111,13 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			return stats, err
 		}
 		d := Decide(v, existing)
-		reason := decisionReason(v, existing, finished)
+		reason := decisionReason(v, d, existing, finished)
 
 		if cfg.DryRun {
 			stats.Considered++
 			slog.Info("promote dry-run", "message", v.MessageID, "kind", v.Kind,
 				"action", d.Action, "status", d.Status, "attach_task", d.TaskID,
+				"reopen_dismissal", d.ReopenDismissalID,
 				"project", v.ProjectSlug, "title", v.Title, "reason", reason)
 			count(&stats, d)
 			continue
@@ -141,6 +143,20 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			}
 			if err := recordTask(ctx, pool, promoID, d.TaskID); err != nil {
 				return stats, err
+			}
+			// SWT-36 D10: the log line first, then the guarded reopen — a
+			// crash between the two leaves exactly today's behaviour. The task
+			// id is recorded BEFORE the reopen for the ordering reason below:
+			// the claim is spent, so a failed reopen must not also lose the
+			// pointer to the task the message was attached to.
+			if d.ReopenDismissalID != 0 {
+				reopened, err := reopenDismissed(ctx, ex, v, d)
+				if err != nil {
+					return stats, err
+				}
+				if reopened {
+					stats.Reopened++
+				}
 			}
 		default: // "task" | "review"
 			taskID, err := createVerdictTask(ctx, ex, v, d)
@@ -287,9 +303,12 @@ func inbox(ctx context.Context, pool *pgxpool.Pool, limit int) ([]verdictRow, er
 }
 
 // threadTask finds the thread's oldest OPEN task IN THE VERDICT'S PROJECT (the
-// attach target), and — when there is none — the oldest finished one, so the
-// Q3 fall-through can name it in the promotion row's reason. A nil thread
-// means neither.
+// attach target); failing that, the oldest DISMISSED one (SWT-36 criterion 10:
+// status='closed' with an OPEN task_dismissals row — inner join, reopened_at
+// IS NULL — so a task whose dismissal was overtaken and which was then
+// plain-closed is NOT dismissed, D3); and — when there is neither — the oldest
+// finished one, so the Q3 fall-through can name it in the promotion row's
+// reason. A nil thread means none of them.
 //
 // Project-scoped ON PURPOSE (go-reviewer, 2026-09-09; a SPEC amendment):
 // task_set_source_thread's other caller is the capture engine, which creates
@@ -299,7 +318,7 @@ func inbox(ctx context.Context, pool *pgxpool.Pool, limit int) ([]verdictRow, er
 // the institutional-knowledge entry says holds. Latent today (no prod task
 // carries source_thread_id yet) but the clause is one line and the leak is
 // silent.
-func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64, projectID int64) (openTask, finished *ExistingTask, err error) {
+func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64, projectID int64) (existing, finished *ExistingTask, err error) {
 	if threadID == nil {
 		return nil, nil, nil
 	}
@@ -312,9 +331,25 @@ func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64, projec
 	case err == nil:
 		return &t, nil, nil
 	case errors.Is(err, pgx.ErrNoRows):
-		// fall through to the finished lookup
+		// fall through to the dismissed lookup
 	default:
 		return nil, nil, fmt.Errorf("promote: find open task for thread %d: %w", *threadID, err)
+	}
+
+	var dt ExistingTask
+	err = pool.QueryRow(ctx,
+		`SELECT t.id, t.status, d.id, d.reason_code
+		   FROM tasks t
+		   JOIN task_dismissals d ON d.task_id = t.id AND d.reopened_at IS NULL
+		  WHERE t.source_thread_id = $1 AND t.project_id = $2 AND t.status = 'closed'
+		  ORDER BY t.id LIMIT 1`, *threadID, projectID).Scan(&dt.ID, &dt.Status, &dt.DismissalID, &dt.DismissalCode)
+	switch {
+	case err == nil:
+		return &dt, nil, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		// fall through to the finished lookup
+	default:
+		return nil, nil, fmt.Errorf("promote: find dismissed task for thread %d: %w", *threadID, err)
 	}
 
 	var f ExistingTask
@@ -335,15 +370,23 @@ func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64, projec
 // when present: a re-attribution (criterion 16 — BOTH project ids, because the
 // disagreement is the interesting fact) and a Q3 fall-through past a finished
 // task (the closed task's id, because "why is there a second task on this
-// thread" must be answerable from the row that made the decision).
-func decisionReason(v Verdict, openTask, finished *ExistingTask) string {
+// thread" must be answerable from the row that made the decision). SWT-36 D7
+// adds a third: an attach onto a DISMISSED task names the task, its reason
+// code and the dismissal the reopen was requested against — the typed outcome
+// lives in task_dismissals.reopened_by_message_id, never in this prose.
+func decisionReason(v Verdict, d Decision, existing, finished *ExistingTask) string {
 	var parts []string
 	if v.StoredProjectID != 0 && v.StoredProjectID != v.ProjectID {
 		parts = append(parts, fmt.Sprintf(
 			"re-attributed after classification: verdict stored project_id %d, current attribution %d",
 			v.StoredProjectID, v.ProjectID))
 	}
-	if openTask == nil && finished != nil {
+	if d.ReopenDismissalID != 0 && existing != nil {
+		parts = append(parts, fmt.Sprintf(
+			"thread's task %d was dismissed (%s); attached, reopen requested against dismissal %d",
+			existing.ID, existing.DismissalCode, d.ReopenDismissalID))
+	}
+	if existing == nil && finished != nil {
 		parts = append(parts, fmt.Sprintf(
 			"thread's task %d is %s; created a new task (Q3: a thread yields at most one open task)",
 			finished.ID, finished.Status))
@@ -431,6 +474,36 @@ func appendVerdictLog(ctx context.Context, ex *executor.Executor, v Verdict, tas
 		return fmt.Errorf("promote: append log to task %d (message %d): %w", taskID, v.MessageID, err)
 	}
 	return nil
+}
+
+// reopenDismissed is the guarded task_reopen (SWT-36 criterion 11) through the
+// executor as promote:classify: ids only — the handler reads both instants and
+// the message direction from columns, under the row lock, and answers either
+// reopened:true or a skip (e.g. message_predates_dismissal, D8). A failed call
+// fails the pass, the linkRuleRef policy.
+func reopenDismissed(ctx context.Context, ex *executor.Executor, v Verdict, d Decision) (bool, error) {
+	taskID := d.TaskID
+	args, err := json.Marshal(map[string]any{
+		"task_id":      taskID,
+		"dismissal_id": d.ReopenDismissalID,
+		"message_id":   v.MessageID,
+		"reason":       fmt.Sprintf("promote: new %s verdict on the task's thread (message %d)", v.Kind, v.MessageID),
+	})
+	if err != nil {
+		return false, fmt.Errorf("promote: marshal task_reopen args for task %d: %w", taskID, err)
+	}
+	res, err := ex.Execute(ctx, executor.Call{Tool: "task_reopen", Actor: Actor, Args: args, TaskID: &taskID})
+	if err != nil {
+		return false, fmt.Errorf("promote: reopen dismissed task %d (dismissal %d, message %d): %w",
+			taskID, d.ReopenDismissalID, v.MessageID, err)
+	}
+	var out struct {
+		Reopened bool `json:"reopened"`
+	}
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		return false, fmt.Errorf("promote: parse task_reopen result for task %d: %w", taskID, err)
+	}
+	return out.Reopened, nil
 }
 
 // setProvenance records which conversation raised the task — what makes the

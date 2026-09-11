@@ -235,3 +235,126 @@ func TestDecide_FinishedTaskFallsThroughToTheWhitelist(t *testing.T) {
 		}
 	}
 }
+
+// ---- SWT-36 criteria 8 + 9: a dismissed task on the thread (D3, D4, D8) -----
+//
+// docs/tickets/dismiss-reopen-on-activity_SPEC.md. Same purity rules as the
+// rest of this file (criterion 6's imports: testing + the package, nothing
+// else — structure_test.go parses this file's import block).
+//
+// IMPOSED SURFACE (criterion 8 names both fields):
+//
+//	type ExistingTask struct {
+//	    ID          int64
+//	    Status      string
+//	    DismissalID int64 // the task's OPEN task_dismissals row (status='closed' AND
+//	                      // reopened_at IS NULL, D3); 0 = none
+//	    // ...plus the dismissal's reason code, for decisionReason's prose. The
+//	    // field name is the implementer's; Decide must not branch on it and no
+//	    // test here reads it.
+//	}
+//	type Decision struct {
+//	    Action, Status    string
+//	    TaskID            int64
+//	    ReopenDismissalID int64 // non-zero = attach AND request task_reopen against this dismissal
+//	}
+//
+// Rule order (criterion 8): an open task -> attach; else DismissalID != 0 ->
+// {Action:"attached", TaskID, ReopenDismissalID} whatever the kind; else the
+// existing whitelist/holding rules.
+//
+// GREENFIELD NOTE — EXPECTED RED: neither field exists, so this test package
+// compile-FAILs until promote.go declares them.
+
+// "open beats dismissed". threadTask looks for an open task FIRST, so an open
+// task never carries a DismissalID in production — which is exactly why the
+// rule ORDER is pinned here rather than assumed: a Decide that checked the
+// dismissal first would ask the handler to reopen a task that is already open
+// (harmless, not_closed) while the log line still attached correctly, and the
+// mistake would hide until the rule order mattered for something else.
+func TestDecide_AnOpenTaskBeatsADismissal(t *testing.T) {
+	const existingID, dismissalID = int64(4243), int64(31)
+	for _, ts := range taskStatuses {
+		if !ts.open {
+			continue
+		}
+		t.Run(ts.status, func(t *testing.T) {
+			got := promote.Decide(promote.Verdict{Kind: "payment_due"},
+				&promote.ExistingTask{ID: existingID, Status: ts.status, DismissalID: dismissalID})
+			if got.Action != "attached" || got.TaskID != existingID {
+				t.Fatalf("Decide(open %s task) = %+v, want an attach to %d", ts.status, got, existingID)
+			}
+			if got.ReopenDismissalID != 0 {
+				t.Errorf("Decide(open %s task carrying DismissalID %d).ReopenDismissalID = %d, want 0. Criterion "+
+					"8's rule order: an OPEN task gives a plain attach; the reopen request is only for a task "+
+					"that is closed with an open dismissal (D3)", ts.status, dismissalID, got.ReopenDismissalID)
+			}
+		})
+	}
+}
+
+// "dismissed plus a whitelisted kind attaches and never creates a task" —
+// and the same for every other kind. D8: today's Q3 fall-through would create a
+// DUPLICATE of the task Salvador just dismissed and split the thread's history;
+// whether the handler then reopens (ingested after the dismissal) or only logs
+// (ingested before it) is the handler's call, under the row lock (D4), never
+// this pure function's.
+func TestDecide_ADismissedTaskAttachesAndRequestsAReopenWhateverTheKind(t *testing.T) {
+	const dismissedID, dismissalID = int64(88), int64(55)
+	for _, k := range classifyKinds {
+		k := k
+		t.Run(k.kind, func(t *testing.T) {
+			got := promote.Decide(promote.Verdict{Kind: k.kind},
+				&promote.ExistingTask{ID: dismissedID, Status: "closed", DismissalID: dismissalID})
+			if got.Action != "attached" {
+				t.Fatalf("Decide(kind=%q, dismissed closed task).Action = %q, want \"attached\". D8: a message on a "+
+					"dismissed thread returns to the SAME task (invariant 2's intent); creating a task here "+
+					"re-creates what the human just threw away", k.kind, got.Action)
+			}
+			if got.TaskID != dismissedID {
+				t.Errorf("Decide(kind=%q, dismissed).TaskID = %d, want %d (D7: classify_promotions.task_id is "+
+					"the dismissed task)", k.kind, got.TaskID, dismissedID)
+			}
+			if got.ReopenDismissalID != dismissalID {
+				t.Errorf("Decide(kind=%q, dismissed).ReopenDismissalID = %d, want %d. The driver passes it to "+
+					"task_reopen as dismissal_id; the HANDLER decides whether the dismissal is overtaken (D4)",
+					k.kind, got.ReopenDismissalID, dismissalID)
+			}
+			if got.Status != "" {
+				t.Errorf("Decide(kind=%q, dismissed).Status = %q, want \"\". Status is create_task's argument, "+
+					"and the restore status is the dismissal's closed_from_status, chosen in the handler (D5) "+
+					"— a whitelisted kind must not lift a review-lane task to ready", k.kind, got.Status)
+			}
+		})
+	}
+}
+
+// "a non-dismissed closed or delivered task keeps the Q3 new-task behaviour".
+// D3's scope: plain task_close, R8's Deliver close and reconciler closes are
+// NOT dismissals, and a follow-up past them is a new obligation (SWT-30's Q3).
+func TestDecide_AClosedTaskWithoutADismissalKeepsQ3(t *testing.T) {
+	for _, status := range []string{"closed", "delivered"} {
+		for _, k := range classifyKinds {
+			got := promote.Decide(promote.Verdict{Kind: k.kind},
+				&promote.ExistingTask{ID: 77, Status: status, DismissalID: 0})
+			wantAction, wantStatus := "review", "holding"
+			if k.whitelisted {
+				wantAction, wantStatus = "task", "ready"
+			}
+			if got.Action != wantAction || got.Status != wantStatus || got.ReopenDismissalID != 0 {
+				t.Errorf("Decide(kind=%q, %s task, no dismissal) = %+v, want {Action:%q Status:%q "+
+					"ReopenDismissalID:0}. D3: only a DISMISSAL reopens on activity; everything else keeps "+
+					"today's fall-through", k.kind, status, got, wantAction, wantStatus)
+			}
+		}
+	}
+}
+
+// "nil existing is unchanged."
+func TestDecide_NoTaskOnTheThreadNeverRequestsAReopen(t *testing.T) {
+	for _, k := range classifyKinds {
+		if got := promote.Decide(promote.Verdict{Kind: k.kind}, nil); got.ReopenDismissalID != 0 || got.TaskID != 0 {
+			t.Errorf("Decide(kind=%q, nil) = %+v, want no task and no reopen request", k.kind, got)
+		}
+	}
+}
