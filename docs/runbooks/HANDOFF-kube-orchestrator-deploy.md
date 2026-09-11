@@ -38,6 +38,15 @@ A Deployment `orchestratord` in `ops`:
   - `MQTT_BROKER=tcp://192.168.50.45:1883`
   - `ORCH_HEALTH_ADDR=:8091`
 - **Not** `ORCH_BRIEF_PROJECT` / `ORCH_BRIEF_HOUR`: the morning brief stays off (owner, 2026-09-11).
+  Leave them in the manifest as a commented block so switching it on later is one uncomment:
+  ```yaml
+  # - name: ORCH_BRIEF_PROJECT   # morning brief, off for now (owner 2026-09-11)
+  #   value: <slug>
+  # - name: ORCH_BRIEF_HOUR
+  #   value: "7"
+  # - name: TZ                   # container clock is UTC; without this hour 7 = 03:00 Eastern
+  #   value: America/New_York
+  ```
 - **No** `OPS_TOKEN_KEY`, Slack bridge, Pipedream or `OPS_LOCAL_*` env. The process wires no
   sender, and least privilege keeps it that way.
 - `livenessProbe`: `httpGet` `/healthz` on port `8091`, `initialDelaySeconds: 20`,
@@ -76,6 +85,8 @@ Then the switchboard session runs the smoke (SPEC V5, which includes a scale-to-
 - **No change to the classify or connector CronJobs.** Moving them to MQTT-woken consumers is a
   follow-up ticket.
 - **No Ingress, no Service** for orchestratord.
+- **Not `pipelined`.** SWT-40's future `pipelined` Deployment is a separate workload with its own
+  MQTT client ids. Never fold it into this manifest or share `switchboard-orchestratord`.
 
 ## Rollback
 

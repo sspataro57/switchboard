@@ -88,6 +88,8 @@ func AdvisoryLockHeld(ctx context.Context, pool *pgxpool.Pool, key int64) (bool,
 	if err := pool.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM pg_locks
 		                WHERE locktype = 'advisory' AND granted
+		                  -- advisory locks are per database; pg-main hosts several
+		                  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
 		                  AND classid::bigint = $1 AND objid::bigint = $2 AND objsubid = 1)`,
 		hi, lo).Scan(&held); err != nil {
 		return false, fmt.Errorf("read pg_locks for advisory key %#x: %w", key, err)

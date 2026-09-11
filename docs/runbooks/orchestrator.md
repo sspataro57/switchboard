@@ -25,14 +25,14 @@ itself.
 - **`/tasks`** shows one red line whenever the verdict isn't `ok`. The board never breaks on a
   failing health query: that failure shows only on `/funnel`, inline.
 - **`GET /healthz` on `:8091`** is the Kubernetes liveness probe, not for humans. It returns 200
-  only if a loop iteration finished within 3 ticks AND the lock connection answers. A 503 restarts
-  the pod.
+  only if a loop iteration finished within 3 ticks AND the lock connection answers. Three consecutive 503s (about 90 seconds) restart the pod.
 
 **"another orchestratord holds the advisory lock; exiting"** right after a rollout is expected:
 the old pod still held the lock. It clears within one restart. `strategy: Recreate` makes it rare.
 
-A **lost lock connection** (for example a CNPG switchover) makes the process exit non-zero on its
-next tick. Kubernetes restarts it, and it takes the lock again. That's by design: an engine that
+A **lost lock connection** (for example a CNPG switchover) makes the process exit non-zero before
+its next tick or drain — the lock is checked before every one, and again before every 200-event
+batch inside a drain. Kubernetes restarts it, and it takes the lock again. That's by design: an engine that
 kept draining without the lock could double-apply.
 
 ## `orchestrator_cursor_advance` — when to use it, and when not
@@ -59,6 +59,18 @@ no-ops. To stop the engine, scale to 0. The cursor stays put, and a restart catc
 ## Cutover (first switch-on, 2026-09-11)
 
 The owner decided on 2026-09-11 to start from now: don't replay the backlog since July.
+
+### P0 — the July leftovers are closed, and before the cursor
+
+Re-run right before the advance. Both must hold:
+
+```sql
+-- none of #4–#6, #8–#20 is open
+SELECT id, status FROM tasks WHERE id IN (4,5,6,8,9,10,11,12,13,14,15,16,17,18,19,20) AND status <> 'closed';
+-- their closing events: the highest id must be <= the advance's reported "to"
+SELECT max(id) FROM task_events
+ WHERE task_id IN (4,5,6,8,9,10,11,12,13,14,15,16,17,18,19,20) AND event_type = 'status_changed';
+```
 
 ### Pre-cutover checks (prod, read-only, run 2026-09-11 ~15:40Z)
 
@@ -93,7 +105,7 @@ ROLLBACK;
 The July smoke leftovers (#4, #5, #6, #8) and the July plan follow-ups (#9–#20) were closed
 through `opsctl call --tool task_close`, audited as `opsctl:salvo`. Their `status_changed` events
 fall before the new cursor, so the engine never evaluates them. The morning brief stays off
-(`ORCH_BRIEF_PROJECT` unset).
+(`ORCH_BRIEF_PROJECT` unset) — see "Turning on the morning brief" below.
 
 ### Sequence
 
@@ -115,6 +127,17 @@ fall before the new cursor, so the engine never evaluates them. The morning brie
 6. Run the smoke in SPEC V5 (the `smoke` project, worker id `swt41-smoke`).
 
 Cursor-advance output: _(pasted at cutover)_
+
+## Turning on the morning brief
+
+Off for the first deploy (owner, 2026-09-11). To turn it on, add to the Deployment's env:
+
+- `ORCH_BRIEF_PROJECT=<slug>` — the project the daily "Morning brief YYYY-MM-DD" task is created in.
+- `ORCH_BRIEF_HOUR=7` — optional; default 7.
+- `TZ=America/New_York` — required in practice: the container clock is UTC, so without it hour 7
+  is 03:00 Eastern. Distroless `static` ships tzdata.
+
+Nothing closes old briefs; they pile up unless closed.
 
 ## Rollback
 

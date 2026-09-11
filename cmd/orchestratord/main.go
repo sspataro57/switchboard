@@ -68,7 +68,9 @@ func newHealthHandler(tick time.Duration, now func() time.Time, lastTick func() 
 				http.StatusServiceUnavailable)
 			return
 		}
-		if err := lock.Alive(r.Context()); err != nil {
+		actx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := lock.Alive(actx); err != nil {
 			slog.Error("healthz: orchestrator lock connection lost", "err", err)
 			http.Error(w, "orchestrator lock connection lost", http.StatusServiceUnavailable)
 			return
@@ -82,7 +84,11 @@ func newHealthHandler(tick time.Duration, now func() time.Time, lastTick func() 
 // keeps draining: log and exit non-zero. Kubernetes restarts the pod, which
 // re-takes the lock or exits on contention.
 func checkLockOrExit(ctx context.Context, lock aliveChecker, exit func(code int)) bool {
-	if err := lock.Alive(ctx); err != nil {
+	// Bounded: a half-open connection must become a prompt exit, not a hang
+	// that also blocks /healthz on the lock handle's mutex.
+	actx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := lock.Alive(actx); err != nil {
 		if ctx.Err() != nil {
 			return false // shutting down: the cancelled context is the error, not the lock
 		}

@@ -12,16 +12,18 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/fleet"
-	"github.com/sspataro57/switchboard/internal/tools"
+	"github.com/sspataro57/switchboard/internal/lockkeys"
 )
 
 // Actor is the executor identity of every orchestrator action.
 const Actor = "orchestrator"
 
 // AdvisoryLockKey guards single-instance operation (pg_try_advisory_lock). It
-// is spelled once, in internal/tools, because orchestrator_cursor_advance must
-// lock the same key to refuse while an engine runs (SWT-41 D1).
-const AdvisoryLockKey = tools.OrchestratorAdvisoryLockKey
+// is spelled once, in the import-free internal/lockkeys, because
+// orchestrator_cursor_advance must lock the same key to refuse while an engine
+// runs (SWT-41 D1) — and importing internal/tools for it would drag the
+// provider adapter into this package's graph (invariant 7).
+const AdvisoryLockKey = lockkeys.Orchestrator
 
 // Publisher is the fleet-command surface the applier needs. *fleet.Client
 // (via fleet.NewSpineClient) satisfies it.

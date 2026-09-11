@@ -16,13 +16,14 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/lockkeys"
 )
 
-// OrchestratorAdvisoryLockKey is orchestratord's single-instance lock, spelled
-// once. internal/orchestrator aliases it (orchestrator.AdvisoryLockKey); it
-// lives here because internal/orchestrator's integration test imports this
-// package, so this package cannot import that one.
-const OrchestratorAdvisoryLockKey int64 = 0x5157_0005 // "switchboard step 5"
+// OrchestratorAdvisoryLockKey is orchestratord's single-instance lock. The one
+// literal lives in the import-free internal/lockkeys, which both this package
+// and internal/orchestrator alias (neither may import the other).
+const OrchestratorAdvisoryLockKey = lockkeys.Orchestrator
 
 type cursorAdvanceArgs struct {
 	ExpectLastEventID *int64 `json:"expect_last_event_id"`
