@@ -207,7 +207,9 @@ func rejectParentID(args json.RawMessage) error {
 // decodes them again — so {"parent_id":123,"PARENT_ID":null} passed the guard
 // yet reached create_task as parent_id=123. Refusing the ambiguity up front
 // means every later decode sees one value per field. Exact repeated keys need no
-// check: map and struct decoding both keep the last, so they cannot diverge.
+// check: map and struct decoding both keep the last, so they cannot diverge
+// unsafely (a later wrong-typed or null value leaves the guard holding the
+// earlier one, which it refuses, or makes the handler fail to parse).
 func rejectFoldDuplicateKeys(args json.RawMessage) error {
 	if len(args) == 0 {
 		return nil
@@ -243,6 +245,12 @@ func overwriteArgs(args json.RawMessage, set map[string]string) (json.RawMessage
 		if err := json.Unmarshal(args, &m); err != nil {
 			return nil, fmt.Errorf("args are not a JSON object: %w", err)
 		}
+	}
+	// A JSON null decodes into a nil map without error; the SDK hands a
+	// client's "arguments": null through unchecked, and assigning into the nil
+	// map below would panic the stdio server. Treat it as an empty object.
+	if m == nil {
+		m = map[string]json.RawMessage{}
 	}
 	for k, v := range set {
 		// go-reviewer (SWT-38): encoding/json matches struct fields
