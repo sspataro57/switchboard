@@ -15,7 +15,7 @@
 -- could be asserted as ABSENCE. Once 34684 ingested it, absence is no longer
 -- true, so the re-runnable form of the bug is DELAY:
 --
---   missed_runs(message) = number of status='ok' sync_runs of the SAME account
+--   missed_runs(message) = number of completed (ok or partial, SWT-39 fix) sync_runs of the SAME account
 --                          that started >= 30 min after the message's Slack
 --                          time (normalized_messages.sent_at) and FINISHED
 --                          before the message was first normalized
@@ -93,7 +93,7 @@ SELECT min(id) AS first_run, max(id) AS last_run,
        min(msgs) || '-' || max(msgs) AS msgs_range,
        min(upd)  || '-' || max(upd)  AS upd_range
 FROM runs
-WHERE ins = 0 AND status = 'ok'
+WHERE ins = 0 AND status IN ('ok','partial')
 GROUP BY grp
 HAVING count(*) >= 6
 ORDER BY min(id);
@@ -110,7 +110,7 @@ WITH m AS (
 ), l AS (
   SELECT m.*,
          (SELECT count(*) FROM sync_runs s
-           WHERE s.source_account_id = m.acct AND s.status = 'ok'
+           WHERE s.source_account_id = m.acct AND s.status IN ('ok','partial')
              AND s.started_at >= m.sent_at + interval '30 minutes'
              AND s.finished_at <= m.created_at) AS missed_runs
   FROM m
@@ -130,7 +130,7 @@ ORDER BY acct;
 SELECT r.id AS raw_id, r.external_id, nm.sent_at, nm.created_at AS first_seen,
        nm.created_at - nm.sent_at AS delay,
        (SELECT count(*) FROM sync_runs s
-         WHERE s.source_account_id = 542 AND s.status = 'ok'
+         WHERE s.source_account_id = 542 AND s.status IN ('ok','partial')
            AND s.started_at >= nm.sent_at + interval '30 minutes'
            AND s.finished_at <= nm.created_at) AS missed_runs,
        (SELECT min(s.id) FROM sync_runs s
@@ -154,7 +154,7 @@ WITH m AS (
 ), l AS (
   SELECT m.*,
          (SELECT count(*) FROM sync_runs s
-           WHERE s.source_account_id = 542 AND s.status = 'ok'
+           WHERE s.source_account_id = 542 AND s.status IN ('ok','partial')
              AND s.started_at >= m.sent_at + interval '30 minutes'
              AND s.finished_at <= m.created_at) AS missed_runs
   FROM m
@@ -190,7 +190,7 @@ BEGIN
   ), l AS (
     SELECT m.*,
            (SELECT count(*) FROM sync_runs s
-             WHERE s.source_account_id = 542 AND s.status = 'ok'
+             WHERE s.source_account_id = 542 AND s.status IN ('ok','partial')
                AND s.started_at >= m.sent_at + interval '30 minutes'
                AND s.finished_at <= m.created_at) AS missed_runs
     FROM m
@@ -212,7 +212,7 @@ BEGIN
     )
     SELECT raw_id, external_id,
            (SELECT count(*) FROM sync_runs s
-             WHERE s.source_account_id = 542 AND s.status = 'ok'
+             WHERE s.source_account_id = 542 AND s.status IN ('ok','partial')
                AND s.started_at >= m.sent_at + interval '30 minutes'
                AND s.finished_at <= m.created_at)
       INTO worst_raw, worst_ext, worst_n

@@ -53,6 +53,9 @@ func run(normalizeOnly, all bool) error {
 	sink := slackweb.NewSink(pool)
 
 	if !normalizeOnly {
+		if err := sink.CheckPartialStatus(ctx); err != nil {
+			return err
+		}
 		bridge, err := newSource()
 		if err != nil {
 			return err

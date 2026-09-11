@@ -21,32 +21,28 @@ type PGSink struct {
 func NewSink(pool *pgxpool.Pool) *PGSink { return &PGSink{pool: pool} }
 
 // KnownConversations lists every conversation:{id} raw row of a slack_web
-// account, with the workspace id from its raw JSON, its name, and the greatest
-// message id among THAT account's message:{conv}:* rows (SWT-39). Greatest by
-// id, never by ingested_at: every upsert rewrite bumps ingested_at, so the
-// latest-ingested row is routinely an old message. Message ids are "p" + ts
-// digits, so length-then-lexical order is numeric order.
+// account, with the workspace id from its raw JSON, its name, and when this
+// account last READ it: the start of the latest completed run (ok or partial)
+// whose stats.read contains the conversation id (SWT-39). Zero when no run
+// recorded reading it — runs before coverage existed carry no read list.
 func (s *PGSink) KnownConversations(ctx context.Context) ([]KnownConversationRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		WITH newest AS (
-		  SELECT m.source_account_id,
-		         split_part(m.external_id, ':', 2) AS conversation_id,
-		         (array_agg(split_part(m.external_id, ':', 3)
-		                    ORDER BY length(split_part(m.external_id, ':', 3)) DESC,
-		                             split_part(m.external_id, ':', 3) DESC))[1] AS message_id
-		    FROM raw_source_items m
-		    JOIN source_accounts a ON a.id = m.source_account_id AND a.provider = $1
-		   WHERE m.external_id LIKE 'message:%'
+		WITH last_read AS (
+		  SELECT r.source_account_id, rd.conversation_id, max(r.started_at) AS at
+		    FROM sync_runs r
+		    JOIN source_accounts a ON a.id = r.source_account_id AND a.provider = $1
+		    CROSS JOIN LATERAL jsonb_array_elements_text(r.stats->'read') AS rd(conversation_id)
+		   WHERE r.status IN ('ok','partial') AND jsonb_typeof(r.stats->'read') = 'array'
 		   GROUP BY 1, 2
 		)
 		SELECT COALESCE(c.raw_json->'workspace'->>'id', ''),
 		       split_part(c.external_id, ':', 2),
 		       COALESCE(c.raw_json->'conversation'->>'name', ''),
-		       COALESCE(n.message_id, '')
+		       lr.at
 		  FROM raw_source_items c
 		  JOIN source_accounts a ON a.id = c.source_account_id AND a.provider = $1
-		  LEFT JOIN newest n ON n.source_account_id = c.source_account_id
-		                    AND n.conversation_id = split_part(c.external_id, ':', 2)
+		  LEFT JOIN last_read lr ON lr.source_account_id = c.source_account_id
+		                        AND lr.conversation_id = split_part(c.external_id, ':', 2)
 		 WHERE c.external_id LIKE 'conversation:%'
 		 ORDER BY 1, 2`, Provider)
 	if err != nil {
@@ -56,12 +52,36 @@ func (s *PGSink) KnownConversations(ctx context.Context) ([]KnownConversationRow
 	var out []KnownConversationRow
 	for rows.Next() {
 		var r KnownConversationRow
-		if err := rows.Scan(&r.WorkspaceID, &r.ConversationID, &r.Name, &r.NewestMessageID); err != nil {
+		var at *time.Time
+		if err := rows.Scan(&r.WorkspaceID, &r.ConversationID, &r.Name, &at); err != nil {
 			return nil, fmt.Errorf("scan known Slack conversation: %w", err)
+		}
+		if at != nil {
+			r.LastReadAt = *at
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate known Slack conversations: %w", err)
+	}
+	return out, nil
+}
+
+// CheckPartialStatus fails fast when migration 0027 is missing: every run of
+// this code can finish 'partial', and without 0027 each one would fail its
+// FinishRun after a full browser export, leave its run row 'running' and stop
+// the pipeline (SWT-39 review). Milliseconds, before any browser time.
+func (s *PGSink) CheckPartialStatus(ctx context.Context) error {
+	var def string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT pg_get_constraintdef(oid) FROM pg_constraint
+		  WHERE conname = 'sync_runs_status_check' AND conrelid = 'sync_runs'::regclass`).Scan(&def); err != nil {
+		return fmt.Errorf("read sync_runs_status_check: %w", err)
+	}
+	if !strings.Contains(def, "'partial'") {
+		return fmt.Errorf("sync_runs does not admit status 'partial' — apply migration 0027 before running this image")
+	}
+	return nil
 }
 
 func (s *PGSink) EnsureAccount(ctx context.Context, workspace Workspace) (int64, error) {

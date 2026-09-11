@@ -35,11 +35,13 @@ package slackweb_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -468,32 +470,54 @@ func swt39Raw(t *testing.T, ctx context.Context, pool *pgxpool.Pool, accountID i
 	}
 }
 
+// Fixed run instants, so expected LastReadAt values are exact.
+var (
+	swt39T1 = time.Date(2026, 9, 11, 10, 0, 0, 0, time.UTC)
+	swt39T2 = time.Date(2026, 9, 11, 11, 0, 0, 0, time.UTC)
+	swt39T3 = time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	swt39T4 = time.Date(2026, 9, 11, 13, 0, 0, 0, time.UTC)
+)
+
+func swt39SeedRunAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, accountID int64, at time.Time, status, stats string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO sync_runs (source_account_id, started_at, finished_at, status, stats)
+		 VALUES ($1, $2::timestamptz, $2::timestamptz + interval '5 minutes', $3, $4::jsonb)`, accountID, at, status, stats); err != nil {
+		t.Fatalf("seed sync_run (%s, %s): %v", at, status, err)
+	}
+}
+
 // swt39SeedKnownCorpus: two slack_web workspaces and one foreign provider.
-//
-//   - DSWT39KN1's NEWEST message (p1789073346665869) has the OLDER ingested_at,
-//     because sink upserts bump ingested_at on every rewrite (the per-run churn
-//     the repro measured). "Newest by ingested_at" picks the wrong message.
-//   - TSWT39KB holds a message row for DSWT39KN1 with a much newer id. It is
-//     another account's row and must not leak into TSWT39KN's last_seen_ts.
-//   - CSWT39KN2 has no messages: known, with no ts.
+// LastReadAt = the start of the latest ok|partial run whose stats.read holds
+// the conversation, for THAT account (SWT-39 review: last-read, not newest
+// message):
+//   - DSWT39KN1: read at T1 (ok) and T2 (partial) -> T2.
+//   - CSWT39KN2: read at T1 (ok); an 'error' run at T3 also lists it and must
+//     not count -> T1. A legacy run with no read key at T4 counts for nothing.
+//   - GSWT39KB1: never read -> zero. TSWT39KB's own run at T4 reads DSWT39KN1,
+//     another account's conversation id, and must not leak into TSWT39KN.
+//   - A message row for DSWT39KN1 exists and is irrelevant to the answer.
 func swt39SeedKnownCorpus(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
+	swt39RequirePartialStatus(t, ctx, pool)
 	kn := swt39Account(t, ctx, pool, "slack_web", swt39KNAccount)
 	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "DSWT39KN1", "asunda45", "", "3 hours")
-	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "DSWT39KN1", "asunda45", "p1789073346665869", "2 hours")
-	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "DSWT39KN1", "asunda45", "p1789000000000001", "1 minute")
+	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "DSWT39KN1", "asunda45", "p1799999999999999", "1 minute")
 	swt39Raw(t, ctx, pool, kn, swt39KNWorkspace, "CSWT39KN2", "rd-asu-collaboratory", "", "3 hours")
+	swt39SeedRunAt(t, ctx, pool, kn, swt39T1, "ok", `{"phase":"slack_web","read":["DSWT39KN1","CSWT39KN2"]}`)
+	swt39SeedRunAt(t, ctx, pool, kn, swt39T2, "partial", `{"phase":"slack_web","read":["DSWT39KN1"],"deferred":["CSWT39KN2"]}`)
+	swt39SeedRunAt(t, ctx, pool, kn, swt39T3, "error", `{"phase":"slack_web","read":["CSWT39KN2"]}`)
+	swt39SeedRunAt(t, ctx, pool, kn, swt39T4, "ok", `{"phase":"slack_web"}`)
 
 	kb := swt39Account(t, ctx, pool, "slack_web", swt39KBAccount)
 	swt39Raw(t, ctx, pool, kb, swt39KBWorkspace, "GSWT39KB1", "avviato-ops", "", "3 hours")
-	swt39Raw(t, ctx, pool, kb, swt39KBWorkspace, "GSWT39KB1", "avviato-ops", "p1789000000000002", "3 hours")
-	swt39Raw(t, ctx, pool, kb, swt39KBWorkspace, "DSWT39KN1", "someone-else", "p1799999999999999", "3 hours")
+	swt39SeedRunAt(t, ctx, pool, kb, swt39T4, "ok", `{"phase":"slack_web","read":["DSWT39KN1"]}`)
 
 	fo := swt39Account(t, ctx, pool, "itest-swt39", swt39FOAccount)
 	swt39Raw(t, ctx, pool, fo, "TSWT39FO", "CSWT39FOR", "not slack", "", "3 hours")
 }
 
-func TestRegression_SWT39_KnownConversationsLoadsEveryConversationWithNewestMessage(t *testing.T) {
+func TestRegression_SWT39_KnownConversationsLoadsEveryConversationWithLastRead(t *testing.T) {
 	ctx := context.Background()
 	pool := newSWT39Pool(t, ctx)
 	swt39SeedKnownCorpus(t, ctx, pool)
@@ -518,15 +542,31 @@ func TestRegression_SWT39_KnownConversationsLoadsEveryConversationWithNewestMess
 		return mine[i].ConversationID < mine[j].ConversationID
 	})
 	want := []slackweb.KnownConversationRow{
-		{WorkspaceID: swt39KBWorkspace, ConversationID: "GSWT39KB1", Name: "avviato-ops", NewestMessageID: "p1789000000000002"},
-		{WorkspaceID: swt39KNWorkspace, ConversationID: "CSWT39KN2", Name: "rd-asu-collaboratory", NewestMessageID: ""},
-		{WorkspaceID: swt39KNWorkspace, ConversationID: "DSWT39KN1", Name: "asunda45", NewestMessageID: "p1789073346665869"},
+		{WorkspaceID: swt39KBWorkspace, ConversationID: "GSWT39KB1", Name: "avviato-ops"},
+		{WorkspaceID: swt39KNWorkspace, ConversationID: "CSWT39KN2", Name: "rd-asu-collaboratory", LastReadAt: swt39T1},
+		{WorkspaceID: swt39KNWorkspace, ConversationID: "DSWT39KN1", Name: "asunda45", LastReadAt: swt39T2},
 	}
-	if !reflect.DeepEqual(mine, want) {
-		t.Errorf("KnownConversations (this suite's rows) =\n  %+v\nwant\n  %+v\n"+
-			"One row per conversation:{id} raw row of a slack_web account. Workspace id from raw_json "+
-			"workspace.id, name from the conversation row, NewestMessageID = the greatest message id among THAT "+
-			"account's message:{conv}:* rows (not the latest ingested_at, which every rewrite bumps)", mine, want)
+	if len(mine) != len(want) {
+		t.Fatalf("KnownConversations (this suite's rows) = %+v, want %+v", mine, want)
+	}
+	for i := range want {
+		g, w := mine[i], want[i]
+		if g.WorkspaceID != w.WorkspaceID || g.ConversationID != w.ConversationID || g.Name != w.Name ||
+			!g.LastReadAt.Equal(w.LastReadAt) {
+			t.Errorf("row %d = %+v, want %+v. LastReadAt = start of the latest ok|partial run of THAT account "+
+				"whose stats.read holds the id; error runs, legacy runs and other accounts do not count", i, g, w)
+		}
+	}
+}
+
+// Fail fast when 0027 is missing (SWT-39 review, HIGH 2); on the compose db,
+// which has it, the check passes.
+func TestRegression_SWT39_CheckPartialStatusPassesWith0027(t *testing.T) {
+	ctx := context.Background()
+	pool := newSWT39Pool(t, ctx)
+	swt39RequirePartialStatus(t, ctx, pool)
+	if err := slackweb.NewSink(pool).CheckPartialStatus(ctx); err != nil {
+		t.Errorf("CheckPartialStatus with 0027 applied = %v, want nil", err)
 	}
 }
 
@@ -547,21 +587,23 @@ func TestRegression_SWT39_IngestSendsTheKnownSetFromTheDatabase(t *testing.T) {
 		t.Fatalf("source.Export called %d times, want 1", len(source.requests))
 	}
 	req := source.requests[0]
-	if req.BudgetMS != 1200000 || req.MaxConversations != 60 {
-		t.Errorf("request budget = %d / %d, want 1200000 / 60", req.BudgetMS, req.MaxConversations)
+	if req.BudgetMS != 900000 || req.MaxConversations != 60 {
+		t.Errorf("request budget = %d / %d, want 900000 / 60", req.BudgetMS, req.MaxConversations)
 	}
 	kn := map[string]slackweb.KnownConversation{}
 	for _, k := range req.Known[swt39KNWorkspace] {
 		kn[k.ID] = k
 	}
-	if got := kn["DSWT39KN1"]; got.LastSeenTS != "1789073346.665869" || got.Name != "asunda45" {
-		t.Errorf("known[%s][DSWT39KN1] = %+v, want last_seen_ts 1789073346.665869 and name asunda45 "+
-			"(request: %+v)", swt39KNWorkspace, got, req.Known[swt39KNWorkspace])
+	wantKN1 := fmt.Sprintf("%d.000000", swt39T2.Unix())
+	if got := kn["DSWT39KN1"]; got.LastSeenTS != wantKN1 || got.Name != "asunda45" {
+		t.Errorf("known[%s][DSWT39KN1] = %+v, want last_seen_ts %s (its last read, T2) and name asunda45 "+
+			"(request: %+v)", swt39KNWorkspace, got, wantKN1, req.Known[swt39KNWorkspace])
 	}
-	if got, ok := kn["CSWT39KN2"]; !ok || got.LastSeenTS != "" {
-		t.Errorf("known[%s][CSWT39KN2] = %+v (present=%v), want present with no ts", swt39KNWorkspace, got, ok)
+	if got, ok := kn["CSWT39KN2"]; !ok || got.LastSeenTS != fmt.Sprintf("%d.000000", swt39T1.Unix()) {
+		t.Errorf("known[%s][CSWT39KN2] = %+v (present=%v), want its last read T1", swt39KNWorkspace, got, ok)
 	}
-	if len(req.Known[swt39KBWorkspace]) != 1 || req.Known[swt39KBWorkspace][0].ID != "GSWT39KB1" {
+	if len(req.Known[swt39KBWorkspace]) != 1 || req.Known[swt39KBWorkspace][0].ID != "GSWT39KB1" ||
+		req.Known[swt39KBWorkspace][0].LastSeenTS != "" {
 		t.Errorf("known[%s] = %+v, want exactly GSWT39KB1", swt39KBWorkspace, req.Known[swt39KBWorkspace])
 	}
 	if _, ok := req.Known["TSWT39FO"]; ok {

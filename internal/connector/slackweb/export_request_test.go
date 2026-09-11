@@ -34,9 +34,9 @@ package slackweb_test
 //	    LastSeenTS string `json:"last_seen_ts,omitempty"`
 //	    Name       string `json:"name,omitempty"`
 //	}
-//	type KnownConversationRow struct { WorkspaceID, ConversationID, Name, NewestMessageID string }
+//	type KnownConversationRow struct { WorkspaceID, ConversationID, Name string; LastReadAt time.Time }
 //	type ExportBudget struct { BudgetMS, MaxConversations int }
-//	const DefaultExportBudgetMS = 1200000
+//	const DefaultExportBudgetMS = 900000   // 15 min (review: 20 left too little of the 30-min run)
 //	const DefaultExportMaxConversations = 60
 //	func ExportBudgetFromEnv() ExportBudget   // SLACK_WEB_EXPORT_BUDGET_MS, SLACK_WEB_EXPORT_MAX_CONVERSATIONS
 //	func BuildExportRequest(rows []KnownConversationRow, budget ExportBudget) (ExportRequest, []KnownConversationRow /*dropped*/)
@@ -45,8 +45,10 @@ package slackweb_test
 //	        req, dropped := BuildExportRequest(rows, ExportBudgetFromEnv()); log dropped;
 //	        source.Export(ctx, req)
 //
-// NewestMessageID is the raw Slack message id ("p1789077765420199"); the
-// builder turns it into the Slack ts the leaf wants ("1789077765.420199").
+// LastReadAt is when a run last READ the conversation (SWT-39 review: the leaf
+// sorts known-unenumerated conversations least-recently-read first, so the ts
+// must be a last-read time, never the newest message's ts). The builder renders
+// it in Slack ts form ("1789073346.665869").
 //
 // EXPECTED RED: compile failure (every symbol above is undefined).
 
@@ -57,6 +59,7 @@ import (
 	"regexp"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 )
@@ -84,12 +87,12 @@ func swt39KnownByID(t *testing.T, req slackweb.ExportRequest, workspaceID string
 // (T0HPR78RX = Collaboratory, D0AUD86LKGA = asunda45, the DM this bug is about).
 func TestRegression_SWT39_BuildExportRequestConvertsTsAndDropsInvalidIDs(t *testing.T) {
 	good := []slackweb.KnownConversationRow{
-		{WorkspaceID: "T0HPR78RX", ConversationID: "D0AUD86LKGA", Name: "asunda45", NewestMessageID: "p1789073346665869"},
-		{WorkspaceID: "T0HPR78RX", ConversationID: "C03J2KTN1PD", Name: "rd-asu-collaboratory", NewestMessageID: "p1788998471987859"},
-		// Known conversation with no stored message yet: still sent, no ts.
-		{WorkspaceID: "T0HPR78RX", ConversationID: "D0B6FV6HFSR", Name: "byeluri", NewestMessageID: ""},
-		// A malformed newest id must not cost the conversation its coverage.
-		{WorkspaceID: "T0360B84U", ConversationID: "GABCDEF12", Name: "avviato-ops", NewestMessageID: "not-a-slack-id"},
+		{WorkspaceID: "T0HPR78RX", ConversationID: "D0AUD86LKGA", Name: "asunda45", LastReadAt: time.Unix(1789073346, 665869000)},
+		{WorkspaceID: "T0HPR78RX", ConversationID: "C03J2KTN1PD", Name: "rd-asu-collaboratory", LastReadAt: time.Unix(1788998471, 987859000)},
+		// Known conversation no run has recorded reading: still sent, no ts (the leaf reads it first).
+		{WorkspaceID: "T0HPR78RX", ConversationID: "D0B6FV6HFSR", Name: "byeluri"},
+		// Same in another workspace.
+		{WorkspaceID: "T0360B84U", ConversationID: "GABCDEF12", Name: "avviato-ops"},
 	}
 	bad := []slackweb.KnownConversationRow{
 		{WorkspaceID: "T123", ConversationID: "CABCDEF12", Name: "workspace id too short"},
@@ -127,17 +130,16 @@ func TestRegression_SWT39_BuildExportRequestConvertsTsAndDropsInvalidIDs(t *test
 		t.Errorf("known[T0HPR78RX] = %+v, want exactly the 3 valid conversations", req.Known["T0HPR78RX"])
 	}
 	if got := collab["D0AUD86LKGA"]; got.LastSeenTS != "1789073346.665869" || got.Name != "asunda45" {
-		t.Errorf("asunda45 = %+v, want last_seen_ts 1789073346.665869 (from p1789073346665869) and name asunda45", got)
+		t.Errorf("asunda45 = %+v, want last_seen_ts 1789073346.665869 (its last-read time) and name asunda45", got)
 	}
 	if got := collab["C03J2KTN1PD"]; got.LastSeenTS != "1788998471.987859" {
 		t.Errorf("C03J2KTN1PD last_seen_ts = %q, want 1788998471.987859", got.LastSeenTS)
 	}
 	if got, ok := collab["D0B6FV6HFSR"]; !ok || got.LastSeenTS != "" {
-		t.Errorf("byeluri = %+v (present=%v), want present with NO last_seen_ts (no stored message)", got, ok)
+		t.Errorf("byeluri = %+v (present=%v), want present with NO last_seen_ts (never recorded as read)", got, ok)
 	}
 	if got, ok := swt39KnownByID(t, req, "T0360B84U")["GABCDEF12"]; !ok || got.LastSeenTS != "" {
-		t.Errorf("GABCDEF12 = %+v (present=%v), want present with NO last_seen_ts: a malformed newest id "+
-			"drops the ts, never the conversation", got, ok)
+		t.Errorf("GABCDEF12 = %+v (present=%v), want present with NO last_seen_ts (never recorded as read)", got, ok)
 	}
 
 	// Property check on the whole output, in the leaf's own terms.
@@ -190,15 +192,15 @@ func TestRegression_SWT39_BuildExportRequestOmitsEmptyOptionalFields(t *testing.
 // default. For this knob that fallback is load-bearing, not cosmetic: 0 or a
 // negative number fails the leaf's positive-integer check and 500s the export.
 func TestRegression_SWT39_ExportBudgetFromEnv(t *testing.T) {
-	if slackweb.DefaultExportBudgetMS != 1200000 || slackweb.DefaultExportMaxConversations != 60 {
-		t.Errorf("defaults = %d ms / %d conversations, want 1200000 / 60",
+	if slackweb.DefaultExportBudgetMS != 900000 || slackweb.DefaultExportMaxConversations != 60 {
+		t.Errorf("defaults = %d ms / %d conversations, want 900000 / 60",
 			slackweb.DefaultExportBudgetMS, slackweb.DefaultExportMaxConversations)
 	}
 	t.Run("unset -> defaults", func(t *testing.T) {
 		t.Setenv("SLACK_WEB_EXPORT_BUDGET_MS", "")
 		t.Setenv("SLACK_WEB_EXPORT_MAX_CONVERSATIONS", "")
-		if got := slackweb.ExportBudgetFromEnv(); got.BudgetMS != 1200000 || got.MaxConversations != 60 {
-			t.Errorf("ExportBudgetFromEnv() = %+v, want {1200000 60}", got)
+		if got := slackweb.ExportBudgetFromEnv(); got.BudgetMS != 900000 || got.MaxConversations != 60 {
+			t.Errorf("ExportBudgetFromEnv() = %+v, want {900000 60}", got)
 		}
 	})
 	t.Run("override honoured", func(t *testing.T) {
@@ -212,8 +214,8 @@ func TestRegression_SWT39_ExportBudgetFromEnv(t *testing.T) {
 		for _, v := range []string{"0", "-5", "20m", "lots"} {
 			t.Setenv("SLACK_WEB_EXPORT_BUDGET_MS", v)
 			t.Setenv("SLACK_WEB_EXPORT_MAX_CONVERSATIONS", v)
-			if got := slackweb.ExportBudgetFromEnv(); got.BudgetMS != 1200000 || got.MaxConversations != 60 {
-				t.Errorf("ExportBudgetFromEnv() with %q = %+v, want the defaults {1200000 60}", v, got)
+			if got := slackweb.ExportBudgetFromEnv(); got.BudgetMS != 900000 || got.MaxConversations != 60 {
+				t.Errorf("ExportBudgetFromEnv() with %q = %+v, want the defaults {900000 60}", v, got)
 			}
 		}
 	})
@@ -227,7 +229,7 @@ func TestRegression_SWT39_IngestSendsKnownSetAndBudgetToSource(t *testing.T) {
 	t.Setenv("SLACK_WEB_EXPORT_MAX_CONVERSATIONS", "")
 	sink := newSWT39Sink()
 	sink.known = []slackweb.KnownConversationRow{
-		{WorkspaceID: "T0HPR78RX", ConversationID: "D0AUD86LKGA", Name: "asunda45", NewestMessageID: "p1789073346665869"},
+		{WorkspaceID: "T0HPR78RX", ConversationID: "D0AUD86LKGA", Name: "asunda45", LastReadAt: time.Unix(1789073346, 665869000)},
 		{WorkspaceID: "T0HPR78RX", ConversationID: "C456", Name: "legacy fixture id, fails the leaf regex"},
 	}
 	source := &swt39Source{export: slackweb.Export{SchemaVersion: slackweb.SchemaVersion}}
@@ -239,8 +241,8 @@ func TestRegression_SWT39_IngestSendsKnownSetAndBudgetToSource(t *testing.T) {
 		t.Fatalf("source.Export called %d times, want 1", len(source.requests))
 	}
 	req := source.requests[0]
-	if req.BudgetMS != 1200000 || req.MaxConversations != 60 {
-		t.Errorf("request budget = %d / %d, want the defaults 1200000 / 60", req.BudgetMS, req.MaxConversations)
+	if req.BudgetMS != 900000 || req.MaxConversations != 60 {
+		t.Errorf("request budget = %d / %d, want the defaults 900000 / 60", req.BudgetMS, req.MaxConversations)
 	}
 	collab := swt39KnownByID(t, req, "T0HPR78RX")
 	if got, ok := collab["D0AUD86LKGA"]; !ok || got.LastSeenTS != "1789073346.665869" {
@@ -249,5 +251,39 @@ func TestRegression_SWT39_IngestSendsKnownSetAndBudgetToSource(t *testing.T) {
 	}
 	if _, ok := collab["C456"]; ok {
 		t.Errorf("known[T0HPR78RX] includes C456, which fails the leaf's id regex and would 500 the export")
+	}
+}
+
+// The known set cannot be loaded (db hiccup): Ingest still exports, with the
+// budget and no known list — coverage degrades to enumeration, ingestion does
+// not stop (SWT-39 review, LOW 8).
+func TestRegression_SWT39_IngestDegradesWhenKnownSetFailsToLoad(t *testing.T) {
+	t.Setenv("SLACK_WEB_EXPORT_BUDGET_MS", "")
+	t.Setenv("SLACK_WEB_EXPORT_MAX_CONVERSATIONS", "")
+	sink := newSWT39Sink()
+	sink.knownErr = errSWT39KnownLoad
+	source := &swt39Source{export: slackweb.Export{SchemaVersion: slackweb.SchemaVersion}}
+	if _, err := slackweb.Ingest(context.Background(), source, sink); err != nil {
+		t.Fatalf("Ingest with a failing known-set load: %v (want it to export anyway)", err)
+	}
+	if len(source.requests) != 1 {
+		t.Fatalf("source.Export called %d times, want 1", len(source.requests))
+	}
+	req := source.requests[0]
+	if req.Known != nil {
+		t.Errorf("known = %+v after a failed load, want none", req.Known)
+	}
+	if req.BudgetMS != 900000 || req.MaxConversations != 60 {
+		t.Errorf("budget = %d / %d, want the defaults still sent", req.BudgetMS, req.MaxConversations)
+	}
+}
+
+// slackTS form: epoch seconds, six fractional digits, matching the leaf's regex.
+func TestRegression_SWT39_LastReadRendersAsSlackTS(t *testing.T) {
+	req, _ := slackweb.BuildExportRequest([]slackweb.KnownConversationRow{
+		{WorkspaceID: "T0HPR78RX", ConversationID: "D0AUD86LKGA", LastReadAt: time.Unix(1789099200, 0)},
+	}, slackweb.ExportBudget{BudgetMS: 900000, MaxConversations: 60})
+	if got := req.Known["T0HPR78RX"][0].LastSeenTS; got != "1789099200.000000" || !leafSlackTS.MatchString(got) {
+		t.Errorf("last_seen_ts = %q, want 1789099200.000000", got)
 	}
 }

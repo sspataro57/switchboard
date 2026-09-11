@@ -55,6 +55,7 @@ package slackweb_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -89,6 +90,7 @@ type swt39FinishedRun struct {
 // JSON PGSink.FinishRun merges into sync_runs.stats.
 type swt39Sink struct {
 	known       []slackweb.KnownConversationRow
+	knownErr    error
 	accountOf   map[string]int64
 	workspaceOf map[int64]string
 	runAccount  map[int64]int64
@@ -107,8 +109,10 @@ func newSWT39Sink() *swt39Sink {
 }
 
 func (s *swt39Sink) KnownConversations(context.Context) ([]slackweb.KnownConversationRow, error) {
-	return s.known, nil
+	return s.known, s.knownErr
 }
+
+var errSWT39KnownLoad = errors.New("known-set load failed")
 
 func (s *swt39Sink) EnsureAccount(_ context.Context, workspace slackweb.Workspace) (int64, error) {
 	if id, ok := s.accountOf[workspace.ID]; ok {
@@ -501,6 +505,17 @@ func TestRegression_SWT39_IngestRecordsCoverageInRunStats(t *testing.T) {
 		t.Errorf("stats.unreadable = %s, want an array of {id,name,code,reason}: %v", raw, err)
 	} else if len(gotUnreadable) != 1 || gotUnreadable[0]["id"] != "DSWT39BAD" || gotUnreadable[0]["reason"] != "timed out opening" {
 		t.Errorf("stats.unreadable = %v, want the one DSWT39BAD entry with its reason", gotUnreadable)
+	}
+
+	// The enumerated list is kept (id, source, rank) so "was it listed, and how
+	// high" stays answerable after the run (SWT-39 review, MEDIUM 4).
+	var enumerated []map[string]any
+	if raw, ok := stats["enumerated"]; !ok {
+		t.Errorf("stats has no `enumerated` key; which conversations the leaf listed is recorded nowhere")
+	} else if err := json.Unmarshal(raw, &enumerated); err != nil {
+		t.Errorf("stats.enumerated = %s: %v", raw, err)
+	} else if len(enumerated) != 4 || enumerated[0]["id"] == nil || enumerated[0]["source"] != "dms" {
+		t.Errorf("stats.enumerated = %v, want the leaf's 4 entries with id and source", enumerated)
 	}
 
 	var cov map[string]any

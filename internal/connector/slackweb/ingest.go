@@ -94,6 +94,9 @@ func Ingest(ctx context.Context, source Source, sink Sink) (Stats, error) {
 				read = []string{}
 			}
 			stats.Read = &read
+			for _, e := range workspace.Enumerated {
+				stats.Enumerated = append(stats.Enumerated, EnumeratedRecord{ID: e.ID, Source: e.Source, Rank: e.Rank})
+			}
 			stats.Deferred = workspace.Deferred
 			stats.Unreadable = workspace.Unreadable
 			stats.Coverage = workspace.Coverage

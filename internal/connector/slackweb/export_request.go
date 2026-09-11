@@ -7,9 +7,11 @@ package slackweb
 // then the rest oldest-visited first, and defers what the budget cannot reach.
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strconv"
+	"time"
 )
 
 // ExportRequest is the /export body. Every field is optional on the wire and
@@ -22,7 +24,12 @@ type ExportRequest struct {
 }
 
 // KnownConversation is one conversation switchboard knows, keyed under its
-// workspace id. LastSeenTS is the Slack ts of the newest stored message.
+// workspace id. LastSeenTS is when switchboard last saw the leaf READ it, in
+// Slack ts form (epoch seconds): the leaf reads known-but-unenumerated
+// conversations least-recently-read first, and one with no ts first of all,
+// so nothing starves. It is NOT the newest message's ts — that never changes
+// for a dormant conversation and would pin the same old channels to the front
+// forever (SWT-39 review).
 type KnownConversation struct {
 	ID         string `json:"id"`
 	LastSeenTS string `json:"last_seen_ts,omitempty"`
@@ -30,12 +37,13 @@ type KnownConversation struct {
 }
 
 // KnownConversationRow is one ingested conversation as the sink loads it.
-// NewestMessageID is the raw Slack message id ("p1789077765420199"), or "".
+// LastReadAt is the start of the latest completed run whose stats.read holds
+// it; zero when no run recorded reading it.
 type KnownConversationRow struct {
-	WorkspaceID     string
-	ConversationID  string
-	Name            string
-	NewestMessageID string
+	WorkspaceID    string
+	ConversationID string
+	Name           string
+	LastReadAt     time.Time
 }
 
 // ExportBudget bounds one export: wall clock and conversations read.
@@ -45,9 +53,11 @@ type ExportBudget struct {
 }
 
 const (
-	// DefaultExportBudgetMS is 20 minutes: under the connector's 30-minute run
-	// deadline with room for enumeration. A full export measured 12–16 min.
-	DefaultExportBudgetMS = 1200000
+	// DefaultExportBudgetMS is 15 minutes. The connector's 30-minute run
+	// context also covers the second workspace's enumeration, normalize,
+	// reconcile and capture, and the shared Slack tab serves MCP callers too
+	// (SWT-39 review: 20 min left too little).
+	DefaultExportBudgetMS = 900000
 	// DefaultExportMaxConversations caps reads per export (15–19 s each).
 	DefaultExportMaxConversations = 60
 )
@@ -77,15 +87,12 @@ func positiveEnv(name string, fallback int) int {
 var (
 	leafWorkspaceIDRule    = regexp.MustCompile(`^T[A-Z0-9]{5,}$`)
 	leafConversationIDRule = regexp.MustCompile(`^[CDG][A-Z0-9]{5,}$`)
-	// A Slack message id is "p" + the ts digits with the dot removed: six
-	// fractional digits at the end.
-	slackMessageIDRule = regexp.MustCompile(`^p(\d+)(\d{6})$`)
 )
 
 // BuildExportRequest turns loaded rows into the /export body. Rows whose
 // workspace or conversation id would fail the leaf's rules are returned as
-// dropped. A malformed newest message id costs the conversation its
-// last_seen_ts, never its place in the list.
+// dropped. A conversation never recorded as read goes without last_seen_ts,
+// which the leaf sorts first.
 func BuildExportRequest(rows []KnownConversationRow, budget ExportBudget) (ExportRequest, []KnownConversationRow) {
 	req := ExportRequest{BudgetMS: budget.BudgetMS, MaxConversations: budget.MaxConversations}
 	var dropped []KnownConversationRow
@@ -101,8 +108,8 @@ func BuildExportRequest(rows []KnownConversationRow, budget ExportBudget) (Expor
 		}
 		seen[key] = true
 		k := KnownConversation{ID: r.ConversationID, Name: r.Name}
-		if m := slackMessageIDRule.FindStringSubmatch(r.NewestMessageID); m != nil {
-			k.LastSeenTS = m[1] + "." + m[2]
+		if !r.LastReadAt.IsZero() {
+			k.LastSeenTS = slackTS(r.LastReadAt)
 		}
 		if req.Known == nil {
 			req.Known = map[string][]KnownConversation{}
@@ -110,4 +117,9 @@ func BuildExportRequest(rows []KnownConversationRow, budget ExportBudget) (Expor
 		req.Known[r.WorkspaceID] = append(req.Known[r.WorkspaceID], k)
 	}
 	return req, dropped
+}
+
+// slackTS renders t in Slack ts form: epoch seconds with six fractional digits.
+func slackTS(t time.Time) string {
+	return fmt.Sprintf("%d.%06d", t.Unix(), t.Nanosecond()/1000)
 }

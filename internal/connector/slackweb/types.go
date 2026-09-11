@@ -54,6 +54,15 @@ type UnreadableConversation struct {
 	Reason string `json:"reason"`
 }
 
+// EnumeratedRecord is what a run keeps of each enumerated conversation: the
+// id, where the leaf found it and its DMs-view rank — enough to answer "was it
+// listed, and how high" without the names and URLs raw_source_items holds.
+type EnumeratedRecord struct {
+	ID     string `json:"id"`
+	Source string `json:"source"`
+	Rank   int    `json:"rank,omitempty"`
+}
+
 // Coverage is the leaf's per-workspace tally for one export.
 type Coverage struct {
 	EnumeratedCount int  `json:"enumerated_count"`
@@ -141,6 +150,7 @@ type Stats struct {
 	// while an old leaf's run carries no key at all (legacy: ReconcileUnconfirmed
 	// keeps counting it as before). Never summed across workspaces.
 	Read       *[]string                `json:"read,omitempty"`
+	Enumerated []EnumeratedRecord       `json:"enumerated,omitempty"`
 	Deferred   []string                 `json:"deferred,omitempty"`
 	Unreadable []UnreadableConversation `json:"unreadable,omitempty"`
 	Coverage   *Coverage                `json:"coverage,omitempty"`
