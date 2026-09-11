@@ -399,19 +399,40 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		fromAccountID = &acctID
 	}
 
+	// SWT-37 (Q1 = b, Codex review): no caller may draft for finished work. The
+	// check runs HERE, under the task row lock closeTransition also takes, not
+	// only in drafts.DeliverTasks: that filter is a read before a model call, so
+	// a hand close in the window would otherwise still get a draft that could
+	// later be approved and sent.
 	var deliveryID int64
-	err := pool.QueryRow(ctx,
-		`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
-		                         from_account_id, thread_id, target_client_ref, created_by,
-		                         starts_at, ends_at)
-		 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9, $10, $11)
-		 RETURNING id`,
-		a.TaskID, a.Channel, a.TargetRef,
-		google.ScrubAIAttribution(a.Body), google.ScrubAIAttribution(a.Subject),
-		fromAccountID, a.ThreadID, targetClientRef, executor.ActorFrom(ctx),
-		startsAt, endsAt).Scan(&deliveryID)
+	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		var status string
+		if err := tx.QueryRow(ctx,
+			`SELECT status FROM tasks WHERE id=$1 FOR UPDATE`, a.TaskID).Scan(&status); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("task %d not found", a.TaskID)
+			}
+			return fmt.Errorf("lock task %d: %w", a.TaskID, err)
+		}
+		if status == "closed" || status == "delivered" {
+			return fmt.Errorf("task %d is %s: switchboard never drafts a delivery for finished work", a.TaskID, status)
+		}
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
+			                         from_account_id, thread_id, target_client_ref, created_by,
+			                         starts_at, ends_at)
+			 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9, $10, $11)
+			 RETURNING id`,
+			a.TaskID, a.Channel, a.TargetRef,
+			google.ScrubAIAttribution(a.Body), google.ScrubAIAttribution(a.Subject),
+			fromAccountID, a.ThreadID, targetClientRef, executor.ActorFrom(ctx),
+			startsAt, endsAt).Scan(&deliveryID); err != nil {
+			return fmt.Errorf("insert delivery: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("insert delivery: %w", err)
+		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": deliveryID})
 }

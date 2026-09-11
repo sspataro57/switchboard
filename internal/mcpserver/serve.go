@@ -46,7 +46,7 @@ func (s *Server) sdkServer(name string) *mcp.Server {
 }
 
 // Serve runs s over stdio until the client disconnects. Shared by ops-mcp
-// (full) and ops-mcp-read (read), so the two binaries differ only in the
+// (full) and ops-mcp-user (user), so the two binaries differ only in the
 // profile they build.
 func (s *Server) Serve(ctx context.Context, name string) error {
 	if err := s.sdkServer(name).Run(ctx, &mcp.StdioTransport{}); err != nil {

@@ -61,13 +61,15 @@ ANY switchboard task in ANY project — undone with a reopen (below) — and the
 sees `mcp:manual:salvo`, a human. The session instructions say to act only when Salvador asks for that task id;
 that is a prompt rule, not a boundary. What cannot happen: nothing is sent, and no
 delivery is created or changed. A wrong close or dismiss drops the task from the
-queue and unblocks its dependents; a wrong dismiss also writes a training label.
+queue and unblocks its dependents; a wrong dismiss also writes a training label
+and stops the Jira status sync from reopening a Jira-linked task.
 Recovery:
 
 - a wrong close or dismiss: `opsctl call --tool task_reopen --args '{"task_id":N,"reason":"…"}'`;
 - a wrong "delivered": `task_close`, then `task_reopen` with `"status":"done_locally"`;
-- a dismissed task also reopens by itself on its next inbound message
-  (`dismiss-reopen-on-activity`).
+- once SWT-36 (`dismiss-reopen-on-activity`) ships, a dismissed task also reopens
+  by itself on the next inbound message routed to it (by a classify promotion or a
+  capture rule).
 
 **Dismissal provenance.** `task_dismissals.dismissed_by` records the actor
 unmodified: `dashboard:…` means Salvador picked the reason code from the board's
@@ -113,7 +115,7 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
    loads `.mcp.json`'s (verified 2026-09-10).
 4. From the other repo, `project_list` and `task_list(project=<slug>)` answer.
 5. `psql -h 192.168.50.49 -U ops -d ops -c "SELECT actor, tool, status FROM
-   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close')
+   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered')
    ORDER BY id DESC LIMIT 5"` shows those calls with actor `mcp:manual:salvo`.
 
 ## Use

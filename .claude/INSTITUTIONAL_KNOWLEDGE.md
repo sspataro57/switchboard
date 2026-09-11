@@ -545,8 +545,8 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   risk: untrusted text read in any session (mail, Slack, a web page) can tell
   it to dismiss/close/deliver any task in any project, and policy sees
   `mcp:manual:salvo`, a human. Nothing is sent and no delivery is touched;
-  recovery is `task_reopen` (and a dismissal reopens on its next inbound
-  message, SWT-36). The Instructions' "only when Salvador asks" line is a
+  recovery is `task_reopen` (and, once SWT-36 ships, a dismissal reopens on
+  the next inbound message routed to it). The Instructions' "only when Salvador asks" line is a
   prompt rule, not a boundary.
 - **`mcp_human_only` (policy rule, `mcpHumanOnly` map):** deny `task_close`
   / `task_mark_delivered` iff the actor carries the MCP prefix AND is not
@@ -579,7 +579,14 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   consoles too; a worker acting on one costs a denied audit row.
 - `drafts.DeliverTasks` drafts only for a parent still in `done_locally`
   (SWT-37 Q1 = b): a parent closed or marked delivered by hand leaves its
-  `Deliver #N` child open but no longer drafted.
+  `Deliver #N` child open but no longer drafted. That filter is only a READ
+  before a model call, so `draft_delivery` itself locks the task row and
+  refuses a `closed`/`delivered` task for every caller (Codex review): the
+  write-time check is what closes the race.
+- **Worker ids are validated at launch** (`worker.ValidateWorkerID`, called by
+  `WriteMCPConfig`): an id that would read as human (`manual:`/`dashboard:`/
+  `opsctl:`) or carries `mcp:` is refused. Before this, `opsworker --client
+  manual:foo` passed every human gate as `mcp:manual:foo`.
 
 ### Link preservation (SWT-25)
 

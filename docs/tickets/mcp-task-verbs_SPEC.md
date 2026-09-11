@@ -586,6 +586,29 @@ These live in the new `internal/tools/mcp_verbs_integration_test.go`, built with
 - **M-g.** `cmd/ops-mcp-user/main.go` builds `ProfileFull` → criterion 18 goes red.
 - **M-h.** `task_dismiss` is removed from `humanOnly` → criteria 3, 17 and 22 go red.
 
+### Added after the Codex review (2026-09-10)
+
+27. **A worker identity cannot pose as a human session.** Codex (high): `opsworker --client
+    manual:foo` exports `OPS_WORKER_ID=manual:foo`, the adapter builds `mcp:manual:foo`, and
+    `HumanActor` trusts it, so the console passed every human gate (approve/send since SWT-11,
+    the three verbs here).
+    - `worker.ValidateWorkerID` (`internal/worker/identity.go`) refuses an empty id, an id
+      carrying `mcp:`, and any id for which `policy.HumanActor("mcp:"+id)` is true. Free-text
+      client names pass.
+    - `WriteMCPConfig`, the only place a worker's `OPS_WORKER_ID` is set, calls it and writes
+      nothing on refusal, so such a console fails at launch.
+    - `internal/worker/identity_test.go` pins both; every accepted id must produce a non-human
+      actor.
+28. **`draft_delivery` refuses finished work under the task row lock.** Codex (medium): Q1 (b)'s
+    `DeliverTasks` filter is a read before a model call, so a hand close in that window still
+    got a draft.
+    - Inside one transaction the handler locks the task (`SELECT … FOR UPDATE`, the lock
+      `closeTransition` takes) and refuses a `closed` or `delivered` task by name, for every
+      caller. The `DeliverTasks` predicate stays as the cheap first filter.
+    - An integration test drafts for a `done_locally` task (allowed), then for a `closed` and a
+      `delivered` one (refused, no `deliveries` row). Mutation: drop the status check, and it
+      goes red.
+
 ### Runbook and IK
 
 24. **`docs/runbooks/ops-mcp-user-scope.md`** (the path is kept, because `runbook_test.go`
