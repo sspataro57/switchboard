@@ -119,8 +119,14 @@ func (b *HTTPBridge) post(ctx context.Context, path string, body []byte) ([]byte
 	return out, nil
 }
 
-func (b *HTTPBridge) Export(ctx context.Context) (Export, error) {
-	out, err := b.post(ctx, "/export", nil)
+func (b *HTTPBridge) Export(ctx context.Context, req ExportRequest) (Export, error) {
+	// Zero-value fields are omitted on the wire: the leaf answers 0, "" or null
+	// with a 500 that stops the export for every workspace (SWT-39).
+	body, err := json.Marshal(req)
+	if err != nil {
+		return Export{}, fmt.Errorf("marshal Slack export request: %w", err)
+	}
+	out, err := b.post(ctx, "/export", body)
 	if err != nil {
 		return Export{}, err
 	}

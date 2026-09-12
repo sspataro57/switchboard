@@ -74,7 +74,7 @@ const (
 // text is the delivery body — the loop-closure input.
 type confirmSource struct{}
 
-func (confirmSource) Export(context.Context) (slackweb.Export, error) {
+func (confirmSource) Export(context.Context, slackweb.ExportRequest) (slackweb.Export, error) {
 	return slackweb.Export{
 		SchemaVersion: slackweb.SchemaVersion,
 		Workspaces: []slackweb.Workspace{{

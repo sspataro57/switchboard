@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -17,6 +18,11 @@ type Sink interface {
 	// END time. ReconcileUnconfirmed counts passes that could have OBSERVED a
 	// message, which is a question about when the scrape began.
 	StartRun(ctx context.Context, accountID int64, startedAt time.Time) (runID int64, err error)
+	// KnownConversations lists every conversation already ingested, with when
+	// a run last visited it (read or failed to read), so the export can read
+	// them by URL least-recently-visited first instead of depending on what the
+	// Slack UI happens to render (SWT-39).
+	KnownConversations(ctx context.Context) ([]KnownConversationRow, error)
 	RawHash(ctx context.Context, accountID int64, externalID string) (hash string, exists bool, err error)
 	InsertRaw(ctx context.Context, accountID int64, externalID string, raw json.RawMessage, hash string) error
 	UpdateRaw(ctx context.Context, accountID int64, externalID string, raw json.RawMessage, hash string) error
@@ -27,7 +33,7 @@ func Ingest(ctx context.Context, source Source, sink Sink) (Stats, error) {
 	var total Stats
 	// Before the export, so every run row records when the scrape actually began.
 	exportStartedAt := time.Now()
-	exported, err := source.Export(ctx)
+	exported, err := source.Export(ctx, knownExportRequest(ctx, sink))
 	if err != nil {
 		return total, fmt.Errorf("export Slack observations: %w", err)
 	}
@@ -82,12 +88,50 @@ func Ingest(ctx context.Context, source Source, sink Sink) (Stats, error) {
 				}
 			}
 		}
-		if err := sink.FinishRun(ctx, runID, "ok", stats, ""); err != nil {
+		status := "ok"
+		if workspace.reportsCoverage() {
+			read := workspace.Read
+			if read == nil {
+				read = []string{}
+			}
+			stats.Read = &read
+			for _, e := range workspace.Enumerated {
+				stats.Enumerated = append(stats.Enumerated, EnumeratedRecord{ID: e.ID, Source: e.Source, Rank: e.Rank})
+			}
+			stats.Deferred = workspace.Deferred
+			stats.Unreadable = workspace.Unreadable
+			stats.Coverage = workspace.Coverage
+			if workspace.partialCoverage() {
+				// What WAS read is ingested above, raw-first; partial only says the
+				// run cannot claim it read everything in scope (SWT-39).
+				status = "partial"
+			}
+		}
+		if err := sink.FinishRun(ctx, runID, status, stats, ""); err != nil {
 			return total, fmt.Errorf("finish Slack sync run for %s: %w", workspace.ID, err)
 		}
 		total.add(stats)
 	}
 	return total, nil
+}
+
+// knownExportRequest builds the export request from what switchboard has
+// already ingested. A failed load degrades to the zero request (the leaf's old
+// behaviour) rather than skipping the export: coverage gets worse, ingestion
+// does not stop.
+func knownExportRequest(ctx context.Context, sink Sink) ExportRequest {
+	budget := ExportBudgetFromEnv()
+	rows, err := sink.KnownConversations(ctx)
+	if err != nil {
+		slog.Error("load known Slack conversations; exporting without them", "err", err)
+		return ExportRequest{BudgetMS: budget.BudgetMS, MaxConversations: budget.MaxConversations}
+	}
+	req, dropped := BuildExportRequest(rows, budget)
+	for _, d := range dropped {
+		slog.Warn("known Slack conversation fails the leaf's id rules; not sent",
+			"workspace", d.WorkspaceID, "conversation", d.ConversationID)
+	}
+	return req
 }
 
 func validateWorkspace(workspace Workspace) error {

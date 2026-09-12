@@ -7,12 +7,16 @@ package dashboard
 // executor (invariant 3).
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/sspataro57/switchboard/internal/orchestrator"
 )
 
 // ---- /tasks board -------------------------------------------------------------
@@ -45,6 +49,10 @@ type boardData struct {
 	Projects []string
 	Filters  map[string]string
 	Flash    string
+	// OrchAlert is set only when the orchestrator verdict is not ok (SWT-41
+	// D5): the board is where Salvador looks, /funnel is where he investigates.
+	// A failing health query leaves it nil — the board never breaks on health.
+	OrchAlert *orchestrator.HealthState
 }
 
 // boardStatusOrder pins the column order to the status machine.
@@ -162,6 +170,14 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Bounded: a slow or hung health read degrades to "no line", never a
+	// stalled board (SWT-41 review).
+	hctx, hcancel := context.WithTimeout(r.Context(), 2*time.Second)
+	if h, err := orchestrator.Health(hctx, s.pool, time.Now()); err == nil && h.Verdict != orchestrator.VerdictOK {
+		data.OrchAlert = &h
+	}
+	hcancel()
 
 	if err := s.tmpl.ExecuteTemplate(w, "tasks.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

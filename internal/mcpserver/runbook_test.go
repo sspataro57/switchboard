@@ -33,7 +33,21 @@ package mcpserver_test
 // claim the install "cannot create, claim, … log". The one existing
 // requirement whose VALUE changes is the full-profile count (`22 tools` →
 // `23 tools`, criterion 22); every other SWT-35/37 requirement is unchanged.
-// EXPECTED RED until the runbook is rewritten.
+//
+// AMENDED — not loosened — for SWT-42 (docs/tickets/mail-attachments_SPEC.md)
+// criterion 24: the user profile gains mail_list_attachments and
+// mail_read_attachment (eleven tools; owner decision O1) and the full profile
+// goes 23 → 25. Two requirements change VALUE: `\bnine tools\b|\b9 tools\b`
+// becomes `\beleven tools\b|\b11 tools\b`, and `\b23 tools\b` becomes
+// `\b25 tools\b` — and the stale counts are now refused outright, since a
+// runbook saying "nine tools" after this ticket is a false claim about the
+// boundary. New: the two tool tokens, the title's `swt-42`, the usage line
+// (find Sana's attachment → mail_list_attachments by sender/subject →
+// mail_read_attachment), "reads attachments of non-private mail only" and
+// "read mail bodies" in the can/cannot paragraphs, and the attachment
+// accepted-risk paragraph naming untrusted content and the task verbs it could
+// trigger. Every other SWT-35/37/38 requirement is unchanged. EXPECTED RED
+// until the runbook is rewritten.
 
 import (
 	"os"
@@ -59,7 +73,7 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{"OPS_WORKER_ID=manual:salvo", "REQUIRED: ops-mcp refuses to start without it (fact 4), and a manual install is manual:salvo"},
 		{"go install ./cmd/ops-mcp-user", "a BUILT binary from main, never `go run` of whatever branch is checked out (L13); SWT-37 renamed it"},
 		{"OPS_TOKEN_KEY", "named, so the reader learns that omitting it is NOT the boundary (L13)"},
-		{"ops-mcp-user", "the boundary: the user binary lists six tools and wires no sender (SWT-37 V4)"},
+		{"ops-mcp-user", "the boundary: the user binary lists its tools and wires no sender (SWT-37 V4)"},
 		// SWT-37 criterion 24: the six tools.
 		{"project_list", "the directory a session confirms a slug against"},
 		{"task_list", "the queue read itself"},
@@ -76,6 +90,9 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{"task_append_log", "SWT-38: progress lines, on human tasks only (C4)"},
 		{"task_set_priority", "SWT-38: reorder any task's priority (C5)"},
 		{"urgent", "SWT-38: the level table (normal 0, elevated 1, high 2, urgent 3)"},
+		// SWT-42 criterion 24: the two attachment tools.
+		{"mail_list_attachments", "SWT-42: list a message's attachments (by id, or the sender/subject finder)"},
+		{"mail_read_attachment", "SWT-42: read one attachment inline, or to a file"},
 	} {
 		if !strings.Contains(doc, want.tok) {
 			t.Errorf("%s never mentions %q — %s", rel, want.tok, want.why)
@@ -127,16 +144,16 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{`swb close`, "the usage line for task_close"},
 		{`swb delivered`, "the usage line for task_mark_delivered"},
 		{`dismissed_by`, "the dismissal provenance note (V7): mcp:… labels were mapped by a model, dashboard:… picked by Salvador"},
-		// Was `\b22 tools\b` (SWT-37 criterion 24, 19 → 22). SWT-38 criterion 22
-		// moves the full profile to 23 with task_set_priority.
-		{`\b23 tools\b`, "the full profile's tool count, 22 → 23 (SWT-38 criterion 22)"},
+		// Was `\b22 tools\b` (SWT-37 criterion 24, 19 → 22), then `\b23 tools\b`
+		// (SWT-38 criterion 22). SWT-42 criterion 24 moves the full profile to 25
+		// with the two attachment tools.
+		{`\b25 tools\b`, "the full profile's tool count, 23 → 25 (SWT-42 criterion 24)"},
 		// SWT-38 criterion 23.
 		{`(?s)(email|web page).{0,600}(creat|priorit).{0,600}task_set_priority`,
 			"the ACCEPTED RISK extended (C9): untrusted text can also create tasks and reorder priority; one task_set_priority puts it back"},
 		{`(?i)no worker console`, "C1: what a session creates is human work, which no worker console picks up"},
-		// SWT-38 criterion 22: the tool count, the usage lines and the upgrade block.
-		{`swt-38`, "the title gains SWT-38"},
-		{`\bnine tools\b|\b9 tools\b`, "the user profile's tool list becomes nine"},
+		// SWT-38 criterion 22: the usage lines and the upgrade block.
+		{`swt-38`, "the title keeps SWT-38"},
 		{`swb add`, "usage: 'swb add <title>' → create_task"},
 		{`swb log`, "usage: 'swb log <id> <text>' → task_append_log"},
 		{`swb done`, "usage: 'swb done <id>' → task_close with the outcome"},
@@ -144,9 +161,30 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{`deprioritize`, "usage: 'swb deprioritize <id>' → normal"},
 		{`(?s)upgrading from swt-37.{0,600}go install \./cmd/ops-mcp-user.{0,600}new session`,
 			"the upgrade block: go install on main, then a NEW session — the registration is unchanged"},
+		// Was `\bnine tools\b|\b9 tools\b` (SWT-38 criterion 22). SWT-42 criterion
+		// 24: the user profile's tool list becomes eleven.
+		{`\beleven tools\b|\b11 tools\b`, "the user profile's tool list becomes eleven (SWT-42)"},
+		// SWT-42 criterion 24.
+		{`swt-42`, "the title gains SWT-42"},
+		{`(?s)find the attachment sana sent.{0,400}mail_list_attachments.{0,300}(sender|subject).{0,400}mail_read_attachment`,
+			"usage: 'find the attachment Sana sent about the Activities Integration' → mail_list_attachments by sender/subject, then mail_read_attachment"},
+		{`reads attachments of non-private mail only`, "the can-do paragraph gains the attachment reads, and says which mail"},
+		{`read mail bodies`, "'What it cannot do' still says it cannot read mail bodies: mail_search / mail_read_thread stay full-profile only"},
+		{`(?s)attachment.{0,400}(untrusted|stranger|someone else)|(untrusted|stranger|someone else).{0,400}attachment`,
+			"the attachment ACCEPTED RISK names untrusted content: a tool whose whole job is fetching outside text"},
+		{`(?s)attachment.{0,400}(dismiss|close|mark(ed)? delivered).{0,600}creat.{0,600}(reorder|priorit)`,
+			"…and the task verbs such text could trigger: dismiss/close/mark delivered, create, reorder"},
 	} {
 		if !regexp.MustCompile(want.re).MatchString(lower) {
 			t.Errorf("%s does not match /%s/ — %s", rel, want.re, want.why)
+		}
+	}
+
+	// SWT-42 criterion 24: the superseded counts are false claims now.
+	for _, stale := range []string{`\bnine tools\b`, `\b9 tools\b`, `\b23 tools\b`} {
+		if regexp.MustCompile(stale).MatchString(lower) {
+			t.Errorf("%s still matches /%s/: since SWT-42 the user profile lists eleven tools and the full "+
+				"profile 25", rel, stale)
 		}
 	}
 

@@ -39,7 +39,10 @@ func NewCommandBridge(node, script string) (*CommandBridge, error) {
 	return &CommandBridge{node: node, script: script}, nil
 }
 
-func (b *CommandBridge) Export(ctx context.Context) (Export, error) {
+// Export runs the local CLI. The request is ignored: the CLI transport has no
+// body, so it keeps the leaf's enumerate-only behaviour. Production uses the
+// HTTP bridge (SWT-39).
+func (b *CommandBridge) Export(ctx context.Context, _ ExportRequest) (Export, error) {
 	out, err := b.run(ctx, "export", nil)
 	if err != nil {
 		return Export{}, err

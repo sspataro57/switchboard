@@ -17,6 +17,7 @@ package dashboard
 // inline error line naming its section while the other three still show.
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/availability"
 	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/classify"
+	"github.com/sspataro57/switchboard/internal/orchestrator"
 	"github.com/sspataro57/switchboard/internal/promote"
 	"github.com/sspataro57/switchboard/internal/tools"
 )
@@ -157,6 +159,11 @@ type funnelPage struct {
 	Capture    []capture.DayAttribution
 	Lanes      []funnelLane
 	Promotions []promote.LaneCounters
+	// SWT-41 D5: the orchestrator's health, read from Postgres (pg_locks +
+	// backlog age), never from the process. OrchLoaded is false when the
+	// section's query failed; the inline error names it.
+	Orch       orchestrator.HealthState
+	OrchLoaded bool
 	Generated  string
 }
 
@@ -167,6 +174,16 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 	page := funnelPage{Days: days, Generated: now.Format("2006-01-02 15:04:05")}
 
 	page.Errors = runSections([]funnelSection{
+		{Name: "orchestrator health", Load: func() error {
+			hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			h, err := orchestrator.Health(hctx, s.pool, now)
+			if err != nil {
+				return err
+			}
+			page.Orch, page.OrchLoaded = h, true
+			return nil
+		}},
 		{Name: "connector health", Load: func() error {
 			// The calendar seams first: the same value and predicate
 			// propose_slots uses (criterion 5). An unparseable
@@ -192,10 +209,14 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 
 			rows, err := s.pool.Query(ctx, `
 				SELECT a.provider, a.account_email,
-				       COALESCE(p.phase, ''), p.last_ok, COALESCE(wnd.runs, 0)
+				       COALESCE(p.phase, ''), p.last_ok, COALESCE(p.latest_status, ''), COALESCE(wnd.runs, 0)
 				  FROM source_accounts a
 				  LEFT JOIN (SELECT source_account_id, COALESCE(stats->>'phase','') AS phase,
-				                    max(finished_at) FILTER (WHERE status='ok' AND finished_at IS NOT NULL) AS last_ok
+				                    -- SWT-39: a 'partial' run synced (it read what it could); it counts
+				                    -- for freshness, and the row says partial when it is the latest.
+				                    max(finished_at) FILTER (WHERE status IN ('ok','partial') AND finished_at IS NOT NULL) AS last_ok,
+				                    (array_agg(status ORDER BY finished_at DESC)
+				                       FILTER (WHERE status IN ('ok','partial') AND finished_at IS NOT NULL))[1] AS latest_status
 				               FROM sync_runs GROUP BY 1,2) p ON p.source_account_id = a.id
 				  LEFT JOIN (SELECT source_account_id, COALESCE(stats->>'phase','') AS phase, count(*) AS runs
 				               FROM sync_runs
@@ -210,7 +231,8 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				var h funnelHealthRow
 				var phase *string
 				var lastOK *time.Time
-				if err := rows.Scan(&h.Provider, &h.Email, &phase, &lastOK, &h.Runs); err != nil {
+				var latestStatus string
+				if err := rows.Scan(&h.Provider, &h.Email, &phase, &lastOK, &latestStatus, &h.Runs); err != nil {
 					return fmt.Errorf("scan health row: %w", err)
 				}
 				name := "(none)"
@@ -239,6 +261,11 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 					}
 				} else {
 					h.Verdict = funnelFreshness(last, now, funnelDisplayStaleAfter)
+					if h.Verdict == "ok" && latestStatus == "partial" {
+						// SWT-39: fresh, but the latest run did not read everything in
+						// scope. A green ok over a 7-of-38 export hid a 17-hour delay.
+						h.Verdict = "partial"
+					}
 				}
 				page.Health = append(page.Health, h)
 			}

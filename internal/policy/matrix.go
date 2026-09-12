@@ -94,6 +94,11 @@ var humanOnly = map[string]bool{
 	// rule that needs it (triage escalation, say) must move it to mcpHumanOnly
 	// deliberately. Not send-shaped: nothing leaves the system.
 	"task_set_priority": true,
+	// SWT-41 D1: moving the orchestrator cursor forward DISCARDS lifecycle
+	// events — a human decision, audited, never an automated caller's (the
+	// orchestrator included). humanOnly, NOT mcpHumanOnly, and not MCP-listed:
+	// reachable only through opsctl/dashboard. Not send-shaped.
+	"orchestrator_cursor_advance": true,
 }
 
 // mcpHumanOnly tools require a human identity WHEN THEY ARRIVE OVER MCP

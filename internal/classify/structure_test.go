@@ -1162,7 +1162,11 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// 26 is SWT-36's (dismiss-reopen-on-activity: task_dismissals'
 		// closed_from_status + reopened_* columns and the partial open-dismissal
 		// index), named by its SPEC's data-model section.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 {
+		// 27 is SWT-39's (bug slackweb-collab-export-stale: sync_runs.status
+		// admits 'partial'), named by the "Fix — data model" section of
+		// docs/bugs/slackweb-collab-export-stale_DIAGNOSIS.md. A bug fix owns
+		// its migration the way a SPEC does.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

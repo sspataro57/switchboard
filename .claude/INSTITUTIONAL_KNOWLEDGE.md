@@ -352,6 +352,39 @@ polling status is not "the run ended". The session task_event lands only after
 the run's envelope is parsed; don't read "parked but no session event" as a
 loss until the wrapper logs park.
 
+### slackweb `status='ok'` and `conversations_seen` are not coverage
+**Location:** leaf `slackconnector/src/slack/slack-web-adapter.ts`
+`collectDmConversations` / `listConversationsOnPage`, plus
+`internal/connector/slackweb/ingest.go:58-85`. Bit 2026-09-10/11 (SWT-39,
+`docs/bugs/slackweb-collab-export-stale_DIAGNOSIS.md`).
+
+**Which conversations get exported.** The leaf exports only the conversations it
+can scrape from the Slack UI in that run: the Home sidebar plus the `/dms` view's
+virtual list. switchboard sends no cursor or conversation list (`/export` has an
+empty body) and marks every run `ok` whatever subset arrives.
+
+**How much that is.** Measured 2026-09-11:
+- Collaboratory (542): 6–8 of 38 known conversations per run.
+- Avviato (539): 16 of 45.
+- Occasional "wide" runs (33–43 conversations, 12–16 min) sweep in messages
+  that 340+ `ok` runs never saw, in BOTH workspaces.
+
+**What that means.** A message lands only when its conversation happens to be
+scraped. That is why messages arrive hours or days late while the runs read
+`ok`, `raw_inserted=0`.
+
+**Consequences:**
+- A zero-insert streak is not evidence that nothing happened.
+- `ReconcileUnconfirmed` counting `ok` runs as "passes that could have observed"
+  a send is false for any conversation outside the scraped set.
+- The bridge logs at `info`. Enumeration lines are `debug` and carry counts
+  only, so the mini log cannot tell you which conversations a run covered.
+
+**Rule:** before reasoning from slackweb `sync_runs`, check which conversations
+the run actually exported. Last-written `raw_source_items` rows per run window
+plus `messages_seen` arithmetic is the only record until coverage telemetry
+ships.
+
 ---
 
 ## The seven invariants (review checklist form)
@@ -504,7 +537,9 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   it lists/accepts `project_list`, `task_list`, `task_get_next` PLUS
   `task_dismiss`, `task_close`, `task_mark_delivered` (see "Task verbs over
   MCP") and, since SWT-38, `create_task`, `task_append_log`,
-  `task_set_priority` (nine tools; see "Task capture over MCP"). Its main
+  `task_set_priority` (nine tools; see "Task capture over MCP") and, since
+  SWT-42, `mail_list_attachments`, `mail_read_attachment` (eleven; see "Mail
+  attachments over MCP"). Its main
   still calls no `tools.Set*` seam, so NO sender is wired
   (connector code is linked via internal/tools but stays nil). Not an env
   setting on ops-mcp: that was tried and fails open (unset had to mean full for
@@ -528,7 +563,7 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   the same name as `.mcp.json`'s).
 - **LANDMINE: `claude mcp get/list` lie about same-name precedence.** Inside
   this repo they show the user-scope `ops`, yet a session here loads
-  `.mcp.json`'s full `ops` (23 tools since SWT-38; a session in `kube` gets 9).
+  `.mcp.json`'s full `ops` (25 tools since SWT-42; a session in `kube` gets 11).
   Verify precedence from inside a session, never from the CLI listing.
 - `claude -p` from a shell uses `ANTHROPIC_API_KEY` (exported, no credit) over
   the claude.ai login: prefix `env -u ANTHROPIC_API_KEY` for smoke sessions.
@@ -662,6 +697,48 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `Call.TaskID`: a session-created task's origin is only in `audit_events.args`
   (project + title), not on its own page.
 
+### Mail attachments over MCP (SWT-42, mail-attachments)
+
+- **Attachments ARE stored** — inside `raw_source_items.raw_json.rfc822_b64`
+  (the whole RFC822 message, IMAP path) for any message up to the capture cap
+  (`MAIL_MAX_MESSAGE_BYTES`, default 1 MiB). NormalizeRFC822 skips them, so
+  `mail_read_thread` shows only the text body; a session that concludes "the
+  attachment isn't stored" is wrong. Over the cap the row is `truncated` and
+  keeps a `parts` manifest (names, types, ENCODED sizes, no bytes). gmail:-shaped
+  rows (API/bridge) carry no bytes at all.
+- `mail_list_attachments` (message ids, a thread, or a sender/subject finder) and
+  `mail_read_attachment` (index | filename | part_id; text inline ≤100 KiB
+  per page with `offset`, else `to_file` → `<UserCacheDir>/switchboard/attachments/<raw>/<idx>-<name>`,
+  0600, swept after 7 days). Both are in BOTH profiles (owner decision O1) — the
+  user profile is now eleven tools, full 25. Read-only, not humanOnly, not
+  snapshotGated: audit row only, never the content. Part numbering is
+  `pathString`, the same numbering `planOversizeFetch` writes into a manifest.
+- **Before SWT-42 the mail tools had NO locality gate** — `mail_search` /
+  `mail_read_thread` return local_only mail bodies to any caller. That residual
+  is still open for those two; the attachment tools are gated in the HANDLER
+  (every caller, every profile) by the SWT-21 rule: latest capture_decisions row
+  per message, `ClassOf(state, local_only)`, outbound folded over its thread's
+  inbound (`MostRestrictive`).
+- **O2 clean-mailbox rule (owner, 2026-09-12):** unfiled inbound is general iff
+  the RECEIVING raw row's `source_account_id` has ≥20 filed inbound messages and
+  none filed local_only (latest decision per message), computed per call. Prod on
+  the day: 1009 handsonconnect clean (566 filed / 0 local); 1003 and 1004 are
+  not. SWT-40's routing supersedes it.
+- Private refusals: an explicit id errors naming the reason (by raw id when the
+  caller gave one — never the private Message-ID); the thread form and the
+  finder classify from HEADERS first and only COUNT restricted matches: private
+  mail is never loaded or MIME-walked. The finder is literal-substring
+  (`likeEscape`), ≤2,000 candidates, ≤64 MiB of raw rows, `truncated` on
+  either cap.
+- The saved-file cache refuses a symlinked base and sweeps only through
+  `os.Root`. Known gaps (Future work): the listed-part count is unbounded
+  (bounded only by the 1 MiB row); `truncatedReason` prints the reader's cap,
+  not the connector's; a truncated manifest omits the text/plain leaf kept as
+  the body, so a named .txt on an HTML-only oversize message is not listed.
+- Attachment content is untrusted third-party text; the Instructions line says
+  read-as-data. Accepted risk as in SWT-37: a session that reads a malicious
+  attachment still holds the write verbs.
+
 ### Link preservation (SWT-25)
 
 - `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written
@@ -735,7 +812,10 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   and the dashboard performs approvals and sends. Reach it with
   `kubectl -n ops port-forward svc/dashboard 8085:80`; the Ingress block in the
   manifest is commented out until OIDC is configured.
-  Still not deployed: orchestrator, triage, drafts, fleetd, hooksd.
+  Still not deployed: triage, drafts, fleetd, hooksd. **orchestratord IS deployed**
+  (SWT-41, 2026-09-12, image 0.7.9): Deployment `orchestratord` in `ops`
+  (`kube/switchboard/orchestrator.yaml`, replicas 1, Recreate, liveness `/healthz`
+  on :8091), started from cursor 1018 after `orchestrator_cursor_advance`.
 - **The production db drifted five migrations behind main (bit 2026-07-31).**
   `schema_migrations` was at 0009 while main was at 0014: 0010 (calendar reset),
   0011/0012 (slack send promotion + attempts) and 0013 (task_events indexes) had
@@ -773,13 +853,37 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 ## Orchestrator contract (shipped in SWT-5)
 
 - NOTIFY on `task_events` is a WAKE-UP only; the cursor drain
-  (`orchestrator_cursor`, seeded at max event id so first deploy never replays
-  history) is the sole delivery path. Missed/duplicate NOTIFYs are harmless.
+  (`orchestrator_cursor`) is the sole delivery path. Missed/duplicate NOTIFYs
+  are harmless.
+- **LANDMINE (SWT-41): built is not deployed, and the Dockerfile build line is
+  the deploy list.** orchestratord shipped in SWT-5 (2026-07-11), ran once as a
+  `--once` smoke and then did not run for two months: its binary was not even in
+  the image. R3 Deliver tasks, R8, R9–R11, dependency unblocking and claim expiry
+  silently never happened in prod while 912 events queued. A daemon a ticket
+  depends on must be in the `Dockerfile` build line (pinned by
+  `cmd/orchestratord/dockerfile_test.go`), have a manifest, and have a health
+  signal judged from OUTSIDE the process, or the ticket is not delivered.
+- **The cursor row outlives its seed.** 0003 seeded it at max(id) ONCE, at apply
+  time; any later first start drains from wherever the row is. Skipping is
+  `orchestrator_cursor_advance` (humanOnly, off MCP, compare-and-set, refuses
+  while an engine holds the lock, takes SHARE on task_events so no in-flight
+  lower id is skipped). Downtime catch-up is the default and correct behaviour —
+  never advance as a routine restart step (docs/runbooks/orchestrator.md).
+- **Health = `pg_locks` (per database) + backlog age, not cursor age** — an idle
+  system never moves the cursor. `/funnel` Orchestrator section, `/tasks` red
+  line when not `ok`, `/healthz` for the kubelet. The engine re-checks its lock
+  before every event (`DrainHooks.Guard`) and exits on loss; residual window is
+  one event's actions (a DB fencing token is future work).
+- **The orchestrator's package graph is pinned:** `internal/orchestrator` must not
+  reach `internal/provider`, `internal/connector/*`, `internal/planimport` or
+  `internal/tools`, even transitively (`deps_test.go`). Shared lock keys live in
+  the import-free `internal/lockkeys`.
 - Dedup idiom: `orchestrated` task_events (written via `record_orchestration`)
   are the replay-dedup keys — rules check them in Facts before firing.
 - Claim-expiry sweep EXEMPTS `needs_feedback` (parked ≠ crashed; expiring
   would orphan the resume).
-- Single instance via `pg_try_advisory_lock` key `0x51570005`.
+- Single instance via `pg_try_advisory_lock` key `0x51570005` (spelled once, in
+  `internal/lockkeys`).
 - Spine transition tools (`task_block`/`task_unblock`/`task_close` on
   already-target statuses) are idempotent no-op successes so replays never
   stall the drain; `task_close` refuses only active work.

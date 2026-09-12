@@ -99,6 +99,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// from live IMAP — see internal/tools/mail.go.
 		{"mail_search", validateMailSearch, mailSearch},
 		{"mail_read_thread", validateMailReadThread, mailReadThread},
+		// SWT-42: stored mail attachments, read-only, gated by the SWT-21
+		// locality rule in the handler (every caller, every profile). Listed in
+		// both MCP profiles (owner decision O1). See mailattach.go.
+		{"mail_list_attachments", validateMailListAttachments, mailListAttachments},
+		{"mail_read_attachment", validateMailReadAttachment, mailReadAttachment},
 		{"record_pr_event", validateRecordPREvent, recordPREvent},
 		{"record_ci_event", validateRecordCIEvent, recordCIEvent},
 		{"task_pr_transition", validatePRTransition, taskPRTransition},
@@ -121,6 +126,10 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// human_only): no spine caller writes priority after creation, so every
 		// automated caller is refused. MCP-listed in both profiles. See priority.go.
 		{"task_set_priority", validateSetPriority, setPriority},
+		// SWT-41 D1: the one audited way to move the orchestrator cursor forward
+		// (start-from-now). humanOnly and deliberately NOT in
+		// internal/mcpserver/schemas.go. See orchestratorcursor.go.
+		{"orchestrator_cursor_advance", validateCursorAdvance, orchestratorCursorAdvance},
 	} {
 		t := t
 		reg.Register(executor.Tool{

@@ -16,7 +16,11 @@ package mcpserver
 // rather than len(agentTools)/len(userProfileTools), which were true of any
 // slice. Full: 22 (SWT-37) + task_set_priority = 23. User: 6 (SWT-37) +
 // create_task, task_append_log and task_set_priority = 9. Read: 3, unchanged.
-// EXPECTED RED until schemas.go and userProfileTools gain the new names.
+//
+// SWT-42 (mail-attachments) criteria 21 and 22: mail_list_attachments and
+// mail_read_attachment join BOTH profiles (owner decision O1). Full: 23 + 2 =
+// 25. User: 9 + 2 = 11. Read: 3, unchanged — the fail-closed floor gains
+// nothing. EXPECTED RED until schemas.go and userProfileTools gain both names.
 
 import (
 	"context"
@@ -40,10 +44,10 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		profile Profile
 		tools   int
 	}{
-		// Literal counts (SWT-38 criterion 19): see the header.
-		{ProfileFull, 23},
+		// Literal counts (SWT-38 criterion 19; SWT-42 criteria 21/22): see the header.
+		{ProfileFull, 25},
 		{ProfileRead, 3},
-		{ProfileUser, 9},
+		{ProfileUser, 11},
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()
