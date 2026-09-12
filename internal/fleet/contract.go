@@ -99,8 +99,9 @@ var liveStates = map[string]struct{}{
 	StateIdle: {}, StateWorking: {}, StateNeedsFeedback: {}, StateManual: {},
 }
 
-// Marshal is the strict publish path: only the four live states pass ("dead"
-// never goes out through Marshal: the LWT and Client.PublishDead are its only paths). A worker cannot emit garbage through the library.
+// Marshal is the strict publish path: only the four live states pass. "dead"
+// never goes out through Marshal: the LWT and Client.PublishDead are its only
+// paths. A worker cannot emit garbage through the library.
 func (s Status) Marshal() ([]byte, error) {
 	if _, ok := liveStates[s.State]; !ok {
 		return nil, fmt.Errorf("state %q is not publishable (live states: idle|working|needs_feedback|manual)", s.State)

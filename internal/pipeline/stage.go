@@ -91,8 +91,9 @@ func (l *StageLoop) Notify() {
 // for a sweep), then waits for a wake, the sweep or a lock retry. It returns
 // nil when ctx ends and never because a pass failed: a stage that errors logs,
 // stays up and retries on the next wake or sweep. The one exception is a
-// wedged pass (ErrPassWedged). Before returning it waits for its last
-// heartbeat to go out, so a caller publishing a final status goes last.
+// wedged pass (ErrPassWedged). Before returning it waits for its heartbeat
+// goroutine to exit (queued states may be dropped), so nothing this loop owns
+// publishes after Run returns and a caller's final status goes last.
 func (l *StageLoop) Run(ctx context.Context) error {
 	// The heartbeat goroutine gets its own context, cancelled on EVERY return:
 	// on the ErrPassWedged path the caller's ctx is still live, and waiting on

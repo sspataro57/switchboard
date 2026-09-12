@@ -95,9 +95,19 @@ func run() error {
 	// every heartbeat goroutine has returned (nothing publishes idle after it).
 	// The publishes run in parallel, so a dead broker costs one ack timeout,
 	// not one per client, inside terminationGracePeriodSeconds.
+	errCh := make(chan error, len(stages))
 	finish := func(runErr error) error {
 		stop()
 		wg.Wait()
+		// A stage that wedged while shutdown was already under way sent its
+		// ErrPassWedged after the main select stopped reading: keep it, so the
+		// pool is not closed under the wedged pass and the exit is non-zero.
+		if runErr == nil {
+			select {
+			case runErr = <-errCh:
+			default:
+			}
+		}
 		var dead sync.WaitGroup
 		for _, c := range clients {
 			dead.Add(1)
@@ -132,7 +142,6 @@ func run() error {
 		}
 	}
 
-	errCh := make(chan error, len(stages))
 	for _, s := range stages {
 		impl := stageImpls[s]
 		client, err := pipeline.DialStage(ctx, broker, s)
