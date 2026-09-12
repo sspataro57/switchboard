@@ -7,8 +7,8 @@ package tools
 // Served from the stored raw bytes, never from a live mailbox (the mail.go
 // rule). The content is someone else's text: descriptions and the MCP
 // Instructions say so, and a hosted model only ever sees attachments of
-// shareable mail — the SWT-21 locality rule, applied here in one SQL spelling
-// (mailMessageClass), for every caller and profile.
+// shareable mail — the SWT-21 locality rule, applied here in one place
+// (mailClassJudge), for every caller and profile.
 
 import (
 	"bytes"
@@ -49,7 +49,11 @@ const (
 	// mailAttachFinderScanCap bounds how many candidate messages one finder call
 	// examines, so a broad sender match cannot turn into a mailbox walk.
 	mailAttachFinderScanCap = 2000
-	mailAttachSniffWindow   = 8 << 10
+	// mailAttachFinderByteBudget bounds the stored mail one finder call loads and
+	// MIME-walks (Codex review): candidates are fetched one raw row at a time and
+	// the walk stops, reporting truncated, once this much has been read.
+	mailAttachFinderByteBudget = 64 << 20
+	mailAttachSniffWindow      = 8 << 10
 )
 
 // ---- args and validation ------------------------------------------------------
@@ -191,6 +195,18 @@ const mailAttachMsgSelect = `
 	  JOIN raw_source_items r ON r.id = m.raw_source_item_id
 	  LEFT JOIN normalized_threads t ON t.id = m.thread_id
 	 WHERE m.channel = 'gmail'`
+
+// mailAttachHeaderSelect is mailAttachMsgSelect without the raw row: the
+// finder scans up to mailAttachFinderScanCap candidates and loads raw_json per
+// candidate, never all of them at once.
+var mailAttachHeaderSelect = strings.Replace(mailAttachMsgSelect, "r.raw_json", "NULL::jsonb", 1)
+
+// likeEscape makes s a literal substring for LIKE/ILIKE (default escape
+// character backslash): the finder's from/subject are substrings, never
+// patterns, so "%" or "_" cannot widen a search to the whole mailbox.
+func likeEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
 
 func scanMailAttachMsg(row pgx.Row) (mailAttachMsg, error) {
 	var m mailAttachMsg
@@ -455,14 +471,16 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 	if limit > mailAttachFinderMaxLimit {
 		limit = mailAttachFinderMaxLimit
 	}
-	rows, err := pool.Query(ctx, mailAttachMsgSelect+`
+	// Headers only here; each candidate's raw row is loaded in the loop, so one
+	// call never holds more than one stored message at a time.
+	rows, err := pool.Query(ctx, mailAttachHeaderSelect+`
 	   AND ($1 = '' OR m.sender ILIKE '%'||$1||'%')
 	   AND ($2 = '' OR m.subject ILIKE '%'||$2||'%')
 	   AND ($3 = '' OR m.sent_at >= $3::timestamptz)
 	   AND ($4 = '' OR m.sent_at <= $4::timestamptz)
 	 ORDER BY m.sent_at DESC NULLS LAST, m.id DESC LIMIT $5`,
-		strings.TrimSpace(a.From), strings.TrimSpace(a.Subject), strings.TrimSpace(a.Since),
-		strings.TrimSpace(a.Until), mailAttachFinderScanCap)
+		likeEscape(strings.TrimSpace(a.From)), likeEscape(strings.TrimSpace(a.Subject)),
+		strings.TrimSpace(a.Since), strings.TrimSpace(a.Until), mailAttachFinderScanCap)
 	if err != nil {
 		return nil, fmt.Errorf("find mail: %w", err)
 	}
@@ -472,7 +490,15 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 	}
 	out := []mailAttachListed{}
 	withheld, truncated := 0, false
+	budget := mailAttachFinderByteBudget
 	for _, m := range msgs {
+		if err := pool.QueryRow(ctx, `SELECT raw_json FROM raw_source_items WHERE id = $1`, m.raw).Scan(&m.rawJSON); err != nil {
+			return nil, fmt.Errorf("load raw item %d: %w", m.raw, err)
+		}
+		if budget -= len(m.rawJSON); budget < 0 {
+			truncated = true // out of budget: more may match; narrow the search
+			break
+		}
 		l, err := listedFor(m)
 		if err != nil {
 			return nil, err

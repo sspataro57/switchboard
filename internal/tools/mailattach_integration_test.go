@@ -824,6 +824,16 @@ func TestMailAttach_Integration_FinderMatchesHeadersAndReturnsNoBodies(t *testin
 		}
 	})
 
+	t.Run("LIKE wildcards are literal, never a match-everything pattern (Codex review)", func(t *testing.T) {
+		for _, args := range []map[string]any{{"from": "%"}, {"subject": "_"}, {"from": "sana%itest"}} {
+			out := maListOK(t, ctx, ex, args)
+			if len(out.Messages) != 0 || out.WithheldPrivate != 0 {
+				t.Errorf("finder(%v) = %v withheld=%d, want nothing: no sender or subject contains it literally",
+					args, maMIDs(out.Messages), out.WithheldPrivate)
+			}
+		}
+	})
+
 	t.Run("the user profile's only way to a message (fact 6)", func(t *testing.T) {
 		user := mcpserver.NewWithProfile(ex, "manual:salvo", mcpserver.ProfileUser)
 		raw, err := user.CallTool(ctx, maList, json.RawMessage(`{"from":"sana.itest-mailattach","subject":"validation (itest-mailattach)"}`))

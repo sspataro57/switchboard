@@ -532,3 +532,22 @@ func TestValidate_MailAttachmentTools_AcceptEveryFamily(t *testing.T) {
 		}
 	}
 }
+
+// Codex review: the finder's from/subject are literal substrings. An unescaped
+// "%" or "_" would match every sender and make one call MIME-walk the mailbox.
+func TestLikeEscape_WildcardsAreLiteral(t *testing.T) {
+	for in, want := range map[string]string{
+		"sana":        "sana",
+		"%":           `\%`,
+		"_":           `\_`,
+		`a\b`:         `a\\b`,
+		`100%_done\x`: `100\%\_done\\x`,
+	} {
+		if got := likeEscape(in); got != want {
+			t.Errorf("likeEscape(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if mailAttachFinderByteBudget <= 0 || mailAttachFinderByteBudget > 64<<20 {
+		t.Errorf("mailAttachFinderByteBudget = %d, want a positive budget of at most 64 MiB", mailAttachFinderByteBudget)
+	}
+}
