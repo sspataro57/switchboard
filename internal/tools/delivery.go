@@ -110,8 +110,9 @@ type draftDeliveryArgs struct {
 	// RequireThreadInTaskProject (SWT-44, owner decision "Same project",
 	// Salvador 2026-09-12) is pinned to "true" by the user-scope MCP profile:
 	// a session drafts only on a thread already filed under the task's project
-	// — the task's own source_thread_id, or a thread with an INBOUND message
-	// whose LATEST capture_decisions row (any mode) names the task's project.
+	// — the task's own source_thread_id, or a thread whose LATEST INBOUND
+	// message (the reply's recipient, latestInboundMessage) has a LATEST
+	// capture_decisions row (any mode) naming the task's project.
 	// Checked in draftDelivery's transaction, under the task lock, before the
 	// insert. Same pattern as RequireChannel: only narrows, hidden from every
 	// schema; the full profile and the drafts worker send none.
@@ -494,39 +495,57 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 }
 
 // refuseThreadOutsideTaskProject is the user profile's same-project rule
-// (owner decision "Same project", Salvador 2026-09-12). The thread is filed
-// under the task's project when it is (a) the task's own source_thread_id
-// (SWT-20 provenance), or (b) it carries at least one INBOUND message whose
-// LATEST capture_decisions row — `ORDER BY cd.id DESC LIMIT 1`, any mode, the
-// repo's latest-decision convention (classify/store.go, mailattach.go) —
-// names the task's project. Outbound messages do not count: our own send is
-// not evidence of where the conversation belongs. Runs in draftDelivery's
-// transaction, after the task row lock, before the insert.
+// (owner decision "Same project", Salvador 2026-09-12). It follows the
+// RECIPIENT: the thread is filed under the task's project when it is (a) the
+// task's own source_thread_id (SWT-20 provenance), or (b) its LATEST INBOUND
+// message — the very message the reply goes to, picked by
+// latestInboundMessage, the helper ResolveGmailRoute uses, so the rule and
+// the send cannot disagree about which message that is — has a LATEST
+// capture_decisions row (`ORDER BY id DESC LIMIT 1`, any mode, the repo's
+// latest-decision convention: classify/store.go, mailattach.go) naming the
+// task's project. An older message filed here does not qualify a thread whose
+// newest inbound mail is filed elsewhere, and outbound messages never count:
+// our own send is not evidence of where the conversation belongs. Runs in
+// draftDelivery's transaction, after the task row lock, before the insert.
+//
+// What it guarantees: the draft's thread is filed under the task's project.
+// It does NOT limit which project a session drafts into — the same session
+// can create_task in any project.
 func refuseThreadOutsideTaskProject(ctx context.Context, tx pgx.Tx, taskID, threadID int64) error {
 	var slug string
-	var filed bool
+	var taskProject int64
+	var sourceThread bool
 	err := tx.QueryRow(ctx, `
-		SELECT p.slug,
-		       COALESCE(t.source_thread_id = $2, false)
-		       OR EXISTS (
-		         SELECT 1
-		           FROM normalized_messages nm
-		           JOIN LATERAL (SELECT cd.project_id FROM capture_decisions cd
-		                          WHERE cd.message_id = nm.id
-		                          ORDER BY cd.id DESC LIMIT 1) latest ON true
-		          WHERE nm.thread_id = $2 AND nm.direction = 'inbound'
-		            AND latest.project_id = t.project_id)
+		SELECT p.slug, t.project_id, COALESCE(t.source_thread_id = $2, false)
 		  FROM tasks t JOIN projects p ON p.id = t.project_id
-		 WHERE t.id = $1`, taskID, threadID).Scan(&slug, &filed)
+		 WHERE t.id = $1`, taskID, threadID).Scan(&slug, &taskProject, &sourceThread)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("task %d not found", taskID)
 	}
 	if err != nil {
 		return fmt.Errorf("check thread %d against task %d's project: %w", threadID, taskID, err)
 	}
-	if !filed {
-		return fmt.Errorf("thread %d is not filed under this task's project (%s); file it first (a capture rule or "+
-			"the dashboard), or draft from the switchboard session", threadID, slug)
+	if sourceThread {
+		return nil
+	}
+	refused := fmt.Errorf("thread %d is not filed under this task's project (%s): its latest inbound message is "+
+		"filed elsewhere or not at all; ask Salvador to file it, or draft from the switchboard session", threadID, slug)
+	latest, err := latestInboundMessage(ctx, tx, threadID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return refused // nothing inbound: nothing filed, and no one to reply to
+	}
+	if err != nil {
+		return fmt.Errorf("check thread %d against task %d's project: %w", threadID, taskID, err)
+	}
+	var decided *int64
+	err = tx.QueryRow(ctx,
+		`SELECT project_id FROM capture_decisions WHERE message_id = $1 ORDER BY id DESC LIMIT 1`,
+		latest.id).Scan(&decided)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("check thread %d against task %d's project: %w", threadID, taskID, err)
+	}
+	if decided == nil || *decided != taskProject {
+		return refused
 	}
 	return nil
 }
@@ -1024,17 +1043,38 @@ func ResolveGmailRoute(ctx context.Context, q store.Querier, fromAccountID, thre
 		return r, err
 	}
 	r.GmailThread = gt
-	if err := q.QueryRow(ctx,
-		`SELECT COALESCE(sender,''), COALESCE(external_message_id,'')
-		 FROM normalized_messages
-		 WHERE thread_id=$1 AND direction='inbound'
-		 ORDER BY sent_at DESC, id DESC LIMIT 1`, threadID).Scan(&r.To, &r.InReplyTo); err != nil {
+	m, err := latestInboundMessage(ctx, q, threadID)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return r, fmt.Errorf("thread %d has no inbound message to reply to", threadID)
 		}
 		return r, fmt.Errorf("resolve reply target: %w", err)
 	}
+	r.To, r.InReplyTo = m.sender, m.messageID
 	return r, nil
+}
+
+// inboundMessage is the part of a thread's reply target the send and the
+// same-project rule read.
+type inboundMessage struct {
+	id        int64
+	sender    string
+	messageID string
+}
+
+// latestInboundMessage is the ONE spelling of "the message a gmail reply on
+// this thread answers": the thread's latest INBOUND message, `ORDER BY sent_at
+// DESC, id DESC`. ResolveGmailRoute takes its To and In-Reply-To from it, and
+// refuseThreadOutsideTaskProject checks ITS filing — so the same-project rule
+// follows the recipient. pgx.ErrNoRows (unwrapped) when nothing is inbound.
+func latestInboundMessage(ctx context.Context, q store.Querier, threadID int64) (inboundMessage, error) {
+	var m inboundMessage
+	err := q.QueryRow(ctx,
+		`SELECT id, COALESCE(sender,''), COALESCE(external_message_id,'')
+		 FROM normalized_messages
+		 WHERE thread_id=$1 AND direction='inbound'
+		 ORDER BY sent_at DESC, id DESC LIMIT 1`, threadID).Scan(&m.id, &m.sender, &m.messageID)
+	return m, err
 }
 
 // ---- mark_delivery_sent (assisted tier) -----------------------------------------

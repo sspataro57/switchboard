@@ -105,6 +105,11 @@ const (
 	tpOtherSlug = "itest-del-thrproj-other"
 	tpOutMID    = "<itest-del-thrproj-out@example.com>"
 	tpOutRaw    = "itest-del-thrproj-raw-out"
+	// A second, NEWER inbound message on the fixture thread: the mixed-thread
+	// stages. It becomes the thread's latest inbound — the message the reply
+	// goes to (ResolveGmailRoute) and so the one the rule checks.
+	tpNewMID = "<itest-del-thrproj-new@example.com>"
+	tpNewRaw = "itest-del-thrproj-raw-new"
 )
 
 // thrProjCleanup removes what the thread-project test adds on top of the SWT-8
@@ -119,10 +124,10 @@ func thrProjCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	}{
 		{`UPDATE tasks SET source_thread_id=NULL WHERE project_id IN (SELECT id FROM projects WHERE slug=$1)`, []any{delSlug}},
 		{`DELETE FROM capture_decisions WHERE message_id IN
-			(SELECT id FROM normalized_messages WHERE external_message_id = ANY($1))`, []any{[]string{delInboundMID, tpOutMID}}},
+			(SELECT id FROM normalized_messages WHERE external_message_id = ANY($1))`, []any{[]string{delInboundMID, tpOutMID, tpNewMID}}},
 		{`DELETE FROM capture_decisions WHERE project_id IN (SELECT id FROM projects WHERE slug=$1)`, []any{tpOtherSlug}},
-		{`DELETE FROM normalized_messages WHERE external_message_id=$1`, []any{tpOutMID}},
-		{`DELETE FROM raw_source_items WHERE external_id=$1`, []any{tpOutRaw}},
+		{`DELETE FROM normalized_messages WHERE external_message_id = ANY($1)`, []any{[]string{tpOutMID, tpNewMID}}},
+		{`DELETE FROM raw_source_items WHERE external_id = ANY($1)`, []any{[]string{tpOutRaw, tpNewRaw}}},
 		{`DELETE FROM projects WHERE slug=$1`, []any{tpOtherSlug}},
 	} {
 		if _, err := pool.Exec(ctx, st.sql, st.args...); err != nil {
@@ -134,13 +139,19 @@ func thrProjCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 // Owner decision (Salvador, 2026-09-12: "Same project"): with the user
 // profile's pin require_thread_in_task_project:"true", draft_delivery drafts
 // only on a thread already filed under the task's project — the task's own
-// source thread, or a thread with an INBOUND message whose LATEST
-// capture_decisions row (any mode) names the task's project. Checked inside
-// the transaction, before the insert; a refusal writes no row.
+// source thread, or a thread whose LATEST INBOUND message (the one the reply
+// goes to: ResolveGmailRoute's ordering, shared through latestInboundMessage)
+// has a LATEST capture_decisions row (any mode) naming the task's project.
+// The rule follows the recipient: an older message filed here does not
+// qualify a thread whose newest inbound mail is filed elsewhere. Checked
+// inside the transaction, before the insert; a refusal writes no row.
 //
-// MUTATION (run by hand): drop the require_thread_in_task_project check in
-// draftDelivery → the unfiled, other-project, outbound-only and re-pointed
-// refusals are all drafted, and this test goes red at "was DRAFTED".
+// MUTATIONS (run by hand):
+//   - drop the require_thread_in_task_project check in draftDelivery → the
+//     unfiled, other-project, outbound-only and re-pointed refusals are all
+//     drafted, and this test goes red at "was DRAFTED".
+//   - check ANY inbound message on the thread instead of the latest → stage 8
+//     ("mixed thread: older here, newest elsewhere") goes red at "was DRAFTED".
 func TestDraftDelivery_Integration_ThreadMustBeFiledUnderTheTaskProject(t *testing.T) {
 	ctx := context.Background()
 	pool := newToolsPool(t, ctx)
@@ -202,8 +213,20 @@ func TestDraftDelivery_Integration_ThreadMustBeFiledUnderTheTaskProject(t *testi
 			return
 		}
 		want := "thread " + itoa(fx.threadID) + " is not filed under this task's project (" + delSlug + ")"
-		if !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "file it first") {
-			t.Errorf("%s: refusal = %q, want it to contain %q and say how to file it", stage, err, want)
+		// The dashboard cannot file mail and a new capture rule does not
+		// re-file decided mail, so the refusal says who can: Salvador.
+		for _, w := range []string{want,
+			"its latest inbound message is filed elsewhere or not at all",
+			"ask Salvador to file it, or draft from the switchboard session"} {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("%s: refusal = %q, want it to contain %q", stage, err, w)
+			}
+		}
+		for _, stale := range []string{"file it first", "capture rule", "dashboard"} {
+			if strings.Contains(err.Error(), stale) {
+				t.Errorf("%s: refusal = %q still says %q: the dashboard cannot file mail and a new capture "+
+					"rule does not re-file decided mail", stage, err, stale)
+			}
 		}
 		if after := rows(); after != before {
 			t.Errorf("%s: a refused draft changed the delivery count %d → %d", stage, before, after)
@@ -264,7 +287,46 @@ func TestDraftDelivery_Integration_ThreadMustBeFiledUnderTheTaskProject(t *testi
 	decide(inboundID, nil, "shadow")
 	refused("latest decision unmatched")
 
-	// 7. The task's own source thread is allowed even while unfiled.
+	// 8. Mixed thread. The fixture's inbound message (older) is filed here...
+	decide(inboundID, &projID, "shadow")
+	allowed("single inbound message filed here, before the newer one arrives")
+	// ...then a NEWER inbound message arrives, filed under another project. The
+	// reply would go to ITS sender, so the thread no longer qualifies.
+	var newRaw, newID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO raw_source_items (source_account_id, external_id, raw_json, content_hash)
+		 VALUES ($1, $2, '{}', 'itest-del-thrproj-hash-new') RETURNING id`, fx.accountID, tpNewRaw).Scan(&newRaw); err != nil {
+		t.Fatalf("seed newer raw: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO normalized_messages
+		   (raw_source_item_id, thread_id, direction, external_message_id, sent_at, body_text, subject, sender, channel)
+		 VALUES ($1, $2, 'inbound', $3,
+		         (SELECT sent_at FROM normalized_messages WHERE external_message_id=$5) + interval '1 hour',
+		         'also this', 'login broken', $4, 'gmail') RETURNING id`,
+		newRaw, fx.threadID, tpNewMID, "someone-else@itest-del.example", delInboundMID).Scan(&newID); err != nil {
+		t.Fatalf("seed newer inbound: %v", err)
+	}
+	// Guard the premise: the newer message IS the reply target.
+	if r, err := tools.ResolveGmailRoute(ctx, pool, fx.accountID, fx.threadID); err != nil || r.InReplyTo != tpNewMID {
+		t.Fatalf("premise: the thread's reply target = %+v (err %v), want the newer message %s", r, err, tpNewMID)
+	}
+	decide(newID, &otherID, "live")
+	refused("mixed thread: older here, newest elsewhere")
+
+	// 9. Newest inbound filed nowhere (unmatched), older here: still refused.
+	decide(newID, nil, "shadow")
+	refused("mixed thread: older here, newest unmatched")
+
+	// 10. The reverse: older elsewhere, newest here → allowed.
+	decide(inboundID, &otherID, "shadow")
+	decide(newID, &projID, "shadow")
+	allowed("mixed thread: older elsewhere, newest here")
+
+	// 11. The task's own source thread is allowed even when its latest inbound
+	// message is filed elsewhere.
+	decide(newID, &otherID, "shadow")
+	refused("newest re-pointed elsewhere, before the source-thread stage")
 	if _, err := pool.Exec(ctx, `UPDATE tasks SET source_thread_id=$1 WHERE id=$2`, fx.threadID, fx.parentID); err != nil {
 		t.Fatalf("set source thread: %v", err)
 	}

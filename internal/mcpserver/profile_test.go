@@ -107,8 +107,9 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 // locality rule in the handler (not by this list), and — through the finder
 // form — the only way a session outside the switchboard repo reaches a message.
 //
-// SWT-44: draft_delivery (gmail only, by pin) and update_delivery (own drafts
-// only, by pin), thirteen in all.
+// SWT-44: draft_delivery (gmail only, by pin) and update_delivery (gmail drafts
+// created by the caller's actor — mcp:manual:salvo, any interactive session —
+// by pin), thirteen in all.
 var wantUserProfileTools = []string{
 	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
 	"task_append_log", "task_close", "task_dismiss",

@@ -137,11 +137,12 @@ that carries no content hash is refused too, so reload the page and review it ag
 binary wires no mail sender at all.
 
 **Same project (Salvador, 2026-09-12: "Same project").** A session drafts only on a thread
-already filed under the task's project: the task's own source thread, or a thread whose inbound
-mail was filed under that project (its latest capture decision). Anything else is refused with
-"thread N is not filed under this task's project (<slug>); file it first (a capture rule or the
-dashboard), or draft from the switchboard session". This repo's full `ops` and the drafts
-worker are not limited this way.
+already filed under the task's project: the task's own source thread, or a thread whose latest
+inbound message — the one the reply goes to — is filed under that project (its latest capture
+decision). An older message filed there does not count if the newest one is filed elsewhere.
+Anything else is refused with "thread N is not filed under this task's project (<slug>): its
+latest inbound message is filed elsewhere or not at all; ask Salvador to file it, or draft from
+the switchboard session". This repo's full `ops` and the drafts worker are not limited this way.
 
 **Known gap (SWT-46).** The To shown on the dashboard can change if a new
 inbound message arrives on the thread before Send: the send picks the To from the thread's
@@ -154,7 +155,8 @@ work task; the first send of it records the delivery lifecycle for that task whi
 hand (`task_mark_delivered`) until the follow-up ticket ships.
 
 **Accepted risk (SWT-44).** Untrusted text a session reads — a mail, an attachment, a web page —
-can tell it to draft a reply on any task, into any gmail thread it can name, or to rewrite one
+can tell it to draft a reply on any task, into a gmail thread whose latest inbound message is
+filed under the task's project, or to rewrite one
 of its own drafts. It stays a draft: nothing leaves until Salvador reads it on the dashboard,
 with its From and To, and approves it. Damage: a misleading draft in the approval queue.
 

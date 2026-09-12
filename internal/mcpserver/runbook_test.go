@@ -181,7 +181,7 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		// SWT-44 review fixes: what the drafting actually is, and how to undo it.
 		{`(?s)draft gmail repl.{0,200}and nothing else`, "the intro's 'and nothing else' includes gmail drafting"},
 		{`(?s)draft_delivery.{0,300}gmail only`, "fix 3: the user profile drafts gmail replies only"},
-		{`its own drafts`, "fix 2: update_delivery edits only the session's own drafts"},
+		{`its own drafts`, "fix 2: update_delivery edits only drafts its actor created, gmail only"},
 		{`(?s)dashboard shows.{0,80}from.{0,40}to.{0,80}before`, "fix 4: the dashboard shows From and To before approval"},
 		{`(?s)planted draft.{0,400}(dashboard|unapproved)`, "Recovery: a planted draft is edited on the dashboard or left unapproved"},
 		{`(?s)swt-43.{0,200}deny`, "…until SWT-43's Deny ships"},

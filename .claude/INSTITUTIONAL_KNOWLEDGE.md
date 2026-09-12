@@ -777,14 +777,33 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   gmail draft is allowed only on a thread already filed under the task's
   project. `refuseThreadOutsideTaskProject`, inside draftDelivery's tx after the
   task lock and before the insert, accepts (a) `thread_id =
-  tasks.source_thread_id`, or (b) ≥1 INBOUND message on the thread whose LATEST
-  capture_decisions row (`ORDER BY cd.id DESC LIMIT 1`, any mode) has
-  `project_id = tasks.project_id`. Outbound messages never count. Refusal:
-  "thread N is not filed under this task's project (<slug>); file it first (a
-  capture rule or the dashboard), or draft from the switchboard session". Full
-  profile and drafts worker: no pin, unchanged. Fixture note:
-  `capture_decisions_live_uniq` allows ONE live row per message — a test that
-  re-points a message writes the later decisions as shadow.
+  tasks.source_thread_id`, or (b) the thread's LATEST INBOUND message — the
+  reply's recipient, picked by `latestInboundMessage`, the same helper
+  `ResolveGmailRoute` uses (`ORDER BY sent_at DESC, id DESC`), so the rule and
+  the send agree on the message — has a LATEST capture_decisions row (`ORDER BY
+  id DESC LIMIT 1`, any mode) with `project_id = tasks.project_id`. The rule
+  follows the recipient: an older message filed here does NOT qualify a thread
+  whose newest inbound mail is filed elsewhere or unmatched. Outbound messages
+  never count. Refusal: "thread N is not filed under this task's project
+  (<slug>): its latest inbound message is filed elsewhere or not at all; ask
+  Salvador to file it, or draft from the switchboard session" (not "the
+  dashboard": it cannot file mail; not "a capture rule": a new rule does not
+  re-file already-decided mail). Full profile and drafts worker: no pin,
+  unchanged. Fixture note: `capture_decisions_live_uniq` allows ONE live row
+  per message — a test that re-points a message writes the later decisions as
+  shadow.
+  - **What it guarantees.** A session can `create_task` in ANY project, so the
+    rule means "the draft's thread is filed under the task's project" — it
+    ties draft to thread, and is NOT a limit on which project a session can
+    draft into.
+  - **Shadow decisions count.** The latest decision in ANY mode, per the repo's
+    latest-decision convention (classify/store.go, mailattach.go). That is
+    also what lets a shadow `--all` re-filing pass qualify a thread.
+  - **Accepted residual race (Codex).** The check and the insert are not
+    serialized against a concurrent capture pass re-filing the thread (or a
+    new inbound message landing). The window is one transaction; nothing sends
+    without Salvador's dashboard approve; the dashboard shows From/To; and
+    SWT-46 will persist the recipient at draft/approval.
 - **Content-bound approval.** `approve_delivery` takes an optional
   `expect_content_hash` = `tools.DeliveryContentHash(subject, body)` (lowercase
   hex sha256 of subject, NUL, body; a NULL subject is `""`), compared under the
@@ -804,7 +823,9 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   newer inbound would misstate where it went). Other channels show
   `target_ref`; anything unresolvable reads `(unresolved)`. The session picks
   the thread, so the recipient is the SESSION's choice among ingested threads —
-  the dashboard, not the resolution, is the check.
+  bounded, on the user profile, by the same-project pin (the thread's latest
+  inbound message must be filed under the task's project) — and the dashboard,
+  not the resolution, is the check.
 - **Known gap — the To can change before Send (NOT fixed here; SWT-46).** Send re-resolves To from the thread's latest inbound
   message AT SEND TIME (pre-existing behaviour), so the To shown can change if
   a new inbound message arrives before Send, and an approved row re-renders its

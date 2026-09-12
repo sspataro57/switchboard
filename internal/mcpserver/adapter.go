@@ -68,8 +68,9 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// (mail_search, mail_read_thread) stay off this profile.
 	"mail_list_attachments", "mail_read_attachment",
 	// SWT-44 (Salvador, 2026-09-12): write and fix a client EMAIL reply as a
-	// drafted delivery row — gmail only, and only the session's own drafts (the
-	// pins below). approve_delivery and send_delivery stay OFF this profile: a
+	// drafted delivery row — gmail only, on a thread filed under the task's
+	// project, and edits only gmail drafts created by the caller's actor
+	// (mcp:manual:salvo = any interactive session; the pins below). approve_delivery and send_delivery stay OFF this profile: a
 	// session must not approve its own client email (invariant 4's human gate),
 	// and these sessions read untrusted attachment text. Salvador approves on
 	// the dashboard, which shows From and To and binds the approve to the words
