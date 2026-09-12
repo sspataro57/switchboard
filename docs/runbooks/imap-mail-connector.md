@@ -136,3 +136,11 @@ google --normalize-only --all
 - **Two passes on one account cannot overlap**: each takes a per-account advisory
   lock and a second pass skips (counted as `accounts_busy`), so a stray CronJob
   cannot race the `--watch` Deployment's cursor.
+
+## Attachments (SWT-42)
+
+- **Where they live:** attachments are stored with the message. `raw_source_items.raw_json->>'rfc822_b64'` holds the whole RFC822 message, up to `MAIL_MAX_MESSAGE_BYTES` (1 MiB default).
+- **Over the cap:** a larger message is captured `truncated: true`, with headers and one text part, and its `parts` manifest lists what was left behind.
+- **Reading them:** normalization keeps only body text. To read attachments, use the executor tools `mail_list_attachments` and `mail_read_attachment`, which are in both MCP profiles.
+- **Who may see what:** both tools gate every caller by the SWT-21 locality rule. Only mail filed under a non-`local_only` project is shown. Unfiled mail is shown only on a mailbox whose filed mail is all non-private (owner decision O2).
+- **Refusal wording:** a truncated part is reported as "not stored … capture cap", never as missing.

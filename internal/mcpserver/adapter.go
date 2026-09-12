@@ -42,7 +42,7 @@ const (
 	// look at the queues, dismiss, close or mark delivered, create HUMAN tasks,
 	// log on human tasks and set priority. It cannot claim, create or log on
 	// worker (claude) tasks — the profile pins below refuse both — draft,
-	// approve, send, book, link, decide, read mail or reopen. Policy refuses
+	// approve, send, book, link, decide, read mail bodies or reopen; since SWT-42 it reads attachments of non-private mail (O1). Policy refuses
 	// the verbs and task_set_priority to worker identities.
 	ProfileUser Profile = "user"
 	// ProfileRead serves the queue reads only. No binary builds it since
@@ -58,7 +58,12 @@ var readProfileTools = []string{"project_list", "task_list", "task_get_next"}
 // and the three capture tools (SWT-38 C3/C5).
 var userProfileTools = append(append([]string(nil), readProfileTools...),
 	"task_dismiss", "task_close", "task_mark_delivered",
-	"create_task", "task_append_log", "task_set_priority")
+	"create_task", "task_append_log", "task_set_priority",
+	// SWT-42 O1 (Salvador, 2026-09-12: "yes expose it on the user mcp too"):
+	// attachment reads, gated by the SWT-21 locality rule in the handler. The
+	// finder returns headers and attachment names only; mail bodies
+	// (mail_search, mail_read_thread) stay off this profile.
+	"mail_list_attachments", "mail_read_attachment")
 
 // userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
 // by OVERWRITE, after injectWorkerID. require_assignee_type:"human" makes the

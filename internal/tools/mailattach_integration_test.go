@@ -1038,9 +1038,12 @@ func TestMailAttach_Integration_LocalityCasesFromPostgres(t *testing.T) {
 					if c.tool == maList {
 						var out maListOut
 						maDecode(t, raw, &out)
+						// At least one available attachment: (a) is the main fixture with
+						// three, every other allowed case has one. The case under test is
+						// allowed-vs-refused, not the attachment count (criterion 1 pins that).
 						if len(out.Messages) != 1 || out.Messages[0].RawSourceItemID != tc.m.raw ||
-							len(out.Messages[0].Attachments) != 1 || !out.Messages[0].Attachments[0].Available {
-							t.Errorf("%s %v = %+v, want the message with its one available attachment", c.tool, c.args, out)
+							len(out.Messages[0].Attachments) == 0 || !out.Messages[0].Attachments[0].Available {
+							t.Errorf("%s %v = %+v, want the message with its available attachment(s)", c.tool, c.args, out)
 						}
 					}
 					continue

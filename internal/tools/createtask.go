@@ -99,6 +99,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// from live IMAP — see internal/tools/mail.go.
 		{"mail_search", validateMailSearch, mailSearch},
 		{"mail_read_thread", validateMailReadThread, mailReadThread},
+		// SWT-42: stored mail attachments, read-only, gated by the SWT-21
+		// locality rule in the handler (every caller, every profile). Listed in
+		// both MCP profiles (owner decision O1). See mailattach.go.
+		{"mail_list_attachments", validateMailListAttachments, mailListAttachments},
+		{"mail_read_attachment", validateMailReadAttachment, mailReadAttachment},
 		{"record_pr_event", validateRecordPREvent, recordPREvent},
 		{"record_ci_event", validateRecordCIEvent, recordCIEvent},
 		{"task_pr_transition", validatePRTransition, taskPRTransition},

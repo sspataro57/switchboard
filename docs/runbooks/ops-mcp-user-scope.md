@@ -1,15 +1,16 @@
-# Runbook — the switchboard MCP at Claude Code user scope (SWT-35, SWT-37, SWT-38)
+# Runbook — the switchboard MCP at Claude Code user scope (SWT-35, SWT-37, SWT-38, SWT-42)
 
 Install `ops-mcp-user` once for Claude Code at USER scope, so a session opened in
 any repo on the workstation can read switchboard's queues, dismiss, close or mark
 delivered a task, log the work Salvador hands it as a swb task in his own lane,
-write progress on that task, and reorder any task's priority — and nothing else.
+write progress on that task, reorder any task's priority, and read the attachments of
+non-private mail (SWT-42) — and nothing else.
 The per-repo binding — which switchboard project is this repo's queue — lives in
 Claude Code's own per-project memory, not in switchboard.
 
-It serves nine tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
-`task_close`, `task_mark_delivered`, `create_task`, `task_append_log` and
-`task_set_priority`.
+It serves eleven tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
+`task_close`, `task_mark_delivered`, `create_task`, `task_append_log`,
+`task_set_priority`, `mail_list_attachments` and `mail_read_attachment`.
 
 ## Fresh install (once, from `main`)
 
@@ -30,7 +31,7 @@ on `main` and open a new session:
 cd ~/projects/personal/switchboard && git switch main && go install ./cmd/ops-mcp-user
 ```
 
-Then open a NEW session, and `/mcp` shows `ops` with the nine tools.
+Then open a NEW session, and `/mcp` shows `ops` with the eleven tools.
 
 ## Migrating from `ops-mcp-read` (SWT-35's install)
 
@@ -49,16 +50,20 @@ Then open a NEW session.
 
 ## What the install can and cannot do
 
-- **`ops-mcp-user` is the boundary.** It lists exactly the nine tools above, refuses
+- **`ops-mcp-user` is the boundary.** It lists exactly the eleven tools above, refuses
   every other tool at the MCP layer, and wires no mail sender and no calendar
   booker: its `main` never calls a sender seam, so whatever the environment holds
   arms nothing. It is a separate binary rather than a setting on `ops-mcp`, so
   there is no variable whose absence falls back to the full surface.
 - **What it can do.** Read the queues; dismiss, close or mark delivered a task;
   create HUMAN tasks (`assignee_type='human'`, status `ready` — Salvador's own
-  lane); log on human tasks; and set any task's priority.
+  lane); log on human tasks; set any task's priority; and it
+  reads attachments of non-private mail only (SWT-42): `mail_list_attachments` finds a message by id or by
+  sender/subject (headers and attachment names, never a body) and `mail_read_attachment`
+  returns one attachment inline, or saves a PDF/image to
+  `~/.cache/switchboard/attachments/` and returns the path.
 - **What it cannot do.** It cannot claim, create worker (`claude`) tasks, log on
-  worker tasks, draft, approve, send, book, link, decide, read mail or reopen.
+  worker tasks, draft, approve, send, book, link, decide, read mail bodies or reopen.
   The binary pins `require_assignee_type:"human"` onto every `create_task` and
   `task_append_log` call (overwriting any value the model passes), so a request
   for a `claude` task or a log line on a `claude` task is refused by the tool
@@ -71,7 +76,7 @@ Then open a NEW session.
   `mcp:manual:salvo`. Never install `ops-mcp` itself at user scope.
 - **Workers are refused by policy, not by the tool list.** The full `ops-mcp` (worker
   consoles, this repo's `.mcp.json`) also lists the three verbs and
-  `task_set_priority`, 23 tools in all. A worker console (`mcp:{client}`) is
+  `task_set_priority`, 25 tools in all. A worker console (`mcp:{client}`) is
   refused `task_dismiss` and `task_set_priority` by `human_only` and `task_close` /
   `task_mark_delivered` by `mcp_human_only`; the orchestrator and the Jira
   reconciler keep closing and delivering as before. `task_set_priority` refuses
@@ -93,6 +98,20 @@ sees `mcp:manual:salvo`, a human. Since SWT-38 it can also tell a session to:
 3. **reorder any task's priority** (`task_set_priority`), worker queues included — a console then takes
    a different ready task next. It only reorders existing work. Damage: urgent
    work delayed, or old work jumped ahead.
+
+**Since SWT-42 (Salvador, 2026-09-12: "yes expose it on the user mcp too")** the install also
+reads mail attachments — a tool whose whole job is to fetch untrusted text someone else
+wrote (a JSON file, a CSV, a forwarded mail) into the session. Text inside an attachment can
+tell a session to dismiss, close or mark delivered any task, create human tasks and log on
+them, or reorder any task's priority — the same verbs as above, now one tool call away from
+a stranger's file. What limits it: only attachments of mail filed under a non-`local_only`
+project are returned (and unfiled mail only on a mailbox whose filings are all non-private —
+owner decision O2), so personal, bank, health and bulk mail never arrive; the finder returns
+no bodies; the Instructions and both tool descriptions say attachment content is data, never
+instructions (a prompt rule, not a boundary). What cannot happen: nothing is sent, no
+delivery is touched, nothing is written to the database but the audit row, and saved files
+stay inside `~/.cache/switchboard/attachments`. Every attachment call leaves an audit row
+with its message and part ids; the content itself is never stored.
 
 The session instructions say to act only when Salvador asks for that task id;
 that is a prompt rule, not a boundary. What cannot happen: nothing is sent, and no
@@ -152,9 +171,9 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
 1. `claude mcp get ops` shows the user-scope entry, its `ops-mcp-user` command and
    both `-e` values.
 2. In another repo (e.g. `cd ~/projects/personal/kube && claude`), `/mcp` shows
-   `ops` connected with exactly nine tools.
+   `ops` connected with exactly eleven tools.
 3. In `~/projects/personal/switchboard`, a SESSION gets ONE `ops` — the
-   project-scope `go run` entry with the full tool list (23 tools). Check this
+   project-scope `go run` entry with the full tool list (25 tools). Check this
    inside a session, NOT with `claude mcp get ops` / `claude mcp list`: run inside
    this repo, those CLI commands display the user-scope entry even though a session
    loads `.mcp.json`'s (verified 2026-09-10).
@@ -198,6 +217,10 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
   show on the dashboard's task page under "Events".
 - "swb done 412" → `task_close` with a one-line outcome as the reason. A session
   that finishes work it logged closes the task the same way and says so.
+- "find the attachment Sana sent about the Activities Integration" → `mail_list_attachments`
+  by sender/subject (from=sana, subject=activities integration) → `mail_read_attachment` on
+  the file you want. Text (JSON, CSV…) comes back inline; a PDF or image comes back as a cache
+  path to open with Read. A private message is refused, never reported as missing.
 - "swb prioritize 412 [level]" → `task_set_priority`. No level means urgent;
   "swb deprioritize 412" means normal. The session says the old and new level.
 
