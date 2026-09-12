@@ -805,8 +805,7 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `target_ref`; anything unresolvable reads `(unresolved)`. The session picks
   the thread, so the recipient is the SESSION's choice among ingested threads —
   the dashboard, not the resolution, is the check.
-- **Known gap — the To can change before Send (NOT fixed here; follow-up
-  ticket pending).** Send re-resolves To from the thread's latest inbound
+- **Known gap — the To can change before Send (NOT fixed here; SWT-46).** Send re-resolves To from the thread's latest inbound
   message AT SEND TIME (pre-existing behaviour), so the To shown can change if
   a new inbound message arrives before Send, and an approved row re-renders its
   To up to Send. The fix is persisting the route at approval; it folds into the
