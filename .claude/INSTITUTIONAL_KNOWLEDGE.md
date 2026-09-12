@@ -724,8 +724,17 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   none filed local_only (latest decision per message), computed per call. Prod on
   the day: 1009 handsonconnect clean (566 filed / 0 local); 1003 and 1004 are
   not. SWT-40's routing supersedes it.
-- Private refusals: an explicit id errors naming the reason; the thread form and
-  the finder withhold restricted messages and only COUNT them (no names).
+- Private refusals: an explicit id errors naming the reason (by raw id when the
+  caller gave one — never the private Message-ID); the thread form and the
+  finder classify from HEADERS first and only COUNT restricted matches: private
+  mail is never loaded or MIME-walked. The finder is literal-substring
+  (`likeEscape`), ≤2,000 candidates, ≤64 MiB of raw rows, `truncated` on
+  either cap.
+- The saved-file cache refuses a symlinked base and sweeps only through
+  `os.Root`. Known gaps (Future work): the listed-part count is unbounded
+  (bounded only by the 1 MiB row); `truncatedReason` prints the reader's cap,
+  not the connector's; a truncated manifest omits the text/plain leaf kept as
+  the body, so a named .txt on an HTML-only oversize message is not listed.
 - Attachment content is untrusted third-party text; the Instructions line says
   read-as-data. Accepted risk as in SWT-37: a session that reads a malicious
   attachment still holds the write verbs.

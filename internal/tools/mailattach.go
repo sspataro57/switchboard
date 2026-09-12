@@ -208,6 +208,15 @@ func likeEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
+// loadMailAttachRaw fills m.rawJSON for a message the caller has already
+// judged shareable.
+func loadMailAttachRaw(ctx context.Context, pool *pgxpool.Pool, m *mailAttachMsg) error {
+	if err := pool.QueryRow(ctx, `SELECT raw_json FROM raw_source_items WHERE id = $1`, m.raw).Scan(&m.rawJSON); err != nil {
+		return fmt.Errorf("load raw item %d: %w", m.raw, err)
+	}
+	return nil
+}
+
 func scanMailAttachMsg(row pgx.Row) (mailAttachMsg, error) {
 	var m mailAttachMsg
 	err := row.Scan(&m.id, &m.raw, &m.account, &m.threadID, &m.messageID, &m.threadKey,
@@ -248,10 +257,16 @@ type mailClassJudge struct {
 	ctx   context.Context
 	pool  *pgxpool.Pool
 	clean map[int64]bool
+	seen  map[int64]inboundVerdict // per inbound message: the outbound fold re-asks
+}
+
+type inboundVerdict struct {
+	class  provider.Class
+	reason string
 }
 
 func newMailClassJudge(ctx context.Context, pool *pgxpool.Pool) *mailClassJudge {
-	return &mailClassJudge{ctx: ctx, pool: pool, clean: map[int64]bool{}}
+	return &mailClassJudge{ctx: ctx, pool: pool, clean: map[int64]bool{}, seen: map[int64]inboundVerdict{}}
 }
 
 // mailboxClean is O2: at least mailboxCleanMinFiled of the account's inbound
@@ -283,6 +298,17 @@ func (j *mailClassJudge) mailboxClean(account int64) (bool, error) {
 
 // inboundClass is one inbound message's class and, when restricted, why.
 func (j *mailClassJudge) inboundClass(messageID, account int64) (provider.Class, string, error) {
+	if v, ok := j.seen[messageID]; ok {
+		return v.class, v.reason, nil
+	}
+	c, reason, err := j.judgeInbound(messageID, account)
+	if err == nil {
+		j.seen[messageID] = inboundVerdict{c, reason}
+	}
+	return c, reason, err
+}
+
+func (j *mailClassJudge) judgeInbound(messageID, account int64) (provider.Class, string, error) {
 	var hasProject, localOnly bool
 	err := j.pool.QueryRow(j.ctx, `
 		SELECT cd.project_id IS NOT NULL, COALESCE(p.ai_locality = 'local_only', false)
@@ -361,8 +387,18 @@ func (j *mailClassJudge) class(m mailAttachMsg) (provider.Class, string, error) 
 	return provider.ClassGeneral, "", nil
 }
 
-func privateMailError(m mailAttachMsg, reason string) error {
-	return fmt.Errorf("message %s is private mail (%s): its attachments are never shown to a hosted model", m.messageID, reason)
+func privateMailError(ident, reason string) error {
+	return fmt.Errorf("%s is private mail (%s): its attachments are never shown to a hosted model", ident, reason)
+}
+
+// privateIdent names a refused message by what the caller gave: a refusal by
+// raw id never hands back the private message's Message-ID (it often carries
+// the sender's domain).
+func privateIdent(rawID int64, m mailAttachMsg) string {
+	if rawID != 0 {
+		return fmt.Sprintf("raw_source_item_id %d", rawID)
+	}
+	return "message " + m.messageID
 }
 
 // ---- mail_list_attachments ---------------------------------------------------
@@ -419,7 +455,7 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 			return nil, err
 		}
 		if c != provider.ClassGeneral {
-			return nil, privateMailError(m, reason)
+			return nil, privateMailError(privateIdent(a.RawSourceItemID, m), reason)
 		}
 		l, err := listedFor(m)
 		if err != nil {
@@ -430,7 +466,7 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 
 	// Thread form: every shareable member, restricted ones counted, not shown.
 	if a.ThreadID != 0 || strings.TrimSpace(a.ThreadKey) != "" {
-		rows, err := pool.Query(ctx, mailAttachMsgSelect+`
+		rows, err := pool.Query(ctx, mailAttachHeaderSelect+`
 		   AND (($1::bigint IS NOT NULL AND m.thread_id = $1) OR ($1 IS NULL AND t.thread_key = $2))
 		 ORDER BY m.sent_at ASC NULLS LAST, m.id ASC LIMIT $3`,
 			nullableID(a.ThreadID), strings.TrimSpace(a.ThreadKey), mailThreadMaxMessages)
@@ -444,23 +480,27 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 		out := []mailAttachListed{}
 		withheld := 0
 		for _, m := range msgs {
-			l, err := listedFor(m)
-			if err != nil {
-				return nil, err
-			}
+			// Class first, from the headers: private mail is counted, never
+			// loaded or parsed.
 			c, _, err := judge.class(m)
 			if err != nil {
 				return nil, err
 			}
 			if c != provider.ClassGeneral {
-				if len(l.Attachments) > 0 {
-					withheld++
-				}
+				withheld++
 				continue
+			}
+			if err := loadMailAttachRaw(ctx, pool, &m); err != nil {
+				return nil, err
+			}
+			l, err := listedFor(m)
+			if err != nil {
+				return nil, err
 			}
 			out = append(out, l)
 		}
-		return marshalResult(map[string]any{"messages": out, "withheld_private": withheld, "truncated": false})
+		return marshalResult(map[string]any{"messages": out, "withheld_private": withheld,
+			"truncated": len(msgs) == mailThreadMaxMessages})
 	}
 
 	// Finder: headers only, newest first, messages with at least one listed part.
@@ -492,8 +532,19 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 	withheld, truncated := 0, false
 	budget := mailAttachFinderByteBudget
 	for _, m := range msgs {
-		if err := pool.QueryRow(ctx, `SELECT raw_json FROM raw_source_items WHERE id = $1`, m.raw).Scan(&m.rawJSON); err != nil {
-			return nil, fmt.Errorf("load raw item %d: %w", m.raw, err)
+		// Class first, from the headers: a private match is counted, never
+		// loaded or parsed (so withheld_private counts private matches, with or
+		// without attachments).
+		c, _, err := judge.class(m)
+		if err != nil {
+			return nil, err
+		}
+		if c != provider.ClassGeneral {
+			withheld++
+			continue
+		}
+		if err := loadMailAttachRaw(ctx, pool, &m); err != nil {
+			return nil, err
 		}
 		if budget -= len(m.rawJSON); budget < 0 {
 			truncated = true // out of budget: more may match; narrow the search
@@ -505,14 +556,6 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 		}
 		if len(l.Attachments) == 0 {
 			continue // criterion 3: only messages with at least one listed part
-		}
-		c, _, err := judge.class(m)
-		if err != nil {
-			return nil, err
-		}
-		if c != provider.ClassGeneral {
-			withheld++
-			continue
 		}
 		if len(out) == limit {
 			truncated = true // limit+1: a further qualifying hit exists
@@ -558,7 +601,7 @@ func mailReadAttachment(ctx context.Context, pool *pgxpool.Pool, args []byte) ([
 		return nil, err
 	}
 	if c != provider.ClassGeneral {
-		return nil, privateMailError(m, reason)
+		return nil, privateMailError(privateIdent(a.RawSourceItemID, m), reason)
 	}
 	sel := google.AttachmentSelector{Filename: a.Filename, PartID: a.PartID}
 	if a.Index != nil {
@@ -582,7 +625,7 @@ func mailReadAttachment(ctx context.Context, pool *pgxpool.Pool, args []byte) ([
 		base["kind"] = "file"
 		base["path"] = path
 		base["sha256"] = hex.EncodeToString(sum[:])
-		base["hint"] = "Open it with Claude Code's Read tool (it renders PDFs and images). The file is removed after 7 days."
+		base["hint"] = "Open it with Claude Code's Read tool (it renders PDFs and images). A later save removes it once it is 7 days old."
 		return marshalResult(base)
 	}
 	page, err := pageAttachmentText(text, a.Offset)
@@ -694,20 +737,28 @@ func writeAttachmentFile(rawID int64, index int, filename string, data []byte) (
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return "", fmt.Errorf("create %s: %w", base, err)
 	}
-	_ = os.Chmod(base, 0o700)
-	sweepAttachmentCache(base, time.Now())
-
+	// The base itself must be a real directory: a symlink here would aim the
+	// chmod and the 7-day sweep at whatever it points to.
+	st, err := os.Lstat(base)
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", base, err)
+	}
+	if !st.IsDir() {
+		return "", fmt.Errorf("%s is not a plain directory (a symlink?); refusing to write or sweep through it", base)
+	}
 	root, err := os.OpenRoot(base)
 	if err != nil {
 		return "", fmt.Errorf("open %s: %w", base, err)
 	}
 	defer root.Close()
+	_ = root.Chmod(".", 0o700)
+	sweepAttachmentCache(root, time.Now())
 
 	dir := strconv.FormatInt(rawID, 10)
 	if err := root.Mkdir(dir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
 		return "", fmt.Errorf("create attachment directory: %w", err)
 	}
-	st, err := root.Lstat(dir)
+	st, err = root.Lstat(dir)
 	if err != nil {
 		return "", fmt.Errorf("stat attachment directory: %w", err)
 	}
@@ -735,49 +786,58 @@ func writeAttachmentFile(rawID int64, index int, filename string, data []byte) (
 	return filepath.Join(base, rel), nil
 }
 
-// sweepAttachmentCache removes entries under base older than the TTL:
-// best-effort, errors ignored, never following a symlink out of the base.
-func sweepAttachmentCache(base string, now time.Time) {
-	dirs, err := os.ReadDir(base)
+// sweepAttachmentCache removes entries under the cache root older than the
+// TTL: best-effort, errors ignored. Every operation goes through the os.Root,
+// so a symlink swapped in mid-sweep cannot reach outside the cache.
+func sweepAttachmentCache(root *os.Root, now time.Time) {
+	dirs, err := readRootDir(root, ".")
 	if err != nil {
 		return
 	}
 	cutoff := now.Add(-mailAttachmentFileTTL)
-	for _, d := range dirs {
-		p := filepath.Join(base, d.Name())
-		info, err := os.Lstat(p)
+	for _, name := range dirs {
+		info, err := root.Lstat(name)
 		if err != nil {
 			continue
 		}
 		if !info.IsDir() { // a stray file or symlink directly under the base
 			if info.ModTime().Before(cutoff) {
-				_ = os.Remove(p)
+				_ = root.Remove(name)
 			}
 			continue
 		}
-		files, err := os.ReadDir(p)
+		files, err := readRootDir(root, name)
 		if err != nil {
 			continue
 		}
 		left := 0
 		for _, f := range files {
-			fp := filepath.Join(p, f.Name())
-			fi, err := os.Lstat(fp)
+			fp := filepath.Join(name, f)
+			fi, err := root.Lstat(fp)
 			if err != nil {
 				left++
 				continue
 			}
 			if fi.ModTime().Before(cutoff) && !fi.IsDir() {
-				if os.Remove(fp) == nil {
+				if root.Remove(fp) == nil {
 					continue
 				}
 			}
 			left++
 		}
 		if left == 0 && info.ModTime().Before(cutoff) {
-			_ = os.Remove(p)
+			_ = root.Remove(name)
 		}
 	}
+}
+
+func readRootDir(root *os.Root, name string) ([]string, error) {
+	d, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	return d.Readdirnames(-1)
 }
 
 // sanitizeAttachmentName keeps only the last path element, maps anything

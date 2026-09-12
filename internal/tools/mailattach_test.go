@@ -533,6 +533,36 @@ func TestValidate_MailAttachmentTools_AcceptEveryFamily(t *testing.T) {
 	}
 }
 
+// Review M2: a symlinked cache base would aim the chmod and the 7-day sweep at
+// its target. The write is refused and the target's old files survive.
+func TestWriteAttachmentFile_RefusesSymlinkedBase(t *testing.T) {
+	cache, target := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cache)
+	old := filepath.Join(target, "precious.txt")
+	if err := os.WriteFile(old, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cache, "switchboard"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(cache, "switchboard", "attachments")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeAttachmentFile(1, 1, "a.bin", []byte("x")); err == nil {
+		t.Errorf("writeAttachmentFile through a symlinked base = nil error, want a refusal")
+	}
+	if _, err := os.Stat(old); err != nil {
+		t.Errorf("the symlink target's 30-day-old file was swept: %v", err)
+	}
+	if st, _ := os.Stat(target); st != nil && st.Mode().Perm() == 0o700 {
+		t.Errorf("the symlink target was chmodded to 0700")
+	}
+}
+
 // Codex review: the finder's from/subject are literal substrings. An unescaped
 // "%" or "_" would match every sender and make one call MIME-walk the mailbox.
 func TestLikeEscape_WildcardsAreLiteral(t *testing.T) {

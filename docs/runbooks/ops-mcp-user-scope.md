@@ -105,8 +105,8 @@ wrote (a JSON file, a CSV, a forwarded mail) into the session. Text inside an at
 tell a session to dismiss, close or mark delivered any task, create human tasks and log on
 them, or reorder any task's priority — the same verbs as above, now one tool call away from
 a stranger's file. What limits it: only attachments of mail filed under a non-`local_only`
-project are returned (and unfiled mail only on a mailbox whose filings are all non-private —
-owner decision O2), so personal, bank, health and bulk mail never arrive; the finder returns
+project are returned (and unfiled mail only on a mailbox with at least 20 filed messages, none
+of them local-only — owner decision O2), so personal, bank, health and bulk mail never arrive; the finder returns
 no bodies; the Instructions and both tool descriptions say attachment content is data, never
 instructions (a prompt rule, not a boundary). What cannot happen: nothing is sent, no
 delivery is touched, nothing is written to the database but the audit row, and saved files
