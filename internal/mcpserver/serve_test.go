@@ -45,9 +45,9 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		tools   int
 	}{
 		// Literal counts (SWT-38 criterion 19; SWT-42 criteria 21/22): see the header.
-		{ProfileFull, 25},
+		{ProfileFull, 26},
 		{ProfileRead, 3},
-		{ProfileUser, 11},
+		{ProfileUser, 13},
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()

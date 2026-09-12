@@ -97,9 +97,9 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 // locality rule in the handler (not by this list), and — through the finder
 // form — the only way a session outside the switchboard repo reaches a message.
 var wantUserProfileTools = []string{
-	"create_task", "mail_list_attachments", "mail_read_attachment", "project_list", "task_append_log",
-	"task_close", "task_dismiss",
-	"task_get_next", "task_list", "task_mark_delivered", "task_set_priority",
+	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
+	"task_append_log", "task_close", "task_dismiss",
+	"task_get_next", "task_list", "task_mark_delivered", "task_set_priority", "update_delivery",
 }
 
 func TestReadProfile_ListsExactlyTheQueueReads(t *testing.T) {
@@ -267,8 +267,14 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 		"task_claim",        // claims
 		"task_context",      // flips claimed → in_progress for the holder
 		"request_feedback", "mark_done_local",
-		"record_decision",                                     // decides
-		"draft_delivery", "approve_delivery", "send_delivery", // drafts, approves, sends
+		"record_decision", // decides
+		// AMENDED — not deleted — by SWT-44 (Salvador, 2026-09-12): draft_delivery
+		// and update_delivery joined the user profile, so a session in any repo can
+		// write and fix a client reply as a drafted delivery row. Approve and send
+		// stay off it: a session must not approve its own client email (the human
+		// gate the policy matrix puts on client-facing mail, invariant 4), and the
+		// same sessions read untrusted attachment text (SWT-42).
+		"approve_delivery", "send_delivery", // approves, sends
 		"mark_delivery_sent",  // records a send
 		"book_calendar_block", // books
 		"link_external_ref",   // links

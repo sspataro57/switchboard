@@ -147,7 +147,8 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		// Was `\b22 tools\b` (SWT-37 criterion 24, 19 → 22), then `\b23 tools\b`
 		// (SWT-38 criterion 22). SWT-42 criterion 24 moves the full profile to 25
 		// with the two attachment tools.
-		{`\b25 tools\b`, "the full profile's tool count, 23 → 25 (SWT-42 criterion 24)"},
+		// SWT-44: update_delivery joins the full profile (25 → 26).
+		{`\b26 tools\b`, "the full profile's tool count, 25 → 26 (SWT-44)"},
 		// SWT-38 criterion 23.
 		{`(?s)(email|web page).{0,600}(creat|priorit).{0,600}task_set_priority`,
 			"the ACCEPTED RISK extended (C9): untrusted text can also create tasks and reorder priority; one task_set_priority puts it back"},
@@ -161,9 +162,13 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{`deprioritize`, "usage: 'swb deprioritize <id>' → normal"},
 		{`(?s)upgrading from swt-37.{0,600}go install \./cmd/ops-mcp-user.{0,600}new session`,
 			"the upgrade block: go install on main, then a NEW session — the registration is unchanged"},
-		// Was `\bnine tools\b|\b9 tools\b` (SWT-38 criterion 22). SWT-42 criterion
-		// 24: the user profile's tool list becomes eleven.
-		{`\beleven tools\b|\b11 tools\b`, "the user profile's tool list becomes eleven (SWT-42)"},
+		// Was `\bnine tools\b|\b9 tools\b` (SWT-38 criterion 22), then
+		// `\beleven tools\b|\b11 tools\b` (SWT-42 criterion 24). SWT-44:
+		// draft_delivery and update_delivery make it thirteen.
+		{`\bthirteen tools\b|\b13 tools\b`, "the user profile's tool list becomes thirteen (SWT-44)"},
+		{`swt-44`, "the title gains SWT-44"},
+		{`(?s)draft_delivery.{0,400}update_delivery.{0,600}(approve|send).{0,200}dashboard`,
+			"SWT-44: the session drafts and fixes a reply; approving and sending stay on the dashboard"},
 		// SWT-42 criterion 24.
 		{`swt-42`, "the title gains SWT-42"},
 		{`(?s)find the attachment sana sent.{0,400}mail_list_attachments.{0,300}(sender|subject).{0,400}mail_read_attachment`,
@@ -181,7 +186,7 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 	}
 
 	// SWT-42 criterion 24: the superseded counts are false claims now.
-	for _, stale := range []string{`\bnine tools\b`, `\b9 tools\b`, `\b23 tools\b`} {
+	for _, stale := range []string{`\bnine tools\b`, `\b9 tools\b`, `\b23 tools\b`, `\beleven tools\b`, `\b11 tools\b`, `\b25 tools\b`} {
 		if regexp.MustCompile(stale).MatchString(lower) {
 			t.Errorf("%s still matches /%s/: since SWT-42 the user profile lists eleven tools and the full "+
 				"profile 25", rel, stale)
