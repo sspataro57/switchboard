@@ -768,7 +768,10 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   and the dashboard performs approvals and sends. Reach it with
   `kubectl -n ops port-forward svc/dashboard 8085:80`; the Ingress block in the
   manifest is commented out until OIDC is configured.
-  Still not deployed: orchestrator, triage, drafts, fleetd, hooksd.
+  Still not deployed: triage, drafts, fleetd, hooksd. **orchestratord IS deployed**
+  (SWT-41, 2026-09-12, image 0.7.9): Deployment `orchestratord` in `ops`
+  (`kube/switchboard/orchestrator.yaml`, replicas 1, Recreate, liveness `/healthz`
+  on :8091), started from cursor 1018 after `orchestrator_cursor_advance`.
 - **The production db drifted five migrations behind main (bit 2026-07-31).**
   `schema_migrations` was at 0009 while main was at 0014: 0010 (calendar reset),
   0011/0012 (slack send promotion + attempts) and 0013 (task_events indexes) had
@@ -806,13 +809,37 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 ## Orchestrator contract (shipped in SWT-5)
 
 - NOTIFY on `task_events` is a WAKE-UP only; the cursor drain
-  (`orchestrator_cursor`, seeded at max event id so first deploy never replays
-  history) is the sole delivery path. Missed/duplicate NOTIFYs are harmless.
+  (`orchestrator_cursor`) is the sole delivery path. Missed/duplicate NOTIFYs
+  are harmless.
+- **LANDMINE (SWT-41): built is not deployed, and the Dockerfile build line is
+  the deploy list.** orchestratord shipped in SWT-5 (2026-07-11), ran once as a
+  `--once` smoke and then did not run for two months: its binary was not even in
+  the image. R3 Deliver tasks, R8, R9–R11, dependency unblocking and claim expiry
+  silently never happened in prod while 912 events queued. A daemon a ticket
+  depends on must be in the `Dockerfile` build line (pinned by
+  `cmd/orchestratord/dockerfile_test.go`), have a manifest, and have a health
+  signal judged from OUTSIDE the process, or the ticket is not delivered.
+- **The cursor row outlives its seed.** 0003 seeded it at max(id) ONCE, at apply
+  time; any later first start drains from wherever the row is. Skipping is
+  `orchestrator_cursor_advance` (humanOnly, off MCP, compare-and-set, refuses
+  while an engine holds the lock, takes SHARE on task_events so no in-flight
+  lower id is skipped). Downtime catch-up is the default and correct behaviour —
+  never advance as a routine restart step (docs/runbooks/orchestrator.md).
+- **Health = `pg_locks` (per database) + backlog age, not cursor age** — an idle
+  system never moves the cursor. `/funnel` Orchestrator section, `/tasks` red
+  line when not `ok`, `/healthz` for the kubelet. The engine re-checks its lock
+  before every event (`DrainHooks.Guard`) and exits on loss; residual window is
+  one event's actions (a DB fencing token is future work).
+- **The orchestrator's package graph is pinned:** `internal/orchestrator` must not
+  reach `internal/provider`, `internal/connector/*`, `internal/planimport` or
+  `internal/tools`, even transitively (`deps_test.go`). Shared lock keys live in
+  the import-free `internal/lockkeys`.
 - Dedup idiom: `orchestrated` task_events (written via `record_orchestration`)
   are the replay-dedup keys — rules check them in Facts before firing.
 - Claim-expiry sweep EXEMPTS `needs_feedback` (parked ≠ crashed; expiring
   would orphan the resume).
-- Single instance via `pg_try_advisory_lock` key `0x51570005`.
+- Single instance via `pg_try_advisory_lock` key `0x51570005` (spelled once, in
+  `internal/lockkeys`).
 - Spine transition tools (`task_block`/`task_unblock`/`task_close` on
   already-target statuses) are idempotent no-op successes so replays never
   stall the drain; `task_close` refuses only active work.
