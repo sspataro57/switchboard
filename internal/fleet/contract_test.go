@@ -147,7 +147,7 @@ func TestValidateWorkerID(t *testing.T) {
 }
 
 // The pinned live-publish vocabulary is exactly these four; dead is the reserved
-// LWT-only state (criterion 2, "publish-side vocabulary").
+// reserved state, published only as the LWT or by Client.PublishDead (criterion 2, "publish-side vocabulary").
 func TestStateVocabulary(t *testing.T) {
 	if fleet.StateIdle != "idle" || fleet.StateWorking != "working" ||
 		fleet.StateNeedsFeedback != "needs_feedback" || fleet.StateManual != "manual" {

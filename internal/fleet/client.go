@@ -60,6 +60,10 @@ func newClient(ctx context.Context, brokerURL, clientID string, will bool, worke
 	select {
 	case <-tok.Done():
 	case <-ctx.Done():
+		// Stop the attempt: a CONNACK arriving after we gave up would otherwise
+		// leave an unowned client auto-reconnecting forever under this id,
+		// kicking every later client that uses it off the broker.
+		cl.c.Disconnect(0)
 		return nil, fmt.Errorf("connect %s: %w", brokerURL, ctx.Err())
 	}
 	if err := tok.Error(); err != nil {
@@ -93,6 +97,57 @@ func NewSpineClient(ctx context.Context, brokerURL, clientID string) (*Client, e
 	return newClient(ctx, brokerURL, clientID, false, "")
 }
 
+// NewWillClient connects a spine participant that owns a heartbeat (SWT-40
+// pipelined stages): a caller-chosen client id AND the retained dead LWT on
+// workerID's status topic — NewWorkerClient's will without its fixed
+// switchboard-worker- id prefix. The client id must be distinct per
+// connection (same-client-id takeover).
+func NewWillClient(ctx context.Context, brokerURL, clientID, workerID string) (*Client, error) {
+	if clientID == "" {
+		return nil, fmt.Errorf("will client requires a distinct client id")
+	}
+	if err := ValidateWorkerID(workerID); err != nil {
+		return nil, fmt.Errorf("will client: %w", err)
+	}
+	return newClient(ctx, brokerURL, clientID, true, workerID)
+}
+
+// publishTimeout bounds the generic Publish's wait for its ack, so a caller on
+// a dead or reconnecting broker gets an error instead of a hang.
+const publishTimeout = 10 * time.Second
+
+// Publish is the generic publish, QoS and retain chosen by the caller, who owns
+// the topic's contract (SWT-40: pipeline wake-ups are QoS 1 and NEVER retained,
+// enforced by internal/pipeline's structure test).
+func (c *Client) Publish(topic string, qos byte, retained bool, payload []byte) error {
+	tok := c.c.Publish(topic, qos, retained, payload)
+	if !tok.WaitTimeout(publishTimeout) {
+		return fmt.Errorf("publish %s: no ack within %v", topic, publishTimeout)
+	}
+	if err := tok.Error(); err != nil {
+		return fmt.Errorf("publish %s: %w", topic, err)
+	}
+	return nil
+}
+
+// Subscribe subscribes filter at QoS 1 and registers the handler for OnConnect
+// re-subscription, like SubscribeStatus.
+func (c *Client) Subscribe(filter string, handler func(topic string, payload []byte)) error {
+	h := func(_ mqtt.Client, msg mqtt.Message) {
+		handler(msg.Topic(), msg.Payload())
+	}
+	c.mu.Lock()
+	c.subs[filter] = h
+	c.mu.Unlock()
+
+	tok := c.c.Subscribe(filter, qos, h)
+	tok.Wait()
+	if err := tok.Error(); err != nil {
+		return fmt.Errorf("subscribe %s: %w", filter, err)
+	}
+	return nil
+}
+
 // PublishStatus publishes this worker's heartbeat — retained, QoS 1, strict
 // vocabulary. Worker mode only.
 func (c *Client) PublishStatus(s Status) error {
@@ -104,9 +159,33 @@ func (c *Client) PublishStatus(s Status) error {
 		return fmt.Errorf("publish status: %w", err)
 	}
 	tok := c.c.Publish(StatusTopic(c.workerID), qos, true, payload)
-	tok.Wait()
+	// Bounded: paho holds a QoS 1 publish while it reconnects, and a caller
+	// blocked here forever would stop heartbeating anything at all.
+	if !tok.WaitTimeout(publishTimeout) {
+		return fmt.Errorf("publish status: no ack within %v", publishTimeout)
+	}
 	if err := tok.Error(); err != nil {
 		return fmt.Errorf("publish status: %w", err)
+	}
+	return nil
+}
+
+// PublishDead publishes the retained dead payload on this client's own status
+// topic, the same bytes the broker publishes as its LWT. A clean DISCONNECT
+// suppresses the will, so a service that stops cleanly calls this first:
+// dead then means "not running" whether the process crashed or was stopped.
+// Status.Marshal still refuses dead; this is the one deliberate path. Worker
+// (will-carrying) clients only.
+func (c *Client) PublishDead() error {
+	if c.workerID == "" {
+		return fmt.Errorf("PublishDead requires a worker-mode client")
+	}
+	tok := c.c.Publish(StatusTopic(c.workerID), qos, true, LWTPayload())
+	if !tok.WaitTimeout(publishTimeout) {
+		return fmt.Errorf("publish dead: no ack within %v", publishTimeout)
+	}
+	if err := tok.Error(); err != nil {
+		return fmt.Errorf("publish dead: %w", err)
 	}
 	return nil
 }

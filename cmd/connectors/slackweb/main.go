@@ -22,6 +22,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/pipeline"
 	"github.com/sspataro57/switchboard/internal/policy"
 	"github.com/sspataro57/switchboard/internal/store"
 	"github.com/sspataro57/switchboard/internal/tools"
@@ -125,6 +126,10 @@ func run(normalizeOnly, all bool) error {
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
 	}
+	// SWT-40 E2: wake the pipeline stages now the decisions are committed.
+	// Never fails the run: an unset or dead broker costs latency (the stages
+	// sweep), never work.
+	pipeline.AnnounceCaptured(ctx, os.Getenv("MQTT_BROKER"), "slackweb", rules)
 	return nil
 }
 
