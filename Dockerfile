@@ -14,7 +14,7 @@ COPY . .
 # from somewhere that can reach both the mail server and the ops db, and a
 # one-shot Job on this image is that place — no workstation in the loop.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-      -o /out/ ./cmd/connectors/... ./cmd/tools/migrate ./cmd/dashboard ./cmd/google-auth ./cmd/classify ./cmd/orchestratord
+      -o /out/ ./cmd/connectors/... ./cmd/tools/migrate ./cmd/dashboard ./cmd/google-auth ./cmd/classify ./cmd/orchestratord ./cmd/pipelined
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ /usr/local/bin/

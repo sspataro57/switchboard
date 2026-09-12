@@ -14,6 +14,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/capture"
 	"github.com/sspataro57/switchboard/internal/connector/google"
 	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/pipeline"
 	"github.com/sspataro57/switchboard/internal/store"
 )
 
@@ -164,6 +165,9 @@ func watchPass(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, ex 
 	// Printed unconditionally, zeros included, even after an error: a pass that
 	// matched nothing and a pass that never ran must not look the same.
 	printCaptureRules(rulesCfg, rules)
+	// SWT-40 E2: an IDLE wake that decided mail wakes the pipeline stages too.
+	// Empty passes (the common case) publish nothing.
+	pipeline.AnnounceCaptured(ctx, os.Getenv("MQTT_BROKER"), "google", rules)
 }
 
 // watchAccount holds one IDLE connection on INBOX and signals on every change.

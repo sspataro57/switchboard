@@ -93,6 +93,57 @@ func NewSpineClient(ctx context.Context, brokerURL, clientID string) (*Client, e
 	return newClient(ctx, brokerURL, clientID, false, "")
 }
 
+// NewWillClient connects a spine participant that owns a heartbeat (SWT-40
+// pipelined stages): a caller-chosen client id AND the retained dead LWT on
+// workerID's status topic — NewWorkerClient's will without its fixed
+// switchboard-worker- id prefix. The client id must be distinct per
+// connection (same-client-id takeover).
+func NewWillClient(ctx context.Context, brokerURL, clientID, workerID string) (*Client, error) {
+	if clientID == "" {
+		return nil, fmt.Errorf("will client requires a distinct client id")
+	}
+	if err := ValidateWorkerID(workerID); err != nil {
+		return nil, fmt.Errorf("will client: %w", err)
+	}
+	return newClient(ctx, brokerURL, clientID, true, workerID)
+}
+
+// publishTimeout bounds the generic Publish's wait for its ack, so a caller on
+// a dead or reconnecting broker gets an error instead of a hang.
+const publishTimeout = 10 * time.Second
+
+// Publish is the generic publish, QoS and retain chosen by the caller, who owns
+// the topic's contract (SWT-40: pipeline wake-ups are QoS 1 and NEVER retained,
+// enforced by internal/pipeline's structure test).
+func (c *Client) Publish(topic string, qos byte, retained bool, payload []byte) error {
+	tok := c.c.Publish(topic, qos, retained, payload)
+	if !tok.WaitTimeout(publishTimeout) {
+		return fmt.Errorf("publish %s: no ack within %v", topic, publishTimeout)
+	}
+	if err := tok.Error(); err != nil {
+		return fmt.Errorf("publish %s: %w", topic, err)
+	}
+	return nil
+}
+
+// Subscribe subscribes filter at QoS 1 and registers the handler for OnConnect
+// re-subscription, like SubscribeStatus.
+func (c *Client) Subscribe(filter string, handler func(topic string, payload []byte)) error {
+	h := func(_ mqtt.Client, msg mqtt.Message) {
+		handler(msg.Topic(), msg.Payload())
+	}
+	c.mu.Lock()
+	c.subs[filter] = h
+	c.mu.Unlock()
+
+	tok := c.c.Subscribe(filter, qos, h)
+	tok.Wait()
+	if err := tok.Error(); err != nil {
+		return fmt.Errorf("subscribe %s: %w", filter, err)
+	}
+	return nil
+}
+
 // PublishStatus publishes this worker's heartbeat — retained, QoS 1, strict
 // vocabulary. Worker mode only.
 func (c *Client) PublishStatus(s Status) error {
