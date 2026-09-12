@@ -126,7 +126,14 @@ fall before the new cursor, so the engine never evaluates them. The morning brie
    - `/tasks` has no red line.
 6. Run the smoke in SPEC V5 (the `smoke` project, worker id `swt41-smoke`).
 
-Cursor-advance output: _(pasted at cutover)_
+Cursor-advance output (run 2026-09-12 02:12Z from main bf25631, P0 re-checked first: 0 open July
+leftovers, cursor 75, no engine holding the lock):
+
+```json
+{"from":75,"to":1018,"skipped_total":912,"skipped_by_type":{"delivery_confirmed":1,"delivery_sent":1,"log":825,"priority_changed":1,"status_changed":84}}
+```
+
+Migration 0027 (SWT-39) was applied to prod in the same window; image 0.7.9 carries both tickets.
 
 ## Turning on the morning brief
 
