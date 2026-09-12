@@ -65,9 +65,13 @@ Then open a NEW session.
   `~/.cache/switchboard/attachments/` and returns the path. And it drafts client email
   replies (SWT-44): `draft_delivery`, gmail only — the binary pins
   `require_channel:"gmail"`, so a Slack, Upwork, Jira or calendar draft is refused — and
-  `update_delivery` on its own drafts while they are still drafted (the binary pins
-  `require_own_draft`, so a draft the drafts worker, the dashboard or another session wrote
-  is refused).
+  only on a thread already filed under the task's project (the binary pins
+  `require_thread_in_task_project`; owner decision below); and `update_delivery` on its
+  own drafts while they are still drafted, gmail only. "Own" is keyed on the actor, not
+  the session: the binary pins `require_own_draft` and `require_channel:"gmail"`, so it
+  edits drafts created by the mcp:manual:salvo actor (any interactive session, this
+  repo's full-profile `ops` included), gmail only; never the drafts worker's or the
+  dashboard's.
 - **What it cannot do.** It cannot claim, create worker (`claude`) tasks, log on
   worker tasks, approve, send, book, link, decide, read mail bodies or reopen (it drafts, but
   never approves or sends: SWT-44).
@@ -128,8 +132,26 @@ the thread's latest inbound sender, and the dashboard shows From, To and the thr
 the draft before approval. Approving and sending stay on the dashboard, deliberately: a session
 must not approve its own client email, and a session that has just read an attachment is
 reading a stranger's text. The approve is bound to the words the page showed: if the draft
-changed after the page loaded, Approve refuses and asks for a reload. The user binary wires no
-mail sender at all.
+changed after the page loaded, Approve refuses and asks for a reload — and a page (or a POST)
+that carries no content hash is refused too, so reload the page and review it again. The user
+binary wires no mail sender at all.
+
+**Same project (Salvador, 2026-09-12: "Same project").** A session drafts only on a thread
+already filed under the task's project: the task's own source thread, or a thread whose inbound
+mail was filed under that project (its latest capture decision). Anything else is refused with
+"thread N is not filed under this task's project (<slug>); file it first (a capture rule or the
+dashboard), or draft from the switchboard session". This repo's full `ops` and the drafts
+worker are not limited this way.
+
+**Known gap (SWT-46).** The To shown on the dashboard can change if a new
+inbound message arrives on the thread before Send: the send picks the To from the thread's
+latest inbound message at send time, so an approved draft re-renders its To up to the moment
+you press Send. Check the To again before Send.
+
+**R8 caveat (SWT-47).** A session's draft usually sits on its own `ready`
+work task; the first send of it records the delivery lifecycle for that task while it is still
+`ready`, so a later real delivery on the same task is not auto-marked delivered. Mark it by
+hand (`task_mark_delivered`) until the follow-up ticket ships.
 
 **Accepted risk (SWT-44).** Untrusted text a session reads — a mail, an attachment, a web page —
 can tell it to draft a reply on any task, into any gmail thread it can name, or to rewrite one

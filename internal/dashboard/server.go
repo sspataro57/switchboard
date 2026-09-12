@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -232,17 +233,23 @@ func (s *Server) action(tool string) http.Handler {
 // (SWT-44): the form's content_hash goes through as expect_content_hash, and
 // approve_delivery refuses if the row changed since. json.Marshal, not
 // Sprintf: a form value is caller text and must not be able to add or replace
-// keys (delivery_id included). A form without the hash (a page rendered before
-// SWT-44) sends none, and the tool keeps its old behaviour.
+// keys (delivery_id included). The dashboard is the review surface, so the
+// hash is REQUIRED here (SWT-44 second review): a POST without one — a page
+// rendered before the deploy, or a crafted POST — is refused before the
+// executor rather than becoming an approve bound to nothing. approve_delivery
+// itself keeps the hash optional for opsctl and the full-profile MCP.
 func (s *Server) approveAction(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	payload := map[string]any{"delivery_id": jsonNum(r.PathValue("id"))}
-	if h := r.PostFormValue("content_hash"); h != "" {
-		payload["expect_content_hash"] = h
+	h := strings.TrimSpace(r.PostFormValue("content_hash"))
+	if h == "" {
+		flash := "approve refused: this page did not say which words you reviewed; reload the page and review it again"
+		http.Redirect(w, r, "/deliveries?flash="+template.URLQueryEscaper(flash), http.StatusSeeOther)
+		return
 	}
+	payload := map[string]any{"delivery_id": jsonNum(r.PathValue("id")), "expect_content_hash": h}
 	raw, err := json.Marshal(payload)
 	if err != nil { // a non-numeric id is not a json.Number
 		http.Error(w, err.Error(), http.StatusBadRequest)

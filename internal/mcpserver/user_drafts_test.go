@@ -7,8 +7,13 @@ package mcpserver_test
 //
 //	draft_delivery:  {"require_channel": "gmail"}     — sessions outside the
 //	                 switchboard repo draft email replies only
-//	update_delivery: {"require_own_draft": "true"}    — a session edits only
-//	                 drafts its own actor created
+//	                 {"require_thread_in_task_project": "true"} — only on a
+//	                 thread already filed under the task's project (owner
+//	                 decision "Same project", 2026-09-12)
+//	update_delivery: {"require_own_draft": "true"}    — only drafts created by
+//	                 the caller's actor (mcp:manual:salvo = any interactive
+//	                 session, this repo's full profile included)
+//	                 {"require_channel": "gmail"}     — and gmail ones only
 //
 // MUTATIONS THAT MUST TURN THIS FILE RED:
 //   - drop either pin from userProfilePins → its "gains the pin" row.
@@ -36,14 +41,30 @@ func TestUserProfile_PinsGmailDraftsAndOwnDraftEdits(t *testing.T) {
 		return mcpserver.NewWithProfile(fx, "manual:salvo", mcpserver.ProfileUser), fx
 	}
 
-	t.Run("user/draft_delivery gains require_channel gmail", func(t *testing.T) {
+	t.Run("user/draft_delivery gains require_channel gmail and require_thread_in_task_project", func(t *testing.T) {
 		srv, fx := user()
 		args := forwardCall(t, srv, fx, "draft_delivery", `{"task_id":4,"channel":"gmail","body":"b","thread_id":5}`)
-		if got := keyList(args); got != "body,channel,require_channel,task_id,thread_id,worker_id" {
-			t.Errorf("forwarded keys = %s, want body,channel,require_channel,task_id,thread_id,worker_id", got)
+		const want = "body,channel,require_channel,require_thread_in_task_project,task_id,thread_id,worker_id"
+		if got := keyList(args); got != want {
+			t.Errorf("forwarded keys = %s, want %s", got, want)
 		}
 		if string(args["require_channel"]) != `"gmail"` {
 			t.Errorf("forwarded require_channel = %s, want \"gmail\"", args["require_channel"])
+		}
+		if string(args["require_thread_in_task_project"]) != `"true"` {
+			t.Errorf("forwarded require_thread_in_task_project = %s, want \"true\"", args["require_thread_in_task_project"])
+		}
+	})
+	// Owner decision (Salvador, 2026-09-12: "Same project").
+	t.Run("user/draft_delivery model-supplied require_thread_in_task_project false is overwritten", func(t *testing.T) {
+		for _, supplied := range []string{`"false"`, `false`, `""`, `null`} {
+			srv, fx := user()
+			args := forwardCall(t, srv, fx, "draft_delivery",
+				`{"task_id":4,"channel":"gmail","body":"b","thread_id":5,"require_thread_in_task_project":`+supplied+`}`)
+			if string(args["require_thread_in_task_project"]) != `"true"` {
+				t.Errorf("caller sent require_thread_in_task_project=%s; forwarded %s, want \"true\" (OVERWRITE)",
+					supplied, args["require_thread_in_task_project"])
+			}
 		}
 	})
 	t.Run("user/draft_delivery model-supplied require_channel is overwritten", func(t *testing.T) {
@@ -58,14 +79,29 @@ func TestUserProfile_PinsGmailDraftsAndOwnDraftEdits(t *testing.T) {
 				args["channel"])
 		}
 	})
-	t.Run("user/update_delivery gains require_own_draft", func(t *testing.T) {
+	t.Run("user/update_delivery gains require_own_draft and require_channel gmail", func(t *testing.T) {
 		srv, fx := user()
 		args := forwardCall(t, srv, fx, "update_delivery", `{"delivery_id":9,"body":"fixed"}`)
-		if got := keyList(args); got != "body,delivery_id,require_own_draft,worker_id" {
-			t.Errorf("forwarded keys = %s, want body,delivery_id,require_own_draft,worker_id", got)
+		if got := keyList(args); got != "body,delivery_id,require_channel,require_own_draft,worker_id" {
+			t.Errorf("forwarded keys = %s, want body,delivery_id,require_channel,require_own_draft,worker_id", got)
 		}
 		if string(args["require_own_draft"]) != `"true"` {
 			t.Errorf("forwarded require_own_draft = %s, want \"true\"", args["require_own_draft"])
+		}
+		if string(args["require_channel"]) != `"gmail"` {
+			t.Errorf("forwarded require_channel = %s, want \"gmail\"", args["require_channel"])
+		}
+	})
+	// The own-draft pin alone cannot tell sessions apart: this repo's full
+	// profile is mcp:manual:salvo too, so its slack/jira/upwork/calendar drafts
+	// are "own" drafts. The channel pin keeps the user profile to gmail edits.
+	t.Run("user/update_delivery model-supplied require_channel is overwritten", func(t *testing.T) {
+		for _, supplied := range []string{`"slack_reply"`, `""`, `null`} {
+			srv, fx := user()
+			args := forwardCall(t, srv, fx, "update_delivery", `{"delivery_id":9,"body":"x","require_channel":`+supplied+`}`)
+			if string(args["require_channel"]) != `"gmail"` {
+				t.Errorf("caller sent require_channel=%s; forwarded %s, want \"gmail\" (OVERWRITE)", supplied, args["require_channel"])
+			}
 		}
 	})
 	t.Run("user/update_delivery model-supplied false is overwritten", func(t *testing.T) {
@@ -104,7 +140,7 @@ func TestNoSchemaExposesTheSWT44Args(t *testing.T) {
 	listed := 0
 	for _, tl := range mcpserver.New(&fakeExec{}, testWorkerID).ListTools() {
 		listed++
-		for _, hidden := range []string{"require_channel", "require_own_draft", "expect_content_hash"} {
+		for _, hidden := range []string{"require_channel", "require_own_draft", "expect_content_hash", "require_thread_in_task_project"} {
 			if strings.Contains(string(tl.InputSchema), hidden) {
 				t.Errorf("%s's schema exposes %s; it is set by the adapter or the dashboard, never advertised. Schema: %s",
 					tl.Name, hidden, tl.InputSchema)

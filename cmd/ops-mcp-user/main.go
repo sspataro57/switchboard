@@ -11,8 +11,11 @@
 // Policy refuses the verbs, task_set_priority and update_delivery to worker
 // identities (human_only / mcp_human_only), so OPS_WORKER_ID must be manual:*;
 // the profile's pins keep create_task and task_append_log to human
-// (Salvador's-lane) tasks, draft_delivery to gmail (require_channel) and
-// update_delivery to the session's own drafts (require_own_draft).
+// (Salvador's-lane) tasks, draft_delivery to gmail (require_channel) on a
+// thread already filed under the task's project
+// (require_thread_in_task_project), and update_delivery to gmail drafts created
+// by the mcp:manual:salvo actor — any interactive session, never the drafts
+// worker's or the dashboard's (require_own_draft + require_channel).
 //
 // It is a separate binary, not a setting on ops-mcp, so that nothing can fall
 // back to the full surface: there is no variable whose absence restores it.

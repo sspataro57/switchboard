@@ -86,6 +86,21 @@ func TestValidateDraftDelivery_RequireChannelRefusesOtherChannels(t *testing.T) 
 	}
 }
 
+// The same-project pin (owner decision, 2026-09-12) is checked against a
+// thread, so a pinned call must name one. gmail already requires thread_id;
+// this keeps the pin from ever meaning "no check" on a thread-less call.
+func TestValidateDraftDelivery_ThreadProjectPinNeedsAThread(t *testing.T) {
+	if err := validateDraftDelivery([]byte(
+		`{"task_id":1,"channel":"jira_comment","body":"b","target_ref":"jira:x.atlassian.net:SWT-1",` +
+			`"require_thread_in_task_project":"true"}`)); err == nil || !strings.Contains(err.Error(), "thread_id") {
+		t.Errorf("a pinned draft with no thread_id = %v, want a refusal naming thread_id", err)
+	}
+	if err := validateDraftDelivery([]byte(
+		`{"task_id":1,"channel":"gmail","body":"b","thread_id":5,"require_thread_in_task_project":"true"}`)); err != nil {
+		t.Errorf("a pinned gmail draft with a thread was refused at validate: %v", err)
+	}
+}
+
 // SWT-44 fix 5: a present body must say something. subject "" stays legal —
 // it clears the subject, as before.
 func TestValidateUpdateDelivery_RefusesEmptyBody(t *testing.T) {

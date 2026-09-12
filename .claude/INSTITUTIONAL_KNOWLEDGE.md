@@ -758,22 +758,44 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `validateDraftDelivery` REFUSES a differing channel, first, and never rewrites
   it. No Slack, Upwork, Jira or calendar row from a session that reads
   untrusted text.
-- **Own drafts only.** Pin `update_delivery: {require_own_draft: "true"}`: the
-  handler locks the row (FOR UPDATE) and refuses unless `deliveries.created_by =
-  executor.ActorFrom(ctx)`. `draft_delivery` writes `created_by` from the same
-  call, so a user-scope draft carries `mcp:manual:salvo` and matches; the drafts
-  worker's (`drafts:gpt`), the dashboard's and other sessions' drafts are
-  refused. The full profile, dashboard and opsctl send no pin and edit any
-  draft. A present body that is empty or whitespace (before or after the
-  attribution scrub) is refused; `subject: ""` still clears the subject.
+- **"Own" drafts = the actor's, gmail only.** Pins `update_delivery:
+  {require_own_draft: "true", require_channel: "gmail"}`: the handler locks the
+  row (FOR UPDATE) and refuses unless `deliveries.created_by =
+  executor.ActorFrom(ctx)` AND `channel = 'gmail'`. The actor is `mcp:` +
+  OPS_WORKER_ID, and the user-scope install and this repo's full-profile `ops`
+  both run as `manual:salvo` — so the pin means drafts created by the
+  mcp:manual:salvo actor (any interactive session), gmail only; never the
+  drafts worker's (`drafts:gpt`) or the dashboard's. It CANNOT tell one session
+  from another; the channel pin (second review round) is what stops a
+  user-scope session rewriting a full-profile slack_reply / jira_comment /
+  upwork_chat / calendar draft. The full profile, dashboard and opsctl send no
+  pin and edit any draft. A present body that is empty or whitespace (before or
+  after the attribution scrub) is refused; `subject: ""` still clears the
+  subject.
+- **Same project (owner decision, Salvador 2026-09-12: "Same project").** Pin
+  `draft_delivery: {require_thread_in_task_project: "true"}`: a user-profile
+  gmail draft is allowed only on a thread already filed under the task's
+  project. `refuseThreadOutsideTaskProject`, inside draftDelivery's tx after the
+  task lock and before the insert, accepts (a) `thread_id =
+  tasks.source_thread_id`, or (b) ≥1 INBOUND message on the thread whose LATEST
+  capture_decisions row (`ORDER BY cd.id DESC LIMIT 1`, any mode) has
+  `project_id = tasks.project_id`. Outbound messages never count. Refusal:
+  "thread N is not filed under this task's project (<slug>); file it first (a
+  capture rule or the dashboard), or draft from the switchboard session". Full
+  profile and drafts worker: no pin, unchanged. Fixture note:
+  `capture_decisions_live_uniq` allows ONE live row per message — a test that
+  re-points a message writes the later decisions as shadow.
 - **Content-bound approval.** `approve_delivery` takes an optional
   `expect_content_hash` = `tools.DeliveryContentHash(subject, body)` (lowercase
   hex sha256 of subject, NUL, body; a NULL subject is `""`), compared under the
   delivery FOR UPDATE lock; a mismatch refuses ("changed since it was shown to
   you") and the row stays drafted. The dashboard renders the hash into the
   Approve form (hidden `content_hash`, computed in `listDeliveries`);
-  `approveAction` passes it through, built with `json.Marshal`. Omitted = the
-  old behaviour (opsctl, full-profile MCP). Not in any MCP schema.
+  `approveAction` passes it through, built with `json.Marshal`, and REFUSES a
+  POST without one ("reload the page and review it again") before the executor
+  — a stale pre-deploy page or a crafted POST cannot approve unbound. The tool
+  keeps it optional for opsctl and full-profile MCP: it stays human-only, and
+  the dashboard is the review surface. Not in any MCP schema.
 - **The dashboard shows From/To before approval.** `tools.ResolveGmailRoute`
   is the ONE spelling of where a gmail send goes (From account, To = the
   thread's latest inbound sender, In-Reply-To, provider thread, thread subject):
@@ -783,6 +805,12 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `target_ref`; anything unresolvable reads `(unresolved)`. The session picks
   the thread, so the recipient is the SESSION's choice among ingested threads —
   the dashboard, not the resolution, is the check.
+- **Known gap — the To can change before Send (NOT fixed here; follow-up
+  ticket pending).** Send re-resolves To from the thread's latest inbound
+  message AT SEND TIME (pre-existing behaviour), so the To shown can change if
+  a new inbound message arrives before Send, and an approved row re-renders its
+  To up to Send. The fix is persisting the route at approval; it folds into the
+  cc/reply-all ticket, which must store explicit recipients anyway.
 - **Approve and send stay off the profile.** A session must not approve its
   own client email: that is the human gate the policy matrix puts on
   client-facing mail (invariant 4), and these sessions read untrusted text
@@ -794,7 +822,8 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `worker.ValidateWorkerID` guards opsworker's ids, not this binary's env.
 - **Recovery for a planted draft:** none by verb until SWT-43's Deny ships —
   edit it on the dashboard or leave it unapproved; it never sends unapproved.
-- **R8 caveat — recorded for a follow-up ticket, NOT fixed here.** R8 fires on
+- **R8 caveat — recorded for a follow-up ticket (SWT-47),
+  NOT fixed here.** R8 fires on
   `delivery_sent` for the delivery's TASK: `task_mark_delivered` refuses a task
   that is not `done_locally`, the engine logs that and continues, and the
   `record_orchestration` delivery_lifecycle dedup key lands anyway — so a LATER
@@ -1119,7 +1148,8 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
 - Lifecycle tools: `draft_delivery` (agent-facing, THE route for client-visible
   words; gmail From resolved server-side from the thread — never caller-chosen),
   `update_delivery` (MCP-listed since SWT-44, still humanOnly; the user profile
-  pins it to the caller's own drafts — see "Gmail drafting over MCP"), and
+  pins it to gmail drafts created by the mcp:manual:salvo actor, i.e. any
+  interactive session — see "Gmail drafting over MCP"), and
   spine-facing `approve_delivery`/`send_delivery`/
   `mark_delivery_sent`/`task_mark_delivered`/`set_sending_frozen`.
 - Policy matrix (internal/policy Matrix wrapping the static list): rules

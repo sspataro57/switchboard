@@ -107,6 +107,15 @@ type draftDeliveryArgs struct {
 	// from every schema, and the validator REFUSES a differing channel rather
 	// than rewriting it, so the model is told the truth.
 	RequireChannel string `json:"require_channel,omitempty"`
+	// RequireThreadInTaskProject (SWT-44, owner decision "Same project",
+	// Salvador 2026-09-12) is pinned to "true" by the user-scope MCP profile:
+	// a session drafts only on a thread already filed under the task's project
+	// — the task's own source_thread_id, or a thread with an INBOUND message
+	// whose LATEST capture_decisions row (any mode) names the task's project.
+	// Checked in draftDelivery's transaction, under the task lock, before the
+	// insert. Same pattern as RequireChannel: only narrows, hidden from every
+	// schema; the full profile and the drafts worker send none.
+	RequireThreadInTaskProject string `json:"require_thread_in_task_project,omitempty"`
 }
 
 func validateDraftDelivery(args []byte) error {
@@ -169,6 +178,11 @@ func validateDraftDelivery(args []byte) error {
 	}
 	if a.Channel == "gmail" && a.ThreadID == nil {
 		return errors.New("gmail drafts require thread_id (From is resolved from the thread)")
+	}
+	// The same-project pin is a check ON a thread: without one it would check
+	// nothing, so a pinned call must name it.
+	if a.RequireThreadInTaskProject == "true" && a.ThreadID == nil {
+		return errors.New("this caller drafts only on a thread filed under the task's project: thread_id is required")
 	}
 	if (a.Channel == "upwork_chat" || a.Channel == "jira_comment" || a.Channel == "slack_reply") && a.TargetRef == "" {
 		return errors.New("upwork_chat/jira_comment/slack_reply drafts require target_ref")
@@ -454,6 +468,11 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 			return fmt.Errorf("task %d is %s, not %s as the caller read it: the work moved on, so no draft",
 				a.TaskID, status, a.ExpectTaskStatus)
 		}
+		if a.RequireThreadInTaskProject == "true" {
+			if err := refuseThreadOutsideTaskProject(ctx, tx, a.TaskID, *a.ThreadID); err != nil {
+				return err
+			}
+		}
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
 			                         from_account_id, thread_id, target_client_ref, created_by,
@@ -472,6 +491,44 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": deliveryID})
+}
+
+// refuseThreadOutsideTaskProject is the user profile's same-project rule
+// (owner decision "Same project", Salvador 2026-09-12). The thread is filed
+// under the task's project when it is (a) the task's own source_thread_id
+// (SWT-20 provenance), or (b) it carries at least one INBOUND message whose
+// LATEST capture_decisions row — `ORDER BY cd.id DESC LIMIT 1`, any mode, the
+// repo's latest-decision convention (classify/store.go, mailattach.go) —
+// names the task's project. Outbound messages do not count: our own send is
+// not evidence of where the conversation belongs. Runs in draftDelivery's
+// transaction, after the task row lock, before the insert.
+func refuseThreadOutsideTaskProject(ctx context.Context, tx pgx.Tx, taskID, threadID int64) error {
+	var slug string
+	var filed bool
+	err := tx.QueryRow(ctx, `
+		SELECT p.slug,
+		       COALESCE(t.source_thread_id = $2, false)
+		       OR EXISTS (
+		         SELECT 1
+		           FROM normalized_messages nm
+		           JOIN LATERAL (SELECT cd.project_id FROM capture_decisions cd
+		                          WHERE cd.message_id = nm.id
+		                          ORDER BY cd.id DESC LIMIT 1) latest ON true
+		          WHERE nm.thread_id = $2 AND nm.direction = 'inbound'
+		            AND latest.project_id = t.project_id)
+		  FROM tasks t JOIN projects p ON p.id = t.project_id
+		 WHERE t.id = $1`, taskID, threadID).Scan(&slug, &filed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("task %d not found", taskID)
+	}
+	if err != nil {
+		return fmt.Errorf("check thread %d against task %d's project: %w", threadID, taskID, err)
+	}
+	if !filed {
+		return fmt.Errorf("thread %d is not filed under this task's project (%s); file it first (a capture rule or "+
+			"the dashboard), or draft from the switchboard session", threadID, slug)
+	}
+	return nil
 }
 
 // refuseClosedTask SHARE-locks the delivery's TASK row and refuses a closed
@@ -527,12 +584,21 @@ type updateDeliveryArgs struct {
 	Body       *string `json:"body,omitempty"`
 	// RequireOwnDraft (SWT-44 review) is pinned to "true" by the user-scope MCP
 	// profile (mcpserver.userProfilePins, after injectWorkerID, by overwrite):
-	// a session in another repo may edit only drafts its OWN actor created —
-	// never the drafts worker's, the dashboard's or another session's, which it
-	// could otherwise rewrite unseen between Salvador's read and his approve.
-	// It only narrows, so it is absent from every schema; the dashboard, opsctl
-	// and the full profile send none and edit any draft, as before.
+	// the caller edits only drafts whose created_by is its own actor. The actor
+	// is "mcp:" + OPS_WORKER_ID, and every interactive install — the user-scope
+	// one AND this repo's full-profile ops — runs as manual:salvo, so "own"
+	// means created by the mcp:manual:salvo actor (any interactive session),
+	// never the drafts worker's or the dashboard's. It cannot tell one session
+	// from another; RequireChannel below keeps it to gmail. It only narrows, so
+	// it is absent from every schema; the dashboard, opsctl and the full
+	// profile send none and edit any draft, as before.
 	RequireOwnDraft string `json:"require_own_draft,omitempty"`
+	// RequireChannel (SWT-44, second review) is pinned to "gmail" by the same
+	// profile, matching draft_delivery's pin: without it the shared actor would
+	// let a user-scope session rewrite a slack_reply, jira_comment,
+	// upwork_chat or calendar draft that this repo's full-profile session
+	// wrote. Checked under the row lock, in updateDelivery.
+	RequireChannel string `json:"require_channel,omitempty"`
 }
 
 func validateUpdateDelivery(args []byte) error {
@@ -576,10 +642,10 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 	// and the write see the same row, so neither an approve nor a re-draft can
 	// slip between them.
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
-		var status, createdBy string
+		var status, channel, createdBy string
 		if err := tx.QueryRow(ctx,
-			`SELECT status, COALESCE(created_by,'') FROM deliveries WHERE id=$1 FOR UPDATE`,
-			a.DeliveryID).Scan(&status, &createdBy); err != nil {
+			`SELECT status, channel, COALESCE(created_by,'') FROM deliveries WHERE id=$1 FOR UPDATE`,
+			a.DeliveryID).Scan(&status, &channel, &createdBy); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("delivery %d not found", a.DeliveryID)
 			}
@@ -588,12 +654,17 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 		if status != "drafted" {
 			return fmt.Errorf("delivery %d is not drafted (editing an approved draft would bypass approval)", a.DeliveryID)
 		}
+		if a.RequireChannel != "" && channel != a.RequireChannel {
+			return fmt.Errorf("delivery %d is a %s delivery: this caller edits %s drafts only; change it on the dashboard",
+				a.DeliveryID, channel, a.RequireChannel)
+		}
 		// draft_delivery stores created_by = executor.ActorFrom(ctx), the same
-		// string compared here (mcp:manual:salvo for the user-scope install).
+		// string compared here: mcp:manual:salvo for every interactive session,
+		// user-scope and full-profile alike.
 		if a.RequireOwnDraft == "true" {
 			if actor := executor.ActorFrom(ctx); createdBy != actor {
-				return fmt.Errorf("delivery %d was drafted by %s, not by this session (%s): a session edits only its "+
-					"own drafts; change it on the dashboard", a.DeliveryID, createdBy, actor)
+				return fmt.Errorf("delivery %d was drafted by %s, not by %s: this caller edits only its own drafts "+
+					"(created by its actor, gmail only); change it on the dashboard", a.DeliveryID, createdBy, actor)
 			}
 		}
 		if _, err := tx.Exec(ctx,
@@ -652,6 +723,11 @@ func DeliveryContentHash(subject, body string) string {
 // approve refuse instead of passing words nobody read. Omitted = the old
 // behaviour, for opsctl and full-profile MCP callers, which name a delivery
 // id without being shown a page. It only narrows, so no MCP schema lists it.
+//
+// approve_delivery stays human-only (policy human_only) and is on no user
+// profile: the dashboard is the review surface, and its route REQUIRES the
+// hash (dashboard approveAction refuses a POST without one), so the optional
+// form here serves only the human CLI and this repo's own session.
 type approveDeliveryArgs struct {
 	DeliveryID        int64  `json:"delivery_id"`
 	ExpectContentHash string `json:"expect_content_hash,omitempty"`

@@ -42,8 +42,12 @@ const (
 	udAcct       = "itest-mcp-drafts-a@example.com"
 	udThreadKey  = "gmail:itest-mcp-drafts-a@example.com:gt-1"
 	udInboundMID = "<itest-mcp-drafts-in-1@example.com>"
-	udWorker     = "manual:itest-mcp-drafts"
-	udActor      = "mcp:" + udWorker
+	// A second thread, left UNFILED (no capture decision): the user profile's
+	// same-project pin refuses a draft on it.
+	udThreadKey2  = "gmail:itest-mcp-drafts-a@example.com:gt-2"
+	udInboundMID2 = "<itest-mcp-drafts-in-2@example.com>"
+	udWorker      = "manual:itest-mcp-drafts"
+	udActor       = "mcp:" + udWorker
 	// A worker-shaped id on the user binary (OPS_WORKER_ID not manual:*).
 	udBadWorker = "itest-mcp-drafts-acme"
 )
@@ -81,8 +85,9 @@ func udCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 			(SELECT id FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug=$1))`, []any{udSlug}},
 		{`DELETE FROM task_events WHERE task_id IN
 			(SELECT id FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug=$1))`, []any{udSlug}},
-		{`DELETE FROM normalized_messages WHERE external_message_id=$1`, []any{udInboundMID}},
-		{`DELETE FROM normalized_threads WHERE thread_key=$1`, []any{udThreadKey}},
+		// capture_decisions cascade with their message.
+		{`DELETE FROM normalized_messages WHERE external_message_id = ANY($1)`, []any{[]string{udInboundMID, udInboundMID2}}},
+		{`DELETE FROM normalized_threads WHERE thread_key = ANY($1)`, []any{[]string{udThreadKey, udThreadKey2}}},
 		{`DELETE FROM raw_source_items WHERE source_account_id IN
 			(SELECT id FROM source_accounts WHERE account_email=$1)`, []any{udAcct}},
 		{`DELETE FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug=$1)`, []any{udSlug}},
@@ -103,24 +108,24 @@ func udExecutor(pool *pgxpool.Pool) *executor.Executor {
 	return executor.New(reg, checker, audit.NewPGStore(pool))
 }
 
-type udFixture struct{ taskID, threadID int64 }
+type udFixture struct{ projID, taskID, threadID, thread2ID, inbound2ID int64 }
 
 func udSeed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) udFixture {
 	t.Helper()
 	var fx udFixture
-	var acctID, projID, rawID int64
+	var acctID, rawID, inboundID int64
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO source_accounts (provider, account_email) VALUES ('google',$1) RETURNING id`, udAcct).Scan(&acctID); err != nil {
 		t.Fatalf("seed account: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
-		 VALUES ($1,$1,$2,'manual','dashboard','/tmp/itest','any') RETURNING id`, udSlug, udClient).Scan(&projID); err != nil {
+		 VALUES ($1,$1,$2,'manual','dashboard','/tmp/itest','any') RETURNING id`, udSlug, udClient).Scan(&fx.projID); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO tasks (project_id, title, assignee_type, status) VALUES ($1,'itest drafts task','human','ready')
-		 RETURNING id`, projID).Scan(&fx.taskID); err != nil {
+		 RETURNING id`, fx.projID).Scan(&fx.taskID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
@@ -133,14 +138,94 @@ func udSeed(t *testing.T, ctx context.Context, pool *pgxpool.Pool) udFixture {
 		udThreadKey).Scan(&fx.threadID); err != nil {
 		t.Fatalf("seed thread: %v", err)
 	}
-	if _, err := pool.Exec(ctx,
+	if err := pool.QueryRow(ctx,
 		`INSERT INTO normalized_messages
 		   (raw_source_item_id, thread_id, direction, external_message_id, sent_at, body_text, subject, sender, channel)
-		 VALUES ($1,$2,'inbound',$3,now(),'can you quote this?','quote request','client@itest-mcp-drafts.example','gmail')`,
-		rawID, fx.threadID, udInboundMID); err != nil {
+		 VALUES ($1,$2,'inbound',$3,now(),'can you quote this?','quote request','client@itest-mcp-drafts.example','gmail')
+		 RETURNING id`,
+		rawID, fx.threadID, udInboundMID).Scan(&inboundID); err != nil {
 		t.Fatalf("seed inbound: %v", err)
 	}
+	// Thread 1 is FILED under the task's project, so the user profile's
+	// same-project pin lets a session draft on it.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO capture_decisions (message_id, mode, action, project_id, reason)
+		 VALUES ($1,'live','attributed',$2,'itest-mcp-drafts')`, inboundID, fx.projID); err != nil {
+		t.Fatalf("file thread 1: %v", err)
+	}
+
+	// Thread 2: same mailbox, inbound, never filed.
+	var raw2 int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO raw_source_items (source_account_id, external_id, raw_json, content_hash)
+		 VALUES ($1,'itest-mcp-drafts-raw-2','{}','itest-mcp-drafts-hash-2') RETURNING id`, acctID).Scan(&raw2); err != nil {
+		t.Fatalf("seed raw 2: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO normalized_threads (thread_key, subject) VALUES ($1,'unrelated') RETURNING id`,
+		udThreadKey2).Scan(&fx.thread2ID); err != nil {
+		t.Fatalf("seed thread 2: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO normalized_messages
+		   (raw_source_item_id, thread_id, direction, external_message_id, sent_at, body_text, subject, sender, channel)
+		 VALUES ($1,$2,'inbound',$3,now(),'hello','unrelated','other@itest-mcp-drafts.example','gmail') RETURNING id`,
+		raw2, fx.thread2ID, udInboundMID2).Scan(&fx.inbound2ID); err != nil {
+		t.Fatalf("seed inbound 2: %v", err)
+	}
 	return fx
+}
+
+// Owner decision (Salvador, 2026-09-12: "Same project"), end to end through
+// the user profile: a session drafts only on a thread already filed under the
+// task's project. The full profile carries no pin and drafts as before.
+func TestUserDrafts_Integration_SameProjectThreadsOnly(t *testing.T) {
+	ctx := context.Background()
+	pool := udPool(t, ctx)
+	fx := udSeed(t, ctx, pool)
+	ex := udExecutor(pool)
+	user := mcpserver.NewWithProfile(ex, udWorker, mcpserver.ProfileUser)
+	rows := func() int {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM deliveries WHERE task_id=$1`, fx.taskID).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+	draftOn := func(srv *mcpserver.Server, threadID int64, extra string) error {
+		_, err := srv.CallTool(ctx, "draft_delivery", json.RawMessage(fmt.Sprintf(
+			`{"task_id":%d,"channel":"gmail","body":"reply","thread_id":%d%s}`, fx.taskID, threadID, extra)))
+		return err
+	}
+
+	// Unfiled thread: refused, no row, even when the model sends the pin false.
+	before := rows()
+	for _, extra := range []string{``, `,"require_thread_in_task_project":"false"`} {
+		err := draftOn(user, fx.thread2ID, extra)
+		if err == nil {
+			t.Errorf("the user profile drafted on an unfiled thread (extra args %q)", extra)
+		} else if !strings.Contains(err.Error(), "not filed under this task's project ("+udSlug+")") {
+			t.Errorf("refusal = %q, want it to say the thread is not filed under %s", err, udSlug)
+		}
+	}
+	if after := rows(); after != before {
+		t.Errorf("refused drafts changed the delivery count %d → %d", before, after)
+	}
+
+	// Positive control: this repo's full profile (no pin) drafts on it.
+	if err := draftOn(mcpserver.New(ex, udWorker), fx.thread2ID, ``); err != nil {
+		t.Errorf("POSITIVE CONTROL: the full profile could not draft on an unfiled thread: %v", err)
+	}
+
+	// File it under the task's project: the user profile now drafts.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO capture_decisions (message_id, mode, action, project_id, reason)
+		 VALUES ($1,'live','attributed',$2,'itest-mcp-drafts')`, fx.inbound2ID, fx.projID); err != nil {
+		t.Fatalf("file thread 2: %v", err)
+	}
+	if err := draftOn(user, fx.thread2ID, ``); err != nil {
+		t.Errorf("the user profile could not draft on a thread filed under the task's project: %v", err)
+	}
 }
 
 func udBody(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id int64) string {
@@ -218,6 +303,30 @@ func TestUserDrafts_Integration_UpdateOnlyOwnDrafts(t *testing.T) {
 					"the user profile's pin, not policy", err)
 			}
 		}
+	}
+
+	// 3b. Its OWN actor's non-gmail draft is refused too: the actor is shared
+	// with this repo's full-profile session, so "own" alone would let a
+	// user-scope session rewrite a slack_reply the full profile drafted.
+	var slackID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, created_by)
+		 VALUES ($1,'slack_reply','https://app.slack.com/client/TITEST/CITEST/p1750000000000000','slack words','drafted',$2)
+		 RETURNING id`, fx.taskID, udActor).Scan(&slackID); err != nil {
+		t.Fatalf("seed own slack draft: %v", err)
+	}
+	if _, err := user.CallTool(ctx, "update_delivery",
+		json.RawMessage(fmt.Sprintf(`{"delivery_id":%d,"body":"planted words"}`, slackID))); err == nil {
+		t.Error("the user profile edited its own actor's slack_reply draft; it edits gmail drafts only")
+	} else if !strings.Contains(err.Error(), "gmail") {
+		t.Errorf("refusal of a slack_reply edit = %q, want it to name gmail", err)
+	}
+	if b := udBody(t, ctx, pool, slackID); b != "slack words" {
+		t.Errorf("slack draft body = %q after a refused edit, want it untouched", b)
+	}
+	if _, err := mcpserver.New(ex, udWorker).CallTool(ctx, "update_delivery",
+		json.RawMessage(fmt.Sprintf(`{"delivery_id":%d,"body":"fixed on this repo's session"}`, slackID))); err != nil {
+		t.Errorf("POSITIVE CONTROL: full-profile edit of its slack_reply draft: %v", err)
 	}
 
 	// 4. The actor path: the user binary with a worker-shaped OPS_WORKER_ID

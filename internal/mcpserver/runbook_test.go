@@ -187,6 +187,15 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{`(?s)swt-43.{0,200}deny`, "…until SWT-43's Deny ships"},
 		{`(?s)untrusted.{0,600}draft`, "Accepted risk: drafting from sessions that read untrusted content"},
 		{`tool in \([^)]*'draft_delivery'[^)]*'update_delivery'`, "the verify step's audit query lists both new tools"},
+		// SWT-44 second review round.
+		{`(?s)mcp:manual:salvo.{0,40}any interactive session`,
+			"the own-draft pin is actor-keyed: 'own' means created by mcp:manual:salvo, i.e. any interactive session"},
+		{`(?s)update_delivery.{0,600}gmail only`, "update_delivery edits gmail drafts only (the second pin)"},
+		{`(?s)salvador, 2026-09-12.{0,40}same project`, "the owner decision is recorded verbatim"},
+		{`filed under the task's project`, "…and what it means: a draft only on a thread already filed under the task's project"},
+		{`(?s)\bto\b.{0,80}can change if a new\s+inbound\s+message\s+arrives.{0,200}before send`,
+			"the known gap: the To re-resolves at send time, so it can change between approve and Send"},
+		{`(?s)r8.{0,600}follow-up ticket`, "the R8 caveat points at its follow-up ticket"},
 		// SWT-42 criterion 24.
 		{`swt-42`, "the title gains SWT-42"},
 		{`(?s)find the attachment sana sent.{0,400}mail_list_attachments.{0,300}(sender|subject).{0,400}mail_read_attachment`,
@@ -214,7 +223,10 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 	// SWT-44 review: sentences that stopped being true when the user profile
 	// started drafting. The session picks the thread, so the recipient is not
 	// "never from the session"; and a session now creates and edits deliveries.
-	for _, lie := range []string{"never from the session", "no delivery is created or changed", "no delivery is touched"} {
+	// Second round: the own-draft pin is keyed on the actor, which every
+	// interactive session shares, so "another session's" drafts are NOT refused.
+	for _, lie := range []string{"never from the session", "no delivery is created or changed", "no delivery is touched",
+		"or another session wrote", "not by this session"} {
 		if strings.Contains(lower, lie) {
 			t.Errorf("%s still says %q: since SWT-44 a session drafts and edits delivery rows (never approves or "+
 				"sends), and it chooses the thread the recipient comes from", rel, lie)

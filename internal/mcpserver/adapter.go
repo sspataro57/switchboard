@@ -87,15 +87,20 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 //
 // SWT-44 review, same pattern: require_channel:"gmail" makes validateDraftDelivery
 // refuse any other channel (no Slack, Upwork, Jira or calendar from a session
-// that reads untrusted text), and require_own_draft:"true" makes the
-// update_delivery handler refuse a draft whose created_by is not this actor —
-// the drafts worker's, the dashboard's, another session's. Each only narrows,
-// and none appears in a schema.
+// that reads untrusted text), and require_thread_in_task_project:"true" makes
+// draftDelivery refuse a thread not already filed under the task's project
+// (owner decision "Same project", Salvador 2026-09-12). On update_delivery,
+// require_own_draft:"true" refuses a draft whose created_by is not this actor
+// and require_channel:"gmail" a non-gmail one. The actor is "mcp:" +
+// OPS_WORKER_ID, shared by every interactive install (manual:salvo), so "own"
+// means drafts created by the mcp:manual:salvo actor (any interactive
+// session), gmail only; never the drafts worker's or the dashboard's. Each
+// only narrows, and none appears in a schema.
 var userProfilePins = map[string]map[string]string{
 	"create_task":     {"require_assignee_type": "human"},
 	"task_append_log": {"require_assignee_type": "human"},
-	"draft_delivery":  {"require_channel": "gmail"},
-	"update_delivery": {"require_own_draft": "true"},
+	"draft_delivery":  {"require_channel": "gmail", "require_thread_in_task_project": "true"},
+	"update_delivery": {"require_own_draft": "true", "require_channel": "gmail"},
 }
 
 // Server adapts MCP tool calls onto the executor for one worker identity.

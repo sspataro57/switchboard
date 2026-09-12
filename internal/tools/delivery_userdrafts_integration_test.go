@@ -10,6 +10,9 @@ package tools_test
 //   - fix 4, the gmail route: tools.ResolveGmailRoute is the ONE spelling of
 //     where a gmail send goes (From, To, threading), shared by send_delivery's
 //     phase 1 and the dashboard.
+//   - second round: draft_delivery's require_thread_in_task_project pin (owner
+//     decision "Same project", 2026-09-12) and update_delivery's
+//     require_channel pin (gmail-only edits).
 //
 // Reuses the SWT-8 lifecycle fixture (seedDeliveryFixture / cleanupDeliveryData
 // / deliveryExecutor / draftGmail in delivery_lifecycle_integration_test.go).
@@ -25,6 +28,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/tools"
@@ -91,6 +96,236 @@ func TestApproveDelivery_Integration_ContentBound(t *testing.T) {
 	approve(t, ctx, ex, id3)
 	if s := deliveryStatus(t, ctx, pool, id3); s != "approved" {
 		t.Errorf("approve without a hash left status %q, want approved", s)
+	}
+}
+
+// ---- second review round: same-project threads, gmail-only edits -----------
+
+const (
+	tpOtherSlug = "itest-del-thrproj-other"
+	tpOutMID    = "<itest-del-thrproj-out@example.com>"
+	tpOutRaw    = "itest-del-thrproj-raw-out"
+)
+
+// thrProjCleanup removes what the thread-project test adds on top of the SWT-8
+// fixture. It runs BEFORE cleanupDeliveryData: that one deletes
+// normalized_threads before tasks, so a task still pointing at the thread
+// through source_thread_id would fail its FK.
+func thrProjCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	for _, st := range []struct {
+		sql  string
+		args []any
+	}{
+		{`UPDATE tasks SET source_thread_id=NULL WHERE project_id IN (SELECT id FROM projects WHERE slug=$1)`, []any{delSlug}},
+		{`DELETE FROM capture_decisions WHERE message_id IN
+			(SELECT id FROM normalized_messages WHERE external_message_id = ANY($1))`, []any{[]string{delInboundMID, tpOutMID}}},
+		{`DELETE FROM capture_decisions WHERE project_id IN (SELECT id FROM projects WHERE slug=$1)`, []any{tpOtherSlug}},
+		{`DELETE FROM normalized_messages WHERE external_message_id=$1`, []any{tpOutMID}},
+		{`DELETE FROM raw_source_items WHERE external_id=$1`, []any{tpOutRaw}},
+		{`DELETE FROM projects WHERE slug=$1`, []any{tpOtherSlug}},
+	} {
+		if _, err := pool.Exec(ctx, st.sql, st.args...); err != nil {
+			t.Fatalf("cleanup %q: %v", st.sql, err)
+		}
+	}
+}
+
+// Owner decision (Salvador, 2026-09-12: "Same project"): with the user
+// profile's pin require_thread_in_task_project:"true", draft_delivery drafts
+// only on a thread already filed under the task's project — the task's own
+// source thread, or a thread with an INBOUND message whose LATEST
+// capture_decisions row (any mode) names the task's project. Checked inside
+// the transaction, before the insert; a refusal writes no row.
+//
+// MUTATION (run by hand): drop the require_thread_in_task_project check in
+// draftDelivery → the unfiled, other-project, outbound-only and re-pointed
+// refusals are all drafted, and this test goes red at "was DRAFTED".
+func TestDraftDelivery_Integration_ThreadMustBeFiledUnderTheTaskProject(t *testing.T) {
+	ctx := context.Background()
+	pool := newToolsPool(t, ctx)
+	defer pool.Close()
+	thrProjCleanup(t, ctx, pool)
+	cleanupDeliveryData(t, ctx, pool)
+	defer cleanupDeliveryData(t, ctx, pool)
+	defer thrProjCleanup(t, ctx, pool) // LIFO: before cleanupDeliveryData
+
+	fx := seedDeliveryFixture(t, ctx, pool)
+	ex := deliveryExecutor(pool)
+
+	var projID, inboundID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM projects WHERE slug=$1`, delSlug).Scan(&projID); err != nil {
+		t.Fatalf("read project: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT id FROM normalized_messages WHERE external_message_id=$1`, delInboundMID).
+		Scan(&inboundID); err != nil {
+		t.Fatalf("read inbound: %v", err)
+	}
+	otherID := seedProject(t, ctx, pool, tpOtherSlug, delClient)
+
+	decide := func(msgID int64, projectID *int64, mode string) {
+		t.Helper()
+		action := "attributed"
+		if projectID == nil {
+			action = "unmatched"
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO capture_decisions (message_id, mode, action, project_id, reason)
+			 VALUES ($1, $2, $3, $4, 'itest thread-project')`, msgID, mode, action, projectID); err != nil {
+			t.Fatalf("insert decision: %v", err)
+		}
+	}
+	rows := func() int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM deliveries WHERE task_id=$1`, fx.parentID).Scan(&n); err != nil {
+			t.Fatalf("count deliveries: %v", err)
+		}
+		return n
+	}
+	draft := func(pin string) error {
+		extra := ""
+		if pin != "" {
+			extra = `,"require_thread_in_task_project":"` + pin + `"`
+		}
+		_, err := ex.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: delActor,
+			Args: []byte(`{"task_id":` + itoa(fx.parentID) + `,"channel":"gmail","subject":"Re: login broken",` +
+				`"body":"on it","thread_id":` + itoa(fx.threadID) + extra + `}`)})
+		return err
+	}
+	refused := func(stage string) {
+		t.Helper()
+		before := rows()
+		err := draft("true")
+		if err == nil {
+			t.Errorf("%s: a pinned gmail draft was DRAFTED on a thread not filed under the task's project", stage)
+			return
+		}
+		want := "thread " + itoa(fx.threadID) + " is not filed under this task's project (" + delSlug + ")"
+		if !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "file it first") {
+			t.Errorf("%s: refusal = %q, want it to contain %q and say how to file it", stage, err, want)
+		}
+		if after := rows(); after != before {
+			t.Errorf("%s: a refused draft changed the delivery count %d → %d", stage, before, after)
+		}
+	}
+	allowed := func(stage string) {
+		t.Helper()
+		if err := draft("true"); err != nil {
+			t.Errorf("%s: pinned draft refused: %v", stage, err)
+		}
+	}
+
+	// 1. Unfiled: no decision at all.
+	refused("unfiled thread")
+	// Positive controls: no pin (the full profile, the drafts worker) and a pin
+	// the caller set to false both draft as before — the handler checks only
+	// "true"; the user profile's adapter overwrites whatever the model sent.
+	if err := draft(""); err != nil {
+		t.Errorf("POSITIVE CONTROL: an unpinned gmail draft on an unfiled thread was refused: %v", err)
+	}
+	if err := draft("false"); err != nil {
+		t.Errorf("POSITIVE CONTROL: require_thread_in_task_project=false was treated as the pin: %v", err)
+	}
+
+	// 2. An OUTBOUND message filed under the project does not file the thread:
+	// our own send is not evidence the conversation belongs to the project.
+	var outRaw, outID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO raw_source_items (source_account_id, external_id, raw_json, content_hash)
+		 VALUES ($1, $2, '{}', 'itest-del-thrproj-hash-out') RETURNING id`, fx.accountID, tpOutRaw).Scan(&outRaw); err != nil {
+		t.Fatalf("seed outbound raw: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO normalized_messages
+		   (raw_source_item_id, thread_id, direction, external_message_id, sent_at, body_text, subject, sender, channel)
+		 VALUES ($1, $2, 'outbound', $3, now(), 'ours', 'login broken', $4, 'gmail') RETURNING id`,
+		outRaw, fx.threadID, tpOutMID, delAcctEmail).Scan(&outID); err != nil {
+		t.Fatalf("seed outbound: %v", err)
+	}
+	decide(outID, &projID, "live")
+	refused("only an outbound message filed under the project")
+
+	// 3. Filed under ANOTHER project. (capture_decisions_live_uniq allows one
+	// live row per message; the later ones are shadow, which also proves the
+	// latest decision counts in ANY mode, not only live.)
+	decide(inboundID, &otherID, "live")
+	refused("thread filed under another project")
+
+	// 4. A later (shadow) decision re-points it here: allowed.
+	decide(inboundID, &projID, "shadow")
+	allowed("latest decision names the task's project")
+
+	// 5. A later one re-points it away again: refused. Latest wins, not "any".
+	decide(inboundID, &otherID, "shadow")
+	refused("re-pointed to another project by a later decision")
+
+	// 6. Latest decision unmatched (no project): unfiled again.
+	decide(inboundID, nil, "shadow")
+	refused("latest decision unmatched")
+
+	// 7. The task's own source thread is allowed even while unfiled.
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET source_thread_id=$1 WHERE id=$2`, fx.threadID, fx.parentID); err != nil {
+		t.Fatalf("set source thread: %v", err)
+	}
+	allowed("the task's own source thread")
+}
+
+// With the user profile's second update pin require_channel:"gmail", the
+// update_delivery handler refuses — under the row lock — a non-gmail draft,
+// even one the caller's own actor created (this repo's full-profile session
+// shares mcp:manual:salvo with the user-scope install).
+//
+// MUTATION (run by hand): drop the require_channel comparison in
+// updateDelivery → the slack_reply edit lands and this test goes red at
+// "edited a slack_reply".
+func TestUpdateDelivery_Integration_RequireChannel(t *testing.T) {
+	ctx := context.Background()
+	pool := newToolsPool(t, ctx)
+	defer pool.Close()
+	cleanupDeliveryData(t, ctx, pool)
+	defer cleanupDeliveryData(t, ctx, pool)
+
+	fx := seedDeliveryFixture(t, ctx, pool)
+	ex := deliveryExecutor(pool)
+
+	var slackID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO deliveries (task_id, channel, target_ref, body, status, created_by)
+		 VALUES ($1, 'slack_reply', 'https://app.slack.com/client/TITEST/CITEST/p1750000000000000',
+		         'their words', 'drafted', $2) RETURNING id`, fx.parentID, delActor).Scan(&slackID); err != nil {
+		t.Fatalf("seed slack draft: %v", err)
+	}
+	body := func(id int64) string {
+		t.Helper()
+		var b string
+		if err := pool.QueryRow(ctx, `SELECT body FROM deliveries WHERE id=$1`, id).Scan(&b); err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return b
+	}
+
+	_, err := ex.Execute(ctx, executor.Call{Tool: "update_delivery", Actor: delActor,
+		Args: []byte(`{"delivery_id":` + itoa(slackID) + `,"body":"planted","require_own_draft":"true","require_channel":"gmail"}`)})
+	if err == nil {
+		t.Error("update_delivery under require_channel gmail edited a slack_reply draft (its own actor's)")
+	} else if !strings.Contains(err.Error(), "gmail") || !strings.Contains(err.Error(), "slack_reply") {
+		t.Errorf("refusal = %q, want it to name the draft's channel and the allowed one (gmail)", err)
+	}
+	if b := body(slackID); b != "their words" {
+		t.Errorf("slack draft body = %q after a refused edit, want it untouched", b)
+	}
+
+	// Positive controls: the same own-draft edit with no channel pin passes
+	// (the refusal above is the channel, not ownership), and a gmail draft
+	// passes the pin.
+	callOK(t, ctx, ex, delActor, "update_delivery",
+		`{"delivery_id":`+itoa(slackID)+`,"body":"fixed here","require_own_draft":"true"}`)
+	gid := draftGmail(t, ctx, ex, fx.parentID, fx.threadID)
+	callOK(t, ctx, ex, delActor, "update_delivery",
+		`{"delivery_id":`+itoa(gid)+`,"body":"fixed words","require_own_draft":"true","require_channel":"gmail"}`)
+	if b := body(gid); b != "fixed words" {
+		t.Errorf("gmail draft body = %q, want the edit", b)
 	}
 }
 

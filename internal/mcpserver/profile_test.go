@@ -70,8 +70,9 @@ package mcpserver_test
 // draft_delivery and update_delivery — thirteen tools. The paragraphs above
 // that say it cannot draft were true of SWT-37/38/42 and are superseded here:
 // a session in any repo now writes a GMAIL reply as a drafted delivery row
-// (pinned require_channel:"gmail") and edits only its OWN drafts (pinned
-// require_own_draft:"true"; both pins in user_drafts_test.go). It still
+// (pinned require_channel:"gmail", on a thread filed under the task's project:
+// require_thread_in_task_project) and edits only gmail drafts its ACTOR created
+// (require_own_draft + require_channel; all pins in user_drafts_test.go). It still
 // cannot approve or send: Salvador does both on the dashboard, and the approve
 // is bound to the words the page showed (expect_content_hash).
 

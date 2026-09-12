@@ -10,6 +10,7 @@ package dashboard
 //   - drop the hidden input → TestDeliveriesTemplate_ApproveFormCarriesContentHash.
 //   - route approve back through action() (no hash) → the handler test.
 //   - Sprintf the args → the injection row.
+//   - forward a hash-less POST to the executor → TestApproveAction_RefusesAPostWithoutTheHash.
 
 import (
 	"context"
@@ -60,9 +61,6 @@ func TestApproveAction_PassesTheHashAsJSON(t *testing.T) {
 	}{
 		{"hash", "ab12", map[string]any{"delivery_id": float64(7), "expect_content_hash": "ab12"}},
 		{"injection", `x","delivery_id":9,"y":"`, map[string]any{"delivery_id": float64(7), "expect_content_hash": `x","delivery_id":9,"y":"`}},
-		// No hash in the form (a page from before SWT-44): the dashboard sends
-		// none rather than an empty one, and the tool keeps today's behaviour.
-		{"absent", "", map[string]any{"delivery_id": float64(7)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := &captureExec{}
@@ -89,6 +87,54 @@ func TestApproveAction_PassesTheHashAsJSON(t *testing.T) {
 				if got[k] != v {
 					t.Errorf("approve args[%s] = %v, want %v (args %s)", k, got[k], v, ex.calls[0].Args)
 				}
+			}
+		})
+	}
+}
+
+// SWT-44 second review (Codex): the dashboard is the review surface, so its
+// Approve REQUIRES the content hash. A POST without one — a page rendered
+// before the deploy, or a crafted POST — is refused before the executor, with
+// a flash telling him to reload and review; it never becomes an unbound
+// approve. (approve_delivery itself keeps the hash optional for opsctl and
+// the full-profile MCP; this is the dashboard route only.)
+//
+// MUTATION: send the call without the hash, as before → "reached the executor".
+func TestApproveAction_RefusesAPostWithoutTheHash(t *testing.T) {
+	auth, err := NewAuth(context.Background(), "", "", "", "")
+	if err != nil {
+		t.Fatalf("NewAuth: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		form url.Values
+	}{
+		{"absent", url.Values{}},
+		{"empty", url.Values{"content_hash": {""}}},
+		{"blank", url.Values{"content_hash": {"   "}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ex := &captureExec{}
+			s := &Server{ex: ex, auth: auth}
+			req := httptest.NewRequest(http.MethodPost, "/deliveries/7/approve", strings.NewReader(tc.form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.SetPathValue("id", "7")
+			rec := httptest.NewRecorder()
+			s.approveAction(rec, req)
+			if len(ex.calls) != 0 {
+				t.Fatalf("an approve POST with no content_hash reached the executor: %+v — the dashboard approve must "+
+					"be bound to the words it showed", ex.calls)
+			}
+			if rec.Code != http.StatusSeeOther {
+				t.Errorf("status = %d, want %d (back to /deliveries with a flash)", rec.Code, http.StatusSeeOther)
+			}
+			loc, err := url.Parse(rec.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("Location %q: %v", rec.Header().Get("Location"), err)
+			}
+			if loc.Path != "/deliveries" || !strings.Contains(loc.Query().Get("flash"), "reload the page and review it again") {
+				t.Errorf("redirect = %q, want /deliveries with a flash saying to reload the page and review it again",
+					rec.Header().Get("Location"))
 			}
 		})
 	}
