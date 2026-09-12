@@ -12,7 +12,9 @@ import (
 )
 
 // State vocabulary. The first four are the ONLY live-publish states; StateDead
-// is reserved for the LWT and never emitted by Status.Marshal.
+// is never emitted by Status.Marshal. It reaches a status topic two ways: the
+// broker's LWT, and Client.PublishDead, which a cleanly stopping service calls
+// because a clean DISCONNECT suppresses the will (SWT-40).
 const (
 	StateIdle          = "idle"
 	StateWorking       = "working"
@@ -98,7 +100,7 @@ var liveStates = map[string]struct{}{
 }
 
 // Marshal is the strict publish path: only the four live states pass ("dead"
-// is LWT-only). A worker cannot emit garbage through the library.
+// never goes out through Marshal: the LWT and Client.PublishDead are its only paths). A worker cannot emit garbage through the library.
 func (s Status) Marshal() ([]byte, error) {
 	if _, ok := liveStates[s.State]; !ok {
 		return nil, fmt.Errorf("state %q is not publishable (live states: idle|working|needs_feedback|manual)", s.State)

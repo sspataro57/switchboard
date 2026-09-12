@@ -86,18 +86,36 @@ func run() error {
 		return fmt.Errorf("connect daemon client: %w", err)
 	}
 	clients := []*fleet.Client{daemon}
-	var wg sync.WaitGroup
+	var (
+		wg   sync.WaitGroup
+		pool *pgxpool.Pool
+	)
 	// finish ends every loop, THEN publishes dead: a clean DISCONNECT suppresses
 	// the LWT, so a stopped pipelined says dead deliberately, and only after
 	// every heartbeat goroutine has returned (nothing publishes idle after it).
+	// The publishes run in parallel, so a dead broker costs one ack timeout,
+	// not one per client, inside terminationGracePeriodSeconds.
 	finish := func(runErr error) error {
 		stop()
 		wg.Wait()
+		var dead sync.WaitGroup
 		for _, c := range clients {
-			if err := c.PublishDead(); err != nil {
-				slog.Warn("final dead status not published", "err", err)
-			}
-			c.Disconnect()
+			dead.Add(1)
+			go func() {
+				defer dead.Done()
+				if err := c.PublishDead(); err != nil {
+					slog.Warn("final dead status not published", "err", err)
+				}
+				c.Disconnect()
+			}()
+		}
+		dead.Wait()
+		// A wedged pass still holds a pooled connection (a GPU stage's advisory
+		// lock), and pool.Close blocks until every connection returns: closing
+		// it would hang the exit the wedge path exists to force. The process
+		// ends right after, which releases everything.
+		if pool != nil && !errors.Is(runErr, pipeline.ErrPassWedged) {
+			pool.Close()
 		}
 		return runErr
 	}
@@ -108,12 +126,10 @@ func run() error {
 		}
 	}
 
-	var pool *pgxpool.Pool
 	if len(stages) > 0 {
 		if pool, err = store.NewPool(ctx); err != nil {
 			return finish(fmt.Errorf("connect db: %w", err))
 		}
-		defer pool.Close()
 	}
 
 	errCh := make(chan error, len(stages))

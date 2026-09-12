@@ -12,7 +12,7 @@ the owner (dated) or unilaterally (with rationale).
 - **A-D6 / A3:** the re-pointing pass ran with `--since 4320h` (180 days), not 720h. The 720h window missed 15 older unmatched collaboratory-subject mails and nearly all #a-millon history.
   - A3 holds within that window: 428 a-millon messages → bulk; the 10 LHH ones stay reengine (rule 1).
   - Older a-millon history (2019 to March 2026) keeps its earlier attribution; no reader acts on it.
-- **E-D4 view command:** `mosquitto_sub -t 'ops/workers/+/status' | grep pipeline.` is invalid, because `+` must fill a whole topic level. Use `-t 'ops/workers/+/status'` and filter for `pipeline.`.
+- **E-D4 view command:** `mosquitto_sub -t 'ops/workers/pipeline.+/status'` is invalid, because `+` must fill a whole topic level. Use `-t 'ops/workers/+/status'` and filter for `pipeline.`.
 - **E2:** the google IMAP IDLE loop (`watch.go`) announces `captured` too. Five announce sites in all.
 - **pipelined:** the daemon has its own heartbeat, `pipeline.daemon` with an LWT, so the Part E smoke is observable with no stage enabled.
 - **E5** (`classify promote --lane personal|inquiry`) ships with Part C, where the inquiry lane lands; Part E did not need it.

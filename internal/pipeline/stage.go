@@ -94,8 +94,15 @@ func (l *StageLoop) Notify() {
 // wedged pass (ErrPassWedged). Before returning it waits for its last
 // heartbeat to go out, so a caller publishing a final status goes last.
 func (l *StageLoop) Run(ctx context.Context) error {
-	status, statusDone := l.startStatus(ctx)
-	defer func() { <-statusDone }()
+	// The heartbeat goroutine gets its own context, cancelled on EVERY return:
+	// on the ErrPassWedged path the caller's ctx is still live, and waiting on
+	// a goroutine that only stops with that ctx would deadlock the wedge exit.
+	sctx, scancel := context.WithCancel(ctx)
+	status, statusDone := l.startStatus(sctx)
+	defer func() {
+		scancel()
+		<-statusDone
+	}()
 	status(fleet.StateIdle)
 	hb := l.cfg.After(fleet.HeartbeatInterval)
 
@@ -107,8 +114,8 @@ func (l *StageLoop) Run(ctx context.Context) error {
 		}
 		retry = nil
 		// One retry after LockRetry, then the sweep (E-D4): a lock a classify
-		// CronJob holds for an hour costs one attempt per sweep, not one every
-		// 30 s.
+		// CronJob holds for an hour costs a wake- or sweep-triggered attempt
+		// plus its one retry, never an attempt every 30 s.
 		if lost && !fromRetry {
 			retry = l.cfg.After(l.cfg.LockRetry)
 		}

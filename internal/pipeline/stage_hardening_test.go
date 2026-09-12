@@ -69,8 +69,11 @@ func TestStageLoop_WedgedPassEndsRun(t *testing.T) {
 	block := make(chan struct{})
 	defer close(block)
 	started := make(chan struct{}, 1)
+	// A heartbeat sink, as in production: without one the status goroutine
+	// is never started, and a Run that waits on it cannot be caught
+	// deadlocking on the wedge path (go-reviewer, 2026-09-12).
 	loop := pipeline.NewStageLoop(pipeline.StageConfig{
-		Stage: pipeline.StageGate, Limit: 10, After: clock.After,
+		Stage: pipeline.StageGate, Limit: 10, After: clock.After, Status: &fakeStatus{},
 		Pass: func(context.Context) (int, error) {
 			started <- struct{}{}
 			<-block // ignores ctx on purpose
