@@ -12,6 +12,8 @@ package pipeline
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -234,7 +236,7 @@ func AnnounceCaptured(ctx context.Context, broker, connector string, stats captu
 	}
 	cctx, cancel := context.WithTimeout(ctx, announceTimeout)
 	defer cancel()
-	cl, err := fleet.NewSpineClient(cctx, broker, CaptureClientID(connector))
+	cl, err := fleet.NewSpineClient(cctx, broker, AnnounceClientID(connector))
 	if err != nil {
 		slog.Warn("captured wake not published: broker unreachable", "connector", connector, "err", err)
 		return false
@@ -245,6 +247,16 @@ func AnnounceCaptured(ctx context.Context, broker, connector string, stats captu
 		return false
 	}
 	return true
+}
+
+// AnnounceClientID is one announce connection's client id: CaptureClientID plus
+// a random suffix. Two capture passes of one connector can overlap (the google
+// CronJob and its IMAP IDLE watcher), and two connections sharing an id kick
+// each other off the broker. The connector name travels in the wake's Source.
+func AnnounceClientID(connector string) string {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return CaptureClientID(connector) + "-" + hex.EncodeToString(b[:])
 }
 
 // DialStage connects a stage's own client: id StageClientID(stage) and a

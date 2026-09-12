@@ -18,7 +18,7 @@ Mosquitto has no ack or redelivery work-queue semantics. That is why nothing may
 
 ## Topics
 
-Every `ops/pipeline/*` topic is QoS 1 and **never retained**: a retained wake would re-fire on every reconnect, and retained state is global on the production broker. `internal/pipeline/structure_test.go` scans the repo for a retained publish.
+Every `ops/pipeline/*` topic is QoS 1 and **never retained**: a retained wake would re-fire on every reconnect, and retained state is global on the production broker. `internal/pipeline/structure_test.go` scans the repo for a retained publish. The scan is lexical: it catches a topic that spells `ops/pipeline` or calls `pipeline.Topic` in the publish itself, not one passed through a variable outside `internal/pipeline`.
 
 | topic | publisher | wakes |
 |---|---|---|
@@ -61,7 +61,8 @@ mosquitto_sub -h 192.168.50.45 -t 'ops/workers/+/status' -v | grep 'workers/pipe
   - a wake (a burst coalesces to one pending run);
   - the sweep (`PipelineSweep`, 5 min; `--sweep` overrides);
   - a lock retry.
-- A pass that fills its `--limit` repeats at once until one comes back short.
+- A pass that fills its `--limit` repeats at once until one comes back short. At most `MaxDrainPasses` (50) in a row: an inbox that never empties costs one burst per wake or sweep, not a hot loop.
+- A pass that runs longer than `PassTimeout` (15 min) is cancelled. One that ignores the cancellation for `PassWedgeGrace` (90 s) more makes `pipelined` exit non-zero, and the pod restarts. A stage pass must honour its context.
 - If a stage's advisory lock is held elsewhere, it retries after 30 s and then on the next sweep. That is normal: the GPU stages share the classify lock with the classify CronJobs.
 - A failing pass logs and waits for the next wake or sweep. A stage never crash-loops on a DB error.
 - The heartbeat is `working` during a pass (republished every 60 s, even through long passes) and `idle` otherwise. It is published from its own goroutine, so a broker outage never stalls passes; the sweep keeps the pipeline moving with MQTT down.
@@ -71,7 +72,7 @@ mosquitto_sub -h 192.168.50.45 -t 'ops/workers/+/status' -v | grep 'workers/pipe
 A retained `{"state":"dead"}` on `ops/workers/pipeline.{stage}/status` or `pipeline.daemon` is the broker firing that client's last will: the pod was killed, OOMed, or lost its network without a clean disconnect.
 - **Immediately:** nothing. Work is not lost: it sits in Postgres until a stage runs again.
 - **Recovery:** check `kubectl -n ops get pods -l app=pipelined` and the pod's last log lines.
-- A clean shutdown (a rollout) sends no will. Its last retained status stays `idle` and goes stale after 3× the 60 s heartbeat.
+- A clean shutdown (a rollout, a `kubectl delete pod`) publishes `dead` too, deliberately: a clean DISCONNECT suppresses the will, so pipelined publishes it itself after its loops stop. `dead` therefore means "not running", however the process ended.
 
 ## Connectors
 

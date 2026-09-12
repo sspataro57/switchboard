@@ -739,6 +739,38 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   read-as-data. Accepted risk as in SWT-37: a session that reads a malicious
   attachment still holds the write verbs.
 
+### The pipeline wake-ups (SWT-40 Part E, inquiry-promote)
+
+- **Only capture is on cron.** Connector mains call `pipeline.AnnounceCaptured` after the error check on
+  `capture.EvaluateRules`, which publishes `ops/pipeline/captured` iff the pass committed ≥1 decision.
+  `cmd/pipelined` (one Deployment, replicas 1, Recreate) runs one `StageLoop` per stage named in
+  `PIPELINE_STAGES`. Runbook: `docs/runbooks/pipeline.md`; kube rows: `docs/runbooks/HANDOFF-kube-inquiry-promote.md`.
+- **A wake-up, never work (E-D1).** Postgres is the queue of record; a stage re-queries its own inbox
+  whatever woke it. Lost wake = latency up to one 5 min sweep; duplicate = one empty query. Never branch
+  on `Wake.Counts`/`MaxID`.
+- **Why not `task_events` (E-D2):** `task_events.task_id` is NOT NULL, so a message with no task cannot be
+  an orchestrator event, and a second message-level event table + LISTEN loop would be a second
+  orchestrator. Message-level stages are direct MQTT; the task boundary stays the orchestrator's R-rules.
+  The stage graph is the static `pipeline.Subscribers` table (invariant 7 discipline).
+- **LANDMINE: `ops/pipeline/*` is QoS 1 and NEVER retained** (a retained wake re-fires on every reconnect;
+  retained state is global on the prod broker). `structure_test.go` scans for it, lexically.
+- **Client ids.** A stage uses `switchboard-pipeline-{stage}` with a dead LWT on
+  `ops/workers/pipeline.{stage}/status`; the daemon `switchboard-pipelined` / `pipeline.daemon`. A
+  connector announce uses `switchboard-capture-{connector}-{random}`: the google CronJob and its IMAP
+  IDLE watcher can overlap, and a shared id kicks the other off the broker.
+- **`dead` means "not running".** A clean DISCONNECT suppresses the will, so pipelined publishes the dead
+  payload itself on shutdown (`fleet.Client.PublishDead`, the one deliberate path around
+  `Status.Marshal`'s refusal), after every loop and heartbeat goroutine has returned.
+- **Loop rules:** one catch-up pass at start; a burst of wakes coalesces to one run; a full pass repeats up
+  to `MaxDrainPasses` (50); a lost advisory lock retries ONCE after 30 s, then waits for the sweep; a pass
+  is cancelled after `PassTimeout` (15 min), and one that ignores it for 90 s more ends Run with
+  `ErrPassWedged` (pipelined exits non-zero). A stage pass MUST honour ctx and count as processed only
+  rows that left its inbox. Heartbeats publish from their own goroutine (a broker outage never stalls
+  passes); the queue drops its OLDEST state when full.
+- `fleet.newClient` now disconnects on a connect that timed out (a late CONNACK used to leave an unowned
+  client reconnecting forever), and `PublishStatus` waits at most 10 s for its ack.
+- **E5** (`classify promote --lane`) ships with Part C.
+
 ### Link preservation (SWT-25)
 
 - `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written

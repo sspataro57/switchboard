@@ -60,6 +60,10 @@ func newClient(ctx context.Context, brokerURL, clientID string, will bool, worke
 	select {
 	case <-tok.Done():
 	case <-ctx.Done():
+		// Stop the attempt: a CONNACK arriving after we gave up would otherwise
+		// leave an unowned client auto-reconnecting forever under this id,
+		// kicking every later client that uses it off the broker.
+		cl.c.Disconnect(0)
 		return nil, fmt.Errorf("connect %s: %w", brokerURL, ctx.Err())
 	}
 	if err := tok.Error(); err != nil {
@@ -155,9 +159,33 @@ func (c *Client) PublishStatus(s Status) error {
 		return fmt.Errorf("publish status: %w", err)
 	}
 	tok := c.c.Publish(StatusTopic(c.workerID), qos, true, payload)
-	tok.Wait()
+	// Bounded: paho holds a QoS 1 publish while it reconnects, and a caller
+	// blocked here forever would stop heartbeating anything at all.
+	if !tok.WaitTimeout(publishTimeout) {
+		return fmt.Errorf("publish status: no ack within %v", publishTimeout)
+	}
 	if err := tok.Error(); err != nil {
 		return fmt.Errorf("publish status: %w", err)
+	}
+	return nil
+}
+
+// PublishDead publishes the retained dead payload on this client's own status
+// topic, the same bytes the broker publishes as its LWT. A clean DISCONNECT
+// suppresses the will, so a service that stops cleanly calls this first:
+// dead then means "not running" whether the process crashed or was stopped.
+// Status.Marshal still refuses dead; this is the one deliberate path. Worker
+// (will-carrying) clients only.
+func (c *Client) PublishDead() error {
+	if c.workerID == "" {
+		return fmt.Errorf("PublishDead requires a worker-mode client")
+	}
+	tok := c.c.Publish(StatusTopic(c.workerID), qos, true, LWTPayload())
+	if !tok.WaitTimeout(publishTimeout) {
+		return fmt.Errorf("publish dead: no ack within %v", publishTimeout)
+	}
+	if err := tok.Error(); err != nil {
+		return fmt.Errorf("publish dead: %w", err)
 	}
 	return nil
 }

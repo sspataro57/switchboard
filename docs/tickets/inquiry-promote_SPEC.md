@@ -12,9 +12,11 @@ the owner (dated) or unilaterally (with rationale).
 - **A-D6 / A3:** the re-pointing pass ran with `--since 4320h` (180 days), not 720h. The 720h window missed 15 older unmatched collaboratory-subject mails and nearly all #a-millon history.
   - A3 holds within that window: 428 a-millon messages → bulk; the 10 LHH ones stay reengine (rule 1).
   - Older a-millon history (2019 to March 2026) keeps its earlier attribution; no reader acts on it.
-- **E-D4 view command:** `mosquitto_sub -t 'ops/workers/pipeline.+/status'` is invalid, because `+` must fill a whole topic level. Use `-t 'ops/workers/+/status'` and filter for `pipeline.`.
+- **E-D4 view command:** `mosquitto_sub -t 'ops/workers/+/status' | grep pipeline.` is invalid, because `+` must fill a whole topic level. Use `-t 'ops/workers/+/status'` and filter for `pipeline.`.
 - **E2:** the google IMAP IDLE loop (`watch.go`) announces `captured` too. Five announce sites in all.
 - **pipelined:** the daemon has its own heartbeat, `pipeline.daemon` with an LWT, so the Part E smoke is observable with no stage enabled.
+- **E5** (`classify promote --lane personal|inquiry`) ships with Part C, where the inquiry lane lands; Part E did not need it.
+- **Review hardening:** a pass is cancelled after `PassTimeout` (15 min), and a pass that ignores that for 90 s more makes pipelined exit; a lost lock retries once, then waits for the sweep; consecutive full passes stop at 50; announce client ids carry a random suffix; a clean shutdown publishes `dead` deliberately.
 
 **Five parts, each usable alone. Ship order: A → E → D → C → B.**
 
@@ -381,7 +383,7 @@ orchestrator's.** The argument against routing message-level stages through the 
 - **Health:** each stage publishes the fleet heartbeat on
   `ops/workers/pipeline.{stage}/status` (retained, QoS 1, every `fleet.HeartbeatInterval`) with
   state `idle` or `working`, and an LWT of `dead`. The dotted id makes fleetd mirror them as client
-  `pipeline` once fleetd is deployed. Until then `mosquitto_sub -t 'ops/workers/pipeline.+/status'`
+  `pipeline` once fleetd is deployed. Until then `mosquitto_sub -t 'ops/workers/+/status' | grep pipeline.`
   is the view. A stage that errors logs, stays up and retries on the next wake or sweep. It never
   crash-loops on a DB error.
 - **GPU serialization:** both local-model stages (C's inquiry lane, B's route lane) take the
@@ -1098,7 +1100,7 @@ No work payloads and no commands. The orchestrator's `ops/workers/{id}/cmd` topi
      1. build the image, hand off (`pipelined` with `PIPELINE_STAGES=` empty, and `MQTT_BROKER` on
         the connectors);
      2. watch `ops/pipeline/captured` arrive after each connector tick, and
-        `ops/workers/pipeline.+/status` heartbeats;
+        `ops/workers/+/status` heartbeats (grep for `pipeline.`);
      3. kill the pod and see `dead`.
   3. **D:**
      1. apply 0027, bump the connector images (capture starts writing `held` for reengine), then

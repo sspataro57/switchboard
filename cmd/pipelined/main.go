@@ -13,6 +13,9 @@
 //	DATABASE_URL     required once any stage is enabled
 //
 // Flags: --stages overrides PIPELINE_STAGES; --sweep overrides the 5 m sweep.
+//
+// Exit: 0 on SIGTERM/SIGINT; non-zero when a stage's pass wedges
+// (pipeline.ErrPassWedged), so the pod restarts rather than sit silent.
 package main
 
 import (
@@ -36,7 +39,7 @@ import (
 )
 
 // The daemon's own identity, apart from any stage: its heartbeat says the
-// process is up even with no stage enabled, and its LWT says when it is not.
+// process is up even with no stage enabled, and its dead says when it is not.
 const (
 	daemonWorkerID = "pipeline.daemon"
 	daemonClientID = "switchboard-pipelined"
@@ -82,48 +85,75 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("connect daemon client: %w", err)
 	}
-	defer daemon.Disconnect()
+	clients := []*fleet.Client{daemon}
+	var wg sync.WaitGroup
+	// finish ends every loop, THEN publishes dead: a clean DISCONNECT suppresses
+	// the LWT, so a stopped pipelined says dead deliberately, and only after
+	// every heartbeat goroutine has returned (nothing publishes idle after it).
+	finish := func(runErr error) error {
+		stop()
+		wg.Wait()
+		for _, c := range clients {
+			if err := c.PublishDead(); err != nil {
+				slog.Warn("final dead status not published", "err", err)
+			}
+			c.Disconnect()
+		}
+		return runErr
+	}
+
 	for _, e := range pipeline.Events() {
 		if err := daemon.Subscribe(pipeline.Topic(e), logWake); err != nil {
-			return fmt.Errorf("subscribe wake log: %w", err)
+			return finish(fmt.Errorf("subscribe wake log: %w", err))
 		}
 	}
 
 	var pool *pgxpool.Pool
 	if len(stages) > 0 {
 		if pool, err = store.NewPool(ctx); err != nil {
-			return fmt.Errorf("connect db: %w", err)
+			return finish(fmt.Errorf("connect db: %w", err))
 		}
 		defer pool.Close()
 	}
 
-	var wg sync.WaitGroup
+	errCh := make(chan error, len(stages))
 	for _, s := range stages {
 		impl := stageImpls[s]
 		client, err := pipeline.DialStage(ctx, broker, s)
 		if err != nil {
-			return fmt.Errorf("connect stage %s: %w", s, err)
+			return finish(fmt.Errorf("connect stage %s: %w", s, err))
 		}
-		defer client.Disconnect()
+		clients = append(clients, client)
 		loop := pipeline.NewStageLoop(pipeline.StageConfig{
 			Stage: s, Pass: impl.pass(pool), Limit: impl.limit, Sweep: *sweep, Status: client,
 		})
 		if err := pipeline.SubscribeWakes(client, s, func(pipeline.Wake) { loop.Notify() }); err != nil {
-			return fmt.Errorf("stage %s: %w", s, err)
+			return finish(fmt.Errorf("stage %s: %w", s, err))
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = loop.Run(ctx)
+			if err := loop.Run(ctx); err != nil {
+				errCh <- fmt.Errorf("stage %s: %w", s, err)
+			}
 		}()
 		slog.Info("stage started", "stage", s, "upstream", pipeline.Upstream(s))
 	}
 
-	go daemonHeartbeat(ctx, daemon)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		daemonHeartbeat(ctx, daemon)
+	}()
 	slog.Info("pipelined serving", "stages", stages, "sweep", *sweep, "broker", broker)
-	<-ctx.Done()
-	wg.Wait()
-	return nil
+
+	var runErr error
+	select {
+	case <-ctx.Done():
+	case runErr = <-errCh:
+		slog.Error("a stage gave up; stopping so the pod restarts", "err", runErr)
+	}
+	return finish(runErr)
 }
 
 // parseStages reads the comma list: known stages only, each implemented by
@@ -164,8 +194,8 @@ func logWake(topic string, payload []byte) {
 }
 
 // daemonHeartbeat republishes idle every fleet.HeartbeatInterval until ctx
-// ends. Its own goroutine: a publish blocked on a reconnecting broker must not
-// hold up shutdown.
+// ends. Each publish is bounded (fleet's ack timeout), so shutdown never waits
+// on a reconnecting broker for long.
 func daemonHeartbeat(ctx context.Context, c *fleet.Client) {
 	t := time.NewTicker(fleet.HeartbeatInterval)
 	defer t.Stop()
