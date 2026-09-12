@@ -520,6 +520,9 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 		}
 		out = append(out, l)
 	}
+	if len(msgs) == mailAttachFinderScanCap {
+		truncated = true // the scan cap cut the candidates: older matches may exist
+	}
 	return marshalResult(map[string]any{"messages": out, "withheld_private": withheld, "truncated": truncated})
 }
 

@@ -144,3 +144,4 @@ google --normalize-only --all
 - **Reading them:** normalization keeps only body text. To read attachments, use the executor tools `mail_list_attachments` and `mail_read_attachment`, which are in both MCP profiles.
 - **Who may see what:** both tools gate every caller by the SWT-21 locality rule. Only mail filed under a non-`local_only` project is shown. Unfiled mail is shown only on a mailbox whose filed mail is all non-private (owner decision O2).
 - **Refusal wording:** a truncated part is reported as "not stored … capture cap", never as missing.
+- **Finder bounds:** `from`/`subject` are literal substrings (`%` and `_` match themselves). One call examines at most 2,000 candidates and reads at most 64 MiB of stored mail; past either limit it returns `truncated: true`, and the fix is a narrower sender, subject or date window.
