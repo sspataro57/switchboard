@@ -55,6 +55,10 @@ package mcpserver_test
 // wantAgentTools, so the full profile lists 23 tools. EXPECTED RED until
 // schemas.go gains the entry. Its worker refusal is pinned in
 // task_capture_test.go (TestMCPListing_DoesNotMakeSetPriorityWorkerCallable).
+//
+// SWT-42 (mail-attachments) criterion 21: mail_list_attachments and
+// mail_read_attachment join wantAgentTools, so the full profile lists 25
+// tools. EXPECTED RED until schemas.go gains both entries.
 
 import (
 	"context"
@@ -141,6 +145,14 @@ var wantAgentTools = []string{
 	// orchestrator is refused too (C6). Pinned for the real worker shapes by
 	// TestMCPListing_DoesNotMakeSetPriorityWorkerCallable (task_capture_test.go).
 	"task_set_priority",
+	// SWT-42 (mail-attachments) criterion 21: read-only, the mail_search shape —
+	// not humanOnly, not snapshotGated; they write nothing but their audit row.
+	// Served from the stored IMAP bytes in raw_source_items, never a live
+	// mailbox. The SWT-21 locality gate is in the HANDLER and applies to every
+	// caller and every profile (criterion 16, D2), so listing them here gives a
+	// worker console nothing the gate would refuse anyone else.
+	"mail_list_attachments",
+	"mail_read_attachment",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.

@@ -18,10 +18,20 @@ package mcpserver_test
 // GREENFIELD NOTE: agentTools carries none of the four yet, so these fail today
 // (and adapter_test.go's exact-allowlist assertion, updated in the same commit,
 // fails with them missing) — the expected failure mode.
+//
+// SWT-42 (mail-attachments) criteria 21 and 22: mail_list_attachments and
+// mail_read_attachment join the surface (both profiles). Their schemas carry
+// exactly the SPEC's API arguments — never a worker_id, never a path (callers
+// pick a part; the handler computes where a file goes, invariant 3) — and
+// their descriptions say "ingest", that private mail is never shown, and that
+// attachment content is untrusted text written by someone else. mail_search
+// and mail_read_thread gain the pointer to mail_list_attachments. EXPECTED RED
+// until schemas.go carries the entries and the description edits.
 
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -127,5 +137,93 @@ func TestCallTool_MailSearchForwardsWithMCPActor(t *testing.T) {
 	}
 	if want := "mcp:" + testWorkerID; fx.lastCall.Actor != want {
 		t.Errorf("forwarded Actor = %q, want %q", fx.lastCall.Actor, want)
+	}
+}
+
+// ---- SWT-42 (mail-attachments) ---------------------------------------------------
+
+func TestListTools_IncludesTheAttachmentTools(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields []string // the SPEC's API section, exactly
+	}{
+		{"mail_list_attachments", []string{"raw_source_item_id", "message_id", "thread_id", "thread_key",
+			"from", "subject", "since", "until", "limit"}},
+		{"mail_read_attachment", []string{"raw_source_item_id", "message_id", "index", "filename", "part_id",
+			"offset", "to_file"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tl := listedTool(t, tc.name)
+			var s struct {
+				Type       string                     `json:"type"`
+				Properties map[string]json.RawMessage `json:"properties"`
+			}
+			if err := json.Unmarshal(tl.InputSchema, &s); err != nil || s.Type != "object" {
+				t.Fatalf("%s InputSchema is not a JSON Schema object: %v (%s)", tc.name, err, tl.InputSchema)
+			}
+			want := map[string]bool{}
+			for _, f := range tc.fields {
+				want[f] = true
+				if _, ok := s.Properties[f]; !ok {
+					t.Errorf("%s schema is missing %q: %s", tc.name, f, tl.InputSchema)
+				}
+			}
+			for f := range s.Properties {
+				if !want[f] {
+					t.Errorf("%s schema declares %q, which the SPEC's API does not (worker_id is injected; a caller "+
+						"never supplies a path)", tc.name, f)
+				}
+			}
+
+			d := strings.ToLower(tl.Description)
+			for _, w := range []struct{ re, why string }{
+				{`ingest`, "the SWT-11 criterion 16 pattern: served from what ingestion stored, not a live mailbox"},
+				{`(?s)private.{0,80}never|never.{0,80}private`, "private mail is never shown (criteria 13-16)"},
+				{`untrusted`, "attachment content is untrusted text…"},
+				{`someone else|written by`, "…written by someone else"},
+			} {
+				if !regexp.MustCompile(w.re).MatchString(d) {
+					t.Errorf("%s description does not match /%s/ — %s. Description: %q", tc.name, w.re, w.why, tl.Description)
+				}
+			}
+		})
+	}
+}
+
+// Criterion 21: the body reads point at the attachment list, and keep "ingest".
+func TestMailBodyReads_PointAtTheAttachmentList(t *testing.T) {
+	for _, name := range []string{"mail_search", "mail_read_thread"} {
+		d := listedTool(t, name).Description
+		if !strings.Contains(d, "Attachments are not in the body; list them with mail_list_attachments") {
+			t.Errorf("%s description lacks \"Attachments are not in the body; list them with mail_list_attachments\" "+
+				"— without it a session concludes attachments are not stored (SPEC fact 3): %q", name, d)
+		}
+		if !strings.Contains(strings.ToLower(d), "ingest") {
+			t.Errorf("%s description no longer states the ingestion-window limitation: %q", name, d)
+		}
+	}
+}
+
+// Criteria 16 and 22: from the user profile both tools forward as
+// mcp:manual:salvo with only worker_id added — no profile pin, because the gate
+// is in the handler and applies to everyone (SPEC "Executor hook").
+func TestCallTool_AttachmentToolsForwardFromTheUserProfile(t *testing.T) {
+	for _, tc := range []struct{ tool, args, keys string }{
+		{"mail_list_attachments", `{"from":"sana","subject":"Activities Integration"}`, "from,subject,worker_id"},
+		{"mail_read_attachment", `{"raw_source_item_id":77761,"filename":"Request.json"}`, "filename,raw_source_item_id,worker_id"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			fx := &fakeExec{result: executor.Result{Output: json.RawMessage(`{}`)}}
+			srv := mcpserver.NewWithProfile(fx, "manual:salvo", mcpserver.ProfileUser)
+			if _, err := srv.CallTool(context.Background(), tc.tool, json.RawMessage(tc.args)); err != nil {
+				t.Fatalf("user profile refused %s: %v (SWT-42 O1: both profiles serve it)", tc.tool, err)
+			}
+			if !fx.called || fx.lastCall.Tool != tc.tool || fx.lastCall.Actor != "mcp:manual:salvo" {
+				t.Fatalf("forwarded %+v, want %s as mcp:manual:salvo", fx.lastCall, tc.tool)
+			}
+			if got := keyList(forwardedKeys(t, fx.lastCall.Args)); got != tc.keys {
+				t.Errorf("forwarded keys = %s, want %s — worker_id and nothing else (no pin on these tools)", got, tc.keys)
+			}
+		})
 	}
 }
