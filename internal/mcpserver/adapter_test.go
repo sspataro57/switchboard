@@ -99,7 +99,10 @@ var wantAgentTools = []string{
 	"mark_done_local",
 	"create_child_task",
 	"record_decision",
-	"draft_delivery",     // agent-facing since SWT-8: THE route for client-visible words
+	"draft_delivery", // agent-facing since SWT-8: THE route for client-visible words
+	// SWT-44: MCP-listed so a session can fix the words it drafted. Still
+	// policy.humanOnly, so a worker console is refused; the user profile lists it.
+	"update_delivery",
 	"link_external_ref",  // agent-facing since SWT-9: workers link their PRs/issues
 	"mark_delivery_sent", // agent-facing since SWT-12 (Q1): resolve a 'sending' Slack row
 	// SWT-11 (criterion 16): read-only, served from normalized_messages rather

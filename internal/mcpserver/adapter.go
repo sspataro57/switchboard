@@ -41,8 +41,9 @@ const (
 	// other repo's session sees (Salvador's decisions of 2026-09-10). It can
 	// look at the queues, dismiss, close or mark delivered, create HUMAN tasks,
 	// log on human tasks and set priority. It cannot claim, create or log on
-	// worker (claude) tasks — the profile pins below refuse both — draft,
-	// approve, send, book, link, decide, read mail bodies or reopen; since SWT-42 it reads attachments of non-private mail (O1). Policy refuses
+	// worker (claude) tasks — the profile pins below refuse both — approve,
+	// send, book, link, decide, read mail bodies or reopen; since SWT-42 it reads attachments of non-private mail (O1); since SWT-44 it drafts and edits client replies (draft_delivery,
+	// update_delivery), approving and sending staying on the dashboard. Policy refuses
 	// the verbs and task_set_priority to worker identities.
 	ProfileUser Profile = "user"
 	// ProfileRead serves the queue reads only. No binary builds it since
@@ -54,8 +55,10 @@ const (
 // deliberately: fetched by the claim holder it flips claimed → in_progress.
 var readProfileTools = []string{"project_list", "task_list", "task_get_next"}
 
-// userProfileTools is the read slice plus the three task verbs (SWT-37 V3)
-// and the three capture tools (SWT-38 C3/C5).
+// userProfileTools is the read slice plus the three task verbs (SWT-37 V3),
+// the three capture tools (SWT-38 C3/C5), the two attachment reads (SWT-42)
+// and gmail drafting (SWT-44: draft_delivery gmail-only and update_delivery
+// own-drafts-only, both by the pins below).
 var userProfileTools = append(append([]string(nil), readProfileTools...),
 	"task_dismiss", "task_close", "task_mark_delivered",
 	"create_task", "task_append_log", "task_set_priority",
@@ -63,7 +66,17 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// attachment reads, gated by the SWT-21 locality rule in the handler. The
 	// finder returns headers and attachment names only; mail bodies
 	// (mail_search, mail_read_thread) stay off this profile.
-	"mail_list_attachments", "mail_read_attachment")
+	"mail_list_attachments", "mail_read_attachment",
+	// SWT-44 (Salvador, 2026-09-12): write and fix a client EMAIL reply as a
+	// drafted delivery row — gmail only, on a thread filed under the task's
+	// project, and edits only gmail drafts created by the caller's actor
+	// (mcp:manual:salvo = any interactive session; the pins below). approve_delivery and send_delivery stay OFF this profile: a
+	// session must not approve its own client email (invariant 4's human gate),
+	// and these sessions read untrusted attachment text. Salvador approves on
+	// the dashboard, which shows From and To and binds the approve to the words
+	// it rendered. update_delivery is humanOnly: mcp:manual:salvo passes, a
+	// worker-shaped OPS_WORKER_ID is refused by policy.
+	"draft_delivery", "update_delivery")
 
 // userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
 // by OVERWRITE, after injectWorkerID. require_assignee_type:"human" makes the
@@ -72,9 +85,23 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 // Salvador's lane, which no worker console routes. The enforcement lives in the
 // validator and handler (inside the executor path); this only injects. It
 // also marks a user-scope call in audit_events.args.
+//
+// SWT-44 review, same pattern: require_channel:"gmail" makes validateDraftDelivery
+// refuse any other channel (no Slack, Upwork, Jira or calendar from a session
+// that reads untrusted text), and require_thread_in_task_project:"true" makes
+// draftDelivery refuse a thread not already filed under the task's project
+// (owner decision "Same project", Salvador 2026-09-12). On update_delivery,
+// require_own_draft:"true" refuses a draft whose created_by is not this actor
+// and require_channel:"gmail" a non-gmail one. The actor is "mcp:" +
+// OPS_WORKER_ID, shared by every interactive install (manual:salvo), so "own"
+// means drafts created by the mcp:manual:salvo actor (any interactive
+// session), gmail only; never the drafts worker's or the dashboard's. Each
+// only narrows, and none appears in a schema.
 var userProfilePins = map[string]map[string]string{
 	"create_task":     {"require_assignee_type": "human"},
 	"task_append_log": {"require_assignee_type": "human"},
+	"draft_delivery":  {"require_channel": "gmail", "require_thread_in_task_project": "true"},
+	"update_delivery": {"require_own_draft": "true", "require_channel": "gmail"},
 }
 
 // Server adapts MCP tool calls onto the executor for one worker identity.

@@ -54,12 +54,15 @@
   </p>
 
   <table>
-    <tr><th>#</th><th>Task</th><th>Channel</th><th>When</th><th>Status</th><th>Draft</th><th>Actions</th></tr>
+    <tr><th>#</th><th>Task</th><th>Channel</th><th>Goes to</th><th>When</th><th>Status</th><th>Draft</th><th>Actions</th></tr>
     {{range .Deliveries}}
     <tr>
       <td>{{.ID}}</td>
       <td>#{{.TaskID}} {{.TaskTitle}}<div class="muted">by {{.CreatedBy}}</div></td>
       <td>{{.Channel}}</td>
+      {{/* SWT-44: where the send would go, before approval. Gmail's comes from
+           tools.ResolveGmailRoute, the send path's own resolution. */}}
+      <td>{{if eq .Channel "gmail"}}{{if .From}}<div>From: {{.From}}</div><div>To: {{.To}}</div><div class="muted">Thread: {{.ThreadSubject}}</div>{{end}}{{else}}{{.TargetRef}}{{end}}</td>
       <td>{{if .StartsAt}}{{.StartsAt}} → {{.EndsAt}}{{end}}</td>
       <td class="status-{{.Status}}">{{.Status}}
         {{if .SentAt}}<div class="muted">sent {{.SentAt}}</div>{{end}}
@@ -84,7 +87,9 @@
       </td>
       <td>
         {{if eq .Status "drafted"}}
-        <form class="inline" method="post" action="/deliveries/{{.ID}}/approve"><button>Approve</button></form>
+        {{/* SWT-44: the approve is bound to the words rendered above; an edit
+             made after this page loaded makes it refuse. */}}
+        <form class="inline" method="post" action="/deliveries/{{.ID}}/approve"><input type="hidden" name="content_hash" value="{{.ContentHash}}"><button>Approve</button></form>
         {{end}}
         {{if eq .Status "approved"}}
           {{if eq .Channel "gmail"}}

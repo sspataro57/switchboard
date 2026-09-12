@@ -63,6 +63,13 @@ var agentTools = []Tool{
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat","jira_comment","slack_reply","calendar"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat, jira_comment, slack_reply, and calendar; Slack uses the exact conversation or thread URL, calendar the account email"},"start":{"type":"string","description":"RFC3339; calendar only — block start, from propose_slots"},"end":{"type":"string","description":"RFC3339; calendar only — block end, at most 12h after start"}},"required":["task_id","channel","body"]}`),
 	},
 	{
+		// SWT-44: fix the words of a reply you drafted, before Salvador approves it.
+		// humanOnly in policy: listed for interactive sessions; a worker is refused.
+		Name:        "update_delivery",
+		Description: "Edit the subject and/or body of a DRAFTED delivery (only while its status is drafted) before Salvador approves it. At least one of subject or body is required; a body, when given, must not be empty (an empty subject clears it). From the user-scope install, only gmail drafts an interactive session created (never the drafts worker's or the dashboard's). Approving and sending happen on the dashboard, never from a session. Human-only: a worker console is refused.",
+		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["delivery_id"]}`),
+	},
+	{
 		Name:        "link_external_ref",
 		Description: "Link a task to an external system object (jira issue, github PR, upwork thread). Idempotent.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"system":{"type":"string","enum":["jira","github","upwork_crm"]},"external_key":{"type":"string"},"external_url":{"type":"string"}},"required":["task_id","system","external_key"]}`),
