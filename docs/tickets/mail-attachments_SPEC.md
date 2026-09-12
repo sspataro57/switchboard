@@ -2,9 +2,10 @@
 
 # mail-attachments: let Claude sessions list and read stored mail attachments
 
-**Status: FINAL.** The one owner decision (do sessions in other repos get these tools) was
-answered on 2026-09-12. It is recorded under "Owner decision" (O1). Everything else is
-decided below, under "Decisions made unilaterally".
+**Status: FINAL.** Both owner decisions were answered on 2026-09-12 and are recorded under
+"Owner decision": O1 (sessions in other repos get these tools) and O2 (unfiled mail on a
+mailbox with a clean filing history is shareable). Everything else is decided below, under
+"Decisions made unilaterally".
 
 ## Source
 
@@ -203,8 +204,21 @@ attachments, one of them `application/octet-stream` JSON.
       latest `capture_decisions` row, any mode (`ORDER BY id DESC LIMIT 1`): a project
       means `AttrProject`, a row with no project means `AttrUnmatched`, no row means
       `AttrUnseen`. `localOnly` is `projects.ai_locality = 'local_only'`.
+    - **O2, the mailbox rule for unfiled inbound mail.** An inbound message whose state is
+      `AttrUnmatched` or `AttrUnseen` is `ClassGeneral` iff its RECEIVING mailbox (the raw
+      row's `source_account_id`) has a clean filing history. Clean means both of these hold
+      over the latest decision per message of that account's inbound mail:
+      - at least `mailboxCleanMinFiled = 20` messages are filed under a project;
+      - none is filed under a `local_only` project.
+
+      Otherwise it stays restricted. The rule is derived from data at call time and never
+      hard-codes an address. It fails closed: a new mailbox with no filings, or any
+      local-only filing ever, restricts that mailbox's unfiled mail. A message filed under a
+      project always follows `ClassOf` (a `local_only` filing is refused even on a clean
+      mailbox, because a clean mailbox cannot have one).
     - An outbound message takes `provider.MostRestrictive` over the classes of every
-      **inbound** message on its `thread_id`. None, or no thread, means restricted.
+      **inbound** message on its `thread_id`, with those inbound classes computed including
+      O2. None, or no thread, means restricted.
     - Only `ClassGeneral` messages are listed or read, and that includes the finder's
       subject and sender lines.
     - The SQL is spelled once, in `internal/tools/mailattach.go`.
@@ -216,6 +230,12 @@ attachments, one of them `application/octet-stream` JSON.
     - (e) outbound on (a)'s thread: allowed.
     - (f) outbound alone on its thread: refused.
     - (g) outbound on a thread with (a) and (b) inbound: refused.
+    - (h) O2: inbound unmatched on a mailbox with ≥20 filings, all under `any` projects:
+      allowed.
+    - (i) O2: inbound unmatched on a mailbox with ≥20 `any` filings plus ONE `local_only`
+      filing: refused, "not filed under a project".
+    - (j) O2: inbound unmatched on a mailbox with only 19 `any` filings: refused.
+    - (k) O2: outbound on (h)'s thread: allowed.
 
     No refusal text contains "not stored" or "does not exist".
 15. **Explicit ids vs finder.** An explicit id (raw, message or thread member) that is
@@ -227,7 +247,8 @@ attachments, one of them `application/octet-stream` JSON.
     "an actor-prefix check is a transport label, not a trust boundary".
 17. **Mutation proof (review checks it).** Replacing `p.ai_locality = 'local_only'` with
     `false` in the class SELECT turns (b) red. Dropping the outbound fold (treating outbound
-    as its own unseen) turns (e) red.
+    as its own unseen) turns (e) red. Dropping the mailbox rule's local-only clause turns (i)
+    red, and lowering the threshold to 0 turns (j) red.
 
 **Executor, audit, writes**
 
@@ -470,6 +491,20 @@ Claude Code session gets. `mail_search` / `mail_read_thread` are not part of the
 and stay full-profile only. The finder form (criterion 3) exists because a user-profile
 session otherwise has no way to reach a message id (fact 6).
 
+**O2 (Salvador, 2026-09-12): "yes" to "treat unfiled handsonconnect mail as readable".** The
+question put to him: "Only mail filed under a non-local-only project may go to a cloud model,
+and unfiled mail counts as restricted. Sana's email was never filed, so her attachments stay
+locked. Treat unfiled handsonconnect mail as readable, since that mailbox only ever means
+collaboratory or reengine (446 + 4 filings, both `any`), while unfiled sspataro@gmail.com mail
+stays locked because it carries personal and bulk mail?" He answered "yes, go ahead and build
+it and deliver it".
+- It is implemented as the data-derived mailbox rule in criterion 13, not a hard-coded
+  address. On prod today (2026-09-12) the rule allows salvador@handsonconnect.org (116
+  unfiled) and restricts sspataro@gmail.com and developer@sspataro.com (both have `local_only`
+  filings).
+- SWT-40's `source_account_projects` candidate sets supersede it when they ship. The rule then
+  becomes "unfiled mail is general iff every candidate project of the mailbox is non-local".
+
 ## Accepted risk (O1): the SWT-37 V0 / SWT-38 C9 pattern
 
 - **The exposure.** Any session in any repo can now pull in text that a stranger wrote: a
@@ -532,9 +567,9 @@ session otherwise has no way to reach a message id (fact 6).
    psql -h 192.168.50.49 -U ops -d ops -tAc "SELECT id, external_id, raw_json->>'source', raw_json->>'truncated', raw_json->>'size' FROM raw_source_items WHERE id=77761"
    psql -h 192.168.50.49 -U ops -d ops -tAc "SELECT m.external_message_id, m.direction, p.slug, p.ai_locality FROM normalized_messages m LEFT JOIN LATERAL (SELECT project_id FROM capture_decisions cd WHERE cd.message_id=m.id ORDER BY cd.id DESC LIMIT 1) l ON true LEFT JOIN projects p ON p.id=l.project_id WHERE m.raw_source_item_id=77761"
    ```
-   Expect `imap`, `false`, and `collaboratory | any`. If the project is NULL, the tool will
-   refuse, by design. Add or fix the capture rule first. Never weaken the gate for the
-   smoke.
+   Expect `imap`, `false`. 77761 is unmatched on prod (no project), so it is allowed only
+   through O2: salvador@handsonconnect.org must show ≥20 filings, none `local_only`. Never
+   weaken the gate for the smoke.
 5. **Smoke, full profile.** Open a new session in the worktree (`.mcp.json` runs
    `go run ./cmd/ops-mcp` from the checkout). Use `env -u ANTHROPIC_API_KEY` if scripting
    `claude -p`.
