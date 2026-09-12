@@ -66,7 +66,7 @@ var agentTools = []Tool{
 		// SWT-44: fix the words of a reply you drafted, before Salvador approves it.
 		// humanOnly in policy: listed for interactive sessions; a worker is refused.
 		Name:        "update_delivery",
-		Description: "Edit the subject and/or body of a DRAFTED delivery (only while its status is drafted) before Salvador approves it. Approving and sending happen on the dashboard, never from a session. Human-only: a worker console is refused.",
+		Description: "Edit the subject and/or body of a DRAFTED delivery (only while its status is drafted) before Salvador approves it. At least one of subject or body is required; a body, when given, must not be empty (an empty subject clears it). From the user-scope install, only drafts that session created. Approving and sending happen on the dashboard, never from a session. Human-only: a worker console is refused.",
 		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"},"subject":{"type":"string"},"body":{"type":"string"}},"required":["delivery_id"]}`),
 	},
 	{

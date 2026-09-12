@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 //go:embed templates/*.html
@@ -77,7 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /export/tasks.json", s.auth.Require(http.HandlerFunc(s.exportJSON)))
 	mux.Handle("GET /deliveries", s.auth.Require(http.HandlerFunc(s.listDeliveries)))
 	mux.Handle("POST /deliveries/{id}/edit", s.auth.Require(http.HandlerFunc(s.actionEdit)))
-	mux.Handle("POST /deliveries/{id}/approve", s.auth.Require(s.action("approve_delivery")))
+	mux.Handle("POST /deliveries/{id}/approve", s.auth.Require(http.HandlerFunc(s.approveAction)))
 	mux.Handle("POST /deliveries/{id}/send", s.auth.Require(s.action("send_delivery")))
 	mux.Handle("POST /deliveries/{id}/mark-sent", s.auth.Require(s.action("mark_delivery_sent")))
 	// Resolves a stuck slack_reply 'sending' row the other way: a human looked in
@@ -104,6 +105,54 @@ type deliveryRow struct {
 	// checking what was booked must see WHEN.
 	StartsAt string
 	EndsAt   string
+	// ContentHash is tools.DeliveryContentHash of the Subject/Body this page
+	// renders. The Approve form posts it back as expect_content_hash, so an
+	// edit made after the page loaded (a session's update_delivery) makes the
+	// approve refuse instead of passing words Salvador never saw (SWT-44).
+	ContentHash string
+	// Where the send would go, shown before approval (SWT-44 review). Gmail:
+	// From / To / ThreadSubject from tools.ResolveGmailRoute — the send path's
+	// own resolution, never a second spelling. Any other channel: TargetRef.
+	// Unresolvable parts read "(unresolved)".
+	From, To, ThreadSubject string
+	TargetRef               string
+}
+
+const unresolved = "(unresolved)"
+
+// sendable are the statuses a gmail send can still start from (approve covers
+// failed-without-id). A sent row's route is NOT recomputed: the thread may
+// have a newer inbound message now, and showing it would misstate where the
+// mail went.
+var sendable = map[string]bool{"drafted": true, "approved": true, "failed": true}
+
+// resolveDestination fills d's destination fields (SWT-44 review).
+func (s *Server) resolveDestination(ctx context.Context, d *deliveryRow, fromAcct, threadID *int64) {
+	if d.Channel != "gmail" {
+		if d.TargetRef == "" {
+			d.TargetRef = unresolved
+		}
+		return
+	}
+	if !sendable[d.Status] {
+		return
+	}
+	d.From, d.To, d.ThreadSubject = unresolved, unresolved, unresolved
+	if fromAcct == nil || threadID == nil {
+		return
+	}
+	// On error the route still carries what resolved before the failure, so a
+	// thread with nothing inbound still shows its From and subject.
+	r, _ := tools.ResolveGmailRoute(ctx, s.pool, *fromAcct, *threadID)
+	if r.From != "" {
+		d.From = r.From
+	}
+	if r.To != "" {
+		d.To = r.To
+	}
+	if r.Subject != "" {
+		d.ThreadSubject = r.Subject
+	}
 }
 
 type pageData struct {
@@ -118,7 +167,8 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	q := `SELECT d.id, d.task_id, COALESCE(t.title,''), d.channel, d.status,
 	             COALESCE(d.subject,''), COALESCE(d.body,''), COALESCE(d.created_by,''),
 	             COALESCE(d.sent_at::text,''), COALESCE(d.confirmed_at::text,''), COALESCE(d.error,''),
-	             COALESCE(d.starts_at::text,''), COALESCE(d.ends_at::text,'')
+	             COALESCE(d.starts_at::text,''), COALESCE(d.ends_at::text,''),
+	             d.from_account_id, d.thread_id, COALESCE(d.target_ref,'')
 	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id`
 	args := []any{}
 	if status != "" {
@@ -135,15 +185,28 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	data := pageData{Status: status, Flash: r.URL.Query().Get("flash")}
+	type routeRef struct{ fromAcct, threadID *int64 }
+	var refs []routeRef
 	for rows.Next() {
 		var d deliveryRow
+		var ref routeRef
 		if err := rows.Scan(&d.ID, &d.TaskID, &d.TaskTitle, &d.Channel, &d.Status,
 			&d.Subject, &d.Body, &d.CreatedBy, &d.SentAt, &d.ConfirmedAt, &d.Error,
-			&d.StartsAt, &d.EndsAt); err != nil {
+			&d.StartsAt, &d.EndsAt, &ref.fromAcct, &ref.threadID, &d.TargetRef); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		d.ContentHash = tools.DeliveryContentHash(d.Subject, d.Body)
 		data.Deliveries = append(data.Deliveries, d)
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	rows.Close() // release the connection before the per-row route reads
+	for i := range data.Deliveries {
+		s.resolveDestination(r.Context(), &data.Deliveries[i], refs[i].fromAcct, refs[i].threadID)
 	}
 
 	var frozen *bool
@@ -163,6 +226,29 @@ func (s *Server) action(tool string) http.Handler {
 		args := fmt.Sprintf(`{"delivery_id":%s}`, id)
 		s.execute(w, r, tool, args)
 	})
+}
+
+// approveAction approves a delivery bound to the words this page rendered
+// (SWT-44): the form's content_hash goes through as expect_content_hash, and
+// approve_delivery refuses if the row changed since. json.Marshal, not
+// Sprintf: a form value is caller text and must not be able to add or replace
+// keys (delivery_id included). A form without the hash (a page rendered before
+// SWT-44) sends none, and the tool keeps its old behaviour.
+func (s *Server) approveAction(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	payload := map[string]any{"delivery_id": jsonNum(r.PathValue("id"))}
+	if h := r.PostFormValue("content_hash"); h != "" {
+		payload["expect_content_hash"] = h
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil { // a non-numeric id is not a json.Number
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.execute(w, r, "approve_delivery", string(raw))
 }
 
 func (s *Server) actionEdit(w http.ResponseWriter, r *http.Request) {

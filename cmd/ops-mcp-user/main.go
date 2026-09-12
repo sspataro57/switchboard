@@ -3,13 +3,16 @@
 // docs/runbooks/ops-mcp-user-scope.md). It serves exactly the user profile —
 // project_list, task_list, task_get_next, task_dismiss, task_close,
 // task_mark_delivered, since SWT-38 create_task, task_append_log and
-// task_set_priority, and since SWT-42 mail_list_attachments and
+// task_set_priority, since SWT-42 mail_list_attachments and
 // mail_read_attachment (attachment reads of non-private mail; the locality
-// gate is in the handler) — through the same executor pipeline as ops-mcp
-// (validate → policy → audit → handler). Policy refuses the verbs and
-// task_set_priority to worker identities (human_only / mcp_human_only); the
-// profile's require_assignee_type:"human" pin keeps create_task and
-// task_append_log to human (Salvador's-lane) tasks.
+// gate is in the handler), and since SWT-44 draft_delivery and update_delivery
+// (gmail reply drafts; approve and send stay on the dashboard) — through the
+// same executor pipeline as ops-mcp (validate → policy → audit → handler).
+// Policy refuses the verbs, task_set_priority and update_delivery to worker
+// identities (human_only / mcp_human_only), so OPS_WORKER_ID must be manual:*;
+// the profile's pins keep create_task and task_append_log to human
+// (Salvador's-lane) tasks, draft_delivery to gmail (require_channel) and
+// update_delivery to the session's own drafts (require_own_draft).
 //
 // It is a separate binary, not a setting on ops-mcp, so that nothing can fall
 // back to the full surface: there is no variable whose absence restores it.

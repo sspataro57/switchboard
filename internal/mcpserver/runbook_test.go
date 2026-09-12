@@ -48,6 +48,15 @@ package mcpserver_test
 // accepted-risk paragraph naming untrusted content and the task verbs it could
 // trigger. Every other SWT-35/37/38 requirement is unchanged. EXPECTED RED
 // until the runbook is rewritten.
+//
+// AMENDED — not loosened — for SWT-44 (user-profile-drafts): the user profile
+// gains draft_delivery and update_delivery (thirteen tools) and the full
+// profile goes 25 → 26 (update_delivery is MCP-listed). The stale list gains
+// eleven/11/25. The review fixes add: gmail drafting in the intro's "and
+// nothing else", gmail only, own drafts only, the dashboard showing From and To
+// before approval, a planted-draft recovery (until SWT-43's Deny), drafting in
+// the accepted risk, both tools in the verify step's audit query, and three
+// sentences that are now false are refused outright.
 
 import (
 	"os"
@@ -169,6 +178,15 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{`swt-44`, "the title gains SWT-44"},
 		{`(?s)draft_delivery.{0,400}update_delivery.{0,600}(approve|send).{0,200}dashboard`,
 			"SWT-44: the session drafts and fixes a reply; approving and sending stay on the dashboard"},
+		// SWT-44 review fixes: what the drafting actually is, and how to undo it.
+		{`(?s)draft gmail repl.{0,200}and nothing else`, "the intro's 'and nothing else' includes gmail drafting"},
+		{`(?s)draft_delivery.{0,300}gmail only`, "fix 3: the user profile drafts gmail replies only"},
+		{`its own drafts`, "fix 2: update_delivery edits only the session's own drafts"},
+		{`(?s)dashboard shows.{0,80}from.{0,40}to.{0,80}before`, "fix 4: the dashboard shows From and To before approval"},
+		{`(?s)planted draft.{0,400}(dashboard|unapproved)`, "Recovery: a planted draft is edited on the dashboard or left unapproved"},
+		{`(?s)swt-43.{0,200}deny`, "…until SWT-43's Deny ships"},
+		{`(?s)untrusted.{0,600}draft`, "Accepted risk: drafting from sessions that read untrusted content"},
+		{`tool in \([^)]*'draft_delivery'[^)]*'update_delivery'`, "the verify step's audit query lists both new tools"},
 		// SWT-42 criterion 24.
 		{`swt-42`, "the title gains SWT-42"},
 		{`(?s)find the attachment sana sent.{0,400}mail_list_attachments.{0,300}(sender|subject).{0,400}mail_read_attachment`,
@@ -188,8 +206,18 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 	// SWT-42 criterion 24: the superseded counts are false claims now.
 	for _, stale := range []string{`\bnine tools\b`, `\b9 tools\b`, `\b23 tools\b`, `\beleven tools\b`, `\b11 tools\b`, `\b25 tools\b`} {
 		if regexp.MustCompile(stale).MatchString(lower) {
-			t.Errorf("%s still matches /%s/: since SWT-42 the user profile lists eleven tools and the full "+
-				"profile 25", rel, stale)
+			t.Errorf("%s still matches /%s/: since SWT-44 the user profile lists thirteen tools and the full "+
+				"profile 26", rel, stale)
+		}
+	}
+
+	// SWT-44 review: sentences that stopped being true when the user profile
+	// started drafting. The session picks the thread, so the recipient is not
+	// "never from the session"; and a session now creates and edits deliveries.
+	for _, lie := range []string{"never from the session", "no delivery is created or changed", "no delivery is touched"} {
+		if strings.Contains(lower, lie) {
+			t.Errorf("%s still says %q: since SWT-44 a session drafts and edits delivery rows (never approves or "+
+				"sends), and it chooses the thread the recipient comes from", rel, lie)
 		}
 	}
 

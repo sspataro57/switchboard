@@ -65,6 +65,15 @@ package mcpserver_test
 // TestUserProfile_ListsExactly (nine listed, eleven wanted),
 // TestUserProfile_NoToolReachesTheSendSnapshot (positive control: nine checked,
 // eleven wanted) and the new schema test.
+//
+// SWT-44 (user-profile-drafts, Salvador 2026-09-12): the user profile gains
+// draft_delivery and update_delivery — thirteen tools. The paragraphs above
+// that say it cannot draft were true of SWT-37/38/42 and are superseded here:
+// a session in any repo now writes a GMAIL reply as a drafted delivery row
+// (pinned require_channel:"gmail") and edits only its OWN drafts (pinned
+// require_own_draft:"true"; both pins in user_drafts_test.go). It still
+// cannot approve or send: Salvador does both on the dashboard, and the approve
+// is bound to the words the page showed (expect_content_hash).
 
 import (
 	"context"
@@ -93,9 +102,12 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 //   - task_set_priority: reorder any task (C5); humanOnly, so no worker can (C6).
 //
 // SWT-42 (mail-attachments) criterion 22, O1: mail_list_attachments and
-// mail_read_attachment, eleven in all. Attachment reads, gated by the SWT-21
+// mail_read_attachment, eleven then. Attachment reads, gated by the SWT-21
 // locality rule in the handler (not by this list), and — through the finder
 // form — the only way a session outside the switchboard repo reaches a message.
+//
+// SWT-44: draft_delivery (gmail only, by pin) and update_delivery (own drafts
+// only, by pin), thirteen in all.
 var wantUserProfileTools = []string{
 	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
 	"task_append_log", "task_close", "task_dismiss",
@@ -246,10 +258,11 @@ func TestUserProfile_RefusesEveryOtherTool(t *testing.T) {
 	}
 }
 
-// Criterion 11 (SWT-37), AMENDED — not deleted — by SWT-38 criterion 16. By
-// NAME, so a later edit to userProfileTools fails with the offending name
-// rather than a count. Nothing that claims, creates child work, drafts,
-// approves, sends, books, links, decides, reads mail or reopens.
+// Criterion 11 (SWT-37), AMENDED — not deleted — by SWT-38 criterion 16 and
+// SWT-44. By NAME, so a later edit to userProfileTools fails with the offending
+// name rather than a count. Nothing that claims, creates child work, approves,
+// sends, books, links, decides, reads mail bodies or reopens (drafting left
+// this list in SWT-44; see the amendment below).
 func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 	listed := map[string]bool{}
 	for _, tool := range mcpserver.NewWithProfile(&fakeExec{}, testWorkerID, mcpserver.ProfileUser).ListTools() {
@@ -291,7 +304,8 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 		if listed[name] {
 			t.Errorf("the user profile lists %q. SWT-37 V3/criterion 11, SWT-38 criterion 16: the user-scope "+
 				"install sits in every repo's session and reads untrusted content; it may dismiss, close, mark "+
-				"delivered, create human tasks, log on them and set priority, and nothing else", name)
+				"delivered, create human tasks, log on them, set priority, read non-private attachments and "+
+				"draft gmail replies (SWT-44), and nothing else", name)
 		}
 	}
 	if len(listed) == 0 {

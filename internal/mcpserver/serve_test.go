@@ -21,6 +21,10 @@ package mcpserver
 // mail_read_attachment join BOTH profiles (owner decision O1). Full: 23 + 2 =
 // 25. User: 9 + 2 = 11. Read: 3, unchanged — the fail-closed floor gains
 // nothing. EXPECTED RED until schemas.go and userProfileTools gain both names.
+//
+// SWT-44 (user-profile-drafts): update_delivery becomes MCP-listed (still
+// policy.humanOnly), so Full: 25 + 1 = 26. The user profile gains
+// draft_delivery and update_delivery: User: 11 + 2 = 13. Read: 3, unchanged.
 
 import (
 	"context"

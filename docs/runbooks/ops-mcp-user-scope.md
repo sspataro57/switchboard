@@ -3,8 +3,9 @@
 Install `ops-mcp-user` once for Claude Code at USER scope, so a session opened in
 any repo on the workstation can read switchboard's queues, dismiss, close or mark
 delivered a task, log the work Salvador hands it as a swb task in his own lane,
-write progress on that task, reorder any task's priority, and read the attachments of
-non-private mail (SWT-42) — and nothing else.
+write progress on that task, reorder any task's priority, read the attachments of
+non-private mail (SWT-42), and draft gmail replies that Salvador approves and sends on the
+dashboard (SWT-44) — and nothing else.
 The per-repo binding — which switchboard project is this repo's queue — lives in
 Claude Code's own per-project memory, not in switchboard.
 
@@ -61,7 +62,12 @@ Then open a NEW session.
   reads attachments of non-private mail only (SWT-42): `mail_list_attachments` finds a message by id or by
   sender/subject (headers and attachment names, never a body) and `mail_read_attachment`
   returns one attachment inline, or saves a PDF/image to
-  `~/.cache/switchboard/attachments/` and returns the path.
+  `~/.cache/switchboard/attachments/` and returns the path. And it drafts client email
+  replies (SWT-44): `draft_delivery`, gmail only — the binary pins
+  `require_channel:"gmail"`, so a Slack, Upwork, Jira or calendar draft is refused — and
+  `update_delivery` on its own drafts while they are still drafted (the binary pins
+  `require_own_draft`, so a draft the drafts worker, the dashboard or another session wrote
+  is refused).
 - **What it cannot do.** It cannot claim, create worker (`claude`) tasks, log on
   worker tasks, approve, send, book, link, decide, read mail bodies or reopen (it drafts, but
   never approves or sends: SWT-44).
@@ -109,21 +115,31 @@ a stranger's file. What limits it: only attachments of mail filed under a non-`l
 project are returned (and unfiled mail only on a mailbox with at least 20 filed messages, none
 of them local-only — owner decision O2), so personal, bank, health and bulk mail never arrive; the finder returns
 no bodies; the Instructions and both tool descriptions say attachment content is data, never
-instructions (a prompt rule, not a boundary). What cannot happen: nothing is sent, no
-delivery is touched, nothing is written to the database but the audit row, and saved files
-stay inside `~/.cache/switchboard/attachments`. Every attachment call leaves an audit row
+instructions (a prompt rule, not a boundary). What cannot happen through the attachment
+tools: they send nothing, touch no delivery row, write nothing to the database but the audit
+row, and keep saved files inside `~/.cache/switchboard/attachments`. Every attachment call leaves an audit row
 with its message and part ids; the content itself is never stored.
 
-**Since SWT-44 (Salvador, 2026-09-12)** the install also drafts client replies: `draft_delivery`
-writes the reply as a drafted delivery row on the task (From and recipient come from the thread,
-never from the session), and `update_delivery` fixes its words while it is still drafted.
-Approving and sending stay on the dashboard, deliberately: a session must not approve its own
-client email, and a session that has just read an attachment is reading a stranger's text.
-The user binary wires no mail sender at all.
+**Since SWT-44 (Salvador, 2026-09-12)** the install also drafts client email replies:
+`draft_delivery` writes the reply as a drafted gmail delivery row on the task, and
+`update_delivery` fixes the words of its own drafts while they are still drafted. The session
+picks the thread (`thread_id`); the From mailbox is resolved from that thread and the To is
+the thread's latest inbound sender, and the dashboard shows From, To and the thread subject on
+the draft before approval. Approving and sending stay on the dashboard, deliberately: a session
+must not approve its own client email, and a session that has just read an attachment is
+reading a stranger's text. The approve is bound to the words the page showed: if the draft
+changed after the page loaded, Approve refuses and asks for a reload. The user binary wires no
+mail sender at all.
+
+**Accepted risk (SWT-44).** Untrusted text a session reads — a mail, an attachment, a web page —
+can tell it to draft a reply on any task, into any gmail thread it can name, or to rewrite one
+of its own drafts. It stays a draft: nothing leaves until Salvador reads it on the dashboard,
+with its From and To, and approves it. Damage: a misleading draft in the approval queue.
 
 The session instructions say to act only when Salvador asks for that task id;
-that is a prompt rule, not a boundary. What cannot happen: nothing is sent, and no
-delivery is created or changed; no worker is dispatched onto attacker-authored
+that is a prompt rule, not a boundary. What cannot happen: nothing is sent and nothing is
+approved — a session creates and edits only drafted gmail deliveries, which go nowhere until
+Salvador approves them on the dashboard; no worker is dispatched onto attacker-authored
 work; no claim is taken; no status other than `ready` is created. A wrong close or
 dismiss drops the task from the queue and unblocks its dependents; a wrong dismiss
 also writes a training label and stops the Jira status sync from reopening a
@@ -135,6 +151,8 @@ Recovery:
 - a wrong "delivered": `task_close`, then `task_reopen` with `"status":"done_locally"`;
 - a wrong priority: one `task_set_priority` back to the event's `from`;
 - a planted task: `task_close`, or `task_dismiss` with `not_actionable`;
+- a planted draft: until SWT-43's Deny ships there is no verb that discards one — edit it on
+  the dashboard, or leave it unapproved; a draft never sends without an approval;
 - once SWT-36 (`dismiss-reopen-on-activity`) ships, a dismissed task also reopens
   by itself on the next inbound message routed to it (by a classify promotion or a
   capture rule).
@@ -187,7 +205,7 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
    loads `.mcp.json`'s (verified 2026-09-10).
 4. From the other repo, `project_list` and `task_list(project=<slug>)` answer.
 5. `psql -h 192.168.50.49 -U ops -d ops -c "SELECT actor, tool, status FROM
-   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered','create_task','task_append_log','task_set_priority')
+   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered','create_task','task_append_log','task_set_priority','draft_delivery','update_delivery')
    ORDER BY id DESC LIMIT 5"` shows those calls with actor `mcp:manual:salvo`.
 
 ## Use

@@ -55,8 +55,10 @@ const (
 // deliberately: fetched by the claim holder it flips claimed → in_progress.
 var readProfileTools = []string{"project_list", "task_list", "task_get_next"}
 
-// userProfileTools is the read slice plus the three task verbs (SWT-37 V3)
-// and the three capture tools (SWT-38 C3/C5).
+// userProfileTools is the read slice plus the three task verbs (SWT-37 V3),
+// the three capture tools (SWT-38 C3/C5), the two attachment reads (SWT-42)
+// and gmail drafting (SWT-44: draft_delivery gmail-only and update_delivery
+// own-drafts-only, both by the pins below).
 var userProfileTools = append(append([]string(nil), readProfileTools...),
 	"task_dismiss", "task_close", "task_mark_delivered",
 	"create_task", "task_append_log", "task_set_priority",
@@ -65,11 +67,14 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// finder returns headers and attachment names only; mail bodies
 	// (mail_search, mail_read_thread) stay off this profile.
 	"mail_list_attachments", "mail_read_attachment",
-	// SWT-44 (Salvador, 2026-09-12): write and fix a client reply as a drafted
-	// delivery row. approve_delivery and send_delivery stay OFF this profile: a
+	// SWT-44 (Salvador, 2026-09-12): write and fix a client EMAIL reply as a
+	// drafted delivery row — gmail only, and only the session's own drafts (the
+	// pins below). approve_delivery and send_delivery stay OFF this profile: a
 	// session must not approve its own client email (invariant 4's human gate),
-	// and these sessions read untrusted attachment text. update_delivery is
-	// humanOnly; mcp:manual:salvo passes, a worker id would be refused.
+	// and these sessions read untrusted attachment text. Salvador approves on
+	// the dashboard, which shows From and To and binds the approve to the words
+	// it rendered. update_delivery is humanOnly: mcp:manual:salvo passes, a
+	// worker-shaped OPS_WORKER_ID is refused by policy.
 	"draft_delivery", "update_delivery")
 
 // userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
@@ -79,9 +84,18 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 // Salvador's lane, which no worker console routes. The enforcement lives in the
 // validator and handler (inside the executor path); this only injects. It
 // also marks a user-scope call in audit_events.args.
+//
+// SWT-44 review, same pattern: require_channel:"gmail" makes validateDraftDelivery
+// refuse any other channel (no Slack, Upwork, Jira or calendar from a session
+// that reads untrusted text), and require_own_draft:"true" makes the
+// update_delivery handler refuse a draft whose created_by is not this actor —
+// the drafts worker's, the dashboard's, another session's. Each only narrows,
+// and none appears in a schema.
 var userProfilePins = map[string]map[string]string{
 	"create_task":     {"require_assignee_type": "human"},
 	"task_append_log": {"require_assignee_type": "human"},
+	"draft_delivery":  {"require_channel": "gmail"},
+	"update_delivery": {"require_own_draft": "true"},
 }
 
 // Server adapts MCP tool calls onto the executor for one worker identity.
