@@ -78,6 +78,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /deliveries", s.auth.Require(http.HandlerFunc(s.listDeliveries)))
 	mux.Handle("POST /deliveries/{id}/edit", s.auth.Require(http.HandlerFunc(s.actionEdit)))
 	mux.Handle("POST /deliveries/{id}/approve", s.auth.Require(s.action("approve_delivery")))
+	// SWT-43: Deny / Redo, one form, the redraft bit chosen by the button.
+	mux.Handle("POST /deliveries/{id}/reject", s.auth.Require(http.HandlerFunc(s.actionReject)))
 	mux.Handle("POST /deliveries/{id}/send", s.auth.Require(s.action("send_delivery")))
 	mux.Handle("POST /deliveries/{id}/mark-sent", s.auth.Require(s.action("mark_delivery_sent")))
 	// Resolves a stuck slack_reply 'sending' row the other way: a human looked in
@@ -104,6 +106,9 @@ type deliveryRow struct {
 	// checking what was booked must see WHEN.
 	StartsAt string
 	EndsAt   string
+	// SWT-43: set on rejected rows only.
+	RejectionNote    string
+	RedraftRequested bool
 }
 
 type pageData struct {
@@ -118,7 +123,8 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	q := `SELECT d.id, d.task_id, COALESCE(t.title,''), d.channel, d.status,
 	             COALESCE(d.subject,''), COALESCE(d.body,''), COALESCE(d.created_by,''),
 	             COALESCE(d.sent_at::text,''), COALESCE(d.confirmed_at::text,''), COALESCE(d.error,''),
-	             COALESCE(d.starts_at::text,''), COALESCE(d.ends_at::text,'')
+	             COALESCE(d.starts_at::text,''), COALESCE(d.ends_at::text,''),
+	             COALESCE(d.rejection_note,''), d.redraft_requested_at IS NOT NULL
 	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id`
 	args := []any{}
 	if status != "" {
@@ -139,7 +145,7 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 		var d deliveryRow
 		if err := rows.Scan(&d.ID, &d.TaskID, &d.TaskTitle, &d.Channel, &d.Status,
 			&d.Subject, &d.Body, &d.CreatedBy, &d.SentAt, &d.ConfirmedAt, &d.Error,
-			&d.StartsAt, &d.EndsAt); err != nil {
+			&d.StartsAt, &d.EndsAt, &d.RejectionNote, &d.RedraftRequested); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -179,6 +185,24 @@ func (s *Server) actionEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, _ := json.Marshal(payload)
 	s.execute(w, r, "update_delivery", string(raw))
+}
+
+// actionReject is Deny (redraft=false) and Redo (redraft=true). The note is
+// free text, so the args are built with json.Marshal, never Sprintf.
+func (s *Server) actionReject(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	payload := map[string]any{
+		"delivery_id": jsonNum(r.PathValue("id")),
+		"redraft":     r.PostFormValue("redraft") == "true",
+	}
+	if v := r.PostFormValue("note"); v != "" {
+		payload["note"] = v
+	}
+	raw, _ := json.Marshal(payload)
+	s.execute(w, r, "reject_delivery", string(raw))
 }
 
 func (s *Server) actionFreeze(w http.ResponseWriter, r *http.Request) {

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -478,22 +479,32 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 // final comment) must still go out. A stale draft on a task marked delivered by
 // hand stays behind the human approval gate.
 func refuseClosedTask(ctx context.Context, tx pgx.Tx, deliveryID int64) error {
-	var taskID int64
-	var status string
-	err := tx.QueryRow(ctx,
-		`SELECT t.id, t.status FROM deliveries d JOIN tasks t ON t.id = d.task_id
-		  WHERE d.id=$1 FOR SHARE OF t`, deliveryID).Scan(&taskID, &status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("delivery %d not found", deliveryID)
-	}
+	taskID, status, err := lockDeliveryTask(ctx, tx, deliveryID)
 	if err != nil {
-		return fmt.Errorf("lock task of delivery %d: %w", deliveryID, err)
+		return err
 	}
 	if status == "closed" {
 		return fmt.Errorf("delivery %d's task %d is closed: switchboard never approves or sends a delivery for "+
 			"closed work; reopen the task first", deliveryID, taskID)
 	}
 	return nil
+}
+
+// lockDeliveryTask SHARE-locks the delivery's task row and returns its id and
+// status: the ONE spelling of the task → delivery lock order (refuseClosedTask's
+// rationale above). refuseClosedTask and rejectDelivery both call it;
+// rejectDelivery does not refuse closed work (SWT-43 criterion 8).
+func lockDeliveryTask(ctx context.Context, tx pgx.Tx, deliveryID int64) (taskID int64, status string, err error) {
+	err = tx.QueryRow(ctx,
+		`SELECT t.id, t.status FROM deliveries d JOIN tasks t ON t.id = d.task_id
+		  WHERE d.id=$1 FOR SHARE OF t`, deliveryID).Scan(&taskID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", fmt.Errorf("delivery %d not found", deliveryID)
+	}
+	if err != nil {
+		return 0, "", fmt.Errorf("lock task of delivery %d: %w", deliveryID, err)
+	}
+	return taskID, status, nil
 }
 
 func splitGmailThreadKey(key string) (email, gmailThreadID string, err error) {
@@ -623,6 +634,156 @@ func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": a.DeliveryID, "status": "approved"})
+}
+
+// ---- reject_delivery (SWT-43) ----------------------------------------------------
+
+// maxRejectNoteRunes caps the note: it travels into the drafts worker's prompt.
+// Runes, not bytes, so an accented note is not refused at half length.
+const maxRejectNoteRunes = 2000
+
+type rejectDeliveryArgs struct {
+	DeliveryID int64  `json:"delivery_id"`
+	Note       string `json:"note,omitempty"`
+	Redraft    bool   `json:"redraft,omitempty"`
+}
+
+func validateRejectDelivery(args []byte) error {
+	var a rejectDeliveryArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		// A non-boolean redraft lands here: it is refused, never coerced.
+		return fmt.Errorf("parse args (delivery_id int, note string, redraft bool): %w", err)
+	}
+	if a.DeliveryID == 0 {
+		return errors.New("missing delivery_id")
+	}
+	if n := utf8.RuneCountInString(a.Note); n > maxRejectNoteRunes {
+		return fmt.Errorf("note is %d runes; the limit is %d", n, maxRejectNoteRunes)
+	}
+	return nil
+}
+
+// rejectDelivery is the human negative verdict (Deny, or Redo with redraft).
+// It moves an unsent row to the terminal status 'rejected' and records the
+// verdict as labelled data (an approvals row plus a delivery_rejected event).
+// With redraft it also stamps redraft_requested_at, the one thing that makes
+// that row stop blocking the drafts worker. It is humanOnly and off MCP (D9).
+//
+// Lock order is task → delivery, through lockDeliveryTask. Unlike approve and
+// send it does NOT refuse a closed task: cleaning up a stale draft is exactly
+// what closed work needs. The task status it reads is Redo's precondition (D7).
+func rejectDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, error) {
+	var a rejectDeliveryArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, fmt.Errorf("parse args: %w", err)
+	}
+	var note *string
+	if strings.TrimSpace(a.Note) != "" {
+		note = &a.Note
+	}
+
+	changed := false
+	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		taskID, taskStatus, err := lockDeliveryTask(ctx, tx, a.DeliveryID)
+		if err != nil {
+			return err
+		}
+		var status, channel string
+		var extID, stored *string
+		var confirmed, redraftRequested bool
+		if err := tx.QueryRow(ctx,
+			`SELECT status, channel, sent_external_id, confirmed_at IS NOT NULL,
+			        redraft_requested_at IS NOT NULL, rejection_note
+			   FROM deliveries WHERE id=$1 FOR UPDATE`,
+			a.DeliveryID).Scan(&status, &channel, &extID, &confirmed, &redraftRequested, &stored); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("delivery %d not found", a.DeliveryID)
+			}
+			return fmt.Errorf("lock delivery %d: %w", a.DeliveryID, err)
+		}
+		refuse := func(reason string) error {
+			return fmt.Errorf("delivery %d (%s, %s) cannot be rejected: %s", a.DeliveryID, status, channel, reason)
+		}
+		// D7: a draft can only be written for done_locally work (draft_delivery's
+		// expect_task_status), so a redraft flag anywhere else would never be honoured.
+		needDoneLocally := func() error {
+			if taskStatus != "done_locally" {
+				return refuse(fmt.Sprintf("its task %d is %s, and a new draft can only be written for "+
+					"done_locally work; Deny it instead", taskID, taskStatus))
+			}
+			return nil
+		}
+
+		upgrade := false
+		switch status {
+		case "drafted", "approved":
+		case "failed":
+			// D4: sendJiraComment writes failed with a NULL id for EVERY error, so the
+			// comment may have landed and the jira matcher still claims failed rows.
+			if channel == "jira_comment" {
+				return refuse("a failed jira_comment may have been sent (the Jira send cannot tell a " +
+					"refusal from a lost response), and its matcher can still claim it")
+			}
+			if extID != nil || confirmed {
+				return refuse("it carries a sent id or a confirmation, so it may have been sent")
+			}
+		case "rejected":
+			switch {
+			case !redraftRequested && !a.Redraft, redraftRequested && a.Redraft:
+				return nil // replay: no-op success, writes nothing
+			case redraftRequested && !a.Redraft:
+				return refuse("a redraft was already requested and the drafts worker may have written the " +
+					"new draft; deny the new draft instead (D6)")
+			}
+			upgrade = true // D6: plain Deny → Redo
+		default: // sending, sent
+			return refuse("it is sending or sent; the words may already be on the wire")
+		}
+		if a.Redraft {
+			if err := needDoneLocally(); err != nil {
+				return err
+			}
+		}
+
+		eventNote := note
+		if upgrade {
+			if _, err := tx.Exec(ctx,
+				`UPDATE deliveries SET redraft_requested_at=now(), rejection_note=COALESCE($2, rejection_note),
+				        updated_at=now()
+				  WHERE id=$1`, a.DeliveryID, note); err != nil {
+				return fmt.Errorf("request redraft of delivery %d: %w", a.DeliveryID, err)
+			}
+			if note == nil {
+				eventNote = stored
+			}
+		} else {
+			if _, err := tx.Exec(ctx,
+				`UPDATE deliveries SET status='rejected', rejection_note=$2,
+				        redraft_requested_at=CASE WHEN $3::boolean THEN now() END, updated_at=now()
+				  WHERE id=$1`, a.DeliveryID, note, a.Redraft); err != nil {
+				return fmt.Errorf("reject delivery %d: %w", a.DeliveryID, err)
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO approvals (subject_type, subject_id, status, decided_by, decided_at)
+				 VALUES ('delivery', $1, 'rejected', $2, now())`,
+				a.DeliveryID, executor.ActorFrom(ctx)); err != nil {
+				return fmt.Errorf("insert approval: %w", err)
+			}
+		}
+		if _, err := insertTaskEvent(ctx, tx, taskID, "delivery_rejected", map[string]any{
+			"delivery_id": a.DeliveryID, "channel": channel, "redraft": a.Redraft, "note": eventNote,
+		}); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return marshalResult(map[string]any{
+		"delivery_id": a.DeliveryID, "status": "rejected", "redraft": a.Redraft, "changed": changed,
+	})
 }
 
 // ---- send_delivery -------------------------------------------------------------

@@ -1075,6 +1075,29 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
 - GO-LIVE PENDING: gmail sends need the SWT-7 OAuth runbook + re-consent with
   `google.Scopes` (now includes gmail.send) + manual
   `UPDATE source_accounts SET send_enabled=true` per allowed account.
+- **`rejected` is a terminal delivery status (SWT-43, delivery-deny).** Written
+  ONLY by `reject_delivery {delivery_id, note?, redraft?}` (humanOnly, off MCP;
+  dashboard Deny/Redo). It means "switchboard did not and will not send this
+  row". The rejectable set is `drafted`, `approved`, and `failed` with no sent
+  id and no confirmation — **EXCEPT `jira_comment`**: `sendJiraComment` writes
+  failed+NULL for every error, the comment may have landed, and the jira
+  matcher still claims `failed` rows, so rejecting one would turn a landed
+  comment into a false `outbound_observed` hand-send. `sending`/`sent` never.
+  The verdict is an `approvals` row `('delivery', id, 'rejected', actor)` plus a
+  `delivery_rejected` task event that NO orchestrator rule reacts to (the
+  Deliver task stays open; never infer delivery state into task state).
+- **`deliveries.redraft_requested_at` is the drafts unblock.** The drafts
+  `NOT EXISTS` ignores exactly a rejected row with it set (Redo); a plain Deny
+  keeps blocking; the new draft blocks again. That is the loop bound — one
+  human click per re-draft — and it holds only while `reject_delivery` is the
+  column's sole writer (`TestRedraftRequestedAt_OnlyInternalToolsWritesIt`).
+  Redo needs the work task `done_locally` (the only status a draft lands on).
+- **Every new matcher's, reconciler's or send path's status set must exclude
+  `rejected`.** Today they exclude it by allowlist, pinned by tests;
+  `deliveries_rejected_unsent_check` is the schema backstop (a rejected row can
+  never carry `sent_external_id` or `confirmed_at`). A hand-sent copy of a
+  rejected draft is recorded as `outbound_observed` on the task, never as a
+  stamp on the rejected row.
 
 ## Google connector (shipped in SWT-7 — code complete, OAuth PENDING)
 

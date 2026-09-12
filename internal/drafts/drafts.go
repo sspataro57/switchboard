@@ -18,7 +18,9 @@ import (
 	"github.com/sspataro57/switchboard/internal/provider"
 )
 
-const PromptVersion = "drafts-v1"
+// PromptVersion is drafts-v2 since SWT-43: the user prompt gained the redraft
+// section.
+const PromptVersion = "drafts-v2"
 
 const SchemaName = "delivery_draft"
 
@@ -82,6 +84,12 @@ type DeliverTask struct {
 	// message content, and its attribution counts the same way it does in triage.
 	ProjectLocalOnly     bool
 	NeighbourAttribution []NeighbourClass
+
+	// The Redo inputs (SWT-43): the parent's newest rejected delivery with a
+	// redraft requested. RedraftOf is 0 for a first draft.
+	RedraftOf     int64
+	RejectedBody  string
+	RejectionNote string // "" when he gave no reason
 }
 
 // NeighbourClass is one thread message's attribution, for the most-restrictive
@@ -160,6 +168,8 @@ func Run(ctx context.Context, store Store, router *provider.Router, exec Executo
 			"parent_task_id":  dt.ParentTaskID,
 			"channel":         dt.Channel,
 			"user_prompt":     user,
+			// The only link between a redraft and the row it replaces (SWT-43).
+			"redraft_of_delivery_id": dt.RedraftOf,
 		})
 
 		// THE BOUNDARY (SWT-21). The task's own project, folded with every thread
@@ -285,6 +295,21 @@ func renderUser(dt DeliverTask) string {
 		for _, m := range dt.Thread {
 			fmt.Fprintf(&b, "  [%s %s] %s: %s\n", m.SentAt.Format("2006-01-02"), m.Direction, m.Sender, truncate(m.BodyText, 300))
 		}
+	}
+	if dt.RedraftOf != 0 {
+		// Locality (SWT-21) is unchanged by this section: the class fold in Run
+		// uses the same inputs. The rejected body was produced from this same
+		// task's context, and the note is Salvador's own instruction to the
+		// drafter, so neither adds an attribution the fold must see. Feeding any
+		// OTHER row's text here would need the fold to change.
+		reason := dt.RejectionNote
+		if reason == "" {
+			reason = "(no reason given)"
+		}
+		b.WriteString("\nAn earlier draft for this work was rejected by Salvador before it was sent:\n")
+		fmt.Fprintf(&b, "  %s\n", truncate(dt.RejectedBody, 600))
+		fmt.Fprintf(&b, "His reason: %s\n", reason)
+		b.WriteString("Write a new message that addresses his reason. Do not repeat the rejected draft.\n")
 	}
 	b.WriteString("\nDraft the message telling the client this work is done.")
 	return b.String()

@@ -73,6 +73,11 @@ var humanOnly = map[string]bool{
 	// channel therefore needs no change here, which is why the channel check
 	// lives in the handler.
 	"mark_delivery_failed": true,
+	// SWT-43 D9: a delivery verdict on a worker's own words belongs to the human,
+	// and it is labelled data (approvals + rejection_note) an automated caller
+	// must not mint. Not send-shaped, freeze-gated or snapshot-gated: it moves a
+	// row AWAY from the world (the mark_delivery_failed argument).
+	"reject_delivery": true,
 	// SWT-17: capture rules decide which project a captured message belongs to,
 	// so they are the funnel's steering. Human-only for the same reason the
 	// plan-import verdicts are: an agent that could add a rule could route any

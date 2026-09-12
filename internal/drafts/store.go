@@ -61,6 +61,12 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 	// parent closed or marked delivered by hand (swb close / swb delivered, or
 	// opsctl) leaves its Deliver #N child open; without this clause the worker
 	// drafts a delivery for work that is already done.
+	//
+	// SWT-43: a rejected row with a redraft requested (Redo) is the ONE delivery
+	// that does not block; a plain Deny keeps blocking, and the new draft blocks
+	// again (one human click per re-draft). Status is spelled out rather than
+	// trusting deliveries_rejection_fields_check alone. The LATERAL feeds the
+	// newest such row's body and note into the prompt.
 	q := `SELECT t.id, t.parent_id, p.slug,
 	             COALESCE(parent.title,''),
 	             COALESCE(NULLIF(p.client,''), p.name),
@@ -69,13 +75,19 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 	             COALESCE((SELECT payload->>'summary' FROM task_events
 	                WHERE task_id = t.parent_id AND event_type='done_local'
 	                ORDER BY id DESC LIMIT 1),''),
-	             (p.ai_locality = 'local_only')
+	             (p.ai_locality = 'local_only'),
+	             COALESCE(rj.id, 0), COALESCE(rj.body,''), COALESCE(rj.rejection_note,'')
 	      FROM tasks t
 	      JOIN tasks parent ON parent.id = t.parent_id
 	      JOIN projects p ON p.id = t.project_id
+	      LEFT JOIN LATERAL (
+	        SELECT d.id, d.body, d.rejection_note FROM deliveries d
+	         WHERE d.task_id = t.parent_id AND d.status = 'rejected' AND d.redraft_requested_at IS NOT NULL
+	         ORDER BY d.id DESC LIMIT 1) rj ON true
 	      WHERE t.title LIKE 'Deliver #%' AND t.status IN ('ready','holding')
 	        AND parent.status = 'done_locally'
-	        AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.task_id = t.parent_id)
+	        AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.task_id = t.parent_id
+	                        AND NOT (d.status = 'rejected' AND d.redraft_requested_at IS NOT NULL))
 	      ORDER BY t.id`
 	if cfg.Limit > 0 {
 		q += fmt.Sprintf(` LIMIT %d`, cfg.Limit)
@@ -96,7 +108,8 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 		var hasSendFrom bool
 		if err := rows.Scan(&dt.DeliverTaskID, &dt.ParentTaskID, &dt.ProjectSlug,
 			&dt.ParentTitle, &dt.ClientName, &channelCfg, &hasSendFrom,
-			&dt.ParentSummary, &dt.ProjectLocalOnly); err != nil {
+			&dt.ParentSummary, &dt.ProjectLocalOnly,
+			&dt.RedraftOf, &dt.RejectedBody, &dt.RejectionNote); err != nil {
 			return nil, fmt.Errorf("scan deliver task: %w", err)
 		}
 		pending = append(pending, dt)
