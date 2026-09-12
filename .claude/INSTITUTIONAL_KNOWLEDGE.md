@@ -537,7 +537,9 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   it lists/accepts `project_list`, `task_list`, `task_get_next` PLUS
   `task_dismiss`, `task_close`, `task_mark_delivered` (see "Task verbs over
   MCP") and, since SWT-38, `create_task`, `task_append_log`,
-  `task_set_priority` (nine tools; see "Task capture over MCP"). Its main
+  `task_set_priority` (nine tools; see "Task capture over MCP") and, since
+  SWT-42, `mail_list_attachments`, `mail_read_attachment` (eleven; see "Mail
+  attachments over MCP"). Its main
   still calls no `tools.Set*` seam, so NO sender is wired
   (connector code is linked via internal/tools but stays nil). Not an env
   setting on ops-mcp: that was tried and fails open (unset had to mean full for
@@ -561,7 +563,7 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   the same name as `.mcp.json`'s).
 - **LANDMINE: `claude mcp get/list` lie about same-name precedence.** Inside
   this repo they show the user-scope `ops`, yet a session here loads
-  `.mcp.json`'s full `ops` (23 tools since SWT-38; a session in `kube` gets 9).
+  `.mcp.json`'s full `ops` (25 tools since SWT-42; a session in `kube` gets 11).
   Verify precedence from inside a session, never from the CLI listing.
 - `claude -p` from a shell uses `ANTHROPIC_API_KEY` (exported, no credit) over
   the claude.ai login: prefix `env -u ANTHROPIC_API_KEY` for smoke sessions.
@@ -694,6 +696,48 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - `create_task` writes NO creation `task_events` row, and the adapter passes no
   `Call.TaskID`: a session-created task's origin is only in `audit_events.args`
   (project + title), not on its own page.
+
+### Mail attachments over MCP (SWT-42, mail-attachments)
+
+- **Attachments ARE stored** — inside `raw_source_items.raw_json.rfc822_b64`
+  (the whole RFC822 message, IMAP path) for any message up to the capture cap
+  (`MAIL_MAX_MESSAGE_BYTES`, default 1 MiB). NormalizeRFC822 skips them, so
+  `mail_read_thread` shows only the text body; a session that concludes "the
+  attachment isn't stored" is wrong. Over the cap the row is `truncated` and
+  keeps a `parts` manifest (names, types, ENCODED sizes, no bytes). gmail:-shaped
+  rows (API/bridge) carry no bytes at all.
+- `mail_list_attachments` (message ids, a thread, or a sender/subject finder) and
+  `mail_read_attachment` (index | filename | part_id; text inline ≤100 KiB
+  per page with `offset`, else `to_file` → `<UserCacheDir>/switchboard/attachments/<raw>/<idx>-<name>`,
+  0600, swept after 7 days). Both are in BOTH profiles (owner decision O1) — the
+  user profile is now eleven tools, full 25. Read-only, not humanOnly, not
+  snapshotGated: audit row only, never the content. Part numbering is
+  `pathString`, the same numbering `planOversizeFetch` writes into a manifest.
+- **Before SWT-42 the mail tools had NO locality gate** — `mail_search` /
+  `mail_read_thread` return local_only mail bodies to any caller. That residual
+  is still open for those two; the attachment tools are gated in the HANDLER
+  (every caller, every profile) by the SWT-21 rule: latest capture_decisions row
+  per message, `ClassOf(state, local_only)`, outbound folded over its thread's
+  inbound (`MostRestrictive`).
+- **O2 clean-mailbox rule (owner, 2026-09-12):** unfiled inbound is general iff
+  the RECEIVING raw row's `source_account_id` has ≥20 filed inbound messages and
+  none filed local_only (latest decision per message), computed per call. Prod on
+  the day: 1009 handsonconnect clean (566 filed / 0 local); 1003 and 1004 are
+  not. SWT-40's routing supersedes it.
+- Private refusals: an explicit id errors naming the reason (by raw id when the
+  caller gave one — never the private Message-ID); the thread form and the
+  finder classify from HEADERS first and only COUNT restricted matches: private
+  mail is never loaded or MIME-walked. The finder is literal-substring
+  (`likeEscape`), ≤2,000 candidates, ≤64 MiB of raw rows, `truncated` on
+  either cap.
+- The saved-file cache refuses a symlinked base and sweeps only through
+  `os.Root`. Known gaps (Future work): the listed-part count is unbounded
+  (bounded only by the 1 MiB row); `truncatedReason` prints the reader's cap,
+  not the connector's; a truncated manifest omits the text/plain leaf kept as
+  the body, so a named .txt on an HTML-only oversize message is not listed.
+- Attachment content is untrusted third-party text; the Instructions line says
+  read-as-data. Accepted risk as in SWT-37: a session that reads a malicious
+  attachment still holds the write verbs.
 
 ### Link preservation (SWT-25)
 

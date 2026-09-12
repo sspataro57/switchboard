@@ -51,6 +51,20 @@ package mcpserver_test
 // TestUserProfile_ListsExactly (six listed, nine wanted) and
 // TestUserProfile_NoToolReachesTheSendSnapshot (positive control: six checked,
 // nine wanted).
+//
+// SWT-42 (docs/tickets/mail-attachments_SPEC.md) criterion 22, owner decision
+// O1 (Salvador, 2026-09-12: "yes expose it on the user mcp too"): the user
+// profile gains mail_list_attachments and mail_read_attachment — eleven tools.
+// Both carry the SWT-21 locality gate in the handler, for every caller, and
+// the finder returns headers and attachment names, never a body; mail_search
+// and mail_read_thread (the BODY reads) stay forbidden here.
+// TestUserProfile_AttachmentToolsAreTheFullProfilesEntries pins that the two
+// entries are a slice of agentTools, byte for byte.
+//
+// EXPECTED RED until adapter.go's userProfileTools and schemas.go gain both:
+// TestUserProfile_ListsExactly (nine listed, eleven wanted),
+// TestUserProfile_NoToolReachesTheSendSnapshot (positive control: nine checked,
+// eleven wanted) and the new schema test.
 
 import (
 	"context"
@@ -77,8 +91,14 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 //   - task_append_log: progress lines, on human tasks only (C4). A log line on
 //     a claude task is text inside a future worker prompt (SPEC fact 5).
 //   - task_set_priority: reorder any task (C5); humanOnly, so no worker can (C6).
+//
+// SWT-42 (mail-attachments) criterion 22, O1: mail_list_attachments and
+// mail_read_attachment, eleven in all. Attachment reads, gated by the SWT-21
+// locality rule in the handler (not by this list), and — through the finder
+// form — the only way a session outside the switchboard repo reaches a message.
 var wantUserProfileTools = []string{
-	"create_task", "project_list", "task_append_log", "task_close", "task_dismiss",
+	"create_task", "mail_list_attachments", "mail_read_attachment", "project_list", "task_append_log",
+	"task_close", "task_dismiss",
 	"task_get_next", "task_list", "task_mark_delivered", "task_set_priority",
 }
 
@@ -249,10 +269,17 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 		"request_feedback", "mark_done_local",
 		"record_decision",                                     // decides
 		"draft_delivery", "approve_delivery", "send_delivery", // drafts, approves, sends
-		"mark_delivery_sent",              // records a send
-		"book_calendar_block",             // books
-		"link_external_ref",               // links
-		"mail_search", "mail_read_thread", // reads private mail
+		"mark_delivery_sent",  // records a send
+		"book_calendar_block", // books
+		"link_external_ref",   // links
+		// AMENDED — not deleted — by SWT-42 criterion 22 (owner decision O1,
+		// 2026-09-12): the ATTACHMENT reads mail_list_attachments and
+		// mail_read_attachment were added to the user profile. They carry the SWT-21
+		// locality gate (only mail filed under a non-local_only project, or O2's
+		// unfiled mail on a clean mailbox) and the finder returns no bodies. The BODY
+		// reads below stay forbidden: listing them would put private message bodies
+		// into every repo's session, which O1 did not grant.
+		"mail_search", "mail_read_thread", // reads private mail bodies
 		"task_reopen", // reopens (Future work)
 	} {
 		if listed[name] {
@@ -334,5 +361,35 @@ func TestUserProfile_ForwardsWithMCPActor(t *testing.T) {
 	}
 	if string(out) != `{"task_id":412,"status":"closed","dismissed":true}` {
 		t.Errorf("CallTool output = %s, want the executor result verbatim", out)
+	}
+}
+
+// SWT-42 criterion 22: the user profile's two attachment tools are the full
+// profile's entries byte for byte — a slice of agentTools, never a second
+// spelling. The descriptions carry the untrusted-content rule (criterion 21);
+// a second spelling of the schema or description is how one profile loses it.
+func TestUserProfile_AttachmentToolsAreTheFullProfilesEntries(t *testing.T) {
+	full := map[string]mcpserver.Tool{}
+	for _, tool := range mcpserver.New(&fakeExec{}, testWorkerID).ListTools() {
+		full[tool.Name] = tool
+	}
+	user := map[string]mcpserver.Tool{}
+	for _, tool := range mcpserver.NewWithProfile(&fakeExec{}, "manual:salvo", mcpserver.ProfileUser).ListTools() {
+		user[tool.Name] = tool
+	}
+	for _, name := range []string{"mail_list_attachments", "mail_read_attachment"} {
+		f, inFull := full[name]
+		u, inUser := user[name]
+		if !inFull || !inUser {
+			t.Errorf("%s listed: full profile %v, user profile %v — want both (SWT-42 O1)", name, inFull, inUser)
+			continue
+		}
+		if string(f.InputSchema) != string(u.InputSchema) {
+			t.Errorf("%s: the user profile's schema %s is not byte-identical to the full profile's %s", name,
+				u.InputSchema, f.InputSchema)
+		}
+		if f.Description != u.Description {
+			t.Errorf("%s: the user profile's description differs from the full profile's", name)
+		}
 	}
 }

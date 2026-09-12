@@ -2,8 +2,10 @@
 // repo on the workstation (SWT-35, renamed from ops-mcp-read by SWT-37;
 // docs/runbooks/ops-mcp-user-scope.md). It serves exactly the user profile —
 // project_list, task_list, task_get_next, task_dismiss, task_close,
-// task_mark_delivered and, since SWT-38, create_task, task_append_log and
-// task_set_priority — through the same executor pipeline as ops-mcp
+// task_mark_delivered, since SWT-38 create_task, task_append_log and
+// task_set_priority, and since SWT-42 mail_list_attachments and
+// mail_read_attachment (attachment reads of non-private mail; the locality
+// gate is in the handler) — through the same executor pipeline as ops-mcp
 // (validate → policy → audit → handler). Policy refuses the verbs and
 // task_set_priority to worker identities (human_only / mcp_human_only); the
 // profile's require_assignee_type:"human" pin keeps create_task and
