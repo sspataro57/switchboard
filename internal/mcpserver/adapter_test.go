@@ -207,6 +207,15 @@ var spineTools = []string{
 	// ticketstatus:jira), which is precisely why its absence from the MCP surface
 	// is asserted rather than assumed.
 	"task_reopen",
+	// SWT-43 (delivery-deny) criterion 7, D9: reject_delivery is humanOnly AND off
+	// the MCP surface in every profile. It joins mark_delivery_failed and
+	// prefill_delivery: a delivery verdict on a worker's own words belongs to the
+	// human, and the brief put MCP profile changes out of scope. The asymmetry is
+	// recorded, not fixed: approve_delivery and send_delivery ARE MCP-listed
+	// (schemas.go), so an interactive ops session can approve but not reject
+	// (SPEC Future work, "MCP symmetry"). The profile loops in profile_test.go
+	// then prove the read and user profiles refuse it too.
+	"reject_delivery",
 }
 
 func TestDraftDeliverySchema_IncludesSlackReply(t *testing.T) {
