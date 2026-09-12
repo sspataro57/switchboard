@@ -41,8 +41,9 @@ const (
 	// other repo's session sees (Salvador's decisions of 2026-09-10). It can
 	// look at the queues, dismiss, close or mark delivered, create HUMAN tasks,
 	// log on human tasks and set priority. It cannot claim, create or log on
-	// worker (claude) tasks — the profile pins below refuse both — draft,
-	// approve, send, book, link, decide, read mail bodies or reopen; since SWT-42 it reads attachments of non-private mail (O1). Policy refuses
+	// worker (claude) tasks — the profile pins below refuse both — approve,
+	// send, book, link, decide, read mail bodies or reopen; since SWT-42 it reads attachments of non-private mail (O1); since SWT-44 it drafts and edits client replies (draft_delivery,
+	// update_delivery), approving and sending staying on the dashboard. Policy refuses
 	// the verbs and task_set_priority to worker identities.
 	ProfileUser Profile = "user"
 	// ProfileRead serves the queue reads only. No binary builds it since
@@ -63,7 +64,13 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// attachment reads, gated by the SWT-21 locality rule in the handler. The
 	// finder returns headers and attachment names only; mail bodies
 	// (mail_search, mail_read_thread) stay off this profile.
-	"mail_list_attachments", "mail_read_attachment")
+	"mail_list_attachments", "mail_read_attachment",
+	// SWT-44 (Salvador, 2026-09-12): write and fix a client reply as a drafted
+	// delivery row. approve_delivery and send_delivery stay OFF this profile: a
+	// session must not approve its own client email (invariant 4's human gate),
+	// and these sessions read untrusted attachment text. update_delivery is
+	// humanOnly; mcp:manual:salvo passes, a worker id would be refused.
+	"draft_delivery", "update_delivery")
 
 // userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
 // by OVERWRITE, after injectWorkerID. require_assignee_type:"human" makes the
