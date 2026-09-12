@@ -71,6 +71,7 @@ func Report(ctx context.Context, pool *pgxpool.Pool, since time.Time, domain str
 		reportProjects,
 		reportProposedTasks,
 		reportAmbiguous,
+		reportGate, // SWT-40 D6 (gate.go's rows)
 		// SWT-23 criterion 1: the DOMAIN table renders before the full-From
 		// table — it is the one a reader acts on, and the sender table is the
 		// detail underneath it. Both stay.
@@ -424,6 +425,53 @@ func reportAmbiguous(ctx context.Context, pool *pgxpool.Pool, window *time.Time,
 	}
 	if !any {
 		b.WriteString("  (none)\n")
+	}
+	return nil
+}
+
+// reportGate is SWT-40 D6: the capture-time gate on its own lines — live held
+// decisions, those still pending a lookup, and the gate's resolutions by action
+// and reason code. Counted over rows of their mode, not latest decisions: a
+// resolved hold's latest row is its gate row, and "held" must still count it.
+func reportGate(ctx context.Context, pool *pgxpool.Pool, window *time.Time, b *strings.Builder) error {
+	var held, pending int
+	if err := pool.QueryRow(ctx, `
+	  SELECT count(*),
+	         count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM capture_decisions g
+	                                             WHERE g.message_id = h.message_id AND g.mode = 'gate'))
+	    FROM capture_decisions h
+	   WHERE h.mode = 'live' AND h.action = 'held'
+	     AND ($1::timestamptz IS NULL OR h.created_at >= $1)`, window).Scan(&held, &pending); err != nil {
+		return fmt.Errorf("count held capture decisions: %w", err)
+	}
+	rows, err := pool.Query(ctx, `
+	  SELECT action, COALESCE(reason,'') FROM capture_decisions
+	   WHERE mode = 'gate' AND ($1::timestamptz IS NULL OR created_at >= $1)`, window)
+	if err != nil {
+		return fmt.Errorf("select gate decisions: %w", err)
+	}
+	defer rows.Close()
+	resolved := map[string]int{}
+	for rows.Next() {
+		var action, reason string
+		if err := rows.Scan(&action, &reason); err != nil {
+			return fmt.Errorf("scan gate decision: %w", err)
+		}
+		resolved["gate "+action+" "+gateReasonCode(reason)]++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate gate decisions: %w", err)
+	}
+
+	b.WriteString("GATE (capture-time assignee gate)\n")
+	if held == 0 && len(resolved) == 0 {
+		b.WriteString("  (none — no gated jira match in this window)\n")
+		return nil
+	}
+	fmt.Fprintf(b, "  %-44s %6d\n", "held", held)
+	fmt.Fprintf(b, "  %-44s %6d\n", "pending_lookup", pending)
+	for _, e := range topCounts(resolved, 0) {
+		fmt.Fprintf(b, "  %-44s %6d\n", e.key, e.count)
 	}
 	return nil
 }

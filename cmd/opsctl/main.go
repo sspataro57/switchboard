@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -660,18 +659,7 @@ func runTicketStatusSync(argv []string) error {
 
 	// The token factory mirrors cmd/connectors/jira: nil without OPS_TOKEN_KEY,
 	// and the pass then skips its lookup half loudly (D21).
-	var factory jira.ClientFactory
-	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
-		factory = func(ctx context.Context, acct jira.Account) (*jira.Client, error) {
-			var token string
-			if err := pool.QueryRow(ctx,
-				`SELECT pgp_sym_decrypt(refresh_token_encrypted, $2) FROM source_accounts WHERE id=$1`,
-				acct.ID, key).Scan(&token); err != nil {
-				return nil, fmt.Errorf("decrypt token for %s: %w", acct.Email, err)
-			}
-			return jira.NewClient(http.DefaultClient, acct.SiteBaseURL, acct.Email, token), nil
-		}
-	}
+	factory := jira.TokenClientFactory(pool, os.Getenv("OPS_TOKEN_KEY"))
 
 	st, err := ticketstatus.Run(ctx, pool, ex, ticketstatus.Config{
 		DryRun: *dryRun, Force: *force, Limit: *limit, Lookup: factory,

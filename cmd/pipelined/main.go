@@ -11,6 +11,8 @@
 //	PIPELINE_STAGES  comma list of stages to run. Empty runs none: the Part E
 //	                 smoke, where the daemon heartbeats and logs every wake-up
 //	DATABASE_URL     required once any stage is enabled
+//	OPS_TOKEN_KEY    the gate stage's Jira lookup credential. Unset: no lookup;
+//	                 holds stay pending until they expire (fail closed)
 //
 // Flags: --stages overrides PIPELINE_STAGES; --sweep overrides the 5 m sweep.
 //
@@ -52,10 +54,12 @@ type stageImpl struct {
 	pass  func(*pgxpool.Pool) pipeline.PassFunc
 }
 
-// stageImpls is every stage this build implements. Parts D, C and B add theirs.
+// stageImpls is every stage this build implements. Parts C and B add theirs.
 // A stage named in PIPELINE_STAGES but absent here is refused at startup,
 // never silently skipped.
-var stageImpls = map[pipeline.Stage]stageImpl{}
+var stageImpls = map[pipeline.Stage]stageImpl{
+	pipeline.StageGate: {limit: gateStageLimit, pass: gatePass}, // Part D (gate.go)
+}
 
 func main() {
 	if err := run(); err != nil {

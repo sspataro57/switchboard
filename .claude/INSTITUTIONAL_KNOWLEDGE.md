@@ -771,6 +771,44 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   client reconnecting forever), and `PublishStatus` waits at most 10 s for its ack.
 - **E5** (`classify promote --lane`) ships with Part C.
 
+### The capture-time assignee gate (SWT-40 Part D, inquiry-promote)
+
+- **Capture never calls Jira.** A jira-keyed match whose rule's project has `ticket_assignee_gate` (read
+  from the column in `loadRules`) is recorded `held`: project, rule and key named, nothing created, in
+  shadow and live alike. Capture runs in every connector main, and an LHH link arrives via slackweb and
+  google too. The lookup credential (`OPS_TOKEN_KEY` plus the stored token) lives only in connector-jira
+  and pipelined. A capture-time GET would spread the secret everywhere, or silently skip the check where
+  it is absent. Runbook: `docs/runbooks/ticket-status-sync.md` "Capture-time assignee gate".
+- **The resolution is a SECOND row, `mode='gate'`** (`capture.RunGate`, the pipelined `gate` stage,
+  lock `0x5157_0015`). The live claim is spent by `held`, which acted on nothing, so the gate row is the
+  message's one action. Actions: `task` / `task_log`, via capture's own helpers as `capture:gate`, or
+  `attributed`, with the reconciler's drop reason or `gate_unverified_expired`. An unreadable hold
+  writes NOTHING and stays held (`pending_lookup`). The gate row is the latest decision, so every
+  `ORDER BY id DESC` reader follows it.
+- **LANDMINE, the third partial unique index on `capture_decisions.message_id`.**
+  `capture_decisions_gate_uniq ... WHERE mode='gate'` sits next to the live one, and every `ON CONFLICT`
+  must restate its predicate. `gate_structure_test.go` scans `internal/` and `cmd/` for it.
+- **`pendingMessages` excludes gate-resolved messages in EVERY mode, `--all` included.** Otherwise the
+  documented shadow `--all` re-pointing pass writes newer rows that bury the resolution for every reader.
+- **One predicate, one fetch path.** The gate calls `ticketstatus.Warranted` (extracted from `Decide`)
+  and `ticketstatus.EnsureSnapshots` (extracted from `Run`), so it cannot create a task the reconciler
+  closes 15 min later, and the two share the stored snapshot cache (TTL 1h). `gate.go` may not name
+  `LookupIssues`, `RouteLookup`, the TTL reader or the delivered-status matcher. `ticket_delivered_statuses`
+  may only be read in `ticketstatus/store.go` and opsctl (SWT-34 criterion 22), so the gate gets the set
+  through `ticketstatus.DeliveredStatusesByProject`.
+- **Rate:** at most 50 distinct keys looked up per pass; holds on other keys are skipped untouched.
+  pipelined's processed count is `GateStats.Resolved`, never pending holds: a re-counted pending hold
+  would make the stage loop re-run at once, faster than the sweep. Expiry is strictly after 72h from
+  the message's `sent_at`, and the inbox includes expired holds so they resolve.
+- **Deploy consequence:** until the connector images carrying Part D are deployed, OLD capture binaries
+  keep creating tasks for gated projects. That is the old behaviour, not a regression. Order: 0029, then
+  the connector bump, then `PIPELINE_STAGES=gate` plus `OPS_TOKEN_KEY` on pipelined. Without the key,
+  every hold expires `gate_unverified_expired` (fail closed, no task).
+- The shared token-decrypting factory is `jira.TokenClientFactory(pool, key)`, which returns nil for an
+  empty key. connector-jira, opsctl and pipelined all use it.
+- `TestDecideGate_BodyIsPure` slices from `func DecideGate(` to the next `\nfunc `, so the next
+  function's doc comment counts as "body". `DecideGate` is kept last in `gate.go` for that reason.
+
 ### Link preservation (SWT-25)
 
 - `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written

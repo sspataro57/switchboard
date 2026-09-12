@@ -82,12 +82,14 @@ type candidate struct {
 	state     *State
 }
 
-// snapshot is one stored raw issue row, with the storing account's identity.
-type snapshot struct {
-	raw          []byte
-	ingestedAt   time.Time
-	ownAccountID string
-	count        int // rows found for this key; >1 is criterion 31's ambiguity
+// Snapshot is one stored raw issue row, with the storing account's identity —
+// what EnsureSnapshots hands the reconciler and the capture-time gate. Decisions
+// read Raw, the STORED row (D19), never an HTTP response in memory.
+type Snapshot struct {
+	Raw          []byte
+	IngestedAt   time.Time
+	OwnAccountID string // the storing account's sync_cursor->>'own_account_id' (D12)
+	Count        int    // rows found for this key; >1 is criterion 31's ambiguity
 }
 
 // Run is one reconciliation pass.
@@ -104,10 +106,6 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 		// Invariant 3: the live path reaches tasks and task_events only through
 		// the executor, so without one there is no legal way to act.
 		return stats, errors.New("ticketstatus: live mode requires an executor")
-	}
-	ttl := cfg.TTL
-	if ttl <= 0 {
-		ttl = LookupTTL()
 	}
 
 	release, held, err := tryLock(ctx, pool)
@@ -128,107 +126,18 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 		return stats, nil
 	}
 
-	snaps, err := loadSnapshots(ctx, pool, cands)
-	if err != nil {
-		return stats, err
-	}
-
-	// The candidate-driven lookup (D16): route each key that needs a snapshot —
-	// missing, or stale beyond the TTL — to the lookup account claiming its
-	// prefix, fetch, and RE-READ the stored rows (D19: write-then-read-back).
-	lookupAccts, err := loadLookupAccounts(ctx, pool)
-	if err != nil {
-		return stats, err
-	}
-	needFetch := map[int64][]string{} // account id -> keys
-	acctByID := map[int64]jira.Account{}
-	wouldFetch := map[string]bool{}
-	routeAmbiguous := map[string]bool{}
-	seenKey := map[string]bool{}
+	// The snapshot half (SWT-40 D-D3): routing, TTL freshness, the fetch and
+	// the read-back, shared with the capture-time gate.
+	keys := make([]string, 0, len(cands))
 	for _, c := range cands {
-		if seenKey[c.key] {
-			continue
-		}
-		seenKey[c.key] = true
-		snap, have := snaps[c.key]
-		fresh := have && snap.count == 1 && time.Since(snap.ingestedAt) < ttl
-		if fresh && !cfg.Force {
-			if _, outcome := RouteLookup(c.key, lookupAccts); outcome == "routed" {
-				stats.FetchSkippedTTL++
-			}
-			continue
-		}
-		acct, outcome := RouteLookup(c.key, lookupAccts)
-		if outcome != "routed" {
-			// No claiming account, or an ambiguous claim: the stored snapshot,
-			// if any, still decides; a key with neither is counted below — and
-			// an ambiguous route is remembered so its refusal is VISIBLE
-			// (go-reviewer F4: an invisible refusal is indistinguishable from
-			// an unpolled prefix).
-			if outcome == "ambiguous" {
-				routeAmbiguous[c.key] = true
-				slog.Warn("ticketstatus: two lookup accounts claim this key's prefix; refusing to fetch",
-					"key", c.key)
-			}
-			continue
-		}
-		if cfg.DryRun {
-			// Criterion 42: a dry run cannot even mutate raw_source_items.
-			wouldFetch[c.key] = true
-			continue
-		}
-		if cfg.Lookup == nil {
-			// D21: no credential. Loud, once per account, at the fetch site.
-			continue
-		}
-		acctByID[acct.ID] = acct
-		needFetch[acct.ID] = append(needFetch[acct.ID], c.key)
+		keys = append(keys, c.key)
 	}
-
-	if cfg.Lookup == nil && !cfg.DryRun {
-		for _, a := range lookupAccts {
-			slog.Warn("ticketstatus: no lookup credential; skipping lookup account",
-				"account", a.Email, "site", a.SiteBaseURL,
-				"consequence", "its refs count unpolled until OPS_TOKEN_KEY is available")
-		}
+	es, err := ensureSnapshots(ctx, pool, keys, cfg)
+	stats.Fetched, stats.FetchSkippedTTL, stats.FetchFailed = es.stats.Fetched, es.stats.FetchSkippedTTL, es.stats.FetchFailed
+	if err != nil {
+		return stats, err
 	}
-
-	if len(needFetch) > 0 {
-		sink := jira.NewSink(pool)
-		ids := make([]int64, 0, len(needFetch))
-		for id := range needFetch {
-			ids = append(ids, id)
-		}
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-		for _, id := range ids {
-			acct, keys := acctByID[id], needFetch[id]
-			sort.Strings(keys)
-			client, err := cfg.Lookup(ctx, acct)
-			if err != nil {
-				slog.Warn("ticketstatus: cannot build lookup client; refs stay on their stored snapshots",
-					"account", acct.Email, "err", err)
-				stats.FetchFailed += len(keys)
-				continue
-			}
-			st, err := jira.LookupIssues(ctx, client, sink, acct, keys, jira.Config{})
-			stats.Fetched += st.IssuesFetched
-			stats.FetchFailed += st.FetchFailed
-			if err != nil {
-				// A whole-call failure (scope refusal, cursor write, /myself)
-				// never becomes a verdict (criterion 32): the previous
-				// snapshots, if any, still decide below. Per-key fetch misses
-				// are handled inside LookupIssues and simply leave no
-				// snapshot, which the loop below counts as unpolled.
-				slog.Warn("ticketstatus: lookup pass failed; refs stay on their stored snapshots",
-					"account", acct.Email, "err", err)
-				stats.FetchFailed += len(keys) - st.IssuesFetched
-			}
-		}
-		snaps, err = loadSnapshots(ctx, pool, cands)
-		if err != nil {
-			return stats, err
-		}
-	}
+	snaps, wouldFetch, routeAmbiguous := es.snaps, es.wouldFetch, es.routeAmbiguous
 
 	for _, c := range cands {
 		stats.Considered++
@@ -241,7 +150,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			}
 			continue
 		}
-		if snap.count > 1 {
+		if snap.Count > 1 {
 			// Criterion 31: two stored snapshots for one key. Refusing is
 			// reversible; a wrong close is a task that vanishes with no
 			// explanation.
@@ -249,7 +158,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			continue
 		}
 
-		facts, err := jira.IssueFacts(snap.raw)
+		facts, err := jira.IssueFacts(snap.Raw)
 		if err != nil {
 			// A stored row that will not parse is a corrupt snapshot; the
 			// operator should hear about it rather than the pass shrugging.
@@ -262,7 +171,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			StatusKnown:       facts.StatusKnown,
 			Assignee:          facts.Assignee,
 			AssigneeKnown:     facts.AssigneeKnown,
-			OwnAccountID:      snap.ownAccountID,
+			OwnAccountID:      snap.OwnAccountID,
 			GateOn:            c.gateOn,
 			TaskStatus:        c.taskStat,
 			Dismissed:         c.dismissed,
@@ -542,17 +451,178 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 	return out, rows.Err()
 }
 
-// loadSnapshots reads the stored raw issues for every candidate key, under
-// polled and lookup accounts alike, with the STORING account's own identity
-// (D12). Ids are computed in Go via jira.IssueRawID and bound as one array
-// parameter (criterion 34).
-func loadSnapshots(ctx context.Context, pool *pgxpool.Pool, cands []candidate) (map[string]snapshot, error) {
+// EnsureSnapshots is the snapshot half of the reconciler (SWT-40 D-D3), shared
+// by Run and the capture-time gate (capture.RunGate): it routes each key that
+// needs a snapshot — missing, or stale beyond the TTL — to the lookup account
+// claiming its prefix, fetches it raw-first through jira.LookupIssues, and
+// RE-READS the stored rows (D19: write-then-read-back). The stored snapshot IS
+// the cache, so a key either caller fetched inside the TTL is not fetched again
+// by the other (D-D5).
+//
+// A key whose fetch failed, or that no account claims, keeps whatever it had
+// stored (possibly nothing): an evidence gap for the caller, never a verdict.
+// Stats carries Fetched, FetchSkippedTTL and FetchFailed only. cfg.Lookup nil
+// means no credential: stored rows come back and nothing is fetched (D21);
+// cfg.DryRun fetches nothing either.
+func EnsureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg Config) (map[string]Snapshot, Stats, error) {
+	if pool == nil {
+		return nil, Stats{}, errors.New("ticketstatus: nil database pool")
+	}
+	es, err := ensureSnapshots(ctx, pool, keys, cfg)
+	return es.snaps, es.stats, err
+}
+
+// ensured is ensureSnapshots' answer: the snapshots, the fetch counters, and
+// the two per-key facts only Run's decision loop reads.
+type ensured struct {
+	snaps          map[string]Snapshot
+	stats          Stats
+	wouldFetch     map[string]bool // dry run: routed keys a live pass would fetch
+	routeAmbiguous map[string]bool // two lookup accounts claim the prefix
+}
+
+func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg Config) (ensured, error) {
+	es := ensured{snaps: map[string]Snapshot{}, wouldFetch: map[string]bool{}, routeAmbiguous: map[string]bool{}}
+	if len(keys) == 0 {
+		return es, nil
+	}
+	ttl := cfg.TTL
+	if ttl <= 0 {
+		ttl = LookupTTL()
+	}
+
+	snaps, err := loadSnapshots(ctx, pool, keys)
+	if err != nil {
+		return es, err
+	}
+
+	// The candidate-driven lookup (D16): route each key that needs a snapshot —
+	// missing, or stale beyond the TTL — to the lookup account claiming its
+	// prefix, fetch, and RE-READ the stored rows (D19: write-then-read-back).
+	lookupAccts, err := loadLookupAccounts(ctx, pool)
+	if err != nil {
+		return es, err
+	}
+	needFetch := map[int64][]string{} // account id -> keys
+	acctByID := map[int64]jira.Account{}
+	seenKey := map[string]bool{}
+	for _, key := range keys {
+		if seenKey[key] {
+			continue
+		}
+		seenKey[key] = true
+		snap, have := snaps[key]
+		fresh := have && snap.Count == 1 && time.Since(snap.IngestedAt) < ttl
+		if fresh && !cfg.Force {
+			if _, outcome := RouteLookup(key, lookupAccts); outcome == "routed" {
+				es.stats.FetchSkippedTTL++
+			}
+			continue
+		}
+		acct, outcome := RouteLookup(key, lookupAccts)
+		if outcome != "routed" {
+			// No claiming account, or an ambiguous claim: the stored snapshot,
+			// if any, still decides; a key with neither is counted by the
+			// caller — and an ambiguous route is remembered so its refusal is
+			// VISIBLE (go-reviewer F4: an invisible refusal is
+			// indistinguishable from an unpolled prefix).
+			if outcome == "ambiguous" {
+				es.routeAmbiguous[key] = true
+				slog.Warn("ticketstatus: two lookup accounts claim this key's prefix; refusing to fetch",
+					"key", key)
+			}
+			continue
+		}
+		if cfg.DryRun {
+			// Criterion 42: a dry run cannot even mutate raw_source_items.
+			es.wouldFetch[key] = true
+			continue
+		}
+		if cfg.Lookup == nil {
+			// D21: no credential. Loud, once per account, at the fetch site.
+			continue
+		}
+		acctByID[acct.ID] = acct
+		needFetch[acct.ID] = append(needFetch[acct.ID], key)
+	}
+
+	if cfg.Lookup == nil && !cfg.DryRun {
+		for _, a := range lookupAccts {
+			slog.Warn("ticketstatus: no lookup credential; skipping lookup account",
+				"account", a.Email, "site", a.SiteBaseURL,
+				"consequence", "its refs count unpolled until OPS_TOKEN_KEY is available")
+		}
+	}
+
+	if len(needFetch) > 0 {
+		sink := jira.NewSink(pool)
+		ids := make([]int64, 0, len(needFetch))
+		for id := range needFetch {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		for _, id := range ids {
+			acct, keys := acctByID[id], needFetch[id]
+			sort.Strings(keys)
+			client, err := cfg.Lookup(ctx, acct)
+			if err != nil {
+				slog.Warn("ticketstatus: cannot build lookup client; refs stay on their stored snapshots",
+					"account", acct.Email, "err", err)
+				es.stats.FetchFailed += len(keys)
+				continue
+			}
+			st, err := jira.LookupIssues(ctx, client, sink, acct, keys, jira.Config{})
+			es.stats.Fetched += st.IssuesFetched
+			es.stats.FetchFailed += st.FetchFailed
+			if err != nil {
+				// A whole-call failure (scope refusal, cursor write, /myself)
+				// never becomes a verdict (criterion 32): the previous
+				// snapshots, if any, still decide. Per-key fetch misses are
+				// handled inside LookupIssues and simply leave no snapshot,
+				// which the caller counts as unpolled.
+				slog.Warn("ticketstatus: lookup pass failed; refs stay on their stored snapshots",
+					"account", acct.Email, "err", err)
+				es.stats.FetchFailed += len(keys) - st.IssuesFetched
+			}
+		}
+		snaps, err = loadSnapshots(ctx, pool, keys)
+		if err != nil {
+			return es, err
+		}
+	}
+	es.snaps = snaps
+	return es, nil
+}
+
+// DeliveredStatusesByProject reads projects.ticket_delivered_statuses for the
+// given projects: the capture-time gate's copy of the value loadCandidates hands
+// Observation.DeliveredStatuses, so the gate's Warranted sees the same delivered
+// set as the reconciler's. It lives in this file so the column keeps its one
+// reader file (SWT-34 criterion 22); one row per query, compared nowhere in SQL.
+func DeliveredStatusesByProject(ctx context.Context, pool *pgxpool.Pool, projectIDs []int64) (map[int64][]string, error) {
+	out := map[int64][]string{}
+	for _, id := range projectIDs {
+		var set []string
+		if err := pool.QueryRow(ctx,
+			`SELECT ticket_delivered_statuses FROM projects WHERE id = $1`, id).Scan(&set); err != nil {
+			return nil, fmt.Errorf("ticketstatus: read delivered statuses for project %d: %w", id, err)
+		}
+		out[id] = set
+	}
+	return out, nil
+}
+
+// loadSnapshots reads the stored raw issues for every key, under polled and
+// lookup accounts alike, with the STORING account's own identity (D12). Ids
+// are computed in Go via jira.IssueRawID and bound as one array parameter
+// (criterion 34).
+func loadSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string) (map[string]Snapshot, error) {
 	byID := map[string]string{} // raw external_id -> ticket key
-	ids := make([]string, 0, len(cands))
-	for _, c := range cands {
-		id := jira.IssueRawID(c.key)
+	ids := make([]string, 0, len(keys))
+	for _, key := range keys {
+		id := jira.IssueRawID(key)
 		if _, seen := byID[id]; !seen {
-			byID[id] = c.key
+			byID[id] = key
 			ids = append(ids, id)
 		}
 	}
@@ -568,7 +638,7 @@ func loadSnapshots(ctx context.Context, pool *pgxpool.Pool, cands []candidate) (
 	}
 	defer rows.Close()
 
-	out := map[string]snapshot{}
+	out := map[string]Snapshot{}
 	for rows.Next() {
 		var id, own string
 		var raw []byte
@@ -578,8 +648,8 @@ func loadSnapshots(ctx context.Context, pool *pgxpool.Pool, cands []candidate) (
 		}
 		key := byID[id]
 		s := out[key]
-		s.count++
-		s.raw, s.ingestedAt, s.ownAccountID = raw, ingested, own
+		s.Count++
+		s.Raw, s.IngestedAt, s.OwnAccountID = raw, ingested, own
 		out[key] = s
 	}
 	return out, rows.Err()
