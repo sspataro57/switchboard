@@ -60,6 +60,13 @@ type Config struct {
 	// reconciles, and every lookup-routed ref without a stored snapshot counts
 	// unpolled, LOUDLY (D21). This package never handles a token itself.
 	Lookup jira.ClientFactory
+	// MinFresh is the capture-time gate's per-key minimum freshness (SWT-40
+	// review fix 1): a key whose stored snapshot was ingested before
+	// MinFresh[key] is fetched whatever the TTL, because a snapshot older than a
+	// held message may never decide it. A burst of mentions still costs one GET
+	// (the gate passes the NEWEST first-seen time per key). Nil — the reconciler
+	// — changes nothing: its TTL logic is untouched.
+	MinFresh map[string]time.Time
 }
 
 // Stats is criterion 43's counter vocabulary, one field per printed name.
@@ -86,8 +93,15 @@ type candidate struct {
 // what EnsureSnapshots hands the reconciler and the capture-time gate. Decisions
 // read Raw, the STORED row (D19), never an HTTP response in memory.
 type Snapshot struct {
-	Raw          []byte
-	IngestedAt   time.Time
+	Raw        []byte
+	IngestedAt time.Time
+	// VerifiedAt is the latest time the ticket is KNOWN to have looked like Raw
+	// (SWT-40 review fix 1): IngestedAt, or — when this call's GET of the key
+	// succeeded — the database clock at the start of that GET. The two differ on
+	// an unchanged refetch: upsertRaw's hash short-circuit leaves ingested_at
+	// alone, so IngestedAt alone would call a just-verified ticket stale. The
+	// capture-time gate compares it with a held message's first-seen time.
+	VerifiedAt   time.Time
 	OwnAccountID string // the storing account's sync_cursor->>'own_account_id' (D12)
 	Count        int    // rows found for this key; >1 is criterion 31's ambiguity
 }
@@ -513,6 +527,11 @@ func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg
 		seenKey[key] = true
 		snap, have := snaps[key]
 		fresh := have && snap.Count == 1 && time.Since(snap.IngestedAt) < ttl
+		if min, ok := cfg.MinFresh[key]; ok && have && snap.IngestedAt.Before(min) {
+			// The gate's freshness floor: stored before the newest held message
+			// naming this key was first seen, so it cannot decide that message.
+			fresh = false
+		}
 		if fresh && !cfg.Force {
 			if _, outcome := RouteLookup(key, lookupAccts); outcome == "routed" {
 				es.stats.FetchSkippedTTL++
@@ -561,6 +580,7 @@ func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg
 			ids = append(ids, id)
 		}
 		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		verified := map[string]time.Time{} // key -> DB clock at the start of its successful GET
 		for _, id := range ids {
 			acct, keys := acctByID[id], needFetch[id]
 			sort.Strings(keys)
@@ -571,7 +591,16 @@ func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg
 				es.stats.FetchFailed += len(keys)
 				continue
 			}
+			// The DATABASE clock, not this process's: VerifiedAt is compared
+			// with normalized_messages.created_at, which the database stamps.
+			var started time.Time
+			if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&started); err != nil {
+				return es, fmt.Errorf("ticketstatus: read the fetch start time: %w", err)
+			}
 			st, err := jira.LookupIssues(ctx, client, sink, acct, keys, jira.Config{})
+			for _, k := range st.FetchedKeys {
+				verified[k] = started
+			}
 			es.stats.Fetched += st.IssuesFetched
 			es.stats.FetchFailed += st.FetchFailed
 			if err != nil {
@@ -588,6 +617,12 @@ func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg
 		snaps, err = loadSnapshots(ctx, pool, keys)
 		if err != nil {
 			return es, err
+		}
+		for k, s := range snaps {
+			if v, ok := verified[k]; ok && v.After(s.VerifiedAt) {
+				s.VerifiedAt = v
+				snaps[k] = s
+			}
 		}
 	}
 	es.snaps = snaps
@@ -649,7 +684,7 @@ func loadSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string) (map[
 		key := byID[id]
 		s := out[key]
 		s.Count++
-		s.Raw, s.IngestedAt, s.OwnAccountID = raw, ingested, own
+		s.Raw, s.IngestedAt, s.VerifiedAt, s.OwnAccountID = raw, ingested, ingested, own
 		out[key] = s
 	}
 	return out, rows.Err()

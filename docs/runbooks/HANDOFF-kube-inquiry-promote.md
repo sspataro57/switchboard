@@ -1,5 +1,7 @@
 # Handoff to the kube session: SWT-40 inquiry-promote
 
+**After this branch merges, migration 0029 must be applied to prod BEFORE any image built from main runs. A new capture binary on a db without 0029 fails the action CHECK on the first gated match and stalls capture for every connector.**
+
 The switchboard session builds and pushes the image. The kube session owns the manifests in `kube/switchboard`. This file lists exactly what changes, part by part. Parts E and D are listed; C and B add rows when they land.
 
 ## Part E: the event pipeline (ready)

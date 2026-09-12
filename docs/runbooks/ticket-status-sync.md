@@ -204,22 +204,53 @@ are four outcomes:
 | still unreadable after 72h | `attributed`, reason `gate_unverified_expired` | nothing (fail closed) |
 
 An **unreadable** hold writes nothing and stays held (`pending_lookup`). That
-covers Jira unreachable, no credential, a per-key fetch failure, or a key over
-this pass's budget. It is retried on the next wake or sweep.
+covers Jira unreachable, no credential, a per-key fetch failure, or a snapshot
+older than the message (below). It is retried on the next wake or sweep. A hold
+whose key is over this pass's budget is left untouched too, counted
+`budget_skipped`.
+
+**Freshness.** A stored snapshot decides a hold only if it was verified at or
+after the message was first seen (`normalized_messages.created_at`, which no
+upsert rewrites). "Verified" is the snapshot's `ingested_at`, or the start of
+this pass's successful GET when the ticket came back unchanged (an unchanged
+refetch leaves `ingested_at` alone). So a key whose snapshot predates a held
+message is fetched whatever the TTL. This is the D-D6 case: the gate saw the
+ticket unassigned, the ticket was then assigned to him, and the assignment mail
+arrives inside the hour. If that fetch fails, the older snapshot is no verdict:
+the hold stays pending and, if Jira stays down, expires fail-closed. Keys
+routed to no lookup account (poller-only projects) are never force-fetched, so
+their holds resolve only when the poller stores a newer copy of the ticket.
+Today every gated project (reengine) is lookup-routed.
+
+**Fetch, then lock.** The gate fetches BEFORE it takes capture's advisory lock
+(fetching is idempotent raw-first ingestion), then locks, re-reads the inbox and
+decides from the stored snapshots. Every connector's capture pass takes the same
+lock, so none of them waits on Jira. A pass that finds the lock busy skips before
+any GET. Token-built Jira clients time out after 30 s per request.
 
 **Cache and rate.** The cache IS the stored raw snapshot, the same row the
-reconciler reads. `TICKET_LOOKUP_TTL` (1h) applies, so a ticket mentioned 50
-times in an hour costs one GET, and the gate and the reconciler share every
-fetch. A pass looks up at most **50 distinct keys**; holds on the rest are left
-untouched for the next pass or sweep. `/myself` is called once per lookup
-account per pass. There are no in-pass retries: the retry rate is the sweep.
+reconciler reads. `TICKET_LOOKUP_TTL` (1h) applies to keys whose snapshot is
+newer than every held message naming them. A burst of mentions costs one GET: the
+pass fetches once for the key's newest hold. The gate and the reconciler share
+every fetch. A pass looks up at most **50 distinct keys**; holds on the rest are
+left untouched for the next pass or sweep (`budget_skipped`). `/myself` is called
+once per lookup account per pass. There are no in-pass retries: the retry rate
+is the sweep.
 
-**Expiry.** `GateMaxAge = 72h`, measured from the held message's `sent_at`.
-After that, a hold that is still unreadable resolves `attributed
-(gate_unverified_expired)` and stops costing GETs. That is the fail-closed
-direction: no task. Without `OPS_TOKEN_KEY` on pipelined, fresh holds pile up as
-`pending_lookup` and every one of them expires this way. Check the key first if
-the report shows only expiries.
+**Expiry.** `GateMaxAge = 72h`, measured from when the HOLD was written (the
+held row's `created_at`), not the message's `sent_at`, so a message captured
+late still gets its full window. After that, a hold that is still unreadable
+resolves `attributed (gate_unverified_expired)` and stops costing GETs. That is
+the fail-closed direction: no task. Without `OPS_TOKEN_KEY` on pipelined, fresh
+holds pile up as `pending_lookup` and every one of them expires this way. Check
+the key first if the report shows only expiries.
+
+**Turning a project's gate off while holds are pending.** The hold rows stay;
+the gate stage still resolves them, but it reads `ticket_assignee_gate` from the
+column on every pass, so they resolve with the gate OFF: a warranted-by-status
+ticket becomes a task (or a log) WITHOUT the assignee check, just as capture
+would have done with the gate off. If that is not what you want, let them
+resolve before switching the gate off, or dry-run first (below) to see them.
 
 **Later assignment.** A resolution is final for its message. A ticket assigned
 to him later gets its task from the next mention, and there always is one: the
@@ -232,8 +263,21 @@ comes back.
 
 **Reading it.** `opsctl capture-rules report` prints a `GATE` section: the
 `held` count, `pending_lookup`, and one line per resolution (`gate task
-warranted`, `gate attributed not_assigned`, …). pipelined logs a `gate pass`
-line with the same counters on every pass. By hand:
+warranted`, `gate attributed not_assigned`, …). Its crash-artifact WARNING line
+counts `task` decisions with no `task_id` in live AND gate rows: a pass that
+died between the gate's claim and `create_task`. pipelined logs a `gate pass`
+line with the same counters on every pass, plus `budget_skipped`.
+
+**Running it by hand.** `opsctl capture-rules gate` runs one gate pass, exactly
+as the pipelined stage does (needs `OPS_TOKEN_KEY` to fetch). `opsctl
+capture-rules gate --dry-run` decides every live hold from the STORED snapshots
+only. It fetches nothing, takes no lock and writes nothing, and it prints one
+line per hold: `message=<id> key=<key> outcome=<task | task_log |
+attributed:<reason> | pending_lookup | budget_skipped>`. Add `--shadow` to read
+the latest shadow `held` rows instead (the V5 preview before capture goes
+live). A dry run never fetches, so a hold whose stored snapshot is older than
+its message reads `pending_lookup` there even when a live pass would fetch and
+resolve it. By hand:
 
 ```sql
 -- holds still waiting, oldest first

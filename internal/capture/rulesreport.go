@@ -290,24 +290,26 @@ func reportTotals(ctx context.Context, pool *pgxpool.Pool, window *time.Time, b 
 	return reportUnapplied(ctx, pool, window, b)
 }
 
-// reportUnapplied surfaces the one failure this engine cannot retry: a LIVE
-// decision that recorded action='task' and has no task.
+// reportUnapplied surfaces the one failure this engine cannot retry: a LIVE or
+// GATE decision that recorded action='task' and has no task.
 //
-// The live claim is one decision per message FOREVER, so a run that died between
-// the claim and the create_task call leaves a message the pass will never look at
-// again. Nothing else in the system notices — there is no task, no external ref,
-// no event — so this line is the only place it surfaces. Zero is the normal
-// reading and is therefore printed only when it is not zero.
+// Both claims are one decision per message FOREVER (the live claim, and the
+// gate's resolution, SWT-40 D-D2), and both are written before create_task runs,
+// so a run that died between the claim and the create_task call leaves a message
+// no pass will ever look at again. Nothing else in the system notices — there is
+// no task, no external ref, no event — so this line is the only place it
+// surfaces. Zero is the normal reading and is therefore printed only when it is
+// not zero.
 func reportUnapplied(ctx context.Context, pool *pgxpool.Pool, window *time.Time, b *strings.Builder) error {
 	var n int
 	if err := pool.QueryRow(ctx, latestDecisions+`
 	  SELECT count(*) FROM latest
-	   WHERE mode = 'live' AND action = 'task' AND task_id IS NULL`, window).Scan(&n); err != nil {
+	   WHERE mode IN ('live','gate') AND action = 'task' AND task_id IS NULL`, window).Scan(&n); err != nil {
 		return fmt.Errorf("count unapplied capture decisions: %w", err)
 	}
 	if n > 0 {
-		fmt.Fprintf(b, "  WARNING: %d live decision(s) recorded action='task' with no task — the run died "+
-			"between claiming the message and creating it, and the live claim is permanent.\n", n)
+		fmt.Fprintf(b, "  WARNING: %d decision(s) (live or gate) recorded action='task' with no task — the run "+
+			"died between claiming the message and creating it, and the claim is permanent.\n", n)
 	}
 	return nil
 }

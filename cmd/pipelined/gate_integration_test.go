@@ -93,16 +93,19 @@ func pgSetup(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	scalar(`INSERT INTO capture_decisions (message_id, raw_source_item_id, mode, matched_rule_id, project_id, action,
 	                                       external_system, external_key, reason)
 	        VALUES ($1,$2,'live',$3,$4,'held','jira','PGT-1','itest-pipegate held') RETURNING id`, msg, raw, rule, project)
-	// The control: a hold whose MESSAGE is older than capture.GateMaxAge (72h).
+	// The control: a hold WRITTEN more than capture.GateMaxAge (72h) ago.
 	raw2 := scalar(`INSERT INTO raw_source_items (source_account_id, external_id, raw_json, content_hash, normalized_at)
 	                VALUES ($1,'itest-pipegate-2','{}','itest-pipegate-h2', now()) RETURNING id`, acct)
 	msg2 := scalar(`INSERT INTO normalized_messages
 	                  (raw_source_item_id, thread_id, direction, external_message_id, sent_at, body_text, subject, sender, channel)
 	                VALUES ($1,$2,'inbound','<itest-pipegate-2@x>', now() - interval '73 hours',
 	                        'look at PGT-2','PGT-2','Someone <s@pipegate.example.test>','gmail') RETURNING id`, raw2, thread)
+	// GateMaxAge runs from the HOLD's created_at (review fix 4), so the expired
+	// control's held row is the old one, not just its message.
 	scalar(`INSERT INTO capture_decisions (message_id, raw_source_item_id, mode, matched_rule_id, project_id, action,
-	                                       external_system, external_key, reason)
-	        VALUES ($1,$2,'live',$3,$4,'held','jira','PGT-2','itest-pipegate held (expired)') RETURNING id`, msg2, raw2, rule, project)
+	                                       external_system, external_key, reason, created_at)
+	        VALUES ($1,$2,'live',$3,$4,'held','jira','PGT-2','itest-pipegate held (expired)', now() - interval '73 hours')
+	        RETURNING id`, msg2, raw2, rule, project)
 	return pool
 }
 

@@ -181,6 +181,9 @@ func TestMigration0029_CaptureTicketGateShape(t *testing.T) {
 		{`external_key is not null`, "gate rows name their key"},
 		{`add constraint capture_decisions_held_is_not_gate check \( ?action <> 'held' or mode in \( ?'shadow', ?'live' ?\) ?\)`,
 			"held is a capture action (shadow or live), never a resolution"},
+		{`add constraint capture_decisions_gate_task_pin check \( ?mode <> 'gate' or \( ?\( ?action <> 'attributed' or task_id is null ?\) ?and \( ?action <> 'task_log' or task_id is not null ?\) ?\) ?\)`,
+			"review fix 7: a gate attributed row names no task, a gate task_log row names its task; a gate task " +
+				"row is claimed before its task exists, so it is left free"},
 		{`create unique index capture_decisions_gate_uniq on capture_decisions \( ?message_id ?\) where mode = 'gate'`,
 			"one resolution per message, forever — PARTIAL"},
 	} {

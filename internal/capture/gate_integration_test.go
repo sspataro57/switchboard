@@ -41,10 +41,15 @@ package capture_test
 //	func RunGate(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor,
 //	             cfg GateConfig) (GateStats, error)
 //
-// Clock: expiry reads the held MESSAGE's age (D-D4: "whose message is ≤
-// GateMaxAge old"). The inbox therefore has to reach past GateMaxAge for the
-// expired holds too — they resolve `attributed (gate_unverified_expired)` and
-// stop costing GETs. That is this file's resolution of D-D4/D-D5's wording.
+// Clock: expiry reads the HOLD's age — the held capture_decisions row's
+// created_at, when capture wrote it (review fix 4) — never the message's
+// sent_at: a late-captured old message still gets its full GateMaxAge of
+// lookups. The inbox reaches past GateMaxAge for the expired holds too — they
+// resolve `attributed (gate_unverified_expired)` and stop costing GETs.
+//
+// Freshness (review fix 1): a stored snapshot decides a hold only if it was
+// verified at or after the message's first-seen time (normalized_messages
+// .created_at). gate_freshness_integration_test.go owns those cases.
 //
 // Report format (D6), imposed loosely — a section whose header line starts with
 // GATE, then one line per fact, the count as the LAST field:
@@ -495,6 +500,23 @@ func TestCaptureGate_Integration_MigrationShape(t *testing.T) {
 	try("an UNrestated ON CONFLICT cannot infer it", "no unique or exclusion constraint",
 		[]any{ins + ` ON CONFLICT (message_id) DO NOTHING`, msg, "gate", s.ruleKey, s.gated, "task", "jira", "GTE-1"})
 	try("the live claim and the gate claim coexist on one message", "", row("live", "held", "GTE-1"), row("gate", "task", "GTE-1"))
+
+	// Review fix 7, capture_decisions_gate_task_pin: attributed names no task;
+	// task_log is inserted WITH its task; task is claimed BEFORE the task exists
+	// (claim-before-act), so it may be NULL until recordDecisionTask completes it.
+	def("capture_decisions_gate_task_pin")
+	task := s.taskWithRef(t, ctx, "GTE-2")
+	const insT = `INSERT INTO capture_decisions (message_id, mode, matched_rule_id, project_id, action, external_system, external_key, task_id)
+	              VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
+	rowT := func(mode, action string, taskID any) []any {
+		return []any{insT, msg, mode, s.ruleKey, s.gated, action, "jira", "GTE-1", taskID}
+	}
+	try("a gate attributed row names no task", "check constraint", rowT("gate", "attributed", task))
+	try("a gate task_log row names its task", "check constraint", rowT("gate", "task_log", nil))
+	try("a gate task_log row with its task", "", rowT("gate", "task_log", task))
+	try("a gate task row is claimed before its task exists", "", rowT("gate", "task", nil))
+	try("a gate task row completed with its task", "", rowT("gate", "task", task))
+	try("the pin binds only gate rows (a live attributed row keeps whatever it had)", "", rowT("live", "attributed", nil))
 }
 
 // ---- D1: capture records `held` for gated jira-keyed matches --------------------
@@ -770,34 +792,44 @@ func TestCaptureGate_Integration_JiraDownStaysHeld(t *testing.T) {
 	}
 }
 
+// Review fix 4: GateMaxAge runs from when the HOLD was written, not from the
+// message's sent_at. The control is an OLD message (sent 73h ago, captured just
+// now) whose hold is fresh: it must stay pending, not expire on arrival.
 func TestCaptureGate_Integration_ExpiredHoldIsAttributedUnverified(t *testing.T) {
 	ctx := context.Background()
 	s := newCGSuite(t, ctx)
 	s.fake.errAll(true)
-	old := s.mention(t, ctx, "expired", "GTE-105", capture.GateMaxAge+time.Hour)
-	young := s.mention(t, ctx, "young", "GTE-115", time.Hour)
+	expired := s.mention(t, ctx, "expired", "GTE-105", time.Hour)
+	lateOld := s.mention(t, ctx, "late-old", "GTE-115", capture.GateMaxAge+time.Hour)
 	s.live(t, ctx)
-	for _, m := range []int64{old, young} {
+	for _, m := range []int64{expired, lateOld} {
 		if d, _ := s.decision(t, ctx, m, "live"); d.action != "held" {
 			t.Fatalf("setup: message %d live decision = %q, want held (inside the 720h live horizon)", m, d.action)
 		}
 	}
+	// Age the HOLD (the row the real live pass wrote), not the message.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE capture_decisions SET created_at = now() - make_interval(secs => $2)
+		  WHERE message_id = $1 AND mode = 'live'`, expired, (capture.GateMaxAge + time.Hour).Seconds()); err != nil {
+		t.Fatalf("age the hold: %v", err)
+	}
 
 	st := s.gate(t, ctx)
 
-	g, ok := s.decision(t, ctx, old, "gate")
+	g, ok := s.decision(t, ctx, expired, "gate")
 	if !ok || g.action != "attributed" || !strings.Contains(deref(g.reason), "gate_unverified_expired") {
-		t.Errorf("gate decision for a hold still unreadable after GateMaxAge = %+v (found %v), want attributed "+
-			"with reason gate_unverified_expired — fail closed, no task (D-D5)", g, ok)
+		t.Errorf("gate decision for a hold written more than GateMaxAge ago and still unreadable = %+v (found %v), "+
+			"want attributed with reason gate_unverified_expired — fail closed, no task (D-D5)", g, ok)
 	}
-	if _, ok := s.decision(t, ctx, young, "gate"); ok {
-		t.Errorf("the 1h-old unreadable hold was resolved; only holds older than GateMaxAge expire")
+	if _, ok := s.decision(t, ctx, lateOld, "gate"); ok {
+		t.Errorf("a hold written just now on a message SENT %s ago was resolved; GateMaxAge is measured from "+
+			"the hold's created_at, so a late-captured message still gets its lookups", capture.GateMaxAge+time.Hour)
 	}
 	if got := s.n(t, ctx, `SELECT count(*) FROM tasks WHERE project_id=$1`, s.gated); got != 0 {
 		t.Errorf("tasks = %d, want 0", got)
 	}
 	if st.Attributed != 1 || st.PendingLookup != 1 {
-		t.Errorf("GateStats = %+v, want Attributed 1 (the expired) and PendingLookup 1 (the young)", st)
+		t.Errorf("GateStats = %+v, want Attributed 1 (the aged hold) and PendingLookup 1 (the fresh hold)", st)
 	}
 }
 
@@ -944,6 +976,11 @@ func TestCaptureGate_Integration_FetchesAtMostGateMaxKeysPerPass(t *testing.T) {
 	if st1.TasksCreated != len(first) {
 		t.Errorf("pass 1 created %d tasks for %d fetched (all assigned) keys", st1.TasksCreated, len(first))
 	}
+	if st1.BudgetSkipped != total-len(first) {
+		t.Errorf("pass 1 BudgetSkipped = %d, want %d: the holds left over the %d-key budget are counted, so "+
+			"the pass log says why they are still held (review fix 8)", st1.BudgetSkipped, total-len(first),
+			capture.GateMaxKeysPerPass)
+	}
 
 	s.gate(t, ctx)
 	all := s.fake.issueGets()
@@ -992,16 +1029,19 @@ func TestCaptureGate_Integration_SnapshotIsSharedWithTheReconciler(t *testing.T)
 		t.Errorf("reconciler FetchSkippedTTL = %d, want >= 1", ts.FetchSkippedTTL)
 	}
 
-	// Reconciler first, gate second.
+	// Reconciler first, gate second. The mention is first seen BEFORE the
+	// reconciler's fetch: a snapshot older than the message may not decide it
+	// (review fix 1; gate_freshness_integration_test.go), so the shared-cache
+	// property is the one for a message the snapshot post-dates.
 	existing := s.taskWithRef(t, ctx, "GTE-302")
 	s.fake.put(cgIssue{"GTE-302", "indeterminate", "In Progress", cgOwnID})
+	m := s.mention(t, ctx, "shared-2", "GTE-302", time.Minute)
 	if _, err := ticketstatus.Run(ctx, s.pool, s.ex, cfg); err != nil {
 		t.Fatalf("ticketstatus.Run: %v", err)
 	}
 	if got := s.fake.getsFor("GTE-302"); got != 1 {
 		t.Fatalf("setup: the reconciler fetched GTE-302 %d times, want 1", got)
 	}
-	m := s.mention(t, ctx, "shared-2", "GTE-302", time.Minute)
 	s.live(t, ctx)
 	s.gate(t, ctx)
 	if got := s.fake.getsFor("GTE-302"); got != 1 {
@@ -1185,6 +1225,15 @@ type cgFakeJira struct {
 	myself int
 	reqs   int
 	fail   bool
+	// onIssueGet runs inside every issue GET, before the response (with f.mu
+	// held: it must not call f's methods). The no-lock-across-HTTP test uses it.
+	onIssueGet func()
+}
+
+func (f *cgFakeJira) setOnIssueGet(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onIssueGet = fn
 }
 
 func newCGFakeJira() *cgFakeJira {
@@ -1261,6 +1310,9 @@ func (f *cgFakeJira) handle(w http.ResponseWriter, r *http.Request) {
 		f.myself++
 		_ = json.NewEncoder(w).Encode(map[string]any{"accountId": cgOwnID})
 	case strings.HasPrefix(r.URL.Path, "/rest/api/2/issue/"):
+		if f.onIssueGet != nil {
+			f.onIssueGet()
+		}
 		key := strings.TrimPrefix(r.URL.Path, "/rest/api/2/issue/")
 		iss, ok := f.issues[key]
 		if !ok {

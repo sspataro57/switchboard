@@ -796,14 +796,41 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `LookupIssues`, `RouteLookup`, the TTL reader or the delivered-status matcher. `ticket_delivered_statuses`
   may only be read in `ticketstatus/store.go` and opsctl (SWT-34 criterion 22), so the gate gets the set
   through `ticketstatus.DeliveredStatusesByProject`.
-- **Rate:** at most 50 distinct keys looked up per pass; holds on other keys are skipped untouched.
-  pipelined's processed count is `GateStats.Resolved`, never pending holds: a re-counted pending hold
-  would make the stage loop re-run at once, faster than the sweep. Expiry is strictly after 72h from
-  the message's `sent_at`, and the inbox includes expired holds so they resolve.
+- **Rate:** at most 50 distinct keys looked up per pass; holds on other keys are skipped untouched and
+  counted `GateStats.BudgetSkipped`. pipelined's processed count is `GateStats.Resolved`, never pending
+  holds: a re-counted pending hold would make the stage loop re-run at once, faster than the sweep.
+  Expiry is strictly after 72h from when the HOLD was written (the held row's `created_at`, not the
+  message's `sent_at`), and the inbox includes expired holds so they resolve.
+- **Freshness rule (review fix 1).** A stored snapshot decides a hold only if `Snapshot.VerifiedAt >=`
+  the message's first-seen time (`normalized_messages.created_at`, which no upsert rewrites). The gate
+  passes `ticketstatus.Config.MinFresh` (per key, the newest held message's first-seen time), which
+  forces a fetch past the TTL; the reconciler passes nil, so its TTL logic is untouched. A failed
+  forced fetch leaves the hold pending until expiry, never decided from the older snapshot.
+  **LANDMINE: `ingested_at` does NOT move on an unchanged refetch** (`upsertRaw`'s hash short-circuit).
+  So `VerifiedAt` is `ingested_at` OR the DB clock at the start of this call's successful GET (from
+  `jira.Stats.FetchedKeys`, in-memory, `json:"-"`). Comparing `ingested_at` alone starves every mention of
+  an unchanged ticket until it expires. Keys routed to no lookup account are never force-fetched, so
+  their holds wait for the poller to store a newer copy. Mutations: drop `MinFresh` → the D-D6 test goes red;
+  drop the `VerifiedAt` check → the Jira-down test goes red.
+- **Fetch, then lock (review fix 3).** `RunGate` probes `0x5157_0015` (busy → `ErrGateLockHeld`, no GET),
+  releases it, fetches via `EnsureSnapshots`, THEN takes the lock, re-reads the inbox and decides.
+  Capture's lock is never held across Jira HTTP. Token-built clients (`jira.TokenClientFactory`) carry a
+  30 s `http.Client` timeout, `LookupRequestTimeout`, which also covers the connector-jira poller.
+- **One decide step (review fix 2).** `decideGateHolds` (budget, freshness, per-message ref re-query,
+  `DecideGate`) is shared by `RunGate` and `DryRunGate`. `opsctl capture-rules gate --dry-run [--shadow]`
+  prints `message=… key=… outcome=…` from the stored snapshots only (no fetch, no lock, no writes).
+  `--shadow` reads the latest shadow `held` rows and is refused without `--dry-run`.
+- **Migration 0029's `capture_decisions_gate_task_pin`:** a gate `attributed` row has NULL `task_id` and a
+  gate `task_log` row has NOT NULL. Gate `task` is left free because it is claimed before `create_task`
+  runs. The report's crash-artifact line counts `mode IN ('live','gate')`.
+- **Gate turned off with holds pending** → they resolve with the gate off (the column is read every pass):
+  tasks with no assignee check.
 - **Deploy consequence:** until the connector images carrying Part D are deployed, OLD capture binaries
   keep creating tasks for gated projects. That is the old behaviour, not a regression. Order: 0029, then
   the connector bump, then `PIPELINE_STAGES=gate` plus `OPS_TOKEN_KEY` on pipelined. Without the key,
-  every hold expires `gate_unverified_expired` (fail closed, no task).
+  every hold expires `gate_unverified_expired` (fail closed, no task). **LANDMINE: 0029 BEFORE any image
+  built from main.** On a db without 0029, a new capture binary fails the action CHECK on the first gated
+  match, and that stalls capture for every connector.
 - The shared token-decrypting factory is `jira.TokenClientFactory(pool, key)`, which returns nil for an
   empty key. connector-jira, opsctl and pipelined all use it.
 - `TestDecideGate_BodyIsPure` slices from `func DecideGate(` to the next `\nfunc `, so the next

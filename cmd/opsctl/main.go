@@ -5,7 +5,7 @@
 //	opsctl call --tool <name> [--args '<json>']   (raw executor call; used by the negative smoke)
 //	opsctl fleet
 //	opsctl answer-feedback --id N --answer "..." [--resume]
-//	opsctl capture-rules <list|add|run|report> [flags]
+//	opsctl capture-rules <list|add|run|report|gate> [flags]
 //	opsctl ticket-status <sync|report> [flags]   (SWT-32: the jira reconciler by hand)
 package main
 
@@ -75,7 +75,7 @@ func main() {
 		// executor path below like create-task. list/run/report are their own
 		// paths: two are reads and `run` needs a deadline the 30s one cannot give.
 		if len(os.Args) < 3 {
-			err = fmt.Errorf("usage: opsctl capture-rules <list|add|run|report> [flags]")
+			err = fmt.Errorf("usage: opsctl capture-rules <list|add|run|report|gate> [flags]")
 			break
 		}
 		if os.Args[2] == "add" {
@@ -368,8 +368,11 @@ func runCaptureRules(sub string, argv []string) error {
 		return runCaptureRulesRun(argv)
 	case "report":
 		return runCaptureRulesReport(argv)
+	case "gate":
+		// SWT-40 Part D: one capture-time gate pass by hand (gate.go).
+		return runCaptureRulesGate(argv)
 	default:
-		return fmt.Errorf("unknown capture-rules command %q (want list|add|run|report)", sub)
+		return fmt.Errorf("unknown capture-rules command %q (want list|add|run|report|gate)", sub)
 	}
 }
 

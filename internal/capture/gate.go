@@ -15,8 +15,23 @@ package capture
 //	task | task_log  the ticket is his and open: capture's exact helpers, as capture:gate
 //	attributed       not his, done, delivered — or still unreadable after GateMaxAge
 //
-// An unreadable hold (no snapshot yet: Jira down, no credential, over this
+// FRESHNESS (review fix 1). A stored snapshot decides a hold only if it was
+// verified at or after the held message's first-seen time
+// (normalized_messages.created_at, which no upsert rewrites). A key whose
+// snapshot predates any held message in the pass is fetched whatever the TTL
+// (ticketstatus.Config.MinFresh); if that fetch fails, the hold stays pending
+// and, if it never becomes fresh, expires fail-closed.
+//
+// FETCH, THEN LOCK (review fix 3). The fetch is idempotent raw-first ingestion,
+// so it runs OUTSIDE capture's advisory lock 0x5157_0015: every connector's
+// capture pass takes that lock, and none of them may wait on Jira. The pass then
+// takes the lock, re-reads the inbox and decides from the stored snapshots.
+//
+// An unreadable hold (no snapshot, stale, Jira down, no credential, over this
 // pass's key budget) writes nothing and stays held for the next wake or sweep.
+//
+// DryRunGate is `opsctl capture-rules gate --dry-run`: the same decide step
+// (decideGateHolds) over stored snapshots only, printing instead of acting.
 //
 // Invariant 3: tasks, external_refs, task_events and task_dismissals are reached
 // only through the executor — create_task, link_external_ref,
@@ -27,6 +42,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"time"
@@ -44,11 +60,14 @@ const (
 	// the capture:{connector} shape.
 	GateActor = "capture:gate"
 	// GateMaxAge is how long a hold may stay unreadable. Past it (measured from
-	// the held MESSAGE's sent_at, strictly after) the hold resolves attributed,
-	// gate_unverified_expired: fail closed, no task (D-D5).
+	// when the HOLD was written — the held row's created_at — strictly after)
+	// the hold resolves attributed, gate_unverified_expired: fail closed, no
+	// task (D-D5). Not the message's sent_at: a message captured late still
+	// gets its full window of lookups.
 	GateMaxAge = 72 * time.Hour
 	// GateMaxKeysPerPass bounds the distinct tickets one pass looks up. Holds on
-	// the rest stay held, untouched, for the next pass or sweep (D-D5).
+	// the rest stay held, untouched, for the next pass or sweep (D-D5), counted
+	// GateStats.BudgetSkipped.
 	GateMaxKeysPerPass = 50
 	// GateDefaultLimit bounds one pass's inbox (held rows) when GateConfig.Limit
 	// is zero; pipelined's gate stage uses it as its --limit.
@@ -59,8 +78,16 @@ const (
 // the done one) are ticketstatus.Warranted's, passed through, never re-spelled.
 const (
 	gateReasonPending   = "pending_lookup"
+	gateReasonBudget    = "budget_skipped" // never written: a skipped hold writes nothing
 	gateReasonExpired   = "gate_unverified_expired"
 	gateReasonWarranted = "warranted"
+)
+
+// The inbox's two sources: live holds (the only ones the gate resolves) and,
+// for the dry run only, the latest shadow decision per message when it is held.
+const (
+	gateInboxLive   = "live"
+	gateInboxShadow = "shadow"
 )
 
 // ErrGateLockHeld is RunGate's error when capture's advisory lock is held
@@ -71,7 +98,7 @@ var ErrGateLockHeld = errors.New("capture gate: the capture-rules advisory lock 
 // GateObservation is everything DecideGate may know about one hold.
 type GateObservation struct {
 	Ticket  ticketstatus.Observation // facts from the STORED snapshot; GateOn from the column
-	HeldFor time.Duration            // now minus the held message's sent_at
+	HeldFor time.Duration            // now minus the held row's created_at: how long the hold has waited
 }
 
 // GateRef is the task external_refs links the held key to, re-read per message.
@@ -100,16 +127,28 @@ type GateConfig struct {
 	Lookup jira.ClientFactory
 }
 
+// GateDryRunConfig drives one DryRunGate.
+type GateDryRunConfig struct {
+	// Limit bounds the inbox; 0 means GateDefaultLimit.
+	Limit int
+	// Shadow reads the latest SHADOW decision per message when it is held,
+	// instead of the live holds.
+	Shadow bool
+	// Out receives one line per hold; nil discards.
+	Out io.Writer
+}
+
 // GateStats is one pass's counters. Resolved = TasksCreated + Appended +
 // Attributed: the gate rows written, and what pipelined reports as processed —
 // a hold that stays pending never counts, so the stage loop does not re-run a
-// pass at once over the same unreadable rows.
+// pass at once over the same unreadable rows. BudgetSkipped counts the holds
+// left untouched because their key was over this pass's GateMaxKeysPerPass.
 type GateStats struct {
-	TasksCreated, Appended, Reopened, Attributed, PendingLookup int
-	Resolved                                                    int
+	TasksCreated, Appended, Reopened, Attributed, PendingLookup, BudgetSkipped int
+	Resolved                                                                   int
 }
 
-// gateHold is one inbox row: the live held decision, its message and its rule.
+// gateHold is one inbox row: the held decision, its message and its rule.
 type gateHold struct {
 	pm        pendingMessage
 	rule      storedRule
@@ -117,12 +156,14 @@ type gateHold struct {
 	ambiguous bool
 	system    string
 	key       string
+	firstSeen time.Time // normalized_messages.created_at: the freshness floor
+	heldAt    time.Time // the held row's created_at: GateMaxAge's clock
 }
 
-// RunGate is one gate pass: take capture's lock, load the inbox (live held rows
-// with no gate row, oldest message first — expired holds included, so they
-// resolve), ensure snapshots for at most GateMaxKeysPerPass distinct keys,
-// decide each hold with DecideGate, and act.
+// RunGate is one gate pass: fetch (outside the lock) the snapshots the inbox's
+// first GateMaxKeysPerPass distinct keys need, then take capture's lock,
+// re-read the inbox (live held rows with no gate row, oldest message first —
+// expired holds included, so they resolve), and decide and act on each hold.
 func RunGate(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg GateConfig) (GateStats, error) {
 	var stats GateStats
 	if pool == nil {
@@ -132,14 +173,35 @@ func RunGate(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg
 		// Invariant 3: tasks are reachable only through the executor.
 		return stats, errors.New("capture gate: requires an executor")
 	}
-	limit := cfg.Limit
-	if limit <= 0 {
-		limit = GateDefaultLimit
+	limit := gateLimit(cfg.Limit)
+
+	// A busy lock means a capture pass (or another gate pass) is running: skip
+	// before spending a single GET. pipelined retries in 30 s, then the sweep.
+	release, held, err := tryRulesLock(ctx, pool)
+	if err != nil {
+		return stats, err
+	}
+	if !held {
+		return stats, ErrGateLockHeld
+	}
+	release()
+
+	// Fetch OUTSIDE the lock: raw-first ingestion is idempotent, and every
+	// connector's capture pass takes 0x5157_0015 — none may wait on Jira.
+	planned, err := gateInbox(ctx, pool, gateInboxLive, limit)
+	if err != nil || len(planned) == 0 {
+		return stats, err
+	}
+	keys, minFresh := gateKeys(planned)
+	snaps, _, err := ticketstatus.EnsureSnapshots(ctx, pool, keys,
+		ticketstatus.Config{TTL: cfg.TTL, Lookup: cfg.Lookup, MinFresh: minFresh})
+	if err != nil {
+		return stats, fmt.Errorf("capture gate: %w", err)
 	}
 
-	// Capture's own lock: the gate writes capture_decisions and must serialize
-	// with every connector's capture pass (E-D4).
-	release, held, err := tryRulesLock(ctx, pool)
+	// Capture's own lock for the decide-and-act half: the gate writes
+	// capture_decisions and must serialize with every capture pass (E-D4).
+	release, held, err = tryRulesLock(ctx, pool)
 	if err != nil {
 		return stats, err
 	}
@@ -148,65 +210,195 @@ func RunGate(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg
 	}
 	defer release()
 
-	holds, err := gateInbox(ctx, pool, limit)
+	// Re-read under the lock: another pass may have resolved some holds, and
+	// holds captured since are decided against what was fetched — a hold newer
+	// than its key's snapshot stays pending for the next wake.
+	holds, err := gateInbox(ctx, pool, gateInboxLive, limit)
 	if err != nil || len(holds) == 0 {
 		return stats, err
 	}
+	err = decideGateHolds(ctx, pool, holds, snaps, nil, &stats,
+		func(h gateHold, obs GateObservation, d GateDecision) error {
+			if d.Action == actionHeld {
+				return nil // pending or over budget: stays held, untouched
+			}
+			return applyGate(ctx, pool, ex, h, obs, d, &stats)
+		})
+	return stats, err
+}
 
-	// D-D5: at most GateMaxKeysPerPass distinct tickets per pass, oldest holds
-	// first. A ticket mentioned many times costs one lookup.
-	inPass := map[string]bool{}
+// DryRunGate decides every hold exactly as RunGate would (decideGateHolds) but
+// from the STORED snapshots only — no fetch, no lock, no writes of any kind —
+// and prints one line per hold: message, key, and the would-be outcome
+// (task / task_log / attributed:<reason> / pending_lookup / budget_skipped).
+// A second hold of a key the dry run "created" a task for reads as task_log,
+// as the live pass would log onto that task.
+func DryRunGate(ctx context.Context, pool *pgxpool.Pool, cfg GateDryRunConfig) (GateStats, error) {
+	var stats GateStats
+	if pool == nil {
+		return stats, errors.New("capture gate: nil database pool")
+	}
+	out := cfg.Out
+	if out == nil {
+		out = io.Discard
+	}
+	source := gateInboxLive
+	if cfg.Shadow {
+		source = gateInboxShadow
+	}
+	holds, err := gateInbox(ctx, pool, source, gateLimit(cfg.Limit))
+	if err != nil {
+		return stats, err
+	}
+	if len(holds) == 0 {
+		fmt.Fprintf(out, "gate dry-run: no pending %s holds\n", source)
+		return stats, nil
+	}
+	keys, _ := gateKeys(holds)
+	// DryRun: EnsureSnapshots returns the stored rows and fetches nothing, so
+	// raw_source_items, sync_runs and the lookup cursor stay untouched.
+	snaps, _, err := ticketstatus.EnsureSnapshots(ctx, pool, keys, ticketstatus.Config{DryRun: true})
+	if err != nil {
+		return stats, fmt.Errorf("capture gate: %w", err)
+	}
+	simulated := map[string]bool{}
+	err = decideGateHolds(ctx, pool, holds, snaps, simulated, &stats,
+		func(h gateHold, obs GateObservation, d GateDecision) error {
+			fmt.Fprintf(out, "gate dry-run: message=%d key=%s outcome=%s", h.pm.msg.ID, h.key, gateOutcome(d))
+			if d.Action != actionHeld {
+				fmt.Fprintf(out, " (%s)", gateReasonText(h, obs, d))
+			}
+			fmt.Fprintln(out)
+			switch d.Action {
+			case actionTask:
+				simulated[h.key] = true
+				stats.TasksCreated++
+			case actionTaskLog:
+				stats.Appended++
+				if d.DismissalID != 0 {
+					stats.Reopened++
+				}
+			case actionAttributed:
+				stats.Attributed++
+			default:
+				return nil
+			}
+			stats.Resolved++
+			return nil
+		})
+	return stats, err
+}
+
+// gateOutcome is a decision's one-token dry-run spelling.
+func gateOutcome(d GateDecision) string {
+	switch d.Action {
+	case actionHeld:
+		return d.Reason
+	case actionAttributed:
+		return actionAttributed + ":" + d.Reason
+	default:
+		return d.Action
+	}
+}
+
+func gateLimit(limit int) int {
+	if limit <= 0 {
+		return GateDefaultLimit
+	}
+	return limit
+}
+
+// gateKeys is D-D5's budget over one inbox, oldest hold first: the first
+// GateMaxKeysPerPass distinct keys, and for each the first-seen time of its
+// NEWEST hold — the freshness a stored snapshot needs before it may decide them
+// all (so a burst of mentions costs one GET).
+func gateKeys(holds []gateHold) ([]string, map[string]time.Time) {
 	keys := []string{}
+	minFresh := map[string]time.Time{}
+	for _, h := range holds {
+		if _, in := minFresh[h.key]; !in {
+			if len(keys) >= GateMaxKeysPerPass {
+				continue // over budget: not fetched, not decided this pass
+			}
+			keys = append(keys, h.key)
+		}
+		if h.firstSeen.After(minFresh[h.key]) {
+			minFresh[h.key] = h.firstSeen
+		}
+	}
+	return keys, minFresh
+}
+
+// decideGateHolds is the ONE decide step, shared by RunGate and DryRunGate: the
+// key budget, the freshness rule (gateObservation), the per-message ref
+// re-query and DecideGate. act sees every hold in inbox order — resolutions,
+// pending holds and budget skips alike (Action held, Reason pending_lookup or
+// budget_skipped) — and returns before the next hold's ref is re-queried, so a
+// task it created is the next mention's ref: two held mentions of one new
+// ticket make ONE task and one log (external_refs' unique key is the
+// backstop). simulated is the dry run's stand-in for that (keys it "created" a
+// task for); nil on the live path.
+func decideGateHolds(ctx context.Context, pool *pgxpool.Pool, holds []gateHold,
+	snaps map[string]ticketstatus.Snapshot, simulated map[string]bool, stats *GateStats,
+	act func(gateHold, GateObservation, GateDecision) error) error {
+	keys, _ := gateKeys(holds)
+	inPass := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		inPass[k] = true
+	}
 	projects := []int64{}
 	seenProject := map[int64]bool{}
 	for _, h := range holds {
-		if !inPass[h.key] && len(keys) < GateMaxKeysPerPass {
-			inPass[h.key] = true
-			keys = append(keys, h.key)
-		}
 		if !seenProject[h.rule.projectID] {
 			seenProject[h.rule.projectID] = true
 			projects = append(projects, h.rule.projectID)
 		}
 	}
-	snaps, _, err := ticketstatus.EnsureSnapshots(ctx, pool, keys, ticketstatus.Config{TTL: cfg.TTL, Lookup: cfg.Lookup})
-	if err != nil {
-		return stats, fmt.Errorf("capture gate: %w", err)
-	}
 	delivered, err := ticketstatus.DeliveredStatusesByProject(ctx, pool, projects)
 	if err != nil {
-		return stats, fmt.Errorf("capture gate: %w", err)
+		return fmt.Errorf("capture gate: %w", err)
 	}
 
+	now := time.Now()
 	for _, h := range holds {
 		if !inPass[h.key] {
-			continue // over this pass's key budget: stays held, untouched
+			stats.BudgetSkipped++
+			if err := act(h, GateObservation{}, GateDecision{Action: actionHeld, Reason: gateReasonBudget}); err != nil {
+				return err
+			}
+			continue
 		}
 		snap, have := snaps[h.key]
-		obs, readable := gateObservation(h, snap, have, delivered[h.rule.projectID])
-
-		// The ref is re-queried per message, under the lock: two held mentions
-		// of one new ticket create ONE task, and the second logs onto it
-		// (external_refs' unique key is the backstop).
-		var ref *GateRef
-		rt, found, err := taskForExternalRef(ctx, pool, h.system, h.key)
+		obs, readable := gateObservation(h, snap, have, delivered[h.rule.projectID], now)
+		ref, err := gateRef(ctx, pool, h, simulated)
 		if err != nil {
-			return stats, err
+			return err
 		}
-		if found {
-			ref = &GateRef{TaskID: rt.taskID, DismissalID: rt.dismissalID}
-		}
-
 		d := DecideGate(obs, readable, ref)
 		if d.Action == actionHeld {
 			stats.PendingLookup++
-			continue
 		}
-		if err := applyGate(ctx, pool, ex, h, obs, d, &stats); err != nil {
-			return stats, err
+		if err := act(h, obs, d); err != nil {
+			return err
 		}
 	}
-	return stats, nil
+	return nil
+}
+
+// gateRef re-queries the key's ref for one message (under the lock, on the
+// live path).
+func gateRef(ctx context.Context, pool *pgxpool.Pool, h gateHold, simulated map[string]bool) (*GateRef, error) {
+	rt, found, err := taskForExternalRef(ctx, pool, h.system, h.key)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		return &GateRef{TaskID: rt.taskID, DismissalID: rt.dismissalID}, nil
+	}
+	if simulated[h.key] {
+		return &GateRef{}, nil // dry run: the task an earlier hold would have created
+	}
+	return nil, nil
 }
 
 // applyGate claims the message's one resolution (the gate row, BEFORE any
@@ -270,10 +462,11 @@ func applyGate(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor,
 }
 
 // gateObservation builds the observation from the STORED snapshot (D19). The
-// driver's half of readable: exactly one stored row that parses.
-func gateObservation(h gateHold, snap ticketstatus.Snapshot, have bool, delivered []string) (GateObservation, bool) {
+// driver's half of readable: exactly one stored row, verified no earlier than
+// the message was first seen, that parses.
+func gateObservation(h gateHold, snap ticketstatus.Snapshot, have bool, delivered []string, now time.Time) (GateObservation, bool) {
 	obs := GateObservation{
-		HeldFor: time.Since(h.pm.sentAt),
+		HeldFor: now.Sub(h.heldAt),
 		Ticket: ticketstatus.Observation{
 			TicketKey:         h.key,
 			GateOn:            h.rule.gateOn,
@@ -281,6 +474,13 @@ func gateObservation(h gateHold, snap ticketstatus.Snapshot, have bool, delivere
 		},
 	}
 	if !have || snap.Count != 1 {
+		return obs, false
+	}
+	if snap.VerifiedAt.Before(h.firstSeen) {
+		// Review fix 1, the freshness rule: this snapshot describes the ticket
+		// as it was BEFORE the message existed — the ticket may have been
+		// reassigned since (D-D6's assignment mail is exactly that case). It is
+		// no verdict: pending, and a fetch failure keeps it so until expiry.
 		return obs, false
 	}
 	facts, err := jira.IssueFacts(snap.Raw)
@@ -299,31 +499,44 @@ func gateObservation(h gateHold, snap ticketstatus.Snapshot, have bool, delivere
 	return obs, true
 }
 
-// gateInbox is the gate's queue-as-filter: live held rows with no gate row,
+// gateInbox is the gate's queue-as-filter: held rows with no gate row on
+// INBOUND messages (re-checked: a re-normalization can rewrite direction),
 // oldest message first, limit-bounded — expired holds included (they resolve
-// attributed and stop costing lookups). The message columns are
-// pendingMessages', so capture's task helpers see exactly what capture would.
-func gateInbox(ctx context.Context, pool *pgxpool.Pool, limit int) ([]gateHold, error) {
+// attributed and stop costing lookups). source is gateInboxLive, or
+// gateInboxShadow (the dry run's: the latest shadow decision per message, when
+// it is held). The message columns are pendingMessages', so capture's task
+// helpers see exactly what capture would.
+func gateInbox(ctx context.Context, pool *pgxpool.Pool, source string, limit int) ([]gateHold, error) {
+	from := `capture_decisions`
+	switch source {
+	case gateInboxLive:
+	case gateInboxShadow:
+		from = `(SELECT DISTINCT ON (message_id) * FROM capture_decisions
+		          WHERE mode = 'shadow' ORDER BY message_id, id DESC)`
+	default:
+		return nil, fmt.Errorf("capture gate: unknown inbox source %q", source)
+	}
 	rows, err := pool.Query(ctx, `
 		SELECT m.id, m.raw_source_item_id, m.thread_id, COALESCE(nt.thread_key,''),
 		       COALESCE(m.sender,''), COALESCE(m.subject,''), COALESCE(m.body_text,''),
 		       COALESCE(m.external_message_id,''), COALESCE(m.channel,''),
-		       COALESCE(m.sent_at, m.created_at),
+		       COALESCE(m.sent_at, m.created_at), m.created_at, h.created_at,
 		       h.matched_rule_ids, h.ambiguous, h.external_system, h.external_key,
 		       r.id, p.slug, p.name, r.criteria_type, r.pattern, r.key_regex, r.priority, r.enabled,
 		       r.project_id, COALESCE(r.subproject,''), COALESCE(r.url_template,''),
 		       p.ticket_assignee_gate
-		  FROM capture_decisions h
+		  FROM `+from+` h
 		  JOIN normalized_messages m ON m.id = h.message_id
 		  JOIN capture_rules r ON r.id = h.matched_rule_id
 		  JOIN projects p ON p.id = r.project_id
 		  LEFT JOIN normalized_threads nt ON nt.id = m.thread_id
-		 WHERE h.mode = 'live' AND h.action = 'held'
+		 WHERE h.mode = $2 AND h.action = 'held'
+		   AND m.direction = 'inbound'
 		   AND h.external_system IS NOT NULL AND h.external_key IS NOT NULL
 		   AND NOT EXISTS (SELECT 1 FROM capture_decisions g
 		                    WHERE g.message_id = h.message_id AND g.mode = 'gate')
 		 ORDER BY COALESCE(m.sent_at, m.created_at), m.id
-		 LIMIT $1`, limit)
+		 LIMIT $1`, limit, source)
 	if err != nil {
 		return nil, fmt.Errorf("select held capture decisions: %w", err)
 	}
@@ -334,7 +547,7 @@ func gateInbox(ctx context.Context, pool *pgxpool.Pool, limit int) ([]gateHold, 
 		var h gateHold
 		if err := rows.Scan(&h.pm.msg.ID, &h.pm.rawItemID, &h.pm.threadID, &h.pm.msg.ThreadKey,
 			&h.pm.msg.Sender, &h.pm.msg.Subject, &h.pm.msg.BodyText,
-			&h.pm.msg.ExternalMessageID, &h.pm.channel, &h.pm.sentAt,
+			&h.pm.msg.ExternalMessageID, &h.pm.channel, &h.pm.sentAt, &h.firstSeen, &h.heldAt,
 			&h.ruleIDs, &h.ambiguous, &h.system, &h.key,
 			&h.rule.rule.ID, &h.rule.rule.Project, &h.rule.projectName, &h.rule.rule.Kind, &h.rule.rule.Pattern,
 			&h.rule.rule.ExternalKeyRegex, &h.rule.rule.Priority, &h.rule.rule.Enabled,
@@ -395,7 +608,7 @@ func gateReasonText(h gateHold, obs GateObservation, d GateDecision) string {
 		return s
 	case actionAttributed:
 		if d.Reason == gateReasonExpired {
-			return fmt.Sprintf("%s: gate: %s %s still unreadable after %s; fail closed, no task",
+			return fmt.Sprintf("%s: gate: %s %s still unreadable %s after the hold; fail closed, no task",
 				d.Reason, h.system, h.key, GateMaxAge)
 		}
 		return fmt.Sprintf("%s: gate: %s %s does not warrant a task (%s); attribution only",

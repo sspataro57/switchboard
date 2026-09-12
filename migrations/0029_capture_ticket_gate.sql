@@ -30,5 +30,12 @@ ALTER TABLE capture_decisions ADD CONSTRAINT capture_decisions_gate_shape CHECK 
                      AND external_key IS NOT NULL));
 ALTER TABLE capture_decisions ADD CONSTRAINT capture_decisions_held_is_not_gate CHECK (
   action <> 'held' OR mode IN ('shadow','live'));
+-- The gate row's task_id: 'attributed' names no task; 'task_log' is inserted WITH
+-- the ref's task. 'task' is left free: it is claimed BEFORE create_task runs
+-- (claim-before-act) and completed with its task_id afterwards, so a NULL there
+-- is the in-flight state (and, if it outlives the pass, the report's crash line).
+ALTER TABLE capture_decisions ADD CONSTRAINT capture_decisions_gate_task_pin CHECK (
+  mode <> 'gate' OR ((action <> 'attributed' OR task_id IS NULL)
+                     AND (action <> 'task_log' OR task_id IS NOT NULL)));
 -- One resolution per message, forever. PARTIAL: every ON CONFLICT restates WHERE mode = 'gate'.
 CREATE UNIQUE INDEX capture_decisions_gate_uniq ON capture_decisions (message_id) WHERE mode = 'gate';

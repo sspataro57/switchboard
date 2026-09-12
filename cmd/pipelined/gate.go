@@ -49,7 +49,7 @@ func gatePass(pool *pgxpool.Pool) pipeline.PassFunc {
 		// ran" are different lines.
 		slog.Info("gate pass", "tasks_created", st.TasksCreated, "appended", st.Appended,
 			"reopened", st.Reopened, "attributed", st.Attributed, "pending_lookup", st.PendingLookup,
-			"resolved", st.Resolved)
+			"budget_skipped", st.BudgetSkipped, "resolved", st.Resolved)
 		// Resolutions only: a hold that stays pending never left the inbox.
 		return st.Resolved, err
 	}
