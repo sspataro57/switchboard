@@ -34,3 +34,7 @@ Reengine is unaffected in practice. Under your refined decision 3, a non-address
 still goes through the assignee gate whatever you answer here.
 
 Answer by editing the entries. Say 'questions answered' and I'll fold them into the SPEC.
+
+## Answer (Salvador, 2026-09-12)
+
+**Yes, any mention.** A Slack or GitHub message that names a ticket key counts as Jira activity: it revives the ticket's closed task or creates one. Only new messages act (no historical backfill), so the ~654 keys mentioned all-time do not become tasks retroactively.
