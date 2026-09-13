@@ -973,6 +973,48 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - `TestDecideGate_BodyIsPure` slices from `func DecideGate(` to the next `\nfunc `, so the next
   function's doc comment counts as "body". `DecideGate` is kept last in `gate.go` for that reason.
 
+### The inquiry lane promotes (SWT-40 Part C, inquiry-promote)
+
+- **Two pipelined stages.** `inquiry` is `classify.Run` on the inquiry lane (`--since 72h`, lock `0x5157_0022`
+  shared with the classify CronJobs), woken by `captured`, `gated` and `routed`. `inquiry_promote` is `promote.Run`
+  with `Lane: LaneInquiry` (lock `0x5157_0021`, shared with the classify-promote CronJob, which will pin
+  `--lane personal` once the kube handoff is applied), actor `promote:inquiry`, woken by `inquiry_classified` and the sweep. The sweep is what
+  releases grace-pending verdicts. Downstream wakes (`gated`, `inquiry_classified`, `promoted`) come from
+  `pipeline.PublishAfterPass`, wrapped around every pass by `cmd/pipelined`'s `buildPass`; the loop core never
+  publishes a wake.
+- **Arming is its own column**, `projects.inquiry_promote_after` (0031): NULL = off, forward-only on the verdict
+  clock. Never `classify_promote_after`.
+- **O7: `inquiryCreateStatus = "holding"`**, a Go constant pinned by `inquiry_internal_test.go`. The flip to
+  `"ready"` edits that pin in the same diff.
+- **The gate is pure** (`promote.InquiryGate`): rethreaded, kind, stale (72h), pending (1h grace), answered,
+  not_addressed, then C-D13's claude_task (the thread's open or dismissed task is not `human`: never attached
+  to, never reopened, never shadowed by a second task); the first failing reason wins. A gated verdict writes no row, calls no tool and stays in the
+  inbox. So **`Limit` bounds verdicts ACTED ON, never rows read**, and the stage's `processed` counts acted
+  verdicts only: a re-counted gated verdict would re-run the loop at once, faster than the sweep.
+- **The inbox follows the latest decision in ANY mode** (no `mode` predicate): a `gate` resolution or a `route`
+  row is the current attribution. A message a personal-lane promotion already claimed is excluded by the inbox's
+  `NOT EXISTS` and never counted Lost; both lanes share the lock, so they cannot race.
+- **`--max-age` is dry-run-only**, refused on a live pass by the CLI and by `promote.Run`: the 72h fence is what
+  keeps historical asks off the board.
+- **Lock collisions with the CronJobs are expected.** pipelined takes `0x5157_0022` and `0x5157_0021` every
+  5 min and on every wake, so the `classify run` CronJobs (exit 1 on losing `0x5157_0022`) and the
+  classify-promote CronJob (fails on losing `0x5157_0021`) occasionally fail a run; the next tick recovers.
+- **Run the V6.4.2 hand backfill (`classify run --lane inquiry --since 336h`) BEFORE enabling the `inquiry`
+  stage**, or the two fight for `0x5157_0022` and the backfill exits 1 part-way.
+- **Stuck claims** (`classify_promotions.task_id` NULL, the criterion-12 crash artifact) are reported by
+  `classify promote --lane inquiry --outcomes`, every lane, all time. Resolution is by hand
+  (`docs/runbooks/local-classifier.md`); automatic recovery is SWT-50.
+- **`classify eval` writes NO ai_runs rows** (restated from SWT-30). It is the only reason an eval over historical
+  inquiry labels cannot inject fresh-timestamped verdicts into this inbox past the cutover. A ticket that gives
+  eval a store write opens that hole.
+- **The replied-since fold lives in `internal/replyfold`** (`JoinSQL`, `RepliedSinceCol`,
+  `PriorParticipationCol`, `ScopeOf`, `State`), shared by `classify.Summarize` and the promoter; classify's
+  `Scope*`/`State*` constants are aliases. replyfold imports only stdlib and slackweb, because promote's
+  no-provider walk goes through it. The DM rule is `slackweb.IsDirectMessageKey` (a `D…` conversation segment;
+  group DMs excluded).
+- **The readout** is `classify promote --lane inquiry --outcomes` (first dismissal per promoted task; precision
+  only, a ratio only at 120 decided).
+
 ### Link preservation (SWT-25)
 
 - `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written
