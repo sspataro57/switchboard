@@ -1166,7 +1166,12 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// admits 'partial'), named by the "Fix — data model" section of
 		// docs/bugs/slackweb-collab-export-stale_DIAGNOSIS.md. A bug fix owns
 		// its migration the way a SPEC does.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 {
+		// 28 is SWT-43's (delivery-deny: deliveries.status admits 'rejected', plus
+		// rejection_note, redraft_requested_at and two CHECKs), named by its SPEC's
+		// "Data model changes" section. SWT-40 (inquiry-promote) ALSO names 0028 in
+		// its SPEC: whichever branch merges SECOND renumbers its files, its
+		// per-ticket guard and this line (delivery-deny criterion 3).
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

@@ -80,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /deliveries", s.auth.Require(http.HandlerFunc(s.listDeliveries)))
 	mux.Handle("POST /deliveries/{id}/edit", s.auth.Require(http.HandlerFunc(s.actionEdit)))
 	mux.Handle("POST /deliveries/{id}/approve", s.auth.Require(http.HandlerFunc(s.approveAction)))
+	// SWT-43: Deny / Redo, one form, the redraft bit chosen by the button.
+	mux.Handle("POST /deliveries/{id}/reject", s.auth.Require(http.HandlerFunc(s.actionReject)))
 	mux.Handle("POST /deliveries/{id}/send", s.auth.Require(s.action("send_delivery")))
 	mux.Handle("POST /deliveries/{id}/mark-sent", s.auth.Require(s.action("mark_delivery_sent")))
 	// Resolves a stuck slack_reply 'sending' row the other way: a human looked in
@@ -106,6 +108,9 @@ type deliveryRow struct {
 	// checking what was booked must see WHEN.
 	StartsAt string
 	EndsAt   string
+	// SWT-43: set on rejected rows only.
+	RejectionNote    string
+	RedraftRequested bool
 	// ContentHash is tools.DeliveryContentHash of the Subject/Body this page
 	// renders. The Approve form posts it back as expect_content_hash, so an
 	// edit made after the page loaded (a session's update_delivery) makes the
@@ -169,7 +174,8 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	             COALESCE(d.subject,''), COALESCE(d.body,''), COALESCE(d.created_by,''),
 	             COALESCE(d.sent_at::text,''), COALESCE(d.confirmed_at::text,''), COALESCE(d.error,''),
 	             COALESCE(d.starts_at::text,''), COALESCE(d.ends_at::text,''),
-	             d.from_account_id, d.thread_id, COALESCE(d.target_ref,'')
+	             d.from_account_id, d.thread_id, COALESCE(d.target_ref,''),
+	             COALESCE(d.rejection_note,''), d.redraft_requested_at IS NOT NULL
 	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id`
 	args := []any{}
 	if status != "" {
@@ -193,7 +199,8 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 		var ref routeRef
 		if err := rows.Scan(&d.ID, &d.TaskID, &d.TaskTitle, &d.Channel, &d.Status,
 			&d.Subject, &d.Body, &d.CreatedBy, &d.SentAt, &d.ConfirmedAt, &d.Error,
-			&d.StartsAt, &d.EndsAt, &ref.fromAcct, &ref.threadID, &d.TargetRef); err != nil {
+			&d.StartsAt, &d.EndsAt, &ref.fromAcct, &ref.threadID, &d.TargetRef,
+			&d.RejectionNote, &d.RedraftRequested); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -272,6 +279,45 @@ func (s *Server) actionEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, _ := json.Marshal(payload)
 	s.execute(w, r, "update_delivery", string(raw))
+}
+
+// actionReject is Deny (redraft=false) and Redo (redraft=true). The note is
+// free text, so the args are built with json.Marshal, never Sprintf.
+//
+// Like approveAction, the verdict is bound to the words this page rendered
+// (SWT-43 review): the form's content_hash goes through as
+// expect_content_hash, and a POST without one is refused before the executor.
+// reject_delivery keeps the hash optional for opsctl.
+//
+// The note reaches the drafts worker's prompt (quoted as data, see
+// drafts.renderUser). It needs no authorization beyond reject_delivery's
+// humanOnly: this route sits behind Keycloak OIDC, and the note is Salvador's
+// own text.
+func (s *Server) actionReject(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h := strings.TrimSpace(r.PostFormValue("content_hash"))
+	if h == "" {
+		flash := "reject refused: this page did not say which words you reviewed; reload the page and review it again"
+		http.Redirect(w, r, "/deliveries?flash="+template.URLQueryEscaper(flash), http.StatusSeeOther)
+		return
+	}
+	payload := map[string]any{
+		"delivery_id":         jsonNum(r.PathValue("id")),
+		"redraft":             r.PostFormValue("redraft") == "true",
+		"expect_content_hash": h,
+	}
+	if v := r.PostFormValue("note"); v != "" {
+		payload["note"] = v
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil { // a non-numeric id is not a json.Number
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.execute(w, r, "reject_delivery", string(raw))
 }
 
 func (s *Server) actionFreeze(w http.ResponseWriter, r *http.Request) {
