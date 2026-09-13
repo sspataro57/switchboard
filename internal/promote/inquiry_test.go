@@ -178,6 +178,20 @@ func TestInquiryGate_EachReasonAlone(t *testing.T) {
 			c.Channel, c.ThreadKey, c.ThreadScope = "jira", "jira:avviato.atlassian.net:LHH-1", "thread"
 			c.PriorPost = true
 		}, ""},
+
+		// C-D13: never attach to or reopen a non-human thread task.
+		{"claude_task: the thread's open task is claude's", func(c *promote.InquiryCandidate) {
+			c.ThreadTask = &promote.ExistingTask{ID: 5, Status: "ready", AssigneeType: "claude"}
+		}, "claude_task"},
+		{"claude_task: the thread's dismissed task is claude's", func(c *promote.InquiryCandidate) {
+			c.ThreadTask = &promote.ExistingTask{ID: 5, Status: "closed", DismissalID: 9, AssigneeType: "claude"}
+		}, "claude_task"},
+		{"claude_task: an empty assignee reads as not human (fail closed)", func(c *promote.InquiryCandidate) {
+			c.ThreadTask = &promote.ExistingTask{ID: 5, Status: "ready"}
+		}, "claude_task"},
+		{"a human thread task passes", func(c *promote.InquiryCandidate) {
+			c.ThreadTask = &promote.ExistingTask{ID: 5, Status: "ready", AssigneeType: "human"}
+		}, ""},
 	}
 	for _, tc := range cases {
 		c := iqBase()
@@ -196,6 +210,7 @@ func TestInquiryGate_ReportsTheFirstReasonInCThreeOrder(t *testing.T) {
 	c := promote.InquiryCandidate{
 		AskKind: "fyi", Channel: "slack", ThreadKey: "slack:T0HPR78RX:C07ABCDEF", ThreadScope: "conversation",
 		StoredThreadID: 7, CurrentThreadID: 8, SentAt: iqNow.Add(-73 * time.Hour), RepliedSince: true,
+		ThreadTask: &promote.ExistingTask{ID: 5, Status: "ready", AssigneeType: "claude"},
 	}
 	steps := []struct {
 		want string
@@ -207,12 +222,13 @@ func TestInquiryGate_ReportsTheFirstReasonInCThreeOrder(t *testing.T) {
 		{"pending", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-2 * time.Hour) }},
 		{"answered", func(c *promote.InquiryCandidate) { c.RepliedSince = false }},
 		{"not_addressed", func(c *promote.InquiryCandidate) { c.ThreadKey = "slack:T0HPR78RX:D07PRIVATE" }},
+		{"claude_task", func(c *promote.InquiryCandidate) { c.ThreadTask.AssigneeType = "human" }},
 		{"", nil},
 	}
 	for _, s := range steps {
 		if got := promote.InquiryGate(c, iqNow); got != s.want {
 			t.Fatalf("InquiryGate(%+v) = %q, want %q (C3 order: rethreaded, kind, stale, pending, answered, "+
-				"not_addressed)", c, got, s.want)
+				"not_addressed, then C-D13's claude_task)", c, got, s.want)
 		}
 		if s.fix != nil {
 			s.fix(&c)

@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sspataro57/switchboard/internal/connector/slackweb"
+	"github.com/sspataro57/switchboard/internal/replyfold"
 )
 
 // InquiryPromptVersion stamps every inquiry ai_runs.input, distinct from the
@@ -116,34 +116,15 @@ type inquiryVerdict struct {
 }
 
 // The three values of a verdict's thread_scope (criterion 13): WHICH claim a
-// later outbound message on the verdict's thread can support.
-//
-//   - thread: the key names one thread — a gmail thread, a jira issue, a slack
-//     message with a thread root. A later outbound there is a reply in it.
-//   - conversation: an unthreaded slack channel or DM. There is no thread to
-//     reply INTO yet, and a later outbound only means Salvador has spoken in the
-//     conversation since.
-//   - none: the message has no thread at all.
+// later outbound message on the verdict's thread can support. Aliases of
+// internal/replyfold's constants since SWT-40 Part C (C-D7): the scope rule
+// moved to that leaf so the inquiry promoter reads the same spelling. The
+// strings are stored on every verdict and did not change.
 const (
-	ScopeThread       = "thread"
-	ScopeConversation = "conversation"
-	ScopeNone         = "none"
+	ScopeThread       = replyfold.ScopeThread
+	ScopeConversation = replyfold.ScopeConversation
+	ScopeNone         = replyfold.ScopeNone
 )
-
-// threadScopeOf decides a message's scope from the columns it was loaded with.
-// Whether a slack key is rooted is asked of slackweb.IsRootedThreadKey, the ONE
-// reading of the shape its normalizer builds (criterion 14) — this package never
-// takes the key apart itself.
-func threadScopeOf(m PendingMessage) string {
-	switch {
-	case m.ThreadID == 0:
-		return ScopeNone
-	case m.Channel == slackweb.Channel && !slackweb.IsRootedThreadKey(m.ThreadKey):
-		return ScopeConversation
-	default:
-		return ScopeThread
-	}
-}
 
 // inquiryFields is what an inquiry verdict records (criterion 13): the model's
 // five, the bookkeeping every lane stores (sender, subject, channel, project —
@@ -169,9 +150,12 @@ func inquiryFields(m PendingMessage, v inquiryVerdict) map[string]any {
 		"normalized_message_id": m.MessageID,
 		"thread_id":             m.ThreadID,
 		"thread_key":            m.ThreadKey,
-		"thread_scope":          threadScopeOf(m),
-		"external_message_id":   m.ExternalMessageID,
-		"context_messages":      len(m.ThreadContext),
+		// The scope rule is replyfold's (SWT-40 C-D7), which asks
+		// slackweb.IsRootedThreadKey (criterion 14): this package never takes the
+		// key apart itself.
+		"thread_scope":        replyfold.ScopeOf(m.Channel, m.ThreadID, m.ThreadKey),
+		"external_message_id": m.ExternalMessageID,
+		"context_messages":    len(m.ThreadContext),
 	}
 }
 

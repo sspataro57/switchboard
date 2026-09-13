@@ -23,7 +23,7 @@ Every `ops/pipeline/*` topic is QoS 1 and **never retained**: a retained wake wo
 | topic | publisher | wakes |
 |---|---|---|
 | `ops/pipeline/captured` | each connector main, after a capture pass that committed ≥1 decision (the google IMAP IDLE loop included) | gate, route, inquiry |
-| `ops/pipeline/gated` | gate stage | inquiry |
+| `ops/pipeline/gated` | gate stage, after a pass that resolved ≥1 hold | inquiry |
 | `ops/pipeline/route_classified` | route stage | route_apply |
 | `ops/pipeline/routed` | route_apply stage | inquiry |
 | `ops/pipeline/inquiry_classified` | inquiry stage | inquiry_promote |
@@ -66,6 +66,31 @@ mosquitto_sub -h 192.168.50.45 -t 'ops/workers/+/status' -v | grep 'workers/pipe
 - If a stage's advisory lock is held elsewhere, it retries after 30 s and then on the next sweep. That is normal: the GPU stages share the classify lock with the classify CronJobs.
 - A failing pass logs and waits for the next wake or sweep. A stage never crash-loops on a DB error.
 - The heartbeat is `working` during a pass (republished every 60 s, even through long passes) and `idle` otherwise. It is published from its own goroutine, so a broker outage never stalls passes; the sweep keeps the pipeline moving with MQTT down.
+
+## Downstream wakes
+
+A stage's downstream wake is published by a wrapper around its pass, `pipeline.PublishAfterPass`, applied to every stage by `cmd/pipelined`'s `buildPass`. It is never published by the loop core in `stage.go`.
+- A pass that reports `processed > 0` publishes ONE wake for its event (`pipeline.Downstream`), QoS 1, not retained, with `counts.processed`.
+- A pass that moved nothing, lost its lock or failed before any row publishes nothing.
+- A publish failure is logged and the pass's own result goes back to the loop unchanged: the sweep covers the lost wake.
+- This is where the gate's `gated` wake comes from.
+
+## The inquiry stages (SWT-40 Part C)
+
+The Part C go-live value is `PIPELINE_STAGES=gate,inquiry,inquiry_promote`.
+
+| stage | a pass | lock | woken by | publishes |
+|---|---|---|---|---|
+| `inquiry` | `classify.Run` on the inquiry lane, `--since 72h`, at most 25 messages. `processed` = verdicts written; a skipped message stays in the inbox and never counts | `0x5157_0022`, shared with the classify CronJobs | `captured`, `gated`, `routed`, sweep | `inquiry_classified` |
+| `inquiry_promote` | `promote.Run` on the inquiry lane as `promote:inquiry`, at most 50 verdicts acted on. `processed` = verdicts acted on; a gated verdict never counts | `0x5157_0021`, shared with the classify-promote CronJob (personal lane) | `inquiry_classified`, sweep | `promoted` |
+
+- **The sweep releases the grace.** A verdict on an ask younger than 1h is gated `pending` and writes nothing, and no event fires when the hour passes. The next sweep (5 min) or wake promotes it, so capture to Holding task is about 1h plus at most one sweep.
+- **Nothing promotes until a project is armed.** `projects.inquiry_promote_after` NULL means off; the pass logs "inquiry promotion is off everywhere". Arming is a hand-run `UPDATE`, never a deploy step.
+- **The inquiry stage needs `OPS_LOCAL_PROVIDER_URL` (an IP literal) and `OPS_LOCAL_MODEL`.** Unset, every message is skipped and recorded as a skip, never sent to a hosted model.
+- **Nothing sends.** Promoted tasks are `holding` (O7) and `assignee_type=human`; neither stage creates a delivery. From the task on, the lifecycle is the orchestrator's (E-D2).
+- **A non-human thread task gates the verdict.** If the thread's open or dismissed task is not `assignee_type=human`, the verdict is gated `claude_task`. It is never attached (no log on a worker's task) or reopened, and never shadowed by a second task (C-D13).
+- **The locks are shared with CronJobs, so a run can fail on a collision.** pipelined takes `0x5157_0022` (the `inquiry` stage, GPU/classify) and `0x5157_0021` (`inquiry_promote`) on every sweep (5 min) and on every wake. The `classify run` CronJobs exit 1 when they lose `0x5157_0022`, and the classify-promote CronJob fails its run when it loses `0x5157_0021`. That run fails, and the next tick recovers. A stage that loses a lock retries after 30 s.
+- **Run the hand backfill BEFORE enabling the `inquiry` stage.** `classify run --lane inquiry --since 336h` (SPEC V6.4.2) holds `0x5157_0022` for the whole backlog. With the stage already live, the two fight for the lock: the backfill exits 1 part-way whenever the stage holds it. Run it, read `classify report`, then add `inquiry` to `PIPELINE_STAGES`.
 
 ## What a dead heartbeat means
 

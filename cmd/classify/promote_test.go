@@ -126,7 +126,8 @@ func TestFormatPromoteStats_InquiryCarriesTheGatedBlock(t *testing.T) {
 	if out.Mode != "dry-run" || out.Lane != "inquiry" || out.Review != 2 {
 		t.Errorf("inquiry stats = %+v, want mode dry-run, lane inquiry, review 2", out)
 	}
-	want := map[string]int{"rethreaded": 0, "kind": 0, "stale": 0, "pending": 1, "answered": 3, "not_addressed": 0}
+	want := map[string]int{"rethreaded": 0, "kind": 0, "stale": 0, "pending": 1, "answered": 3, "not_addressed": 0,
+		"claude_task": 0}
 	for k, v := range want {
 		got, ok := out.Gated[k]
 		if !ok || got != v {
@@ -134,7 +135,44 @@ func TestFormatPromoteStats_InquiryCarriesTheGatedBlock(t *testing.T) {
 		}
 	}
 	if len(out.Gated) != len(want) {
-		t.Errorf("gated carries %d keys (%v), want exactly the six C3 reasons", len(out.Gated), out.Gated)
+		t.Errorf("gated carries %d keys (%v), want exactly the six C3 reasons and C-D13's claude_task", len(out.Gated), out.Gated)
+	}
+}
+
+// Stuck claims (classify_promotions.task_id NULL, the criterion-12 crash
+// artifact) print as their own block under --outcomes: a total, then one line
+// per lane with the count and the oldest claim, zeros included.
+func TestFormatStuckClaims_EveryLaneCountAndOldest(t *testing.T) {
+	oldest := time.Date(2026, 9, 7, 8, 30, 0, 0, time.FixedZone("CEST", 2*3600))
+	got := formatStuckClaims([]promote.StuckClaim{
+		{Lane: "personal"},
+		{Lane: "inquiry", Count: 2, Oldest: oldest},
+		{Lane: "unknown (worker_type classify_residue)", Count: 1, Oldest: oldest},
+	})
+	want := "stuck claims (task_id NULL, all time, every lane): 3\n" +
+		"  personal: 0\n" +
+		"  inquiry: 2 (oldest 2026-09-07T06:30:00Z)\n" +
+		"  unknown (worker_type classify_residue): 1 (oldest 2026-09-07T06:30:00Z)\n"
+	if got != want {
+		t.Errorf("formatStuckClaims:\n got %q\nwant %q", got, want)
+	}
+
+	b, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	i := strings.Index(string(b), "func promoteCmd(")
+	if i < 0 {
+		t.Fatalf("POSITIVE CONTROL FAILED: main.go has no promoteCmd")
+	}
+	body := string(b)[i:]
+	if j := strings.Index(body[1:], "\nfunc "); j >= 0 {
+		body = body[:j+1]
+	}
+	for _, seam := range []string{"promote.StuckClaims(", "formatStuckClaims("} {
+		if !strings.Contains(body, seam) {
+			t.Errorf("promoteCmd does not call %s: --outcomes would not report stuck claims", seam)
+		}
 	}
 }
 

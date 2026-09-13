@@ -1450,3 +1450,167 @@ func TestPromoteInquiry_Integration_OutcomesFoldOnTheFirstDismissal(t *testing.T
 			"include this test's rows", got, err)
 	}
 }
+
+// ---- C-D13: never attach to or reopen a non-human task ------------------------------
+
+// claudeThreadTask seeds a thread in the armed project whose only task is a
+// CLAUDE task (open, or closed with an open dismissal), then an eligible ask
+// on that thread. It returns the task, its dismissal (0 when open) and the
+// ask's message.
+func (s *iqpSuite) claudeThreadTask(t *testing.T, ctx context.Context, label string, dismissed bool) (task, dismissal, msg int64) {
+	t.Helper()
+	key := gmailKey(label)
+	th := s.thread(t, ctx, key)
+	status := "ready"
+	if dismissed {
+		status = "closed"
+	}
+	task = s.id(t, ctx, `INSERT INTO tasks (project_id, title, body, assignee_type, status, priority, source_thread_id)
+	                     VALUES ($1,$2,'','claude',$3,0,$4) RETURNING id`, s.armed, "itest-inqp "+label, status, th)
+	if dismissed {
+		dismissal = s.id(t, ctx, `INSERT INTO task_dismissals (task_id, reason_code, dismissed_by)
+		                          VALUES ($1,'not_actionable',$2) RETURNING id`, task, iqpHuman)
+	}
+	m, r := s.message(t, ctx, iqpMsg{label: label, key: key, sentAt: s.ago(2 * time.Hour)})
+	s.decision(t, ctx, m, "live", "attributed", s.armed)
+	s.verdict(t, ctx, m, r, iqpV{scope: "thread", ask: "can you look at this?"})
+	return task, dismissal, m
+}
+
+// assertClaudeGated: gated claude_task, no promotion row, no tool call, no
+// event on the claude task, no second task — and the verdict stays in the
+// inbox (a second pass gates it again).
+func (s *iqpSuite) assertClaudeGated(t *testing.T, ctx context.Context, task, msg int64, wantStatus string) {
+	t.Helper()
+	for pass := 1; pass <= 2; pass++ {
+		st := s.run(t, ctx, promote.Config{})
+		if st.Gated[promote.GateClaudeTask] != 1 || st.Created+st.Review+st.Attached+st.Reopened != 0 {
+			t.Errorf("pass %d: stats %+v, want exactly one gated %q and nothing acted", pass, st, promote.GateClaudeTask)
+		}
+	}
+	if p, ok := s.promotion(t, ctx, msg); ok {
+		t.Errorf("a gated verdict wrote a promotion row %+v", p)
+	}
+	if n := s.inquiryAudit(t, ctx); n != 0 {
+		t.Errorf("%d audit rows as promote:inquiry; a gated verdict calls no tool (no log, no reopen)", n)
+	}
+	if n := s.count(t, ctx, `SELECT count(*) FROM task_events WHERE task_id=$1`, task); n != 0 {
+		t.Errorf("%d task_events on the claude task %d; nothing may be logged onto it", n, task)
+	}
+	if got := s.status(t, ctx, task); got != wantStatus {
+		t.Errorf("claude task %d status = %q, want %q unchanged", task, got, wantStatus)
+	}
+	if n := s.armedTasks(t, ctx); n != 1 {
+		t.Errorf("%d tasks on the armed project, want 1: never a second task on the thread (Q3)", n)
+	}
+}
+
+// MUTATIONS: drop InquiryGate's C-D13 clause → both tests red (an attach log on
+// the open claude task; a reopen of the dismissed one). Drop assignee_type from
+// threadTask's SELECTs → AttachesToTheOpenTask and ReopensADismissedTask red
+// (an empty assignee reads as not human), and so does this file's positive
+// control. The positive control flips the SAME task to human: the gate is the
+// only thing standing between the verdict and the attach.
+func TestPromoteInquiry_Integration_NeverAttachesToAnOpenClaudeTask(t *testing.T) {
+	ctx := context.Background()
+	s := newIQPSuite(t, ctx)
+	task, _, m := s.claudeThreadTask(t, ctx, "claude-open", false)
+	s.assertClaudeGated(t, ctx, task, m, "ready")
+
+	s.exec(t, ctx, `UPDATE tasks SET assignee_type='human' WHERE id=$1`, task)
+	st := s.run(t, ctx, promote.Config{})
+	if p, ok := s.promotion(t, ctx, m); !ok || p.action != "attached" || p.taskID == nil || *p.taskID != task || st.Attached != 1 {
+		t.Errorf("POSITIVE CONTROL: the same task as human: promotion %+v (found=%v), stats %+v; want attached to %d",
+			p, ok, st, task)
+	}
+}
+
+func TestPromoteInquiry_Integration_NeverReopensADismissedClaudeTask(t *testing.T) {
+	ctx := context.Background()
+	s := newIQPSuite(t, ctx)
+	task, dismissal, m := s.claudeThreadTask(t, ctx, "claude-dismissed", true)
+	s.assertClaudeGated(t, ctx, task, m, "closed")
+	if n := s.count(t, ctx, `SELECT count(*) FROM task_dismissals WHERE id=$1 AND reopened_at IS NULL`, dismissal); n != 1 {
+		t.Errorf("dismissal %d was reopened; a claude task must never go back to a console queue", dismissal)
+	}
+
+	s.exec(t, ctx, `UPDATE tasks SET assignee_type='human' WHERE id=$1`, task)
+	st := s.run(t, ctx, promote.Config{})
+	if p, ok := s.promotion(t, ctx, m); !ok || p.action != "attached" || p.taskID == nil || *p.taskID != task || st.Reopened != 1 {
+		t.Errorf("POSITIVE CONTROL: the same task as human: promotion %+v (found=%v), stats %+v; want attached to %d "+
+			"and reopened", p, ok, st, task)
+	}
+}
+
+// ---- stuck claims: the criterion-12 crash artifact, made visible ------------------
+
+// A claim whose executor call never completed keeps task_id NULL and excludes
+// its message from the inbox for good (at most once, never a duplicate task;
+// ClaimBeforeAct pins that). StuckClaims reports them per lane with the oldest
+// claim, all time. MUTATIONS: drop `WHERE cp.task_id IS NULL` → the completed
+// control counts and the inquiry delta is 2; join ai_runs on 'classify_inquiry'
+// only → the personal claim vanishes.
+func TestPromoteInquiry_Integration_StuckClaimsAreReported(t *testing.T) {
+	ctx := context.Background()
+	s := newIQPSuite(t, ctx)
+	lane := func(sc []promote.StuckClaim, l string) promote.StuckClaim {
+		for _, c := range sc {
+			if c.Lane == l {
+				return c
+			}
+		}
+		t.Fatalf("StuckClaims has no %q line: %+v (personal and inquiry always print)", l, sc)
+		return promote.StuckClaim{}
+	}
+	before, err := promote.StuckClaims(ctx, s.pool)
+	if err != nil {
+		t.Fatalf("StuckClaims: %v", err)
+	}
+	if len(before) < 2 || before[0].Lane != "personal" || before[1].Lane != "inquiry" {
+		t.Fatalf("StuckClaims = %+v, want personal then inquiry first, zeros included", before)
+	}
+
+	claimAt := func(msg, raw, extr, task int64, at time.Time) {
+		var tp *int64
+		if task != 0 {
+			tp = &task
+		}
+		s.exec(t, ctx, `INSERT INTO classify_promotions (normalized_message_id, raw_source_item_id, ai_extraction_id,
+		                                                 project_id, kind, action, task_id, created_at)
+		                VALUES ($1,$2,$3,$4,'question','review',$5,$6)`, msg, raw, extr, s.armed, tp, at)
+	}
+	im, ir, iextr := s.eligible(t, ctx, "stuck-inquiry", iqpV{})
+	claimAt(im, ir, iextr, 0, s.ago(120*time.Hour))
+	pm, pr := s.message(t, ctx, iqpMsg{label: "stuck-personal", key: gmailKey("stuck-personal"), sentAt: s.ago(3 * time.Hour)})
+	pextr := s.verdict(t, ctx, pm, pr, iqpV{worker: "classify", scope: "thread"})
+	claimAt(pm, pr, pextr, 0, s.ago(48*time.Hour))
+	// Control: a COMPLETED inquiry claim is not stuck.
+	cm, cr, cextr := s.eligible(t, ctx, "stuck-control", iqpV{})
+	done := s.id(t, ctx, `INSERT INTO tasks (project_id, title, body, assignee_type, status, priority)
+	                      VALUES ($1,'itest-inqp done','','human','holding',0) RETURNING id`, s.armed)
+	claimAt(cm, cr, cextr, done, s.ago(200*time.Hour))
+
+	after, err := promote.StuckClaims(ctx, s.pool)
+	if err != nil {
+		t.Fatalf("StuckClaims: %v", err)
+	}
+	for _, tc := range []struct {
+		lane string
+		at   time.Time
+	}{{"inquiry", s.ago(120 * time.Hour)}, {"personal", s.ago(48 * time.Hour)}} {
+		b, a := lane(before, tc.lane), lane(after, tc.lane)
+		if a.Count-b.Count != 1 {
+			t.Errorf("%s stuck claims %d -> %d, want +1 (the seeded NULL-task claim; the completed control never counts)",
+				tc.lane, b.Count, a.Count)
+		}
+		if a.Oldest.IsZero() || a.Oldest.After(tc.at) {
+			t.Errorf("%s oldest stuck claim = %v, want at or before the seeded %v", tc.lane, a.Oldest, tc.at)
+		}
+	}
+
+	// The contract is unchanged: a pass never completes a stuck claim.
+	s.run(t, ctx, promote.Config{})
+	if p, _ := s.promotion(t, ctx, im); p.taskID != nil {
+		t.Errorf("a pass completed the stuck claim with task %d; the at-most-once contract is not this change's", *p.taskID)
+	}
+}

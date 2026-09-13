@@ -619,3 +619,105 @@ Idempotency is structural (`UNIQUE (normalized_message_id)` on
 `classify_promotions`); a promotion row with `task_id IS NULL` is the crash
 artifact — decided, not carried out — and later passes leave it alone on
 purpose. Counters per lane render on `/funnel` under "Classify promotion".
+
+## Inquiry promotion (SWT-40 Part C)
+
+The inquiry lane's exit from shadow. `classify promote --lane inquiry` turns
+stored inquiry verdicts into **holding** tasks on the project's board, as
+`promote:inquiry`; the pipelined `inquiry_promote` stage calls the same
+function (`docs/runbooks/pipeline.md`). Nothing is sent, and no console can
+claim these tasks (`assignee_type=human`). `--lane personal`, the default, is
+byte-identical to before.
+
+**What promotes.** An ok `classify_inquiry` verdict with `needs_reply`, on an
+inbound message whose LATEST capture decision (any mode) is `attributed` to a
+project with `ai_inquiry` and `inquiry_promote_after` set, recorded at or after
+that cutover, sent within 72h, and not already promoted. Then a deterministic
+gate, which reports the first failing reason:
+
+| reason | means |
+|---|---|
+| `rethreaded` | the message's thread is no longer the one it was classified on |
+| `kind` | `ask_kind` outside {question, request, decision, scheduling}; `fyi` asks nothing |
+| `stale` | sent more than 72h ago |
+| `pending` | sent less than 1h ago: the grace, so a reply can land first |
+| `answered` | Salvador posted on the thread (or in the DM or conversation) after the ask |
+| `not_addressed` | not gmail, not a 1:1 Slack DM, and not a thread he posted on before the ask |
+| `claude_task` | the thread's open or dismissed task is not `assignee_type=human`: it is never attached to (no log on a worker's task), never reopened, and never shadowed by a second task (C-D13) |
+
+A gated verdict writes nothing and is counted in the stats line's `gated`
+block. A pending one promotes on the first pass after its hour. A passing
+verdict attaches to the thread's open task, reopens a dismissed one (SWT-36),
+or creates a new `holding` task titled `{asker}: {ask}`.
+
+**Arming it.** Off until a human sets the lane's own cutover, after task #110
+has its provenance (C-D11):
+
+```sql
+UPDATE projects SET inquiry_promote_after = now() WHERE slug = 'collaboratory';
+```
+
+**Dry run, and the backfill read.** `classify promote --lane inquiry
+--dry-run` prints the plan (every would-create line shows `status=holding`)
+and writes nothing. `--max-age 720h` widens the 72h fence for that read only.
+It is refused unless `--dry-run`, because the fence is what keeps historical
+asks off the board.
+
+**Holding first (O7), and the flip.** New inquiry tasks land in Holding
+(`classify_promotions.action='review'`) because `inquiryCreateStatus` is
+`"holding"`, a Go constant. After about two weeks, if the readout below
+satisfies Salvador, the flip is one line, `inquiryCreateStatus = "ready"`
+(action `task`), plus the pinned test it must edit in the same diff. Tasks
+already created stay where they are.
+
+**The readout, O7's flip signal:** `classify promote --lane inquiry --outcomes
+[--since 336h]`. It folds every promoted inquiry task on its FIRST dismissal:
+
+| outcome | condition |
+|---|---|
+| `false_positive` | first dismissal `not_actionable` or `wrong_kind`: not a real ask |
+| `true_positive` | closed or delivered with no dismissal, or first dismissal `handled_elsewhere` |
+| `mis_click` | a human reopened the first dismissal: a mis-click, not a label |
+| `excluded` | `duplicate`, still open, or an `attached` promotion |
+
+An activity reopen (a new message on the thread) does not undo a label. The
+counts always print; a precision ratio (true positives over decided) prints
+only at 120 decided or more, with the indicative marker below that. It
+measures precision, never recall: an ask the model missed never becomes a
+task, so no dismissal can count it. It is a read-only readout, not an eval:
+nothing enters the labelled set, and `classify eval` is untouched.
+
+**Stuck claims.** The promoter writes its claim (the `classify_promotions`
+row) before it calls the executor, then records the task on that row
+(claim-before-act, criterion 12). A crash or a transient error between the two
+leaves a claim with `task_id` NULL, and the inbox skips that message from then
+on: at most once, never a duplicate task. The personal lane and capture share
+that contract. `--outcomes` prints these after the counts, under `stuck claims
+(task_id NULL, all time, every lane)`: the total, then one line per lane with
+the count and the oldest claim. `--since` does not narrow it. A claim that a
+running pass is still working on shows there for a few seconds; one older than
+a pass is stuck. To resolve one by hand:
+
+1. Find it: `SELECT cp.id, cp.normalized_message_id, cp.action, cp.created_at,
+   r.worker_type FROM classify_promotions cp JOIN ai_extractions e ON e.id =
+   cp.ai_extraction_id JOIN ai_runs r ON r.id = e.ai_run_id WHERE cp.task_id IS
+   NULL;`
+2. Check whether the executor acted before it failed. Look for an `ok`
+   `create_task` or `task_append_log` row: `SELECT id, tool, status, task_id,
+   started_at FROM audit_events WHERE actor LIKE 'promote:%' AND started_at
+   BETWEEN <created_at> AND <created_at> + interval '5 minutes' ORDER BY id;`.
+   A promoted task's body names its message on a line of its own, so `SELECT
+   id, project_id FROM tasks WHERE position(E'normalized_message_id: <message
+   id>\n' in body) > 0` finds one even when the crash came before
+   `task_set_source_thread`. Anchor on the newline: a bare `LIKE` on the id
+   also matches longer ids (12 matches 123). Both lanes write this line, so
+   check the project matches the claim's.
+3. If a task exists (or, for `action='attached'`, the log landed on the
+   thread's task), link it: `UPDATE classify_promotions SET task_id = <task>
+   WHERE id = <claim> AND task_id IS NULL;`
+4. If there is no task, delete the claim: `DELETE FROM classify_promotions
+   WHERE id = <claim> AND task_id IS NULL;`. The next pass or sweep promotes
+   the message again if its verdict is still eligible (on the inquiry lane,
+   that includes the 72h fence).
+
+Automatic recovery of stranded claims is the follow-up ticket SWT-50.

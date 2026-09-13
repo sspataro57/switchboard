@@ -227,6 +227,10 @@ func TestMigration0031_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 // The LEDGER (internal/classify/structure_test.go) must own 31, naming this
 // ticket, within the window TestMigrationLedger_Learns0024 already reads.
 // GREEN guard: the ledger was taught 31 in the same change as this file.
+//
+// It does NOT refuse 30: SWT-45 owns 0030 on another branch, and when it
+// merges its ledger line accepts 30 beside this one's 31. Whichever branch
+// merges second must keep both, so this guard reads only its own number.
 func TestMigrationLedger_Learns0031(t *testing.T) {
 	src := prRepoFile(t, "internal/classify/structure_test.go")
 	i := strings.Index(src, "THIS LEDGER IS THE LIVING REGISTRY")
@@ -240,9 +244,6 @@ func TestMigrationLedger_Learns0031(t *testing.T) {
 	}
 	if !strings.Contains(ledger, "31 is SWT-40 Part C") {
 		t.Errorf("the ledger adds 31 without the ownership note \"31 is SWT-40 Part C ...\" above the marker")
-	}
-	if regexp.MustCompile(`n\s*!=\s*30\b`).MatchString(ledger) {
-		t.Errorf("the ledger accepts 30 on this branch; 0030 is SWT-45's, and it learns it when SWT-45 merges")
 	}
 }
 
