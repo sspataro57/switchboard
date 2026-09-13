@@ -1149,12 +1149,6 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// its ticket's "Data model changes" section. Anything else above 0017 is
 		// a migration nobody's ticket owns.
 		//
-		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
-		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
-		// asserts only its own file; the numbers nobody owns are caught HERE,
-		// because the migrate runner keys on schema_migrations.version with NO
-		// checksum — a stray or edited file is skipped SILENTLY and the schema
-		// diverges with no error anywhere.
 		// 24 is SWT-33's (this branch, ai_inquiry) and 25 is SWT-34's
 		// (delivered statuses, merged first) — the two were built in parallel
 		// and this line is where their ledgers meet, exactly as SWT-34's review
@@ -1171,7 +1165,19 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// "Data model changes" section. SWT-40 (inquiry-promote) ALSO names 0028 in
 		// its SPEC: whichever branch merges SECOND renumbers its files, its
 		// per-ticket guard and this line (delivery-deny criterion 3).
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 {
+		// 29 is SWT-40 Part D's (inquiry-promote: capture_decisions admits
+		// action 'held' and mode 'gate', the gate shape CHECKs and the partial
+		// capture_decisions_gate_uniq), named by its SPEC's data-model section
+		// as 0027_capture_ticket_gate and renumbered: 0027 went to SWT-39 and
+		// 0028 is claimed by SWT-43 on another branch — whichever merges second
+		// renumbers, and this line learns it.
+		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
+		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
+		// asserts only its own file; the numbers nobody owns are caught HERE,
+		// because the migrate runner keys on schema_migrations.version with NO
+		// checksum — a stray or edited file is skipped SILENTLY and the schema
+		// diverges with no error anywhere.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

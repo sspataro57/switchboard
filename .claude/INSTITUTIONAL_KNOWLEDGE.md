@@ -886,6 +886,93 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   client reconnecting forever), and `PublishStatus` waits at most 10 s for its ack.
 - **E5** (`classify promote --lane`) ships with Part C.
 
+### The capture-time assignee gate (SWT-40 Part D, inquiry-promote)
+
+- **Capture never calls Jira.** A jira-keyed match whose rule's project has `ticket_assignee_gate` (read
+  from the column in `loadRules`) is recorded `held`: project, rule and key named, nothing created, in
+  shadow and live alike. Capture runs in every connector main, and an LHH link arrives via slackweb and
+  google too. The lookup credential (`OPS_TOKEN_KEY` plus the stored token) lives only in connector-jira
+  and pipelined. A capture-time GET would spread the secret everywhere, or silently skip the check where
+  it is absent. Runbook: `docs/runbooks/ticket-status-sync.md` "Capture-time assignee gate".
+- **The resolution is a SECOND row, `mode='gate'`** (`capture.RunGate`, the pipelined `gate` stage,
+  lock `0x5157_0015`). The live claim is spent by `held`, which acted on nothing, so the gate row is the
+  message's one action. Actions: `task` / `task_log`, via capture's own helpers as `capture:gate`, or
+  `attributed`, with the reconciler's drop reason or `gate_unverified_expired`. An unreadable hold
+  writes NOTHING and stays held (`pending_lookup`). The gate row is the latest decision, so every
+  `ORDER BY id DESC` reader follows it.
+- **LANDMINE, the third partial unique index on `capture_decisions.message_id`.**
+  `capture_decisions_gate_uniq ... WHERE mode='gate'` sits next to the live one, and every `ON CONFLICT`
+  must restate its predicate. `gate_structure_test.go` scans `internal/` and `cmd/` for it.
+- **`pendingMessages` excludes gate-resolved messages in EVERY mode, `--all` included.** Otherwise the
+  documented shadow `--all` re-pointing pass writes newer rows that bury the resolution for every reader.
+- **One predicate, one fetch path.** The gate calls `ticketstatus.Warranted` (extracted from `Decide`)
+  and `ticketstatus.EnsureSnapshots` (extracted from `Run`), so it cannot create a task the reconciler
+  closes 15 min later, and the two share the stored snapshot cache (TTL 1h). `gate.go` may not name
+  `LookupIssues`, `RouteLookup`, the TTL reader or the delivered-status matcher. `ticket_delivered_statuses`
+  may only be read in `ticketstatus/store.go` and opsctl (SWT-34 criterion 22), so the gate gets the set
+  through `ticketstatus.DeliveredStatusesByProject`.
+- **Rate:** at most 50 distinct keys looked up per pass; holds on other keys are skipped untouched and
+  counted `GateStats.BudgetSkipped`. pipelined's processed count is `GateStats.Resolved`, never pending
+  holds: a re-counted pending hold would make the stage loop re-run at once, faster than the sweep.
+  Expiry is strictly after 72h from when the HOLD was written (the held row's `created_at`, not the
+  message's `sent_at`), and the inbox includes expired holds so they resolve.
+- **Freshness rule (review fix 1).** A stored snapshot decides a hold only if `Snapshot.VerifiedAt >=`
+  the message's first-seen time (`normalized_messages.created_at`, which no upsert rewrites). The gate
+  passes `ticketstatus.Config.MinFresh` (per key, the newest held message's first-seen time), which
+  forces a fetch past the TTL; the reconciler passes nil, so its TTL logic is untouched. A failed
+  forced fetch leaves the hold pending until expiry, never decided from the older snapshot.
+  **LANDMINE: `ingested_at` does NOT move on an unchanged refetch** (`upsertRaw`'s hash short-circuit).
+  So `VerifiedAt` is `ingested_at` OR the DB clock at the start of this call's successful GET (from
+  `jira.Stats.FetchedKeys`, in-memory, `json:"-"`). Comparing `ingested_at` alone starves every mention of
+  an unchanged ticket until it expires. Keys routed to no lookup account are never force-fetched, so
+  their holds wait for the poller to store a newer copy. Mutations: drop `MinFresh` → the D-D6 test goes red;
+  drop the `VerifiedAt` check → the Jira-down test goes red.
+- **Fetch, then lock (review fix 3).** `RunGate` probes `0x5157_0015` (busy → `ErrGateLockHeld`, no GET),
+  releases it, fetches via `EnsureSnapshots`, THEN takes the lock, re-reads the inbox and decides.
+  Capture's lock is never held across Jira HTTP. Token-built clients (`jira.TokenClientFactory`) carry a
+  30 s `http.Client` timeout, `LookupRequestTimeout`, which also covers the connector-jira poller.
+- **One decide step (review fix 2).** `decideGateHolds` (budget, freshness, per-message ref re-query,
+  `DecideGate`) is shared by `RunGate` and `DryRunGate`. `opsctl capture-rules gate --dry-run [--shadow]`
+  prints `message=… key=… outcome=…` from the stored snapshots only (no fetch, no lock, no writes).
+  `--shadow` reads the latest shadow `held` rows and is refused without `--dry-run`.
+- **Claim, act, complete (review round 2, fix 1).** Gate `task` AND `task_log` rows are both claimed with
+  `task_id` NULL before any executor call, and `recordDecisionTask` fills `task_id` only after the calls
+  succeed (for `task_log`: `task_append_log`, then the guarded reopen). Migration 0029's
+  `capture_decisions_gate_task_pin` therefore pins only `attributed ⇒ task_id NULL`. The report's
+  "claimed with no task" WARNING counts live/gate `task` and gate `task_log` rows with NULL `task_id`: a
+  pass that died after the claim. For a `task_log`, the log may or may not have landed; the reason text
+  names the target task. Mutation: claim `task_log` with `task_id` set → the failing-append test
+  (`gate_scope_integration_test.go`) goes red.
+- **Tenant scope (review round 2, fix 2).** The gate sets `ticketstatus.Config.ScopeToRoute`. A stored row
+  counts as a key's snapshot only if it came from the account `RouteLookup` routes the key to (by prefix
+  scope). For a key no lookup account claims, it falls back to the one `provider='jira'` poller account
+  storing it. An ambiguous route, or two storing pollers, gives no snapshot: pending, then fail-closed
+  expiry. The reconciler leaves the flag false, so its Count > 1 ambiguity refusal is unchanged.
+  `Snapshot.SourceAccountID` is the storing row's `source_account_id`. Mutation: drop the filter → the
+  two-snapshot test goes pending and the lone-foreign test creates a task.
+- **`VerifiedAt` for a key fetched in this call is the fetch START** (`clock_timestamp()` before the GET),
+  unconditionally, and only for the row the fetching account stored (round 2, fix 3). It is never
+  max(ingested_at, start): the response describes the ticket as of the request.
+- **FOLLOW-UP (not fixed): `external_refs` dedup is not tenant-qualified (follow-up SWT-49) either.** `taskForExternalRef`
+  and the unique key are `(system, external_key)`, so two Jira sites sharing a prefix would share one ref.
+  This is latent today because the sites use different prefixes.
+- **FOLLOW-UP (not fixed): unchanged-content verification lives only in memory.** `VerifiedAt` from a GET
+  that returned unchanged content is not stored (`ingested_at` does not move). So a pass that fetches and
+  then loses the capture lock (`ErrGateLockHeld` on the second take) re-fetches the same keys next pass,
+  up to 50 GETs. Persisting a verified-at time per stored snapshot would fix it.
+- **Gate turned off with holds pending** → they resolve with the gate off (the column is read every pass):
+  tasks with no assignee check.
+- **Deploy consequence:** until the connector images carrying Part D are deployed, OLD capture binaries
+  keep creating tasks for gated projects. That is the old behaviour, not a regression. Order: 0029, then
+  the connector bump, then `PIPELINE_STAGES=gate` plus `OPS_TOKEN_KEY` on pipelined. Without the key,
+  every hold expires `gate_unverified_expired` (fail closed, no task). **LANDMINE: 0029 BEFORE any image
+  built from main.** On a db without 0029, a new capture binary fails the action CHECK on the first gated
+  match, and that stalls capture for every connector.
+- The shared token-decrypting factory is `jira.TokenClientFactory(pool, key)`, which returns nil for an
+  empty key. connector-jira, opsctl and pipelined all use it.
+- `TestDecideGate_BodyIsPure` slices from `func DecideGate(` to the next `\nfunc `, so the next
+  function's doc comment counts as "body". `DecideGate` is kept last in `gate.go` for that reason.
+
 ### Link preservation (SWT-25)
 
 - `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written
@@ -1444,6 +1531,7 @@ the executor. Runbook: `docs/runbooks/capture-rules.md`.
 - _Known infra issues: none yet — record flakes and races here the first time they bite._
 - **LANDMINE (2026-09-12): the compose Postgres is SHARED by every worktree and agent.** Capture suites take capture's advisory lock 0x5157_0015 and delete `capture_decisions` wholesale, so two branches running integration tests at once corrupt each other ("another pass holds advisory lock", rows vanishing). Run a branch's integration suite in its own database: `psql 'postgres://ops:ops@localhost:5433/ops?sslmode=disable' -c "CREATE DATABASE ops_<branch>"`, `make migrate LOCAL_DB_URL='postgres://ops:ops@localhost:5433/ops_<branch>?sslmode=disable'`, then point `DATABASE_URL` at it. Advisory locks are per-database, so this isolates them too.
 - **Known flake (SWT-48): `TestAttributionTrend_*` in internal/capture fail from 20:00 to 24:00 EDT** (local date != UTC date). They pass with `TZ=UTC`. Pre-existing on main; it is not a regression in whatever branch you are testing.
+- **LANDMINE: an edited migration never reaches a DB that already applied it.** `cmd/tools/migrate` keys on `schema_migrations.version` with no checksum. Editing a numbered file in place is fine only if NO database (prod or the shared compose `ops`) has applied it yet; otherwise fix that DB by hand or rebuild it. 2026-09-12: 0029's task_id pin was edited after the compose `ops` DB had applied it and was patched by hand; prod never had the old version.
 
 ---
 

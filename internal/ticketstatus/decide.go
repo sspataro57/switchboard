@@ -95,38 +95,9 @@ func activeWork(status string) bool {
 
 // Decide is the whole rule set (criteria 21-29, 32). Pure — zero I/O.
 func Decide(obs Observation, state *State) Decision {
-	// Criterion 32: evidence gaps are unreadable, never a verdict in either
-	// direction. D12's fail-safe: a task must not vanish because we could not
-	// identify ourselves. With the gate OFF the assignee is never consulted, so
-	// its absence is not a gap (D11's whole meaning).
-	if !obs.StatusKnown || (obs.GateOn && (!obs.AssigneeKnown || obs.OwnAccountID == "")) {
+	warranted, drop, readable := Warranted(obs)
+	if !readable {
 		return Decision{Action: "unreadable"}
-	}
-
-	// D15 as SWT-34 extends it: one predicate, now THREE facts. drop_reason
-	// records WHICH fact dropped it, chosen by ONE ordered list (E7):
-	// ticket_done > ticket_delivered > not_assigned.
-	//
-	// The order's argument: `done` keeps the top slot because the strongest
-	// statement about a ticket is that it is finished (an admin may give a
-	// done-category status a QA-sounding name, and it is still done). `delivered` sits
-	// directly beneath it because it is the same KIND of fact — the ticket's own
-	// lifecycle — and a weaker version of it; a QA ticket also assigned to a QA
-	// engineer was dropped because he delivered it, and recording that as
-	// `not_assigned` would make the counter he reads to judge a capture rule
-	// wrong. Inserting it between the two leaves SWT-32's done > not_assigned
-	// relation byte-identical.
-	delivered := IsDeliveredStatus(obs.StatusName, obs.DeliveredStatuses)
-	warranted := obs.StatusCategory != "done" && !delivered &&
-		(!obs.GateOn || obs.Assignee == obs.OwnAccountID)
-	drop := ""
-	switch {
-	case obs.StatusCategory == "done":
-		drop = "ticket_done"
-	case delivered:
-		drop = "ticket_delivered"
-	case obs.GateOn && obs.Assignee != obs.OwnAccountID:
-		drop = "not_assigned"
 	}
 
 	if !warranted {
@@ -180,4 +151,48 @@ func Decide(obs Observation, state *State) Decision {
 		restore = "ready"
 	}
 	return Decision{Warranted: true, Action: "reopened", RestoreStatus: restore, Act: true}
+}
+
+// Warranted is the ONE spelling of "does this ticket warrant a task" (SWT-40
+// D-D3), shared by Decide and the capture-time gate (capture.DecideGate), so the
+// gate never creates a task this reconciler would close 15 minutes later. Pure —
+// zero I/O. readable=false is an evidence gap, and then warranted and dropReason
+// carry no verdict in either direction (criterion 32). dropReason names the fact
+// that dropped the ticket ('ticket_done' | 'ticket_delivered' | 'not_assigned')
+// and is "" when warranted.
+func Warranted(obs Observation) (warranted bool, dropReason string, readable bool) {
+	// Criterion 32: evidence gaps are unreadable, never a verdict in either
+	// direction. D12's fail-safe: a task must not vanish because we could not
+	// identify ourselves. With the gate OFF the assignee is never consulted, so
+	// its absence is not a gap (D11's whole meaning).
+	if !obs.StatusKnown || (obs.GateOn && (!obs.AssigneeKnown || obs.OwnAccountID == "")) {
+		return false, "", false
+	}
+
+	// D15 as SWT-34 extends it: one predicate, now THREE facts. drop_reason
+	// records WHICH fact dropped it, chosen by ONE ordered list (E7):
+	// ticket_done > ticket_delivered > not_assigned.
+	//
+	// The order's argument: `done` keeps the top slot because the strongest
+	// statement about a ticket is that it is finished (an admin may give a
+	// done-category status a QA-sounding name, and it is still done). `delivered` sits
+	// directly beneath it because it is the same KIND of fact — the ticket's own
+	// lifecycle — and a weaker version of it; a QA ticket also assigned to a QA
+	// engineer was dropped because he delivered it, and recording that as
+	// `not_assigned` would make the counter he reads to judge a capture rule
+	// wrong. Inserting it between the two leaves SWT-32's done > not_assigned
+	// relation byte-identical.
+	delivered := IsDeliveredStatus(obs.StatusName, obs.DeliveredStatuses)
+	warranted = obs.StatusCategory != "done" && !delivered &&
+		(!obs.GateOn || obs.Assignee == obs.OwnAccountID)
+	drop := ""
+	switch {
+	case obs.StatusCategory == "done":
+		drop = "ticket_done"
+	case delivered:
+		drop = "ticket_delivered"
+	case obs.GateOn && obs.Assignee != obs.OwnAccountID:
+		drop = "not_assigned"
+	}
+	return warranted, drop, true
 }

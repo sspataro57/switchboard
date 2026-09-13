@@ -71,6 +71,7 @@ func Report(ctx context.Context, pool *pgxpool.Pool, since time.Time, domain str
 		reportProjects,
 		reportProposedTasks,
 		reportAmbiguous,
+		reportGate, // SWT-40 D6 (gate.go's rows)
 		// SWT-23 criterion 1: the DOMAIN table renders before the full-From
 		// table — it is the one a reader acts on, and the sender table is the
 		// detail underneath it. Both stay.
@@ -289,24 +290,33 @@ func reportTotals(ctx context.Context, pool *pgxpool.Pool, window *time.Time, b 
 	return reportUnapplied(ctx, pool, window, b)
 }
 
-// reportUnapplied surfaces the one failure this engine cannot retry: a LIVE
-// decision that recorded action='task' and has no task.
+// reportUnapplied surfaces the one failure this engine cannot retry: a claim
+// with no task — a LIVE or GATE decision that recorded action='task', or a GATE
+// decision that recorded action='task_log', and has no task_id.
 //
-// The live claim is one decision per message FOREVER, so a run that died between
-// the claim and the create_task call leaves a message the pass will never look at
-// again. Nothing else in the system notices — there is no task, no external ref,
-// no event — so this line is the only place it surfaces. Zero is the normal
+// Both claims are one decision per message FOREVER (the live claim, and the
+// gate's resolution, SWT-40 D-D2), and both are written before the executor
+// acts: a live or gate `task` before create_task, a gate `task_log` before
+// task_append_log and the guarded reopen (its task_id is filled in only after
+// they succeed; SWT-40 review round 2). A run that died in between leaves a
+// message no pass will ever look at again. Nothing else in the system notices —
+// for a task there is no task, no external ref, no event; for a log, the log may
+// or may not have landed — so this line is the only place it surfaces. A live
+// `task_log` is written WITH its task and never counts. Zero is the normal
 // reading and is therefore printed only when it is not zero.
 func reportUnapplied(ctx context.Context, pool *pgxpool.Pool, window *time.Time, b *strings.Builder) error {
 	var n int
 	if err := pool.QueryRow(ctx, latestDecisions+`
 	  SELECT count(*) FROM latest
-	   WHERE mode = 'live' AND action = 'task' AND task_id IS NULL`, window).Scan(&n); err != nil {
+	   WHERE task_id IS NULL
+	     AND ((mode IN ('live','gate') AND action = 'task')
+	          OR (mode = 'gate' AND action = 'task_log'))`, window).Scan(&n); err != nil {
 		return fmt.Errorf("count unapplied capture decisions: %w", err)
 	}
 	if n > 0 {
-		fmt.Fprintf(b, "  WARNING: %d live decision(s) recorded action='task' with no task — the run died "+
-			"between claiming the message and creating it, and the live claim is permanent.\n", n)
+		fmt.Fprintf(b, "  WARNING: %d decision(s) claimed with no task (live or gate task, gate task_log) — the "+
+			"run died between claiming the message and acting on it (creating the task, or appending the log), and "+
+			"the claim is permanent.\n", n)
 	}
 	return nil
 }
@@ -424,6 +434,53 @@ func reportAmbiguous(ctx context.Context, pool *pgxpool.Pool, window *time.Time,
 	}
 	if !any {
 		b.WriteString("  (none)\n")
+	}
+	return nil
+}
+
+// reportGate is SWT-40 D6: the capture-time gate on its own lines — live held
+// decisions, those still pending a lookup, and the gate's resolutions by action
+// and reason code. Counted over rows of their mode, not latest decisions: a
+// resolved hold's latest row is its gate row, and "held" must still count it.
+func reportGate(ctx context.Context, pool *pgxpool.Pool, window *time.Time, b *strings.Builder) error {
+	var held, pending int
+	if err := pool.QueryRow(ctx, `
+	  SELECT count(*),
+	         count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM capture_decisions g
+	                                             WHERE g.message_id = h.message_id AND g.mode = 'gate'))
+	    FROM capture_decisions h
+	   WHERE h.mode = 'live' AND h.action = 'held'
+	     AND ($1::timestamptz IS NULL OR h.created_at >= $1)`, window).Scan(&held, &pending); err != nil {
+		return fmt.Errorf("count held capture decisions: %w", err)
+	}
+	rows, err := pool.Query(ctx, `
+	  SELECT action, COALESCE(reason,'') FROM capture_decisions
+	   WHERE mode = 'gate' AND ($1::timestamptz IS NULL OR created_at >= $1)`, window)
+	if err != nil {
+		return fmt.Errorf("select gate decisions: %w", err)
+	}
+	defer rows.Close()
+	resolved := map[string]int{}
+	for rows.Next() {
+		var action, reason string
+		if err := rows.Scan(&action, &reason); err != nil {
+			return fmt.Errorf("scan gate decision: %w", err)
+		}
+		resolved["gate "+action+" "+gateReasonCode(reason)]++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate gate decisions: %w", err)
+	}
+
+	b.WriteString("GATE (capture-time assignee gate)\n")
+	if held == 0 && len(resolved) == 0 {
+		b.WriteString("  (none — no gated jira match in this window)\n")
+		return nil
+	}
+	fmt.Fprintf(b, "  %-44s %6d\n", "held", held)
+	fmt.Fprintf(b, "  %-44s %6d\n", "pending_lookup", pending)
+	for _, e := range topCounts(resolved, 0) {
+		fmt.Fprintf(b, "  %-44s %6d\n", e.key, e.count)
 	}
 	return nil
 }

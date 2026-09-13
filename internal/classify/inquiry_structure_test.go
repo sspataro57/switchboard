@@ -145,7 +145,7 @@ func TestMigrationLedger_Learns0024(t *testing.T) {
 	// ownership list is the comment ABOVE the sentinel and the predicate is
 	// below it, and a window anchored only forwards would report "0024 is
 	// unowned" while its owner sat three lines up.
-	start := i - 1600
+	start := i - 3000
 	if start < 0 {
 		start = 0
 	}

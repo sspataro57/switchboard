@@ -163,3 +163,138 @@ SELECT te.task_id, te.created_at, te.payload->>'message'
    AND te.created_at > s.acted_at
  ORDER BY te.created_at DESC;
 ```
+
+## Capture-time assignee gate (SWT-40 Part D)
+
+The reconciler above only ever sees tasks that already exist. On a gated
+project that meant every LHH mention created a task first and the reconciler
+closed it about a day later (`not_assigned` or `ticket_done`). The gate checks
+the ticket BEFORE a task exists: assigned to him and still open means a task,
+exactly as before; otherwise there is no task and no log line.
+
+**The trigger.** The winning capture rule has `external_system='jira'`, a
+ticket key was derived, and the rule's project has `ticket_assignee_gate`
+(the column, loaded with the rules). Capture then records action **`held`**
+instead of `task`/`task_log`. The row names the project, rule and key, and
+nothing is created. Shadow mode writes `held` too. Gate-off projects
+(collaboratory) are unchanged, and so is an unkeyed match, which stays
+`attributed`.
+
+**Why capture never calls Jira.** Capture runs inside every connector main,
+and an LHH link arrives through slackweb and google as well as jira. The lookup
+credential (`OPS_TOKEN_KEY` plus the stored token) exists only where the lookup
+runs. A capture-time HTTP call would spread that secret to every connector, or
+silently skip the check where it is absent. So `held` is resolved later by the
+`gate` stage in `pipelined` (`docs/runbooks/pipeline.md`). It is woken by
+`captured`, with the 5 min sweep as the fallback, and it takes capture's
+advisory lock.
+
+**The resolution** is a second `capture_decisions` row with `mode='gate'`, one
+per message forever (`capture_decisions_gate_uniq`). It is claimed before any
+executor call. It uses the reconciler's own stored snapshot and its own
+predicate (`ticketstatus.EnsureSnapshots` and `ticketstatus.Warranted`), so the
+gate never creates a task this reconciler would close 15 minutes later. There
+are four outcomes:
+
+| ticket | gate row | writes |
+|---|---|---|
+| assigned to own account, open, no task yet | `task` | create_task + link_external_ref + task_set_source_thread, actor `capture:gate` |
+| same, and the key already has a task | `task_log` | task_append_log; plus the guarded task_reopen if a human dismissed that task (SWT-36) |
+| not his, unassigned, done or a delivered status | `attributed`, reason `not_assigned` / the done reason / `ticket_delivered` | nothing |
+| still unreadable after 72h | `attributed`, reason `gate_unverified_expired` | nothing (fail closed) |
+
+An **unreadable** hold writes nothing and stays held (`pending_lookup`). That
+covers Jira unreachable, no credential, a per-key fetch failure, or a snapshot
+older than the message (below). It is retried on the next wake or sweep. A hold
+whose key is over this pass's budget is left untouched too, counted
+`budget_skipped`.
+
+**Freshness.** A stored snapshot decides a hold only if it was verified at or
+after the message was first seen (`normalized_messages.created_at`, which no
+upsert rewrites). "Verified" is the snapshot's `ingested_at`, or the start of
+this pass's successful GET when the ticket came back unchanged (an unchanged
+refetch leaves `ingested_at` alone). So a key whose snapshot predates a held
+message is fetched whatever the TTL. This is the D-D6 case: the gate saw the
+ticket unassigned, the ticket was then assigned to him, and the assignment mail
+arrives inside the hour. If that fetch fails, the older snapshot is no verdict:
+the hold stays pending and, if Jira stays down, expires fail-closed. Keys
+routed to no lookup account (poller-only projects) are never force-fetched, so
+their holds resolve only when the poller stores a newer copy of the ticket.
+Today every gated project (reengine) is lookup-routed.
+
+**Fetch, then lock.** The gate fetches BEFORE it takes capture's advisory lock
+(fetching is idempotent raw-first ingestion), then locks, re-reads the inbox and
+decides from the stored snapshots. Every connector's capture pass takes the same
+lock, so none of them waits on Jira. A pass that finds the lock busy skips before
+any GET. Token-built Jira clients time out after 30 s per request.
+
+**Cache and rate.** The cache IS the stored raw snapshot, the same row the
+reconciler reads. `TICKET_LOOKUP_TTL` (1h) applies to keys whose snapshot is
+newer than every held message naming them. A burst of mentions costs one GET: the
+pass fetches once for the key's newest hold. The gate and the reconciler share
+every fetch. A pass looks up at most **50 distinct keys**; holds on the rest are
+left untouched for the next pass or sweep (`budget_skipped`). `/myself` is called
+once per lookup account per pass. There are no in-pass retries: the retry rate
+is the sweep.
+
+**Expiry.** `GateMaxAge = 72h`, measured from when the HOLD was written (the
+held row's `created_at`), not the message's `sent_at`, so a message captured
+late still gets its full window. After that, a hold that is still unreadable
+resolves `attributed (gate_unverified_expired)` and stops costing GETs. That is
+the fail-closed direction: no task. Without `OPS_TOKEN_KEY` on pipelined, fresh
+holds pile up as `pending_lookup` and every one of them expires this way. Check
+the key first if the report shows only expiries.
+
+**Turning a project's gate off while holds are pending.** The hold rows stay;
+the gate stage still resolves them, but it reads `ticket_assignee_gate` from the
+column on every pass, so they resolve with the gate OFF: a warranted-by-status
+ticket becomes a task (or a log) WITHOUT the assignee check, just as capture
+would have done with the gate off. If that is not what you want, let them
+resolve before switching the gate off, or dry-run first (below) to see them.
+
+**Later assignment.** A resolution is final for its message. A ticket assigned
+to him later gets its task from the next mention, and there always is one: the
+Jira assignment notification mail itself (the `jira@avviato.atlassian.net`
+rule), which holds and then resolves `task`.
+
+**The backstop.** The reconciler is unchanged. It closes a gate-created task
+when the ticket is reassigned away or finished, and reopens it when the ticket
+comes back.
+
+**Reading it.** `opsctl capture-rules report` prints a `GATE` section: the
+`held` count, `pending_lookup`, and one line per resolution (`gate task
+warranted`, `gate attributed not_assigned`, …). Its crash-artifact WARNING line
+("claimed with no task") counts live and gate `task` rows, and gate `task_log`
+rows, with no `task_id`. That is a pass that died between the gate's claim and
+the executor call: `create_task` for a task, or `task_append_log` and the guarded
+reopen for a log. A gate row gets its `task_id` only after those succeed. For a
+`task_log`, the log may or may not have landed; the row's reason names the task.
+A stored snapshot counts only if it came from the account the key routes to (the
+lookup account whose prefix scope claims it or, for a key no lookup account
+claims, the one poller account storing it). Any other site's copy is ignored,
+and the hold stays pending. pipelined logs a `gate pass`
+line with the same counters on every pass, plus `budget_skipped`.
+
+**Running it by hand.** `opsctl capture-rules gate` runs one gate pass, exactly
+as the pipelined stage does (needs `OPS_TOKEN_KEY` to fetch). `opsctl
+capture-rules gate --dry-run` decides every live hold from the STORED snapshots
+only. It fetches nothing, takes no lock and writes nothing, and it prints one
+line per hold: `message=<id> key=<key> outcome=<task | task_log |
+attributed:<reason> | pending_lookup | budget_skipped>`. Add `--shadow` to read
+the latest shadow `held` rows instead (the V5 preview before capture goes
+live). A dry run never fetches, so a hold whose stored snapshot is older than
+its message reads `pending_lookup` there even when a live pass would fetch and
+resolve it. By hand:
+
+```sql
+-- holds still waiting, oldest first
+SELECT h.message_id, h.external_key, m.sent_at
+  FROM capture_decisions h JOIN normalized_messages m ON m.id = h.message_id
+ WHERE h.mode = 'live' AND h.action = 'held'
+   AND NOT EXISTS (SELECT 1 FROM capture_decisions g WHERE g.message_id = h.message_id AND g.mode = 'gate')
+ ORDER BY m.sent_at;
+```
+
+Any `ON CONFLICT` against `capture_decisions` must restate its partial
+predicate (`WHERE mode = 'live'` / `WHERE mode = 'gate'`). A structural test
+scans for this.

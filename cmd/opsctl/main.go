@@ -5,7 +5,7 @@
 //	opsctl call --tool <name> [--args '<json>']   (raw executor call; used by the negative smoke)
 //	opsctl fleet
 //	opsctl answer-feedback --id N --answer "..." [--resume]
-//	opsctl capture-rules <list|add|run|report> [flags]
+//	opsctl capture-rules <list|add|run|report|gate> [flags]
 //	opsctl ticket-status <sync|report> [flags]   (SWT-32: the jira reconciler by hand)
 package main
 
@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -76,7 +75,7 @@ func main() {
 		// executor path below like create-task. list/run/report are their own
 		// paths: two are reads and `run` needs a deadline the 30s one cannot give.
 		if len(os.Args) < 3 {
-			err = fmt.Errorf("usage: opsctl capture-rules <list|add|run|report> [flags]")
+			err = fmt.Errorf("usage: opsctl capture-rules <list|add|run|report|gate> [flags]")
 			break
 		}
 		if os.Args[2] == "add" {
@@ -369,8 +368,11 @@ func runCaptureRules(sub string, argv []string) error {
 		return runCaptureRulesRun(argv)
 	case "report":
 		return runCaptureRulesReport(argv)
+	case "gate":
+		// SWT-40 Part D: one capture-time gate pass by hand (gate.go).
+		return runCaptureRulesGate(argv)
 	default:
-		return fmt.Errorf("unknown capture-rules command %q (want list|add|run|report)", sub)
+		return fmt.Errorf("unknown capture-rules command %q (want list|add|run|report|gate)", sub)
 	}
 }
 
@@ -660,18 +662,7 @@ func runTicketStatusSync(argv []string) error {
 
 	// The token factory mirrors cmd/connectors/jira: nil without OPS_TOKEN_KEY,
 	// and the pass then skips its lookup half loudly (D21).
-	var factory jira.ClientFactory
-	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
-		factory = func(ctx context.Context, acct jira.Account) (*jira.Client, error) {
-			var token string
-			if err := pool.QueryRow(ctx,
-				`SELECT pgp_sym_decrypt(refresh_token_encrypted, $2) FROM source_accounts WHERE id=$1`,
-				acct.ID, key).Scan(&token); err != nil {
-				return nil, fmt.Errorf("decrypt token for %s: %w", acct.Email, err)
-			}
-			return jira.NewClient(http.DefaultClient, acct.SiteBaseURL, acct.Email, token), nil
-		}
-	}
+	factory := jira.TokenClientFactory(pool, os.Getenv("OPS_TOKEN_KEY"))
 
 	st, err := ticketstatus.Run(ctx, pool, ex, ticketstatus.Config{
 		DryRun: *dryRun, Force: *force, Limit: *limit, Lookup: factory,
