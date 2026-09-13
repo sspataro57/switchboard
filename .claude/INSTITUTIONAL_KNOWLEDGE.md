@@ -953,7 +953,7 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - **`VerifiedAt` for a key fetched in this call is the fetch START** (`clock_timestamp()` before the GET),
   unconditionally, and only for the row the fetching account stored (round 2, fix 3). It is never
   max(ingested_at, start): the response describes the ticket as of the request.
-- **FOLLOW-UP (not fixed): `external_refs` dedup is not tenant-qualified either.** `taskForExternalRef`
+- **FOLLOW-UP (not fixed): `external_refs` dedup is not tenant-qualified (follow-up SWT-49) either.** `taskForExternalRef`
   and the unique key are `(system, external_key)`, so two Jira sites sharing a prefix would share one ref.
   This is latent today because the sites use different prefixes.
 - **FOLLOW-UP (not fixed): unchanged-content verification lives only in memory.** `VerifiedAt` from a GET
