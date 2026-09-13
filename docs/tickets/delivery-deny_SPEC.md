@@ -473,7 +473,7 @@ MCP (D9).
 - `drafts.renderUser` and `PromptVersion`;
 - dashboard `listDeliveries` and the template.
 
-No existing tool's code changes. Every send path's existing status allowlist is
+Existing tools change in two places, both from the review fixes: `draft_delivery` refuses on the drafts-worker path (`expect_task_status` set) when a blocking delivery exists for the task (`tools.BlockingDeliverySQL`, under the task lock), and approve_delivery validates `expect_content_hash` with the shared `checkContentHashShape`. Every send path's existing status allowlist is
 what refuses `rejected` (criterion 13).
 
 ## MQTT topics
