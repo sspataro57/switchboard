@@ -820,9 +820,31 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `DecideGate`) is shared by `RunGate` and `DryRunGate`. `opsctl capture-rules gate --dry-run [--shadow]`
   prints `message=… key=… outcome=…` from the stored snapshots only (no fetch, no lock, no writes).
   `--shadow` reads the latest shadow `held` rows and is refused without `--dry-run`.
-- **Migration 0029's `capture_decisions_gate_task_pin`:** a gate `attributed` row has NULL `task_id` and a
-  gate `task_log` row has NOT NULL. Gate `task` is left free because it is claimed before `create_task`
-  runs. The report's crash-artifact line counts `mode IN ('live','gate')`.
+- **Claim, act, complete (review round 2, fix 1).** Gate `task` AND `task_log` rows are both claimed with
+  `task_id` NULL before any executor call, and `recordDecisionTask` fills `task_id` only after the calls
+  succeed (for `task_log`: `task_append_log`, then the guarded reopen). Migration 0029's
+  `capture_decisions_gate_task_pin` therefore pins only `attributed ⇒ task_id NULL`. The report's
+  "claimed with no task" WARNING counts live/gate `task` and gate `task_log` rows with NULL `task_id`: a
+  pass that died after the claim. For a `task_log`, the log may or may not have landed; the reason text
+  names the target task. Mutation: claim `task_log` with `task_id` set → the failing-append test
+  (`gate_scope_integration_test.go`) goes red.
+- **Tenant scope (review round 2, fix 2).** The gate sets `ticketstatus.Config.ScopeToRoute`. A stored row
+  counts as a key's snapshot only if it came from the account `RouteLookup` routes the key to (by prefix
+  scope). For a key no lookup account claims, it falls back to the one `provider='jira'` poller account
+  storing it. An ambiguous route, or two storing pollers, gives no snapshot: pending, then fail-closed
+  expiry. The reconciler leaves the flag false, so its Count > 1 ambiguity refusal is unchanged.
+  `Snapshot.SourceAccountID` is the storing row's `source_account_id`. Mutation: drop the filter → the
+  two-snapshot test goes pending and the lone-foreign test creates a task.
+- **`VerifiedAt` for a key fetched in this call is the fetch START** (`clock_timestamp()` before the GET),
+  unconditionally, and only for the row the fetching account stored (round 2, fix 3). It is never
+  max(ingested_at, start): the response describes the ticket as of the request.
+- **FOLLOW-UP (not fixed): `external_refs` dedup is not tenant-qualified either.** `taskForExternalRef`
+  and the unique key are `(system, external_key)`, so two Jira sites sharing a prefix would share one ref.
+  This is latent today because the sites use different prefixes.
+- **FOLLOW-UP (not fixed): unchanged-content verification lives only in memory.** `VerifiedAt` from a GET
+  that returned unchanged content is not stored (`ingested_at` does not move). So a pass that fetches and
+  then loses the capture lock (`ErrGateLockHeld` on the second take) re-fetches the same keys next pass,
+  up to 50 GETs. Persisting a verified-at time per stored snapshot would fix it.
 - **Gate turned off with holds pending** → they resolve with the gate off (the column is read every pass):
   tasks with no assignee check.
 - **Deploy consequence:** until the connector images carrying Part D are deployed, OLD capture binaries

@@ -40,6 +40,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sspataro57/switchboard/internal/connector/jira"
 	"github.com/sspataro57/switchboard/internal/store"
@@ -144,6 +145,60 @@ func TestTicketStatus_Integration_EnsureSnapshotsFetchesStoresAndHonoursTheTTL(t
 	}
 	if _, ok := nilSnaps["ENS-1"]; !ok {
 		t.Errorf("with no credential the STORED ENS-1 snapshot was not returned; the stored row still decides")
+	}
+}
+
+// SWT-40 review round 2, fix 3: for a key this call fetched, VerifiedAt is the
+// database clock at the START of the GET — never the later ingested_at the
+// upsert stamps after the response. The ticket is only known to have looked
+// like Raw as of the request; max(ingested_at, start) would overstate it.
+// MUTATION: VerifiedAt back to max(ingested_at, start) → VerifiedAt equals the
+// fresh insert's ingested_at: red.
+func TestTicketStatus_Integration_EnsureSnapshotsVerifiedAtIsTheFetchStart(t *testing.T) {
+	ctx := context.Background()
+	if os.Getenv("DATABASE_URL") == "" {
+		t.Skip("DATABASE_URL not set; skipping Postgres integration test")
+	}
+	if strings.Contains(os.Getenv("DATABASE_URL"), "192.168.50.49") {
+		t.Fatal("integration tests must NEVER run against the real ops db; use the compose db on :5433")
+	}
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		t.Fatalf("store.NewPool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	tsRequireStateTable(t, ctx, pool)
+	tsCleanup(t, ctx, pool)
+	t.Cleanup(func() { tsCleanup(t, ctx, pool) })
+
+	fake := newTSFakeJira()
+	t.Cleanup(fake.close)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO source_accounts (provider, account_email, domain_default, scopes, send_enabled, sync_cursor)
+		 VALUES ('jira_lookup','itest-tstatus-verified@example.com',$1,'{VFY}',false,'{}'::jsonb)`, fake.url()); err != nil {
+		t.Fatalf("seed lookup account: %v", err)
+	}
+	fake.put(tsIssue{"VFY-1", "indeterminate", tsLookupID, true})
+
+	var before time.Time
+	if err := pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&before); err != nil {
+		t.Fatalf("clock: %v", err)
+	}
+	snaps, _, err := ticketstatus.EnsureSnapshots(ctx, pool, []string{"VFY-1"}, ticketstatus.Config{Lookup: fake.factory()})
+	if err != nil {
+		t.Fatalf("EnsureSnapshots: %v", err)
+	}
+	s, ok := snaps["VFY-1"]
+	if !ok {
+		t.Fatalf("no snapshot for VFY-1 after fetching it")
+	}
+	if s.VerifiedAt.Before(before) {
+		t.Errorf("VerifiedAt %v predates the call (%v): it must be this call's fetch start", s.VerifiedAt, before)
+	}
+	if !s.VerifiedAt.Before(s.IngestedAt) {
+		t.Errorf("VerifiedAt %v is not before IngestedAt %v for a fresh insert: it must be the fetch START "+
+			"(clock_timestamp before the GET), not max(ingested_at, start) — the ticket is only known as of the request",
+			s.VerifiedAt, s.IngestedAt)
 	}
 }
 

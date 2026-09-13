@@ -67,6 +67,14 @@ type Config struct {
 	// (the gate passes the NEWEST first-seen time per key). Nil — the reconciler
 	// — changes nothing: its TTL logic is untouched.
 	MinFresh map[string]time.Time
+	// ScopeToRoute is the capture-time gate's tenant filter (SWT-40 review round
+	// 2, fix 2): a stored row counts as a key's snapshot only if it came from the
+	// account the key routes to — the lookup account RouteLookup picks by prefix
+	// scope or, for a key no lookup account claims, the one provider='jira'
+	// (poller) account storing it. An ambiguous route, or two storing pollers,
+	// leaves no snapshot. False — the reconciler — keeps every jira/jira_lookup
+	// row, and Count > 1 stays its ambiguity refusal.
+	ScopeToRoute bool
 }
 
 // Stats is criterion 43's counter vocabulary, one field per printed name.
@@ -95,15 +103,18 @@ type candidate struct {
 type Snapshot struct {
 	Raw        []byte
 	IngestedAt time.Time
-	// VerifiedAt is the latest time the ticket is KNOWN to have looked like Raw
-	// (SWT-40 review fix 1): IngestedAt, or — when this call's GET of the key
-	// succeeded — the database clock at the start of that GET. The two differ on
-	// an unchanged refetch: upsertRaw's hash short-circuit leaves ingested_at
+	// VerifiedAt is the time the ticket is KNOWN to have looked like Raw (SWT-40
+	// review fix 1): IngestedAt, or — when this call's GET of the key succeeded
+	// through the account that stored Raw — the database clock at the START of
+	// that GET, unconditionally (round 2, fix 3: the response describes the
+	// ticket as of the request, so the later ingested_at would overstate it). On
+	// an unchanged refetch upsertRaw's hash short-circuit leaves ingested_at
 	// alone, so IngestedAt alone would call a just-verified ticket stale. The
 	// capture-time gate compares it with a held message's first-seen time.
-	VerifiedAt   time.Time
-	OwnAccountID string // the storing account's sync_cursor->>'own_account_id' (D12)
-	Count        int    // rows found for this key; >1 is criterion 31's ambiguity
+	VerifiedAt      time.Time
+	OwnAccountID    string // the storing account's sync_cursor->>'own_account_id' (D12)
+	SourceAccountID int64  // the storing account (raw_source_items.source_account_id)
+	Count           int    // rows found for this key; >1 is criterion 31's ambiguity
 }
 
 // Run is one reconciliation pass.
@@ -505,7 +516,18 @@ func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg
 		ttl = LookupTTL()
 	}
 
-	snaps, err := loadSnapshots(ctx, pool, keys)
+	lookupAccts, err := loadLookupAccounts(ctx, pool)
+	if err != nil {
+		return es, err
+	}
+	var scope []jira.Account // nil: every stored row counts (the reconciler)
+	if cfg.ScopeToRoute {
+		scope = lookupAccts
+		if scope == nil {
+			scope = []jira.Account{} // scoped, with no lookup accounts: poller fallback only
+		}
+	}
+	snaps, err := loadSnapshots(ctx, pool, keys, scope)
 	if err != nil {
 		return es, err
 	}
@@ -513,10 +535,6 @@ func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg
 	// The candidate-driven lookup (D16): route each key that needs a snapshot —
 	// missing, or stale beyond the TTL — to the lookup account claiming its
 	// prefix, fetch, and RE-READ the stored rows (D19: write-then-read-back).
-	lookupAccts, err := loadLookupAccounts(ctx, pool)
-	if err != nil {
-		return es, err
-	}
 	needFetch := map[int64][]string{} // account id -> keys
 	acctByID := map[int64]jira.Account{}
 	seenKey := map[string]bool{}
@@ -580,7 +598,13 @@ func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg
 			ids = append(ids, id)
 		}
 		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-		verified := map[string]time.Time{} // key -> DB clock at the start of its successful GET
+		// key -> the account whose GET of it succeeded, and the DB clock at the
+		// start of that GET.
+		type fetchMark struct {
+			acct int64
+			at   time.Time
+		}
+		verified := map[string]fetchMark{}
 		for _, id := range ids {
 			acct, keys := acctByID[id], needFetch[id]
 			sort.Strings(keys)
@@ -599,7 +623,7 @@ func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg
 			}
 			st, err := jira.LookupIssues(ctx, client, sink, acct, keys, jira.Config{})
 			for _, k := range st.FetchedKeys {
-				verified[k] = started
+				verified[k] = fetchMark{acct: acct.ID, at: started}
 			}
 			es.stats.Fetched += st.IssuesFetched
 			es.stats.FetchFailed += st.FetchFailed
@@ -614,13 +638,15 @@ func ensureSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, cfg
 				es.stats.FetchFailed += len(keys) - st.IssuesFetched
 			}
 		}
-		snaps, err = loadSnapshots(ctx, pool, keys)
+		snaps, err = loadSnapshots(ctx, pool, keys, scope)
 		if err != nil {
 			return es, err
 		}
 		for k, s := range snaps {
-			if v, ok := verified[k]; ok && v.After(s.VerifiedAt) {
-				s.VerifiedAt = v
+			// The fetch start, unconditionally (round 2, fix 3) — but only for
+			// the row the fetching account stored.
+			if v, ok := verified[k]; ok && v.acct == s.SourceAccountID {
+				s.VerifiedAt = v.at
 				snaps[k] = s
 			}
 		}
@@ -651,7 +677,73 @@ func DeliveredStatusesByProject(ctx context.Context, pool *pgxpool.Pool, project
 // lookup accounts alike, with the STORING account's own identity (D12). Ids
 // are computed in Go via jira.IssueRawID and bound as one array parameter
 // (criterion 34).
-func loadSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string) (map[string]Snapshot, error) {
+//
+// scope nil keeps every row (the reconciler: Count > 1 is its ambiguity). A
+// non-nil scope (the lookup accounts; Config.ScopeToRoute) keeps only the rows
+// of the account routedSnapshotAccount picks for the key.
+func loadSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string, scope []jira.Account) (map[string]Snapshot, error) {
+	rows, err := loadSnapshotRows(ctx, pool, keys)
+	if err != nil {
+		return nil, err
+	}
+	byKey := map[string][]snapshotRow{}
+	for _, r := range rows {
+		byKey[r.key] = append(byKey[r.key], r)
+	}
+	out := map[string]Snapshot{}
+	for _, r := range rows {
+		if scope != nil {
+			acct, ok := routedSnapshotAccount(r.key, scope, byKey[r.key])
+			if !ok || r.acctID != acct {
+				continue
+			}
+		}
+		s := out[r.key]
+		s.Count++
+		s.Raw, s.IngestedAt, s.VerifiedAt, s.OwnAccountID, s.SourceAccountID = r.raw, r.ingested, r.ingested, r.own, r.acctID
+		out[r.key] = s
+	}
+	return out, nil
+}
+
+// routedSnapshotAccount is the account whose stored row may be a key's snapshot
+// under Config.ScopeToRoute: the lookup account RouteLookup routes the key to
+// (the same routing the fetch uses); for a key no lookup account claims, the
+// one provider='jira' account storing it. An ambiguous route, or zero or
+// several storing pollers, is no account: unreadable.
+func routedSnapshotAccount(key string, lookups []jira.Account, rows []snapshotRow) (int64, bool) {
+	acct, outcome := RouteLookup(key, lookups)
+	switch outcome {
+	case "routed":
+		return acct.ID, true
+	case "ambiguous":
+		return 0, false
+	}
+	var poller int64
+	pollers := map[int64]bool{}
+	for _, r := range rows {
+		if r.provider == "jira" {
+			pollers[r.acctID] = true
+			poller = r.acctID
+		}
+	}
+	if len(pollers) != 1 {
+		return 0, false
+	}
+	return poller, true
+}
+
+// snapshotRow is one stored raw issue row with its storing account.
+type snapshotRow struct {
+	key      string
+	acctID   int64
+	provider string
+	raw      []byte
+	ingested time.Time
+	own      string
+}
+
+func loadSnapshotRows(ctx context.Context, pool *pgxpool.Pool, keys []string) ([]snapshotRow, error) {
 	byID := map[string]string{} // raw external_id -> ticket key
 	ids := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -662,7 +754,7 @@ func loadSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string) (map[
 		}
 	}
 	rows, err := pool.Query(ctx, `
-		SELECT ri.external_id, ri.raw_json, ri.ingested_at,
+		SELECT ri.external_id, ri.source_account_id, sa.provider, ri.raw_json, ri.ingested_at,
 		       COALESCE(sa.sync_cursor->>'own_account_id','')
 		  FROM raw_source_items ri
 		  JOIN source_accounts sa ON sa.id = ri.source_account_id
@@ -673,19 +765,15 @@ func loadSnapshots(ctx context.Context, pool *pgxpool.Pool, keys []string) (map[
 	}
 	defer rows.Close()
 
-	out := map[string]Snapshot{}
+	var out []snapshotRow
 	for rows.Next() {
-		var id, own string
-		var raw []byte
-		var ingested time.Time
-		if err := rows.Scan(&id, &raw, &ingested, &own); err != nil {
+		var id string
+		var r snapshotRow
+		if err := rows.Scan(&id, &r.acctID, &r.provider, &r.raw, &r.ingested, &r.own); err != nil {
 			return nil, fmt.Errorf("ticketstatus: scan snapshot: %w", err)
 		}
-		key := byID[id]
-		s := out[key]
-		s.Count++
-		s.Raw, s.IngestedAt, s.VerifiedAt, s.OwnAccountID = raw, ingested, ingested, own
-		out[key] = s
+		r.key = byID[id]
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }

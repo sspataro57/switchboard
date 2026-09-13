@@ -27,6 +27,18 @@ package capture
 // capture pass takes that lock, and none of them may wait on Jira. The pass then
 // takes the lock, re-reads the inbox and decides from the stored snapshots.
 //
+// TENANT SCOPE (review round 2, fix 2). A stored snapshot counts only if it came
+// from the account ticketstatus routes the key to (ticketstatus.Config
+// .ScopeToRoute): the lookup account whose prefix scope claims it, or — for a
+// key no lookup account claims — the one poller account storing it. Any other
+// stored copy is another site's ticket and is ignored.
+//
+// CLAIM, THEN ACT, THEN COMPLETE (review round 2, fix 1). Every gate row that
+// leads to an executor call — task and task_log alike — is claimed with task_id
+// NULL and completed with recordDecisionTask only after the calls succeed, so a
+// pass that dies in between leaves a row the report's "claimed with no task"
+// line counts.
+//
 // An unreadable hold (no snapshot, stale, Jira down, no credential, over this
 // pass's key budget) writes nothing and stays held for the next wake or sweep.
 //
@@ -194,7 +206,7 @@ func RunGate(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg
 	}
 	keys, minFresh := gateKeys(planned)
 	snaps, _, err := ticketstatus.EnsureSnapshots(ctx, pool, keys,
-		ticketstatus.Config{TTL: cfg.TTL, Lookup: cfg.Lookup, MinFresh: minFresh})
+		ticketstatus.Config{TTL: cfg.TTL, Lookup: cfg.Lookup, MinFresh: minFresh, ScopeToRoute: true})
 	if err != nil {
 		return stats, fmt.Errorf("capture gate: %w", err)
 	}
@@ -257,7 +269,7 @@ func DryRunGate(ctx context.Context, pool *pgxpool.Pool, cfg GateDryRunConfig) (
 	keys, _ := gateKeys(holds)
 	// DryRun: EnsureSnapshots returns the stored rows and fetches nothing, so
 	// raw_source_items, sync_runs and the lookup cursor stay untouched.
-	snaps, _, err := ticketstatus.EnsureSnapshots(ctx, pool, keys, ticketstatus.Config{DryRun: true})
+	snaps, _, err := ticketstatus.EnsureSnapshots(ctx, pool, keys, ticketstatus.Config{DryRun: true, ScopeToRoute: true})
 	if err != nil {
 		return stats, fmt.Errorf("capture gate: %w", err)
 	}
@@ -401,15 +413,13 @@ func gateRef(ctx context.Context, pool *pgxpool.Pool, h gateHold, simulated map[
 	return nil, nil
 }
 
-// applyGate claims the message's one resolution (the gate row, BEFORE any
-// executor call) and then acts on it.
+// applyGate claims the message's one resolution (the gate row, with task_id
+// NULL, BEFORE any executor call), acts on it, and only then records the task
+// on the row — for task and task_log alike, so a failure after the claim leaves
+// a row the report's "claimed with no task" line counts (review round 2, fix 1).
 func applyGate(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor,
 	h gateHold, obs GateObservation, d GateDecision, stats *GateStats) error {
-	var taskID *int64
-	if d.Action == actionTaskLog {
-		taskID = &d.TaskID
-	}
-	id, inserted, err := insertGateDecision(ctx, pool, h, d.Action, taskID, gateReasonText(h, obs, d))
+	id, inserted, err := insertGateDecision(ctx, pool, h, d.Action, gateReasonText(h, obs, d))
 	if err != nil {
 		return err
 	}
@@ -450,6 +460,10 @@ func applyGate(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor,
 			if reopened {
 				stats.Reopened++
 			}
+		}
+		// Completed last: the log (and the guarded reopen) are done.
+		if err := recordDecisionTask(ctx, pool, id, d.TaskID); err != nil {
+			return err
 		}
 	case actionAttributed:
 		// No executor call: attribution names the project and creates nothing.
@@ -563,23 +577,25 @@ func gateInbox(ctx context.Context, pool *pgxpool.Pool, source string, limit int
 	return out, nil
 }
 
-// insertGateDecision writes the message's one resolution. The partial index
-// capture_decisions_gate_uniq is the claim, so the predicate is restated
-// (arbiter inference matches a partial index only when it is repeated).
+// insertGateDecision writes the message's one resolution, always with task_id
+// NULL: the claim. applyGate completes a task / task_log row afterwards with
+// recordDecisionTask. The partial index capture_decisions_gate_uniq is the
+// claim, so the predicate is restated (arbiter inference matches a partial index
+// only when it is repeated).
 func insertGateDecision(ctx context.Context, pool *pgxpool.Pool, h gateHold,
-	action string, taskID *int64, reason string) (int64, bool, error) {
+	action string, reason string) (int64, bool, error) {
 	var id int64
 	err := pool.QueryRow(ctx,
 		`INSERT INTO capture_decisions
 		   (message_id, raw_source_item_id, mode, matched_rule_id, project_id,
 		    matched_rule_ids, ambiguous, action, external_system, external_key,
 		    task_id, reason)
-		 VALUES ($1,$2,'gate',$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		 VALUES ($1,$2,'gate',$3,$4,$5,$6,$7,$8,$9,NULL,$10)
 		 ON CONFLICT (message_id) WHERE mode = 'gate' DO NOTHING
 		 RETURNING id`,
 		h.pm.msg.ID, h.pm.rawItemID, h.rule.rule.ID, h.rule.projectID,
 		h.ruleIDs, h.ambiguous, action, h.system, h.key,
-		taskID, reason).Scan(&id)
+		reason).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}

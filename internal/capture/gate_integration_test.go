@@ -501,9 +501,10 @@ func TestCaptureGate_Integration_MigrationShape(t *testing.T) {
 		[]any{ins + ` ON CONFLICT (message_id) DO NOTHING`, msg, "gate", s.ruleKey, s.gated, "task", "jira", "GTE-1"})
 	try("the live claim and the gate claim coexist on one message", "", row("live", "held", "GTE-1"), row("gate", "task", "GTE-1"))
 
-	// Review fix 7, capture_decisions_gate_task_pin: attributed names no task;
-	// task_log is inserted WITH its task; task is claimed BEFORE the task exists
-	// (claim-before-act), so it may be NULL until recordDecisionTask completes it.
+	// capture_decisions_gate_task_pin: attributed names no task. task AND
+	// task_log are claimed BEFORE the executor acts (claim-before-act) with
+	// task_id NULL, and recordDecisionTask completes them afterwards (round-2
+	// fix 1), so either may be NULL — in flight, or the report's crash line.
 	def("capture_decisions_gate_task_pin")
 	task := s.taskWithRef(t, ctx, "GTE-2")
 	const insT = `INSERT INTO capture_decisions (message_id, mode, matched_rule_id, project_id, action, external_system, external_key, task_id)
@@ -512,8 +513,8 @@ func TestCaptureGate_Integration_MigrationShape(t *testing.T) {
 		return []any{insT, msg, mode, s.ruleKey, s.gated, action, "jira", "GTE-1", taskID}
 	}
 	try("a gate attributed row names no task", "check constraint", rowT("gate", "attributed", task))
-	try("a gate task_log row names its task", "check constraint", rowT("gate", "task_log", nil))
-	try("a gate task_log row with its task", "", rowT("gate", "task_log", task))
+	try("a gate task_log row is claimed before its log is written", "", rowT("gate", "task_log", nil))
+	try("a gate task_log row completed with its task", "", rowT("gate", "task_log", task))
 	try("a gate task row is claimed before its task exists", "", rowT("gate", "task", nil))
 	try("a gate task row completed with its task", "", rowT("gate", "task", task))
 	try("the pin binds only gate rows (a live attributed row keeps whatever it had)", "", rowT("live", "attributed", nil))

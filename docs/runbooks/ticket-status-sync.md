@@ -264,8 +264,15 @@ comes back.
 **Reading it.** `opsctl capture-rules report` prints a `GATE` section: the
 `held` count, `pending_lookup`, and one line per resolution (`gate task
 warranted`, `gate attributed not_assigned`, …). Its crash-artifact WARNING line
-counts `task` decisions with no `task_id` in live AND gate rows: a pass that
-died between the gate's claim and `create_task`. pipelined logs a `gate pass`
+("claimed with no task") counts live and gate `task` rows, and gate `task_log`
+rows, with no `task_id`. That is a pass that died between the gate's claim and
+the executor call: `create_task` for a task, or `task_append_log` and the guarded
+reopen for a log. A gate row gets its `task_id` only after those succeed. For a
+`task_log`, the log may or may not have landed; the row's reason names the task.
+A stored snapshot counts only if it came from the account the key routes to (the
+lookup account whose prefix scope claims it or, for a key no lookup account
+claims, the one poller account storing it). Any other site's copy is ignored,
+and the hold stays pending. pipelined logs a `gate pass`
 line with the same counters on every pass, plus `budget_skipped`.
 
 **Running it by hand.** `opsctl capture-rules gate` runs one gate pass, exactly
