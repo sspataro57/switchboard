@@ -55,7 +55,7 @@ Without `OPS_TOKEN_KEY` the gate still runs, but it looks nothing up: every hold
 
 ## Part C: the inquiry lane as pipeline stages
 
-**Image:** `192.168.50.20:5000/switchboard:<tag>`. The tag is filled in when Part C merges. One step at a time:
+**Image:** `192.168.50.20:5000/switchboard:0.7.14` (`sha256:4e5d6a88d34d852caf1804fe92f5da2e9f1d0e9c57c8cfaff2ed6ff21a3786e1`, main 2f89b74; handed off 2026-09-12). One step at a time:
 
 1. **Migration first.** Apply `migrations/0031_inquiry_promotion.sql` to the `ops` db. It adds `projects.inquiry_promote_after TIMESTAMPTZ` (NULL, no default); old images never read it. 0030 belongs to SWT-45; the migrate runner applies whatever is pending in number order.
 2. **Pin the classify-promote CronJob** to `classify promote --lane personal`. Personal is the default, so its behaviour and log line are byte-identical, but the pin keeps the inquiry lane off cron for good (E5).
