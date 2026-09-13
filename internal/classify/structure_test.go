@@ -1166,7 +1166,12 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// admits 'partial'), named by the "Fix — data model" section of
 		// docs/bugs/slackweb-collab-export-stale_DIAGNOSIS.md. A bug fix owns
 		// its migration the way a SPEC does.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 {
+		// 30 is SWT-45's (jira-activity-revive: capture_rules.revive/addressed,
+		// tasks.closed_*/surfaced_*, ticket_status_syncs.surfaced_seen_at and the
+		// 'resurfaced' last_action), named by its SPEC's data-model section. 28
+		// (SWT-43) and 29 (SWT-40 Part D) are owned on unmerged branches; whichever
+		// merges adds its own number here.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 30 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}
