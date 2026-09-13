@@ -37,6 +37,24 @@ type routeCandidateAddArgs struct {
 	Project      string `json:"project"`       // projects.slug
 	Description  string `json:"description"`   // reaches the prompt (B-D4)
 	IsDefault    bool   `json:"is_default,omitempty"`
+	// Provider narrows account_email to one source_accounts row when the address
+	// exists under several providers (B8 amendment 2026-09-13). A pointer so an
+	// explicit "" is refused rather than read as absent.
+	Provider *string `json:"provider,omitempty"`
+}
+
+// parseRouteProvider trims an optional provider. Absent → "" (no narrowing);
+// present but empty after trimming → refused. There is no hard-coded provider
+// list: the database decides which providers exist for the address.
+func parseRouteProvider(p *string) (string, error) {
+	if p == nil {
+		return "", nil
+	}
+	v := strings.TrimSpace(*p)
+	if v == "" {
+		return "", errors.New("provider, when given, must be non-empty (a source_accounts.provider, e.g. google)")
+	}
+	return v, nil
 }
 
 // parseRouteCandidateAdd applies every check that needs no database, so
@@ -62,7 +80,22 @@ func parseRouteCandidateAdd(args []byte) (routeCandidateAddArgs, error) {
 		return a, errors.New("missing description: it is what the model reads on the candidate's numbered line " +
 			"(B-D4), so an empty one is refused")
 	}
+	provider, err := parseRouteProvider(a.Provider)
+	if err != nil {
+		return a, err
+	}
+	if a.Provider != nil {
+		a.Provider = &provider
+	}
 	return a, nil
+}
+
+// routeProvider is the trimmed provider after parsing, "" when absent.
+func routeProvider(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func validateRouteCandidateAdd(args []byte) error {
@@ -80,7 +113,7 @@ func routeCandidateAdd(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]
 	if err != nil {
 		return nil, err
 	}
-	accountID, err := resolveRouteAccount(ctx, pool, a.AccountEmail)
+	accountID, err := resolveRouteAccount(ctx, pool, a.AccountEmail, routeProvider(a.Provider))
 	if err != nil {
 		return nil, err
 	}
@@ -129,8 +162,9 @@ func routeCandidateAdd(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]
 // ---- route_candidate_remove ---------------------------------------------------
 
 type routeCandidateRemoveArgs struct {
-	AccountEmail string `json:"account_email"`
-	Project      string `json:"project"`
+	AccountEmail string  `json:"account_email"`
+	Project      string  `json:"project"`
+	Provider     *string `json:"provider,omitempty"` // as on add
 }
 
 func parseRouteCandidateRemove(args []byte) (routeCandidateRemoveArgs, error) {
@@ -145,6 +179,13 @@ func parseRouteCandidateRemove(args []byte) (routeCandidateRemoveArgs, error) {
 	}
 	if a.Project == "" {
 		return a, errors.New("missing project (a projects.slug)")
+	}
+	provider, err := parseRouteProvider(a.Provider)
+	if err != nil {
+		return a, err
+	}
+	if a.Provider != nil {
+		a.Provider = &provider
 	}
 	return a, nil
 }
@@ -167,7 +208,7 @@ func routeCandidateRemove(ctx context.Context, pool *pgxpool.Pool, args []byte) 
 	if err != nil {
 		return nil, err
 	}
-	accountID, err := resolveRouteAccount(ctx, pool, a.AccountEmail)
+	accountID, err := resolveRouteAccount(ctx, pool, a.AccountEmail, routeProvider(a.Provider))
 	if err != nil {
 		return nil, err
 	}
@@ -190,14 +231,24 @@ func routeCandidateRemove(ctx context.Context, pool *pgxpool.Pool, args []byte) 
 
 // ---- shared resolution --------------------------------------------------------
 
-// resolveRouteAccount maps an account email to ONE source_accounts row.
-// source_accounts is unique on (provider, account_email), so one address can
-// name accounts under two providers; that is AMBIGUOUS and refused rather than
-// guessed — a candidate on the wrong account routes the wrong mailbox. Matched
-// case-insensitively: an address typed by a human.
-func resolveRouteAccount(ctx context.Context, pool *pgxpool.Pool, email string) (int64, error) {
+// resolveRouteAccount maps an account email (and an optional provider) to ONE
+// source_accounts row. source_accounts is unique on (provider, account_email),
+// so one address can name accounts under several providers (prod:
+// salvador@handsonconnect.org is google, jira and jira_lookup).
+//
+//   - provider given: (lower(account_email), provider) must match exactly; no
+//     match is refused, naming the providers that DO exist for the address. It
+//     never falls back to the address's only account: a caller who named jira
+//     must not get the google mailbox.
+//   - provider absent: exactly one match proceeds; several are AMBIGUOUS and
+//     refused rather than guessed (a candidate on the wrong account routes the
+//     wrong mailbox), and the error says to pass provider.
+//
+// The email is matched case-insensitively (typed by a human); the provider
+// exactly, and against the database's own values: no hard-coded list.
+func resolveRouteAccount(ctx context.Context, pool *pgxpool.Pool, email, provider string) (int64, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT id, provider FROM source_accounts WHERE lower(account_email) = lower($1) ORDER BY id`, email)
+		`SELECT id, provider FROM source_accounts WHERE lower(account_email) = lower($1) ORDER BY provider, id`, email)
 	if err != nil {
 		return 0, fmt.Errorf("resolve account %q: %w", email, err)
 	}
@@ -216,15 +267,23 @@ func resolveRouteAccount(ctx context.Context, pool *pgxpool.Pool, email string) 
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("iterate accounts: %w", err)
 	}
-	switch len(ids) {
-	case 0:
+	if len(ids) == 0 {
 		return 0, fmt.Errorf("no source account has account_email %q", email)
-	case 1:
-		return ids[0], nil
-	default:
-		return 0, fmt.Errorf("account_email %q names %d source accounts (providers %s); ambiguous, refused",
-			email, len(ids), strings.Join(providers, ", "))
 	}
+	if provider != "" {
+		for i, p := range providers {
+			if p == provider {
+				return ids[i], nil
+			}
+		}
+		return 0, fmt.Errorf("account_email %q has no source account under provider %q; it exists under: %s",
+			email, provider, strings.Join(providers, ", "))
+	}
+	if len(ids) == 1 {
+		return ids[0], nil
+	}
+	return 0, fmt.Errorf("account_email %q names %d source accounts; ambiguous, refused: pass provider: one of %s",
+		email, len(ids), strings.Join(providers, ", "))
 }
 
 func resolveRouteProject(ctx context.Context, pool *pgxpool.Pool, slug string) (int64, error) {
