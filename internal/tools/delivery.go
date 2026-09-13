@@ -470,6 +470,14 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 			return fmt.Errorf("task %d is %s, not %s as the caller read it: the work moved on, so no draft",
 				a.TaskID, status, a.ExpectTaskStatus)
 		}
+		// SWT-43 review (Codex): the drafts-worker path also re-checks the
+		// queue's own predicate under this lock, so two passes that both read
+		// the Deliver task cannot both draft. See refuseBlockingDelivery.
+		if a.ExpectTaskStatus != "" {
+			if err := refuseBlockingDelivery(ctx, tx, a.TaskID); err != nil {
+				return err
+			}
+		}
 		if a.RequireThreadInTaskProject == "true" {
 			if err := refuseThreadOutsideTaskProject(ctx, tx, a.TaskID, *a.ThreadID); err != nil {
 				return err
@@ -493,6 +501,49 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": deliveryID})
+}
+
+// BlockingDeliverySQL is the ONE spelling of "this delivery row blocks the
+// drafts worker from drafting for its task" (SWT-43), over a deliveries row
+// aliased d. Every delivery blocks except a rejected row with a redraft
+// requested (Redo): a plain Deny keeps blocking, and the new draft blocks
+// again, which is the loop bound (one human click per re-draft). Status is
+// spelled out rather than trusting deliveries_rejection_fields_check alone.
+// drafts.DeliverTasks lists a Deliver task only when NO row matches it, and
+// draftDelivery re-checks it under the task lock on the drafts-worker path.
+const BlockingDeliverySQL = `NOT (d.status = 'rejected' AND d.redraft_requested_at IS NOT NULL)`
+
+// ErrDeliveryBlocksDraft is draftDelivery's refusal on the drafts-worker path
+// (expect_task_status set) when the task already has a blocking delivery:
+// another worker drafted first, or a draft or a plain Deny is already there.
+// The drafts worker treats it as a skip, not a failure.
+var ErrDeliveryBlocksDraft = errors.New("the task already has a delivery that blocks a new draft")
+
+// refuseBlockingDelivery refuses a drafts-worker draft (expect_task_status
+// set) when the task already has a blocking delivery (BlockingDeliverySQL).
+// DeliverTasks is a read, not a claim, so two drafts passes can both list one
+// Deliver task and both call the model. This runs inside draftDelivery's
+// transaction AFTER the task row FOR UPDATE, so the two serialise here, and
+// the second sees the first's committed row (READ COMMITTED: each statement
+// reads after the lock wait) and is refused. That closes the Redo race (two
+// drafts from one click) and the same race for a first draft. Plain callers (a
+// session, the full profile, the dashboard, opsctl) send no expect_task_status
+// and keep drafting siblings.
+func refuseBlockingDelivery(ctx context.Context, tx pgx.Tx, taskID int64) error {
+	var id int64
+	var status string
+	err := tx.QueryRow(ctx,
+		`SELECT d.id, d.status FROM deliveries d
+		  WHERE d.task_id = $1 AND `+BlockingDeliverySQL+`
+		  ORDER BY d.id DESC LIMIT 1`, taskID).Scan(&id, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check task %d for a blocking delivery: %w", taskID, err)
+	}
+	return fmt.Errorf("task %d already has delivery %d (%s), which blocks a new draft (another drafts pass wrote "+
+		"it first, or it is waiting on Salvador): %w", taskID, id, status, ErrDeliveryBlocksDraft)
 }
 
 // refuseThreadOutsideTaskProject is the user profile's same-project rule
@@ -771,10 +822,15 @@ func validateApproveDelivery(args []byte) error {
 	if a.DeliveryID == 0 {
 		return errors.New("missing delivery_id")
 	}
-	// A malformed hash can never match, and refusing it as "changed since it
-	// was shown" would send the approver to reload for the wrong reason.
-	if h := a.ExpectContentHash; h != "" &&
-		(len(h) != sha256.Size*2 || strings.Trim(h, "0123456789abcdef") != "") {
+	return checkContentHashShape(a.ExpectContentHash)
+}
+
+// checkContentHashShape refuses a malformed expect_content_hash, for approve
+// and reject alike. A malformed hash can never match, and refusing it as
+// "changed since it was shown" would send the human to reload for the wrong
+// reason. Empty means omitted.
+func checkContentHashShape(h string) error {
+	if h != "" && (len(h) != sha256.Size*2 || strings.Trim(h, "0123456789abcdef") != "") {
 		return fmt.Errorf("expect_content_hash %q is not a lowercase hex sha256 (tools.DeliveryContentHash)", h)
 	}
 	return nil
@@ -845,6 +901,11 @@ type rejectDeliveryArgs struct {
 	DeliveryID int64  `json:"delivery_id"`
 	Note       string `json:"note,omitempty"`
 	Redraft    bool   `json:"redraft,omitempty"`
+	// ExpectContentHash binds the verdict to the words the human was shown
+	// (SWT-43 review, SWT-44's approve pattern): DeliveryContentHash(subject,
+	// body), compared under the delivery row lock. The dashboard route requires
+	// it; omitted keeps opsctl working unbound.
+	ExpectContentHash string `json:"expect_content_hash,omitempty"`
 }
 
 func validateRejectDelivery(args []byte) error {
@@ -859,7 +920,7 @@ func validateRejectDelivery(args []byte) error {
 	if n := utf8.RuneCountInString(a.Note); n > maxRejectNoteRunes {
 		return fmt.Errorf("note is %d runes; the limit is %d", n, maxRejectNoteRunes)
 	}
-	return nil
+	return checkContentHashShape(a.ExpectContentHash)
 }
 
 // rejectDelivery is the human negative verdict (Deny, or Redo with redraft).
@@ -887,14 +948,16 @@ func rejectDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 		if err != nil {
 			return err
 		}
-		var status, channel string
+		var status, channel, subject, body string
 		var extID, stored *string
-		var confirmed, redraftRequested bool
+		var confirmed, redraftRequested, sendFailed bool
 		if err := tx.QueryRow(ctx,
 			`SELECT status, channel, sent_external_id, confirmed_at IS NOT NULL,
-			        redraft_requested_at IS NOT NULL, rejection_note
+			        redraft_requested_at IS NOT NULL, rejection_note,
+			        COALESCE(subject,''), COALESCE(body,''), error IS NOT NULL
 			   FROM deliveries WHERE id=$1 FOR UPDATE`,
-			a.DeliveryID).Scan(&status, &channel, &extID, &confirmed, &redraftRequested, &stored); err != nil {
+			a.DeliveryID).Scan(&status, &channel, &extID, &confirmed, &redraftRequested, &stored,
+			&subject, &body, &sendFailed); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("delivery %d not found", a.DeliveryID)
 			}
@@ -903,25 +966,45 @@ func rejectDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 		refuse := func(reason string) error {
 			return fmt.Errorf("delivery %d (%s, %s) cannot be rejected: %s", a.DeliveryID, status, channel, reason)
 		}
+		// SWT-43 review: bound to the words shown (SWT-44's content hash),
+		// compared under this row lock, which update_delivery also takes, so no
+		// edit lands between the check and the verdict.
+		if a.ExpectContentHash != "" && a.ExpectContentHash != DeliveryContentHash(subject, body) {
+			return fmt.Errorf("delivery %d changed since it was shown to you; reload and review it again", a.DeliveryID)
+		}
 		// D7: a draft can only be written for done_locally work (draft_delivery's
 		// expect_task_status), so a redraft flag anywhere else would never be honoured.
 		needDoneLocally := func() error {
 			if taskStatus != "done_locally" {
+				advice := "Deny it instead"
+				if status == "rejected" { // the D6 upgrade: the row is already denied
+					advice = "it is already denied and stays that way"
+				}
 				return refuse(fmt.Sprintf("its task %d is %s, and a new draft can only be written for "+
-					"done_locally work; Deny it instead", taskID, taskStatus))
+					"done_locally work; %s", taskID, taskStatus, advice))
 			}
 			return nil
 		}
+		// D4: sendJiraComment writes failed with a NULL id for EVERY error, so the
+		// comment may have landed (and the jira matcher still claims failed rows).
+		const d4 = "a jira_comment whose send failed may have been sent: the Jira send cannot tell a refusal " +
+			"from a lost response, so 'switchboard did not send this' could be false (D4)"
 
 		upgrade := false
 		switch status {
 		case "drafted", "approved":
+			// The D4 hole (go-reviewer): approve accepts failed-without-id, so a
+			// failed jira_comment approved for a retry reads plain 'approved'.
+			// sendJiraComment writes `error` on every failure and approve does
+			// not clear it (only a successful send or mark_delivery_sent does),
+			// so an approved jira_comment carrying an error is the same
+			// may-have-landed row.
+			if status == "approved" && channel == "jira_comment" && sendFailed {
+				return refuse(d4)
+			}
 		case "failed":
-			// D4: sendJiraComment writes failed with a NULL id for EVERY error, so the
-			// comment may have landed and the jira matcher still claims failed rows.
 			if channel == "jira_comment" {
-				return refuse("a failed jira_comment may have been sent (the Jira send cannot tell a " +
-					"refusal from a lost response), and its matcher can still claim it")
+				return refuse(d4)
 			}
 			if extID != nil || confirmed {
 				return refuse("it carries a sent id or a confirmation, so it may have been sent")

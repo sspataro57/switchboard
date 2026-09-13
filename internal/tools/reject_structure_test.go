@@ -46,6 +46,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 // ---- criterion 1: migration 0028 ---------------------------------------------
@@ -240,12 +242,56 @@ func sortedKeys(m map[string]bool) []string {
 // redraft_requested_at is the humanOnly reject_delivery handler. A spine rule,
 // a connector or the drafts worker writing it would turn Redo into an
 // unbounded drafting loop with no human in it.
+//
+// redraftWrite recognises a WRITE of the column: an assignment with ANY
+// right-hand side (`col = now()`, `col=$2`, `col = CASE ...`, `col = NULL`, a
+// literal, a function), the multi-column `SET (..., col) = (...)` form, or an
+// INSERT INTO deliveries naming it. `col >= x`, `col <= x`, `IS [NOT] NULL` and
+// ORDER BY do not match. SWT-43 review (go-reviewer): the first cut listed
+// right-hand sides one by one and missed CASE, the form rejectDelivery's own
+// Redo UPDATE uses, so a CASE writer anywhere else passed the scan. An equality
+// COMPARISON (`WHERE col = $1`) is flagged too; that is the safe direction.
+var redraftWrite = regexp.MustCompile(`(?is)redraft_requested_at\s*=[^=]` +
+	`|redraft_requested_at\s*\)\s*=` +
+	`|insert\s+into\s+deliveries[^;` + "`" + `]*redraft_requested_at`)
+
+// The probe (positive and negative controls on the pattern itself). MUTATION:
+// restore the first cut's right-hand-side list (no CASE) → the CASE rows go red.
+func TestRedraftWritePattern_Probe(t *testing.T) {
+	for _, s := range []string{
+		`UPDATE deliveries SET redraft_requested_at=now() WHERE id=$1`,
+		`UPDATE deliveries SET redraft_requested_at = CASE WHEN $3::boolean THEN now() END`,
+		"UPDATE deliveries SET status='rejected',\n\t\tredraft_requested_at=CASE WHEN $3 THEN now() END",
+		`SET redraft_requested_at=$2`,
+		`SET redraft_requested_at = NULL`,
+		`SET redraft_requested_at = COALESCE(redraft_requested_at, now())`,
+		`SET redraft_requested_at = clock_timestamp()`,
+		`SET redraft_requested_at = '2026-09-12T00:00:00Z'`,
+		`ON CONFLICT (id) DO UPDATE SET redraft_requested_at = EXCLUDED.redraft_requested_at`,
+		`UPDATE deliveries SET (status, redraft_requested_at) = ('rejected', now())`,
+		"INSERT INTO deliveries (task_id, status, redraft_requested_at)\n VALUES ($1, 'rejected', now())",
+	} {
+		if !redraftWrite.MatchString(s) {
+			t.Errorf("redraftWrite misses a WRITE: %q", s)
+		}
+	}
+	for _, s := range []string{
+		`AND NOT (d.status = 'rejected' AND d.redraft_requested_at IS NOT NULL)`,
+		`SELECT d.redraft_requested_at IS NOT NULL FROM deliveries d`,
+		`WHERE redraft_requested_at IS NULL`,
+		`WHERE redraft_requested_at >= now() - interval '1 day'`,
+		`WHERE redraft_requested_at <= now()`,
+		`ORDER BY d.redraft_requested_at DESC`,
+	} {
+		if redraftWrite.MatchString(s) {
+			t.Errorf("redraftWrite flags a READ as a write: %q", s)
+		}
+	}
+}
+
 func TestRedraftRequestedAt_OnlyInternalToolsWritesIt(t *testing.T) {
 	root := filepath.Join("..") // internal/
 	readers := map[string]bool{"drafts": true, "dashboard": true}
-	// A WRITE: an assignment to the column in SQL, or an INSERT naming it.
-	write := regexp.MustCompile(`(?is)redraft_requested_at\s*=\s*(now\s*\(|\$\d|null\b|coalesce|excluded\.|current_timestamp)` +
-		`|insert\s+into\s+deliveries[^;` + "`" + `]*redraft_requested_at`)
 
 	writerInTools := false
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -267,11 +313,11 @@ func TestRedraftRequestedAt_OnlyInternalToolsWritesIt(t *testing.T) {
 		top := strings.Split(filepath.ToSlash(rel), "/")[0]
 		switch {
 		case top == "tools":
-			if write.MatchString(src) {
+			if redraftWrite.MatchString(src) {
 				writerInTools = true
 			}
 		case readers[top]:
-			if loc := write.FindStringIndex(src); loc != nil {
+			if loc := redraftWrite.FindStringIndex(src); loc != nil {
 				t.Errorf("internal/%s WRITES redraft_requested_at (%q). internal/%s may read it (criterion "+
 					"27 allows readers by name); the only writer is reject_delivery, which is humanOnly — "+
 					"that is the loop bound", rel, src[loc[0]:loc[1]], top)
@@ -285,9 +331,91 @@ func TestRedraftRequestedAt_OnlyInternalToolsWritesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walk internal/: %v", err)
 	}
+
+	// cmd/ (SWT-43 review): a binary writes through the executor, never SQL of
+	// its own, so no main may write the column either.
+	cmdRoot := filepath.Join("..", "..", "cmd")
+	err = filepath.WalkDir(cmdRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if loc := redraftWrite.FindStringIndex(string(raw)); loc != nil {
+			rel, _ := filepath.Rel(cmdRoot, path)
+			t.Errorf("cmd/%s WRITES redraft_requested_at (%q). Criterion 27: the only writer is reject_delivery "+
+				"in internal/tools, which is humanOnly — that is the loop bound", rel, string(raw)[loc[0]:loc[1]])
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk cmd/: %v", err)
+	}
+
 	if !writerInTools {
 		t.Fatalf("POSITIVE CONTROL FAILED: no non-test file in internal/tools writes redraft_requested_at. " +
 			"reject_delivery's Redo (and the D6 upgrade) set it; a scan that finds no writer at all cannot " +
 			"tell 'one writer' from 'the pattern is wrong'")
+	}
+	// Positive control on the real code, per writer: rejectDelivery's Redo
+	// UPDATE (`redraft_requested_at=CASE ...`) and the D6 upgrade
+	// (`redraft_requested_at=now()`). The first cut's pattern found only the
+	// second, so it could not see the CASE shape at all.
+	if got := redraftWrite.FindAllString(dsRepoFile(t, "internal/tools/delivery.go"), -1); len(got) != 2 {
+		t.Errorf("redraftWrite finds %d writer(s) in internal/tools/delivery.go (%q), want exactly 2: the Redo "+
+			"UPDATE (CASE) and the D6 upgrade (now()). A third is a new writer the loop bound must account for",
+			len(got), got)
+	}
+}
+
+// ---- SWT-43 review fix 2: one spelling of the blocking predicate ------------
+
+// The drafts queue (drafts.DeliverTasks' NOT EXISTS) and draftDelivery's
+// re-check under the task lock must agree on which rows block a new draft. Two
+// spellings would drift: a queue that lists a task the re-check then refuses
+// every pass, or a re-check that lets a second draft in.
+func TestBlockingDeliverySQL_OneSpellingSharedByQueueAndDraft(t *testing.T) {
+	for _, want := range []string{"NOT", "d.status = 'rejected'", "d.redraft_requested_at IS NOT NULL"} {
+		if !strings.Contains(tools.BlockingDeliverySQL, want) {
+			t.Errorf("tools.BlockingDeliverySQL = %q lacks %q", tools.BlockingDeliverySQL, want)
+		}
+	}
+	store := dsRepoFile(t, "internal/drafts/store.go")
+	if !strings.Contains(store, "tools.BlockingDeliverySQL") {
+		t.Errorf("internal/drafts/store.go does not use tools.BlockingDeliverySQL in DeliverTasks' NOT EXISTS")
+	}
+	if strings.Contains(store, "AND NOT (d.status = 'rejected' AND d.redraft_requested_at IS NOT NULL)") {
+		t.Errorf("internal/drafts/store.go still spells the blocking predicate itself; use tools.BlockingDeliverySQL")
+	}
+
+	fset := token.NewFileSet()
+	src, err := os.ReadFile("delivery.go")
+	if err != nil {
+		t.Fatalf("read delivery.go: %v", err)
+	}
+	f, err := parser.ParseFile(fset, "delivery.go", src, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse delivery.go: %v", err)
+	}
+	funcs := map[string]*ast.FuncDecl{}
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil && fd.Recv == nil {
+			funcs[fd.Name.Name] = fd
+		}
+	}
+	draft, helper := funcs["draftDelivery"], funcs["refuseBlockingDelivery"]
+	if draft == nil || helper == nil {
+		t.Fatalf("delivery.go must declare draftDelivery and refuseBlockingDelivery (the re-check under the task lock)")
+	}
+	if !rjLocalCallees(draft)["refuseBlockingDelivery"] {
+		t.Errorf("draftDelivery does not call refuseBlockingDelivery")
+	}
+	if !strings.Contains(rjFuncSource(src, fset, helper), "BlockingDeliverySQL") {
+		t.Errorf("refuseBlockingDelivery does not use BlockingDeliverySQL")
 	}
 }

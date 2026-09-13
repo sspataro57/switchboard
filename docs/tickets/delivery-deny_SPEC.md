@@ -194,6 +194,7 @@ anything for that task. Nothing outbound happens at any point.
    | `drafted` / `approved` | → `rejected` | → `rejected` + redraft |
    | `failed`, id NULL, confirmed NULL, channel ≠ `jira_comment` | → `rejected` | → `rejected` + redraft |
    | `failed` `jira_comment` | refuse (D4) | refuse (D4) |
+   | `approved` `jira_comment` with `error` set (a failed send approved for retry; review fix) | refuse (D4) | refuse (D4) |
    | `failed` with id or `confirmed_at` | refuse ("may have been sent") | refuse |
    | `sending` / `sent` | refuse | refuse |
    | `rejected`, no redraft | no-op success | upgrade: set `redraft_requested_at`, replace note if one is given |
@@ -676,6 +677,34 @@ Run in order, and do not commit before step 6 passes.
    - Production is smoke-checked only after the kube session rolls a new
      dashboard image. Hand that off; do not edit `kube/` from here.
 
+## Review fixes (go-reviewer, Codex), 2026-09-12
+
+1. **The D4 hole.** A failed `jira_comment` approved for a retry, then
+   rejected, slipped past D4. The refusal now also covers an `approved`
+   `jira_comment` with `error IS NOT NULL`: `sendJiraComment` writes `error` on
+   every failure, and approve does not clear it.
+2. **The Redo race.** `draft_delivery` with `expect_task_status` (the drafts
+   worker) re-checks, under the task lock, that no blocking delivery exists.
+   The predicate is `tools.BlockingDeliverySQL`, one spelling shared with
+   `drafts.DeliverTasks`. On a hit it refuses with `tools.ErrDeliveryBlocksDraft`,
+   which the worker counts as a skip. This also closes the same race for first
+   drafts.
+3. **The note in the prompt.** The rejected body and the note are quoted as
+   data between explicit markers, with marker copies neutralised, and framed as
+   his feedback rather than instructions. `SystemPrompt` is unchanged. There is
+   deliberately no authorization beyond humanOnly.
+4. **The locality comment** now says the rejected body can come from a worker
+   console or a user-scope session. It is still the task's own delivery, on
+   the task's own thread, under the same-project and provenance rules.
+5. **Deny/Redo bound to the words shown.** The reject forms carry the
+   `content_hash`; `reject_delivery` takes an optional `expect_content_hash`;
+   the dashboard route requires it (the `approveAction` shape).
+6. **The writer scan** flags any assignment (CASE included), scans `cmd/`, and
+   has a pattern probe.
+7. **Docs.** `docs/runbooks/HANDOFF-kube-delivery-deny.md` (0028 before any
+   roll). IK notes. The D7 refusal no longer says "Deny it instead" to an
+   already denied row; it says the row "is already denied and stays that way".
+
 ## Future work (not this ticket)
 
 - `deliveries.redraft_of` FK (or `ai_run_id`), so that the triple (rejected
@@ -686,7 +715,10 @@ Run in order, and do not commit before step 6 passes.
 - Label `update_delivery` edits (a before/after diff) as the other half of
   approval-without-edit.
 - Surface "redraft requested, but the Deliver task is closed or the parent moved
-  on" (the D7 residual) on the dashboard.
+  on" (the D7 residual) on the dashboard. The same surface should cover the
+  **silent wait**: a Redo stays "redraft requested", unlogged, whenever another
+  non-rejected delivery exists on the same parent, because every delivery but
+  the Redo row blocks the drafts queue (IK, Delivery contract).
 - MCP symmetry: either list `reject_delivery` for human sessions or unlist
   `approve_delivery` (D9).
 - A distinct `failed_definite` vs `failed_ambiguous` state for Jira sends. That

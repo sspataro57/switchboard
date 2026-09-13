@@ -12,6 +12,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/connector/upworkcrm"
 	"github.com/sspataro57/switchboard/internal/provider"
 	"github.com/sspataro57/switchboard/internal/store"
+	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 // PGStore resolves the Deliver-task queue deterministically: channel from
@@ -64,9 +65,12 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 	//
 	// SWT-43: a rejected row with a redraft requested (Redo) is the ONE delivery
 	// that does not block; a plain Deny keeps blocking, and the new draft blocks
-	// again (one human click per re-draft). Status is spelled out rather than
-	// trusting deliveries_rejection_fields_check alone. The LATERAL feeds the
-	// newest such row's body and note into the prompt.
+	// again (one human click per re-draft). The predicate is
+	// tools.BlockingDeliverySQL, the ONE spelling draft_delivery also re-checks
+	// under the task lock on this worker's path (expect_task_status), so a pass
+	// that loses the race to another is refused rather than drafting twice. The
+	// LATERAL feeds the newest redraft-requested row's body and note into the
+	// prompt.
 	q := `SELECT t.id, t.parent_id, p.slug,
 	             COALESCE(parent.title,''),
 	             COALESCE(NULLIF(p.client,''), p.name),
@@ -87,7 +91,7 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 	      WHERE t.title LIKE 'Deliver #%' AND t.status IN ('ready','holding')
 	        AND parent.status = 'done_locally'
 	        AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.task_id = t.parent_id
-	                        AND NOT (d.status = 'rejected' AND d.redraft_requested_at IS NOT NULL))
+	                        AND ` + tools.BlockingDeliverySQL + `)
 	      ORDER BY t.id`
 	if cfg.Limit > 0 {
 		q += fmt.Sprintf(` LIMIT %d`, cfg.Limit)

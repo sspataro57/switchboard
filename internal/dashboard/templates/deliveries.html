@@ -119,14 +119,14 @@
              worker writes a fresh one using the reason. Refusals (e.g. a failed
              jira_comment) surface as the flash. */}}
         {{if or (eq .Status "drafted") (eq .Status "approved") (eq .Status "failed")}}
-        <form method="post" action="/deliveries/{{.ID}}/reject">
+        <form method="post" action="/deliveries/{{.ID}}/reject"><input type="hidden" name="content_hash" value="{{.ContentHash}}">
           <input type="text" name="note" placeholder="reason (optional)">
           <button name="redraft" value="false">Deny</button>
           <button name="redraft" value="true">Redo</button>
         </form>
         {{end}}
         {{if and (eq .Status "rejected") (not .RedraftRequested)}}
-        <form method="post" action="/deliveries/{{.ID}}/reject">
+        <form method="post" action="/deliveries/{{.ID}}/reject"><input type="hidden" name="content_hash" value="{{.ContentHash}}">
           <input type="text" name="note" placeholder="reason (optional)">
           <button name="redraft" value="true">Redo</button>
         </form>

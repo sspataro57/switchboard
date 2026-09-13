@@ -283,19 +283,40 @@ func (s *Server) actionEdit(w http.ResponseWriter, r *http.Request) {
 
 // actionReject is Deny (redraft=false) and Redo (redraft=true). The note is
 // free text, so the args are built with json.Marshal, never Sprintf.
+//
+// Like approveAction, the verdict is bound to the words this page rendered
+// (SWT-43 review): the form's content_hash goes through as
+// expect_content_hash, and a POST without one is refused before the executor.
+// reject_delivery keeps the hash optional for opsctl.
+//
+// The note reaches the drafts worker's prompt (quoted as data, see
+// drafts.renderUser). It needs no authorization beyond reject_delivery's
+// humanOnly: this route sits behind Keycloak OIDC, and the note is Salvador's
+// own text.
 func (s *Server) actionReject(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	h := strings.TrimSpace(r.PostFormValue("content_hash"))
+	if h == "" {
+		flash := "reject refused: this page did not say which words you reviewed; reload the page and review it again"
+		http.Redirect(w, r, "/deliveries?flash="+template.URLQueryEscaper(flash), http.StatusSeeOther)
+		return
+	}
 	payload := map[string]any{
-		"delivery_id": jsonNum(r.PathValue("id")),
-		"redraft":     r.PostFormValue("redraft") == "true",
+		"delivery_id":         jsonNum(r.PathValue("id")),
+		"redraft":             r.PostFormValue("redraft") == "true",
+		"expect_content_hash": h,
 	}
 	if v := r.PostFormValue("note"); v != "" {
 		payload["note"] = v
 	}
-	raw, _ := json.Marshal(payload)
+	raw, err := json.Marshal(payload)
+	if err != nil { // a non-numeric id is not a json.Number
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	s.execute(w, r, "reject_delivery", string(raw))
 }
 

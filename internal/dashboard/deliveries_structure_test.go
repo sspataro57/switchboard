@@ -207,3 +207,121 @@ func TestApproveAction_RefusesAPostWithoutTheHash(t *testing.T) {
 		})
 	}
 }
+
+// ---- SWT-43 review fix 5: Deny / Redo bound to the words shown -----------------
+//
+// The reject forms carry the same content_hash as the Approve form, and
+// actionReject passes it through as expect_content_hash (json.Marshal) and
+// REFUSES a POST without one, mirroring approveAction.
+//
+// MUTATIONS THAT MUST TURN THESE RED:
+//   - drop the hidden input from either reject form → RejectFormsCarryContentHash;
+//   - forward a hash-less POST to the executor → TestRejectAction_RefusesAPostWithoutTheHash;
+//   - Sprintf the args → the injection rows.
+
+func TestDeliveriesTemplate_RejectFormsCarryContentHash(t *testing.T) {
+	raw, err := templateFS.ReadFile("templates/deliveries.html")
+	if err != nil {
+		t.Fatalf("read embedded deliveries.html: %v", err)
+	}
+	forms := regexp.MustCompile(`(?s)<form[^>]*action="/deliveries/\{\{\.ID\}\}/reject"[^>]*>(.*?)</form>`).
+		FindAllStringSubmatch(string(raw), -1)
+	if len(forms) != 2 {
+		t.Fatalf("deliveries.html has %d reject form(s), want 2 (drafted/approved/failed rows, and a plain-rejected "+
+			"row's Redo)", len(forms))
+	}
+	for i, m := range forms {
+		for _, want := range []string{`type="hidden"`, `name="content_hash"`, `value="{{.ContentHash}}"`} {
+			if !strings.Contains(m[1], want) {
+				t.Errorf("reject form %d lacks %s; without the rendered hash a Deny/Redo can judge words he never "+
+					"saw. Form: %s", i+1, want, m[1])
+			}
+		}
+	}
+}
+
+func TestRejectAction_PassesTheHashAsJSON(t *testing.T) {
+	auth, err := NewAuth(context.Background(), "", "", "", "")
+	if err != nil {
+		t.Fatalf("NewAuth: %v", err)
+	}
+	const inject = `x","delivery_id":9,"redraft":true,"y":"`
+	for _, tc := range []struct {
+		name string
+		form url.Values
+		want map[string]any
+	}{
+		{"redo with a note", url.Values{"content_hash": {"ab12"}, "redraft": {"true"}, "note": {"shorter"}},
+			map[string]any{"delivery_id": float64(7), "redraft": true, "note": "shorter", "expect_content_hash": "ab12"}},
+		{"deny without a note", url.Values{"content_hash": {"ab12"}, "redraft": {"false"}},
+			map[string]any{"delivery_id": float64(7), "redraft": false, "expect_content_hash": "ab12"}},
+		{"injection in the hash", url.Values{"content_hash": {inject}, "redraft": {"false"}},
+			map[string]any{"delivery_id": float64(7), "redraft": false, "expect_content_hash": inject}},
+		{"injection in the note", url.Values{"content_hash": {"ab12"}, "redraft": {"false"}, "note": {inject}},
+			map[string]any{"delivery_id": float64(7), "redraft": false, "note": inject, "expect_content_hash": "ab12"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ex := &captureExec{}
+			s := &Server{ex: ex, auth: auth}
+			req := httptest.NewRequest(http.MethodPost, "/deliveries/7/reject", strings.NewReader(tc.form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.SetPathValue("id", "7")
+			s.actionReject(httptest.NewRecorder(), req)
+			if len(ex.calls) != 1 || ex.calls[0].Tool != "reject_delivery" {
+				t.Fatalf("executor calls = %+v, want one reject_delivery", ex.calls)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(ex.calls[0].Args, &got); err != nil {
+				t.Fatalf("reject args %s are not JSON: %v", ex.calls[0].Args, err)
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("reject args = %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("reject args[%s] = %v, want %v (args %s)", k, got[k], v, ex.calls[0].Args)
+				}
+			}
+		})
+	}
+}
+
+func TestRejectAction_RefusesAPostWithoutTheHash(t *testing.T) {
+	auth, err := NewAuth(context.Background(), "", "", "", "")
+	if err != nil {
+		t.Fatalf("NewAuth: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		form url.Values
+	}{
+		{"absent", url.Values{"redraft": {"true"}, "note": {"shorter"}}},
+		{"empty", url.Values{"redraft": {"false"}, "content_hash": {""}}},
+		{"blank", url.Values{"redraft": {"true"}, "content_hash": {"   "}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ex := &captureExec{}
+			s := &Server{ex: ex, auth: auth}
+			req := httptest.NewRequest(http.MethodPost, "/deliveries/7/reject", strings.NewReader(tc.form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.SetPathValue("id", "7")
+			rec := httptest.NewRecorder()
+			s.actionReject(rec, req)
+			if len(ex.calls) != 0 {
+				t.Fatalf("a reject POST with no content_hash reached the executor: %+v — the dashboard Deny/Redo "+
+					"must be bound to the words it showed", ex.calls)
+			}
+			if rec.Code != http.StatusSeeOther {
+				t.Errorf("status = %d, want %d (back to /deliveries with a flash)", rec.Code, http.StatusSeeOther)
+			}
+			loc, err := url.Parse(rec.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("Location %q: %v", rec.Header().Get("Location"), err)
+			}
+			if loc.Path != "/deliveries" || !strings.Contains(loc.Query().Get("flash"), "reload the page and review it again") {
+				t.Errorf("redirect = %q, want /deliveries with a flash saying to reload the page and review it again",
+					rec.Header().Get("Location"))
+			}
+		})
+	}
+}

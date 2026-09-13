@@ -840,8 +840,8 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   id drafts, but `update_delivery` is `humanOnly`: a worker-shaped id (`salvo`,
   `acme`) gets `human_only` and cannot fix even its own draft.
   `worker.ValidateWorkerID` guards opsworker's ids, not this binary's env.
-- **Recovery for a planted draft:** none by verb until SWT-43's Deny ships —
-  edit it on the dashboard or leave it unapproved; it never sends unapproved.
+- **Recovery for a planted draft:** Deny it on the dashboard (SWT-43; a plain
+  Deny, not Redo), or edit it. Either way it never sends unapproved.
 - **R8 caveat — recorded for a follow-up ticket (SWT-47),
   NOT fixed here.** R8 fires on
   `delivery_sent` for the delivery's TASK: `task_mark_delivered` refuses a task
@@ -1232,16 +1232,54 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
   id and no confirmation — **EXCEPT `jira_comment`**: `sendJiraComment` writes
   failed+NULL for every error, the comment may have landed, and the jira
   matcher still claims `failed` rows, so rejecting one would turn a landed
-  comment into a false `outbound_observed` hand-send. `sending`/`sent` never.
+  comment into a false `outbound_observed` hand-send. **The same refusal covers
+  an `approved` `jira_comment` with `error IS NOT NULL`** (SWT-43 review):
+  approve accepts failed-without-id for a retry and does not clear `error`
+  (only a successful send or `mark_delivery_sent` does), so a failed-then-
+  approved Jira row is the same may-have-landed row. `sending`/`sent` never.
   The verdict is an `approvals` row `('delivery', id, 'rejected', actor)` plus a
   `delivery_rejected` task event that NO orchestrator rule reacts to (the
   Deliver task stays open; never infer delivery state into task state).
+- **Deny/Redo are bound to the words shown, like Approve (SWT-44's hash).**
+  Both reject forms carry the hidden `content_hash`
+  (`tools.DeliveryContentHash`). `reject_delivery` takes an optional
+  `expect_content_hash`, compared under the delivery FOR UPDATE lock; a mismatch
+  refuses with "changed since it was shown to you; reload and review it again".
+  The dashboard's `actionReject` refuses a POST without a hash before the
+  executor, and opsctl may omit it.
 - **`deliveries.redraft_requested_at` is the drafts unblock.** The drafts
   `NOT EXISTS` ignores exactly a rejected row with it set (Redo); a plain Deny
   keeps blocking; the new draft blocks again. That is the loop bound — one
   human click per re-draft — and it holds only while `reject_delivery` is the
   column's sole writer (`TestRedraftRequestedAt_OnlyInternalToolsWritesIt`).
+  That scan covers `internal/` and `cmd/`, flags ANY assignment (the first cut
+  listed right-hand sides and missed `= CASE ...`, the shape the Redo UPDATE
+  itself uses), and has a probe, `TestRedraftWritePattern_Probe`.
   Redo needs the work task `done_locally` (the only status a draft lands on).
+- **"Blocks a new draft" has ONE spelling: `tools.BlockingDeliverySQL`.** It is
+  used by `drafts.DeliverTasks`' NOT EXISTS AND by `draft_delivery`'s re-check
+  under the task FOR UPDATE whenever `expect_task_status` is set (the
+  drafts-worker path). DeliverTasks is a read, not a claim, so without the
+  re-check two drafts passes could each draft from one Redo, or from one first
+  draft. The loser gets `tools.ErrDeliveryBlocksDraft`, which the worker counts
+  as a skip. Plain callers (sessions, dashboard, opsctl) send no
+  `expect_task_status` and still draft siblings.
+- **The note reaches the redraft prompt as quoted data.** The rejected body and
+  Salvador's note sit between `<<<BEGIN/END REJECTED DRAFT>>>` and
+  `<<<BEGIN/END HIS REASON>>>`, and any marker copy inside them is broken up
+  (`neutraliseMarkers`). They are framed as his feedback to address, not
+  instructions. `SystemPrompt` is byte-unchanged. There is deliberately no
+  authorization beyond humanOnly: the note is his own text, typed behind
+  Keycloak.
+- **Silent wait (Future work, beside D7's residual).** A Redo stays "redraft
+  requested" with nothing drafting it, and nothing logged, whenever ANOTHER
+  non-rejected delivery exists on the same parent task. Examples: a session
+  drafted a sibling gmail reply, or an older drafted, approved or sent row sits
+  beside the rejected one. Every delivery on the parent blocks the drafts queue
+  except the Redo row itself, so the worker never lists the Deliver task. This
+  is the same shape as D7's residual (a Redo whose Deliver task was closed by
+  hand). Recovery today: deal with the sibling first (Deny it or send it), or
+  draft by hand. Surfacing both cases on the dashboard is SPEC Future work.
 - **Every new matcher's, reconciler's or send path's status set must exclude
   `rejected`.** Today they exclude it by allowlist, pinned by tests;
   `deliveries_rejected_unsent_check` is the schema backstop (a rejected row can

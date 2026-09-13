@@ -110,3 +110,29 @@ func TestValidateRejectDelivery_Accepts(t *testing.T) {
 		}
 	}
 }
+
+// SWT-43 review fix 5: reject_delivery's optional expect_content_hash has
+// approve_delivery's shape (tools.DeliveryContentHash). A malformed hash can
+// never match, and refusing it as "changed since it was shown" would send him
+// to reload for the wrong reason. MUTATION: drop the shape check → the "abc"
+// and upper-case rows go red.
+func TestValidateRejectDelivery_ContentHashShape(t *testing.T) {
+	good := DeliveryContentHash("s", "b")
+	for _, tc := range []struct {
+		args string
+		ok   bool
+	}{
+		{`{"delivery_id":7}`, true}, // omitted: opsctl keeps working unbound
+		{`{"delivery_id":7,"redraft":true,"expect_content_hash":"` + good + `"}`, true},
+		{`{"delivery_id":7,"expect_content_hash":"abc"}`, false},
+		{`{"delivery_id":7,"expect_content_hash":"` + strings.ToUpper(good) + `"}`, false},
+	} {
+		err := validateRejectDelivery([]byte(tc.args))
+		if tc.ok && err != nil {
+			t.Errorf("validateRejectDelivery(%s) = %v, want nil", tc.args, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("validateRejectDelivery(%s) accepted a malformed expect_content_hash", tc.args)
+		}
+	}
+}

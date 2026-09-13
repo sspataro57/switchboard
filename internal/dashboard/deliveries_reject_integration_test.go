@@ -29,11 +29,14 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 const ddSlug = "itest-deny-dash-proj"
@@ -107,10 +110,23 @@ func TestDeliveriesReject_Integration_DenyAndRedoThroughTheHandler(t *testing.T)
 	noFollow := &http.Client{Jar: client.Jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
-	post := func(id int64, note, redraft string) {
+	// hashShown is the content_hash the page renders into delivery id's reject
+	// form: the dashboard route requires it (SWT-43 review fix 5), so every
+	// verdict below posts the words the page showed.
+	hashShown := func(id int64) string {
 		t.Helper()
-		resp, err := noFollow.PostForm(ts.URL+"/deliveries/"+strconv.FormatInt(id, 10)+"/reject",
-			url.Values{"note": {note}, "redraft": {redraft}})
+		_, page := get(t, client, ts.URL+"/deliveries")
+		m := regexp.MustCompile(`(?s)action="/deliveries/` + strconv.FormatInt(id, 10) + `/reject">.*?name="content_hash" value="([^"]*)"`).
+			FindStringSubmatch(ddRow(page, id))
+		if m == nil {
+			t.Fatalf("delivery %d's reject form carries no content_hash", id)
+		}
+		return m[1]
+	}
+	// postForm POSTs the reject form and returns the flash.
+	postForm := func(id int64, form url.Values) string {
+		t.Helper()
+		resp, err := noFollow.PostForm(ts.URL+"/deliveries/"+strconv.FormatInt(id, 10)+"/reject", form)
 		if err != nil {
 			t.Fatalf("POST /deliveries/%d/reject: %v", id, err)
 		}
@@ -122,7 +138,12 @@ func TestDeliveriesReject_Integration_DenyAndRedoThroughTheHandler(t *testing.T)
 		if err != nil || loc.Path != "/deliveries" {
 			t.Fatalf("redirect Location = %q, want /deliveries?flash=...", resp.Header.Get("Location"))
 		}
-		if flash := loc.Query().Get("flash"); flash != "reject_delivery ok" {
+		return loc.Query().Get("flash")
+	}
+	post := func(id int64, note, redraft string) {
+		t.Helper()
+		form := url.Values{"note": {note}, "redraft": {redraft}, "content_hash": {hashShown(id)}}
+		if flash := postForm(id, form); flash != "reject_delivery ok" {
 			t.Fatalf("flash = %q, want \"reject_delivery ok\" (the executor accepted the call)", flash)
 		}
 	}
@@ -232,5 +253,34 @@ func TestDeliveriesReject_Integration_DenyAndRedoThroughTheHandler(t *testing.T)
 	// ---- criterion 34: the task detail page reads 'rejected' unchanged ----------
 	if _, detail := get(t, client, ts.URL+"/tasks/"+strconv.FormatInt(taskID, 10)); !strings.Contains(detail, "rejected") {
 		t.Errorf("/tasks/%d does not show the rejected delivery's status", taskID)
+	}
+
+	// ---- SWT-43 review fix 5: the verdict is bound to the words shown ------------
+	stale := drafted("DDASH stale body")
+	shown := hashShown(stale)
+	if want := tools.DeliveryContentHash("Re: login broken", "DDASH stale body"); shown != want {
+		t.Fatalf("the reject form's content_hash = %q, want tools.DeliveryContentHash of the rendered words %q", shown, want)
+	}
+	// An edit lands after the render (a session's update_delivery).
+	if _, err := pool.Exec(ctx, `UPDATE deliveries SET body='DDASH planted words' WHERE id=$1`, stale); err != nil {
+		t.Fatalf("edit draft: %v", err)
+	}
+	if flash := postForm(stale, url.Values{"note": {"shorter"}, "redraft": {"true"}, "content_hash": {shown}}); !strings.Contains(flash, "changed since it was shown to you") {
+		t.Errorf("a Redo with the hash of the words shown, after an edit, flashed %q; want the changed-since-shown refusal", flash)
+	}
+	if s := read(stale); s.status != "drafted" || s.redraft {
+		t.Errorf("after a stale Redo: status=%q redraft=%v, want still drafted", s.status, s.redraft)
+	}
+	// A POST without any hash never reaches the executor.
+	if flash := postForm(stale, url.Values{"redraft": {"false"}}); !strings.Contains(flash, "reload the page and review it again") {
+		t.Errorf("a hash-less reject POST flashed %q; want the reload-and-review refusal", flash)
+	}
+	if s := read(stale); s.status != "drafted" {
+		t.Errorf("a hash-less reject POST changed the row (status %q)", s.status)
+	}
+	// Reload: the new hash rejects.
+	post(stale, "", "false")
+	if s := read(stale); s.status != "rejected" {
+		t.Errorf("Deny with the reloaded page's hash left status %q, want rejected", s.status)
 	}
 }
