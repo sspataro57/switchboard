@@ -121,9 +121,11 @@ func LaneByName(name string) (Lane, error) {
 		return LaneResidue, nil
 	case LaneInquiry.Name:
 		return LaneInquiry, nil
+	case LaneRoute.Name:
+		return LaneRoute, nil
 	default:
-		return Lane{}, fmt.Errorf("unknown lane %q (want %q, %q or %q)",
-			name, LanePersonal.Name, LaneResidue.Name, LaneInquiry.Name)
+		return Lane{}, fmt.Errorf("unknown lane %q (want %q, %q, %q or %q)",
+			name, LanePersonal.Name, LaneResidue.Name, LaneInquiry.Name, LaneRoute.Name)
 	}
 }
 
@@ -132,7 +134,7 @@ func LaneByName(name string) (Lane, error) {
 // its golden report uses a non-lane worker_type), so the lookup is by value and
 // an unrecognised worker_type is NOT an error — it keeps today's behaviour.
 func LaneByWorkerType(workerType string) (Lane, bool) {
-	for _, l := range []Lane{LanePersonal, LaneResidue, LaneInquiry} {
+	for _, l := range []Lane{LanePersonal, LaneResidue, LaneInquiry, LaneRoute} {
 		if l.WorkerType == workerType {
 			return l, true
 		}
@@ -145,8 +147,8 @@ func LaneByWorkerType(workerType string) (Lane, bool) {
 // symptom is a prompt asking whether a Nextdoor digest is a personal bill.
 func (l Lane) validate() error {
 	if l.Name == "" || l.WorkerType == "" || l.System == "" || l.PromptVersion == "" {
-		return fmt.Errorf("classify: Config.Lane is unset or incomplete; pass LanePersonal, LaneResidue " +
-			"or LaneInquiry — the zero lane is refused rather than defaulted, so the residue is never " +
+		return fmt.Errorf("classify: Config.Lane is unset or incomplete; pass LanePersonal, LaneResidue, " +
+			"LaneInquiry or LaneRoute — the zero lane is refused rather than defaulted, so the residue is never " +
 			"classified by the personal prompt by omission")
 	}
 	return nil

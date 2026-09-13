@@ -71,7 +71,8 @@ func Report(ctx context.Context, pool *pgxpool.Pool, since time.Time, domain str
 		reportProjects,
 		reportProposedTasks,
 		reportAmbiguous,
-		reportGate, // SWT-40 D6 (gate.go's rows)
+		reportGate,  // SWT-40 D6 (gate.go's rows)
+		reportRoute, // SWT-40 B9 (route.go's rows, routereport.go)
 		// SWT-23 criterion 1: the DOMAIN table renders before the full-From
 		// table — it is the one a reader acts on, and the sender table is the
 		// detail underneath it. Both stay.

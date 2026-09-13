@@ -87,6 +87,10 @@ type Summary struct {
 	// broke. Empty on the other two lanes.
 	ByChannel map[string]ChannelCounts
 	Flags     []Flag // newest first, capped at summaryFlagCap (the page's list)
+	// RouteAccounts is the ROUTE lane's breakdown by receiving account (SWT-40
+	// B9): verdicts, pending_verdict and route_apply's steps. Empty on the
+	// other lanes.
+	RouteAccounts []RouteAccountCounts
 	// allFlags is EVERY flagged verdict, uncapped. The CLI report renders all
 	// of them — its text is byte-identical to the pre-refactor output
 	// (criterion 12), and a residue window can carry a thousand-plus flagged
@@ -138,6 +142,11 @@ func Summarize(ctx context.Context, pool *pgxpool.Pool, since time.Duration, wor
 	}
 	lane, known := LaneByWorkerType(workerType)
 	inquiry := known && lane.Name == LaneInquiry.Name
+	// The ROUTE lane (SWT-40 B9) decodes its own contract and folds verdicts per
+	// receiving account here, beside the other lanes' folds, so the CLI report
+	// and /funnel read one Summary.
+	route := known && lane.Name == LaneRoute.Name
+	routeAcc := map[int64]*RouteAccountCounts{}
 
 	// The replied-since column is computed for the inquiry lane only; the other
 	// lanes select a constant so one scan serves all three.
@@ -186,6 +195,12 @@ func Summarize(ctx context.Context, pool *pgxpool.Pool, since time.Duration, wor
 			Ask         string `json:"ask"`
 			Channel     string `json:"channel"`
 			ThreadScope string `json:"thread_scope"`
+			// The route contract (SWT-40 Part B).
+			Grounded        bool    `json:"grounded"`
+			Evidence        string  `json:"evidence"`
+			RouteProject    *int64  `json:"project_id"`
+			RouteSlug       *string `json:"project_slug"`
+			SourceAccountID int64   `json:"source_account_id"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			continue
@@ -196,6 +211,24 @@ func Summarize(ctx context.Context, pool *pgxpool.Pool, since time.Duration, wor
 		decision, category, title := f.Actionable, f.Kind, f.Title
 		if inquiry {
 			decision, category, title = f.NeedsReply, f.AskKind, f.Ask
+		}
+		// The route lane: a grounded choice is the "flag", the category is the
+		// RESOLVED candidate's slug, and the line shows the quoted evidence.
+		if route {
+			decision, category, title = f.Grounded, routeNoChoice, f.Evidence
+			if f.RouteSlug != nil && *f.RouteSlug != "" {
+				category = *f.RouteSlug
+			}
+			a := routeAccount(routeAcc, f.SourceAccountID)
+			a.Verdicts++
+			switch {
+			case f.Grounded:
+				a.Grounded++
+			case f.RouteProject != nil:
+				a.Ungrounded++
+			default:
+				a.NoChoice++
+			}
 		}
 		channel := channelKey(f.Channel)
 
@@ -246,6 +279,11 @@ func Summarize(ctx context.Context, pool *pgxpool.Pool, since time.Duration, wor
 		return s, fmt.Errorf("iterate verdicts: %w", err)
 	}
 
+	if route {
+		if err := summarizeRoute(ctx, pool, since, routeAcc, &s); err != nil {
+			return s, err
+		}
+	}
 	if err := summarizeSkipped(ctx, pool, since, workerType, inquiry, &s); err != nil {
 		return s, err
 	}

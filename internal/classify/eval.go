@@ -99,6 +99,14 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 			"produce a number for a model that will never run", reason)
 	}
 
+	// SWT-40 B10: the route lane's labels are project SLUGS, one class per
+	// candidate, so its score is a multi-class count table rather than the
+	// binary recall/precision below (route_eval.go). The refusals above — one
+	// label per message, the local lane only — are shared.
+	if cfg.Lane.Name == LaneRoute.Name {
+		return evalRoute(ctx, store, lane, cfg, labels, ids, w)
+	}
+
 	msgs, err := store.MessagesByID(ctx, cfg, ids)
 	if err != nil {
 		return fmt.Errorf("load labelled messages: %w", err)
@@ -191,10 +199,7 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 	// LOAD, before any request, so even a fully checkpointed resume — where no
 	// request, and so no server-reported-model check below, would ever run — is
 	// covered. A mismatch is refused, never merged.
-	promptFP := sha256.Sum256([]byte(cfg.Lane.System + "\x00" + string(cfg.Lane.Contract.Schema)))
-	ckptKey := fmt.Sprintf("%s/%s/%s/model=%s/think=%t/max=%d/ctx=%d",
-		cfg.Lane.WorkerType, cfg.Lane.PromptVersion, hex.EncodeToString(promptFP[:])[:12],
-		cfg.Model, cfg.Think, cfg.MaxTokens, cfg.NumCtx)
+	ckptKey := evalCheckpointKey(cfg)
 	if cfg.EvalCheckpoint != "" {
 		if raw, err := os.ReadFile(cfg.EvalCheckpoint); err == nil {
 			for _, line := range strings.Split(string(raw), "\n") {
@@ -501,6 +506,16 @@ func Eval(ctx context.Context, store Store, router *provider.Router, cfg Config,
 
 // displayModel names the model in the header. An eval whose output does not say
 // what it scored is a number nobody can reproduce.
+// evalCheckpointKey is the one spelling of "which evaluation wrote this
+// checkpoint line" (see Eval's CHECKPOINT comment), shared by the generic eval
+// and the route lane's (route_eval.go).
+func evalCheckpointKey(cfg Config) string {
+	promptFP := sha256.Sum256([]byte(cfg.Lane.System + "\x00" + string(cfg.Lane.Contract.Schema)))
+	return fmt.Sprintf("%s/%s/%s/model=%s/think=%t/max=%d/ctx=%d",
+		cfg.Lane.WorkerType, cfg.Lane.PromptVersion, hex.EncodeToString(promptFP[:])[:12],
+		cfg.Model, cfg.Think, cfg.MaxTokens, cfg.NumCtx)
+}
+
 func displayModel(model string) string {
 	if model == "" {
 		return "(model not reported)"
@@ -535,11 +550,17 @@ const OwnerBlanketNote = OwnerBlanketNotePrefix + ": labelled by the owner's bla
 // an unconstrained string field is a place client text can ride along).
 func LabelStratumAllowed(stratum string) bool {
 	switch stratum {
-	case "", "uniform", "enriched", "domain_gate":
+	case "", "uniform", "enriched", "domain_gate", RouteLabelStratum:
 		return true
 	}
 	return false
 }
+
+// RouteLabelStratum marks every line of the route lane's label set (SWT-40
+// B-D7): the label is the RULES tier's own attribution, deterministic output
+// rather than a human judgement, and biased easy. cmd/classify's loader
+// requires it on the route lane and refuses it on every other.
+const RouteLabelStratum = "rules"
 
 // LabelNoteAllowed says whether a label file's `note` value is in the CLOSED
 // vocabulary. A note is never free text (Codex adversarial review, round 8):

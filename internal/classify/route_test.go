@@ -9,7 +9,7 @@ package classify_test
 //
 // ---- IMPOSED SURFACE (internal/classify/route.go; the SPEC's B1/B3 names) ----
 //
-//	const RoutePromptVersion = "route-v1"
+//	const RoutePromptVersion = "route-v2" // route-v1 until the B-D4 amendment of 2026-09-13
 //	const RouteSchemaName    = "route_verdict"
 //	var   RouteVerdictSchema json.RawMessage
 //	      // {project_index: integer|null, evidence: string, reason: string},
@@ -32,10 +32,12 @@ package classify_test
 //	// nil, 0, negative or past the end → (zero, false).
 //	func ResolveCandidate(cands []RouteCandidate, idx *int) (RouteCandidate, bool)
 //	// The grounding gate that replaces confidence (B-D4): evidence, whitespace-
-//	// collapsed and case-folded, is a substring of the sender, the subject or
-//	// the body — each field on its own, same collapse and fold. Empty evidence
+//	// collapsed and case-folded, is a substring of the subject or the body —
+//	// each field on its own, same collapse and fold — and is at least
+//	// GroundMinWords (2) words and GroundMinChars (8) characters. NOT the sender
+//	// (B-D4 amendment 2026-09-13: a shared sender is not enough). Empty evidence
 //	// grounds nothing.
-//	func Grounded(evidence, sender, subject, body string) bool
+//	func Grounded(evidence, subject, body string) bool
 //
 //	// PendingMessage gains two fields, filled by the route inbox only:
 //	    SourceAccountID int64            // raw_source_items.source_account_id (B-D9's carve-out)
@@ -131,8 +133,9 @@ func TestLaneRoute_Values(t *testing.T) {
 		t.Errorf("LaneRoute.WorkerType = %q, want \"classify_route\" (B-D3). Every inbox keys its NOT EXISTS on "+
 			"worker_type: a shared value would hide a message classified by one lane from another, forever", l.WorkerType)
 	}
-	if classify.RoutePromptVersion != "route-v1" || l.PromptVersion != classify.RoutePromptVersion {
-		t.Errorf("RoutePromptVersion = %q, LaneRoute.PromptVersion = %q; want route-v1 for both (B1)",
+	if classify.RoutePromptVersion != "route-v2" || l.PromptVersion != classify.RoutePromptVersion {
+		t.Errorf("RoutePromptVersion = %q, LaneRoute.PromptVersion = %q; want route-v2 for both (B1; bumped from "+
+			"route-v1 when the prompt text changed under the B-D4 amendment of 2026-09-13)",
 			classify.RoutePromptVersion, l.PromptVersion)
 	}
 	if l.System != classify.RouteSystemPrompt {
@@ -334,18 +337,43 @@ func TestGrounded(t *testing.T) {
 	}{
 		{"verbatim span with different spacing and case passes", "beta engine feed   TIMELINE", true},
 		{"a span of the subject passes", "the Beta Engine activity feed", true},
-		{"a span of the sender passes", "pat@univ.example.test", true},
 		{"a no-break space collapses like any whitespace", "Beta\u00a0Engine feed", true},
 		{"a paraphrase fails", "the beta engine schedule question", false},
 		{"a claim about the message fails", "the sender works on beta", false},
 		{"empty evidence grounds nothing", "", false},
 		{"whitespace-only evidence grounds nothing", "  \n\t ", false},
 		{"a span straddling subject and body is not a substring of either", "activity feed Hi, can you", false},
+		// B-D4 amendment (2026-09-13): the sender is not a field. Mutation: put
+		// the sender back in Grounded's field list \u2192 these pass.
+		{"a quote of the sender (display name and address) grounds nothing", "Pat Doe <pat@univ.example.test>", false},
+		{"a quote of the sender's display name grounds nothing", "Pat Doe", false},
+		// The floor: GroundMinWords (2) AND GroundMinChars (8), on the folded text.
+		{"trivial evidence: one letter", "e", false},
+		{"trivial evidence: one common word", "the", false},
+		{"trivial evidence: a greeting", "hi", false},
+		{"exactly at both thresholds (2 words, 8 characters) passes", "the beta", true},
+		{"at threshold after folding (extra spaces and case do not count)", "  THE   Beta ", true},
+		// Mutation: GroundMinChars 8 \u2192 7 \u2192 this passes.
+		{"just below the character floor (2 words, 7 characters)", "the bet", false},
+		// Mutation: GroundMinWords 2 \u2192 1 \u2192 this passes.
+		{"just below the word floor (1 word, 8 characters)", "timeline", false},
 	} {
-		if got := classify.Grounded(tc.evidence, sender, subject, body); got != tc.want {
-			t.Errorf("%s: Grounded(%q) = %v, want %v (B-D4: whitespace-collapsed, case-folded substring of the "+
-				"sender, subject or body)", tc.name, tc.evidence, got, tc.want)
+		if got := classify.Grounded(tc.evidence, subject, body); got != tc.want {
+			t.Errorf("%s: Grounded(%q) = %v, want %v (B-D4 as amended: a whitespace-collapsed, case-folded substring "+
+				"of the subject or body, never the sender, of at least %d words and %d characters)",
+				tc.name, tc.evidence, got, tc.want, classify.GroundMinWords, classify.GroundMinChars)
 		}
+	}
+	// The sender cases quote the sender verbatim, so they fail on the FIELD (the
+	// sender is not searched), not on a typo: the quote is really the sender's,
+	// and appears in neither the subject nor the body.
+	if !strings.Contains(sender, "Pat Doe <pat@univ.example.test>") ||
+		strings.Contains(strings.ToLower(subject+body), "pat doe") {
+		t.Fatalf("fixture: the sender-only probes must quote the sender and appear nowhere else")
+	}
+	if classify.GroundMinWords != 2 || classify.GroundMinChars != 8 {
+		t.Errorf("GroundMinWords = %d, GroundMinChars = %d; the B-D4 amendment fixes 2 and 8",
+			classify.GroundMinWords, classify.GroundMinChars)
 	}
 }
 
@@ -438,6 +466,11 @@ func TestRun_RouteLane_RecordsTheResolvedCandidateAndTheGroundingBit(t *testing.
 	}{
 		{"grounded choice", rtVerdict("2", "beta   engine FEED timeline"), float64(42), true},
 		{"ungrounded choice keeps the choice, not the grounding", rtVerdict("2", "they mean the engine rebuild"), float64(42), false},
+		// B-D4 amendment: the verdict's grounding bit never reads the sender.
+		// Mutation: pass m.Sender into routeFields' Grounded call (e.g. prefixed to
+		// the subject) → this records grounded=true.
+		{"a quote of the sender is recorded ungrounded", rtVerdict("2", "Pat Doe <pat@univ.example.test>"), float64(42), false},
+		{"a trivial quote is recorded ungrounded", rtVerdict("2", "the"), float64(42), false},
 		{"null index: nothing chosen, nothing grounded", rtVerdict("null", "Beta Engine"), nil, false},
 		{"index 0: rejected", rtVerdict("0", "Beta Engine"), nil, false},
 		{"index past the end: rejected", rtVerdict("7", "Beta Engine"), nil, false},

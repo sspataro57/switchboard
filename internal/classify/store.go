@@ -145,6 +145,69 @@ const inboxWhereInquiry = `
 	           JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type = 'classify_inquiry'
 	          WHERE e.raw_source_item_id = nm.raw_source_item_id)`
 
+// routeAccountJoin is B-D9's NAMED CARVE-OUT (SWT-40 Part B), and the only
+// place internal/classify touches the raw item table: the route inbox has to
+// know which source account RECEIVED a message, because the closed candidate
+// set is per account (B-D1), and that fact lives only on the raw item's
+// source_account_id. It selects that one id column and nothing else — the
+// provider payload is never read here (invariant 1; the structure test bans
+// the payload column package-wide and allows this table name only inside this
+// constant). Every query that needs the account reuses THIS constant, so the
+// raw touch stays one line a reviewer can find. Requires the alias `nm` for
+// normalized_messages; yields `acct.source_account_id`.
+const routeAccountJoin = `
+	  JOIN LATERAL (SELECT ri.source_account_id FROM raw_source_items ri
+	                 WHERE ri.id = nm.raw_source_item_id) acct ON true`
+
+// inboxWhereRoute is the ROUTE lane's filter (SWT-40 Part B, criterion B2):
+//
+//   - `nm.direction = 'inbound'` — asserted for the reader; capture never
+//     decides an outbound message (invariant 5), so the decision clauses below
+//     already exclude our own sends;
+//   - EXISTS a mode='live' 'unmatched' decision — the rules tier ran on this
+//     message live and left it unmatched (B-D2). A shadow-only message was never
+//     decided live and is not the routing tier's to touch;
+//   - the LATEST decision (ORDER BY id DESC, ANY mode) is 'unmatched' — a later
+//     shadow re-pointing, a gate resolution or an existing route row takes the
+//     message out. No mode predicate on purpose: every latest-decision reader
+//     follows the newest row;
+//   - the receiving account has >= 1 source_account_projects row (B-D1: only
+//     accounts with candidates are routed at all);
+//   - NOT EXISTS a CURRENT classify_route verdict. Current (SPEC amendment
+//     2026-09-13, B7): with route_after NULL (unarmed, shadow) any route verdict
+//     counts, so shadow classifies each message once; once armed, only a
+//     verdict recorded at or after route_after counts, so the shadow period's
+//     verdicts do not keep the backlog out of the post-arming backfill. One
+//     fresh verdict is all a message ever needs. route_apply never applies a
+//     pre-arming verdict (internal/capture/route.go), so B7 stands.
+//
+// LEFT JOIN projects: an unmatched decision has no project (0015's CHECK), and
+// rows scanned from here carry Attribution = AttrUnmatched, which is what makes
+// ClassOf restrict them (B-D8).
+const inboxWhereRoute = `
+	  FROM normalized_messages nm` + routeAccountJoin + `
+	  JOIN source_accounts sa ON sa.id = acct.source_account_id
+	  JOIN LATERAL (SELECT cd.action, cd.project_id
+	                  FROM capture_decisions cd
+	                 WHERE cd.message_id = nm.id
+	                 ORDER BY cd.id DESC LIMIT 1) latest ON true
+	  LEFT JOIN projects p ON p.id = latest.project_id
+	 WHERE nm.direction = 'inbound'
+	   AND latest.action = 'unmatched'
+	   AND EXISTS (SELECT 1 FROM capture_decisions lv
+	                WHERE lv.message_id = nm.id AND lv.mode = 'live' AND lv.action = 'unmatched')
+	   AND EXISTS (SELECT 1 FROM source_account_projects sap
+	                WHERE sap.source_account_id = acct.source_account_id)
+	   AND NOT EXISTS (
+	         SELECT 1 FROM ai_extractions e
+	           JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type = 'classify_route'
+	          WHERE e.raw_source_item_id = nm.raw_source_item_id
+	            AND (sa.route_after IS NULL OR r.created_at >= sa.route_after))`
+
+// routeSelectAccount is the one extra column the route loaders select after
+// inboxSelect's: the receiving account, from routeAccountJoin.
+const routeSelectAccount = `, acct.source_account_id`
+
 // inboxSelect is shared by every lane's loader. The last two columns (SWT-33
 // criterion 13) are the thread identity an inquiry verdict records VERBATIM:
 // the message's own provider id, and the thread key as normalized_threads
@@ -161,14 +224,18 @@ const inboxSelect = `
 
 // PendingMessages returns one pass of the lane's inbox, oldest first.
 func (s *PGStore) PendingMessages(ctx context.Context, cfg Config) ([]PendingMessage, error) {
-	where, attr := inboxWhere, attrProject
+	where, attr, sel := inboxWhere, attrProject, inboxSelect
 	switch cfg.Lane.Name {
 	case LaneResidue.Name:
 		where, attr = inboxWhereResidue, attrUnmatched
 	case LaneInquiry.Name:
 		where = inboxWhereInquiry
+	case LaneRoute.Name:
+		// SWT-40 Part B: the unmatched pile on candidate accounts, with the
+		// receiving account selected through B-D9's carve-out.
+		where, attr, sel = inboxWhereRoute, attrUnmatched, inboxSelect+routeSelectAccount
 	}
-	q := inboxSelect + where
+	q := sel + where
 	args := []any{}
 	if cfg.Since > 0 {
 		args = append(args, cfg.Since.String())
@@ -197,6 +264,24 @@ func (s *PGStore) PendingMessages(ctx context.Context, cfg Config) ([]PendingMes
 func (s *PGStore) MessagesByID(ctx context.Context, cfg Config, ids []int64) ([]PendingMessage, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+	// The ROUTE loader (SWT-40 B10) loads labelled messages by id with their
+	// receiving account and its candidates, and NO decision predicate: the
+	// route eval scores messages the RULES attributed (the rules' answer is the
+	// label), so an 'unmatched' requirement would load nothing. Safe for the
+	// reason the residue branch is: Eval refuses any lane but the local one
+	// before it reads anything, and it never shows the model the project.
+	if cfg.Lane.Name == LaneRoute.Name {
+		q := inboxSelect + routeSelectAccount + `
+	  FROM normalized_messages nm` + routeAccountJoin + `
+	  LEFT JOIN LATERAL (SELECT cd.action, cd.project_id
+	                  FROM capture_decisions cd
+	                 WHERE cd.message_id = nm.id
+	                 ORDER BY cd.id DESC LIMIT 1) latest ON true
+	  LEFT JOIN projects p ON p.id = latest.project_id
+	 WHERE nm.id = ANY($1)
+	 ORDER BY nm.id`
+		return s.scanMessages(ctx, cfg.Lane, attrUnmatched, q, ids)
 	}
 	// The INQUIRY loader (SWT-33) takes the residue's shape: no ai_inquiry and no
 	// action predicate, for the same reason — a labelled message whose project
@@ -290,10 +375,16 @@ func (s *PGStore) scanMessages(ctx context.Context, lane Lane, attr provider.Att
 	for rows.Next() {
 		var m PendingMessage
 		var linksRaw []byte
-		if err := rows.Scan(&m.MessageID, &m.RawSourceItemID, &m.ThreadID, &m.SentAt,
+		dest := []any{&m.MessageID, &m.RawSourceItemID, &m.ThreadID, &m.SentAt,
 			&m.Sender, &m.Subject, &m.Channel, &m.BodyText, &m.Direction,
 			&m.ProjectID, &m.ProjectSlug, &m.ProjectLocalOnly, &linksRaw,
-			&m.ExternalMessageID, &m.ThreadKey); err != nil {
+			&m.ExternalMessageID, &m.ThreadKey}
+		// The route loaders select one more column, the receiving account
+		// (routeSelectAccount, through routeAccountJoin).
+		if lane.Name == LaneRoute.Name {
+			dest = append(dest, &m.SourceAccountID)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("scan classify inbox row: %w", err)
 		}
 		// The links COLUMN is the contract with the normalizer (SWT-25): the
@@ -333,7 +424,57 @@ func (s *PGStore) scanMessages(ctx context.Context, lane Lane, attr provider.Att
 			out[i].ThreadContext = InquiryContext(out[i], thread)
 		}
 	}
+	// The route lane's closed candidate sets (B-D1), one read for every account
+	// in the pass.
+	if lane.Name == LaneRoute.Name {
+		if err := s.attachCandidates(ctx, out); err != nil {
+			return nil, err
+		}
+	}
 	return out, nil
+}
+
+// attachCandidates fills each route row's Candidates: its receiving account's
+// source_account_projects rows with the project's slug, name and client, in
+// row order — the order the prompt numbers them and ResolveCandidate indexes.
+func (s *PGStore) attachCandidates(ctx context.Context, msgs []PendingMessage) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	seen := map[int64]bool{}
+	var accounts []int64
+	for _, m := range msgs {
+		if !seen[m.SourceAccountID] {
+			seen[m.SourceAccountID] = true
+			accounts = append(accounts, m.SourceAccountID)
+		}
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT sap.source_account_id, p.id, p.slug, p.name, COALESCE(p.client, ''), sap.description, sap.is_default
+		  FROM source_account_projects sap
+		  JOIN projects p ON p.id = sap.project_id
+		 WHERE sap.source_account_id = ANY($1)
+		 ORDER BY sap.source_account_id, sap.id`, accounts)
+	if err != nil {
+		return fmt.Errorf("load route candidates: %w", err)
+	}
+	defer rows.Close()
+	byAccount := map[int64][]RouteCandidate{}
+	for rows.Next() {
+		var account int64
+		var c RouteCandidate
+		if err := rows.Scan(&account, &c.ProjectID, &c.Slug, &c.Name, &c.Client, &c.Description, &c.IsDefault); err != nil {
+			return fmt.Errorf("scan route candidate: %w", err)
+		}
+		byAccount[account] = append(byAccount[account], c)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate route candidates: %w", err)
+	}
+	for i := range msgs {
+		msgs[i].Candidates = byAccount[msgs[i].SourceAccountID]
+	}
+	return nil
 }
 
 // priorThread loads the inquiry prompt's transcript: the target's thread, BOTH

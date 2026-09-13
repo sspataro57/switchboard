@@ -146,6 +146,9 @@ type funnelHealthRow struct {
 type funnelLane struct {
 	Name    string
 	Inquiry bool
+	// Route selects the route lane's layout (SWT-40 B9): verdicts by account
+	// and route_apply's steps, every number from classify.Summarize.
+	Route   bool
 	Summary classify.Summary
 }
 
@@ -365,13 +368,14 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 		}},
 		{Name: "classify shadow summary", Load: func() error {
 			since := time.Duration(days) * 24 * time.Hour
-			for _, lane := range []classify.Lane{classify.LanePersonal, classify.LaneResidue, classify.LaneInquiry} {
+			for _, lane := range []classify.Lane{classify.LanePersonal, classify.LaneResidue, classify.LaneInquiry, classify.LaneRoute} {
 				sum, err := classify.Summarize(ctx, s.pool, since, lane.WorkerType)
 				if err != nil {
 					return err
 				}
 				page.Lanes = append(page.Lanes, funnelLane{
-					Name: lane.Name, Inquiry: lane.Name == classify.LaneInquiry.Name, Summary: sum,
+					Name: lane.Name, Inquiry: lane.Name == classify.LaneInquiry.Name,
+					Route: lane.Name == classify.LaneRoute.Name, Summary: sum,
 				})
 			}
 			return nil

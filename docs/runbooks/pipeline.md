@@ -92,6 +92,22 @@ The Part C go-live value is `PIPELINE_STAGES=gate,inquiry,inquiry_promote`.
 - **The locks are shared with CronJobs, so a run can fail on a collision.** pipelined takes `0x5157_0022` (the `inquiry` stage, GPU/classify) and `0x5157_0021` (`inquiry_promote`) on every sweep (5 min) and on every wake. The `classify run` CronJobs exit 1 when they lose `0x5157_0022`, and the classify-promote CronJob fails its run when it loses `0x5157_0021`. That run fails, and the next tick recovers. A stage that loses a lock retries after 30 s.
 - **Run the hand backfill BEFORE enabling the `inquiry` stage.** `classify run --lane inquiry --since 336h` (SPEC V6.4.2) holds `0x5157_0022` for the whole backlog. With the stage already live, the two fight for the lock: the backfill exits 1 part-way whenever the stage holds it. Run it, read `classify report`, then add `inquiry` to `PIPELINE_STAGES`.
 
+## The route stages (SWT-40 Part B)
+
+The Part B value, in SHADOW, is `PIPELINE_STAGES=gate,route,route_apply,inquiry,inquiry_promote`.
+
+| stage | a pass | lock | woken by | publishes |
+|---|---|---|---|---|
+| `route` | `classify.Run` on the route lane (`worker_type=classify_route`), `--since 168h`, at most 25 messages. `processed` = verdicts written; a skipped message stays in the inbox and never counts | `0x5157_0022`, shared with the `inquiry` stage and the classify CronJobs | `captured`, sweep | `route_classified` |
+| `route_apply` | `capture.RunRouteApply`, window 720h, at most 500 messages. Writes one `mode='route'` `capture_decisions` row per routed message, directly (capture's own log: no task, no tool call). `processed` = rows written; an unrouted message (`pending_verdict`, `no_default`, `verdict_before_arming`, `candidate_revoked`) stays in the inbox and never counts | `0x5157_0015`, capture's own, shared with every connector's capture pass and the `gate` stage | `route_classified`, sweep | `routed` (wakes `inquiry`) |
+
+- **Shadow until an account is armed.** The `route` stage classifies every live-unmatched message on an account with candidate rows (`opsctl route-candidates list`), armed or not. `route_apply` writes nothing for an account whose `source_accounts.route_after` is NULL. Arming is a hand-run `UPDATE` after the eval gate, never a deploy step (`docs/runbooks/local-classifier.md`, "Routing lane").
+- **The `route` stage is local only.** It needs `OPS_LOCAL_PROVIDER_URL` (an IP literal) and `OPS_LOCAL_MODEL`, as the `inquiry` stage does. Unset, every message is skipped and recorded as a skip, never sent to a hosted model.
+- **`route_apply` needs no model.** It reads the verdict the lane recorded (`fields.project_id`, the resolved candidate, and `fields.grounded`) and decides with the pure `capture.DecideRoute`.
+- **Capture-lock collisions are expected.** `route_apply` takes `0x5157_0015` every sweep and on every `route_classified`. A connector capture pass that overlaps it logs "another pass holds advisory lock" and skips; its next tick (or the IMAP IDLE loop) recovers. A `route_apply` pass that loses the lock retries after 30 s.
+- **The post-arming backfill competes for the GPU lock.** `classify run --lane route --since 720h` (SPEC V6.5) takes `0x5157_0022` for its whole run. If it exits at start with "another classify run holds the advisory lock", a stage pass holds it: rerun it. Once it holds the lock, the `route` and `inquiry` stages wait, retrying every sweep.
+- **A route backlog drain can starve the `inquiry` stage.** `route` and `inquiry` share `0x5157_0022`. While a large route backlog drains (the post-arming backfill, or a first shadow pass over an account's history), a route pass holds the lock on most sweeps and wakes, and the `inquiry` stage keeps losing it: client asks wait behind routing until the backlog is gone. Watch the `inquiry pass` lines in the pipelined log during a drain. If asks are waiting, pause the drain (stop the hand backfill, or drop `route` from `PIPELINE_STAGES`) and let `inquiry` catch up. A structural fix is SPEC Future work.
+
 ## What a dead heartbeat means
 
 A retained `{"state":"dead"}` on `ops/workers/pipeline.{stage}/status` or `pipeline.daemon` is the broker firing that client's last will: the pod was killed, OOMed, or lost its network without a clean disconnect.

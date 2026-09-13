@@ -157,6 +157,15 @@ type PendingMessage struct {
 	// when it means "not applicable" — and would restrict every replied-on
 	// thread forever. See internal/drafts/store.go for the long note.
 	Neighbours []NeighbourClass
+
+	// SourceAccountID and Candidates are filled by the ROUTE lane's loaders only
+	// (SWT-40 Part B). The account is the one that RECEIVED the message, read
+	// through B-D9's named join (routeAccountJoin, the one place this package
+	// touches the raw item, for that one id column). Candidates are that
+	// account's source_account_projects rows, the closed set the prompt numbers
+	// and ResolveCandidate resolves against.
+	SourceAccountID int64
+	Candidates      []RouteCandidate
 }
 
 // AIRun is one ai_runs row's worth of bookkeeping.
@@ -249,6 +258,15 @@ func Run(ctx context.Context, store Store, router *provider.Router, cfg Config) 
 			"= ~2.5 GPU-minutes per day of history. Pass --since (e.g. --since 168h for the last week, " +
 			"--since 24h on a twice-daily cadence)")
 	}
+	// SWT-40 B2: the same refusal for the route lane. Its inbox is every
+	// live-unmatched message on an account with candidate rows, and the
+	// handsonconnect mailbox alone carries years of history; an unbounded pass
+	// would be a GPU-hours job started by a missing flag.
+	if cfg.Lane.Name == LaneRoute.Name && cfg.Since <= 0 {
+		return Stats{}, fmt.Errorf("the route lane refuses an unbounded pass: its inbox is every live-unmatched " +
+			"message on an account with candidate rows, and a mailbox's history is unbounded from here. Pass " +
+			"--since (e.g. --since 720h for the post-arming backfill, SPEC V6.5)")
+	}
 	pending, err := store.PendingMessages(ctx, cfg)
 	if err != nil {
 		return Stats{}, fmt.Errorf("list pending messages: %w", err)
@@ -317,13 +335,18 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 		// the actionability struct decodes to a zero verdict — "nothing to do" —
 		// rather than an error, so the wrong struct fails silently.
 		inquiry := cfg.Lane.Name == LaneInquiry.Name
+		route := cfg.Lane.Name == LaneRoute.Name
 		var v verdict
 		var iv inquiryVerdict
+		var rv routeVerdict
 		parseErr := callErr
 		if parseErr == nil {
 			var dst any = &v
-			if inquiry {
+			switch {
+			case inquiry:
 				dst = &iv
+			case route:
+				dst = &rv
 			}
 			if err := json.Unmarshal(resp.Raw, dst); err != nil {
 				parseErr = fmt.Errorf("parse verdict JSON: %w", err)
@@ -401,6 +424,12 @@ func classifyAll(ctx context.Context, store Store, router *provider.Router, cfg 
 			// the thread identity. No link fields — the contract has none.
 			fields = inquiryFields(m, iv)
 			flagged = iv.NeedsReply
+		} else if route {
+			// The route contract (SWT-40 B-D4): the model's three, the RESOLVED
+			// candidate and the grounding bit — decided HERE, at classify time,
+			// so route_apply reads a recorded fact and never re-reads a body. A
+			// "flagged" route verdict is a grounded choice.
+			fields, flagged = routeFields(m, rv)
 		} else {
 			fields = map[string]any{
 				"actionable":            v.Actionable,
@@ -589,6 +618,11 @@ func dominantReason(reasons map[string]int) string {
 func renderUser(lane Lane, m PendingMessage) string {
 	if lane.Name == LaneInquiry.Name {
 		return renderInquiryUser(m)
+	}
+	// The route lane (SWT-40 B-D8): the message and the numbered candidate rows,
+	// nothing else — no links, no thread context.
+	if lane.Name == LaneRoute.Name {
+		return renderRouteUser(m)
 	}
 	base := renderMessage(m)
 

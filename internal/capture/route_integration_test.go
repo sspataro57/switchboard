@@ -785,3 +785,179 @@ func TestCaptureRoute_Integration_AFreshVerdictAfterArmingIsApplied(t *testing.T
 		t.Errorf("second pass Written = %d, want 1", st.Written)
 	}
 }
+
+// routeOnly gives msg a live 'unmatched' decision and then a mode='route' row
+// (step model, to project) — a neighbour whose ONLY attribution is a route.
+func (s *raSuite) routeOnly(t *testing.T, ctx context.Context, acct int64, thread string, sentAgo time.Duration, project int64) int64 {
+	t.Helper()
+	m, mr := s.msg(t, ctx, acct, thread, "inbound", sentAgo)
+	s.dec(t, ctx, m, mr, "live", "unmatched", 0)
+	ext := s.verdict(t, ctx, m, mr, acct, project, true, 0)
+	s.exec(t, ctx, `INSERT INTO capture_decisions (message_id, raw_source_item_id, mode, action, project_id, route_step, ai_extraction_id, reason)
+	                VALUES ($1,$2,'route','attributed',$3,'model',$4,'itest-caproute')`, m, mr, project, ext)
+	return m
+}
+
+// SPEC B-D2 amendment (2026-09-13): the thread step reads rules/gate attribution
+// only; a route never begets a route. A neighbour whose only attribution is a
+// route row contributes nothing; a live or gate attribution still fires step 1.
+// MUTATION: drop `AND cd.mode <> 'route'` from routeThreadProjects' LATERAL →
+// the route-only messages get thread rows (and the mixed thread loses its
+// thread step to the default).
+func TestCaptureRoute_Integration_ARouteNeverBegetsARoute(t *testing.T) {
+	ctx := context.Background()
+	s := newRASuite(t, ctx)
+	h := time.Hour
+
+	// Route-only neighbour (a wrong model route to reeng); an ungrounded verdict
+	// → the default, collab. Mutated: thread → reeng.
+	s.routeOnly(t, ctx, s.hoc, "t-routeonly", 6*h, s.reeng)
+	a, ar := s.msg(t, ctx, s.hoc, "t-routeonly", "inbound", 5*h)
+	s.dec(t, ctx, a, ar, "live", "unmatched", 0)
+	s.verdict(t, ctx, a, ar, s.hoc, s.reeng, false, 0)
+	// Route-only neighbour, no verdict → pending_verdict. Mutated: thread → reeng.
+	s.routeOnly(t, ctx, s.hoc, "t-routeonly-pending", 6*h, s.reeng)
+	b, br := s.msg(t, ctx, s.hoc, "t-routeonly-pending", "inbound", 5*h)
+	s.dec(t, ctx, b, br, "live", "unmatched", 0)
+	// Route-only neighbour on a no-default account, ungrounded → no_default.
+	s.routeOnly(t, ctx, s.nodef, "t-routeonly-nodef", 6*h, s.reeng)
+	c, cr := s.msg(t, ctx, s.nodef, "t-routeonly-nodef", "inbound", 5*h)
+	s.dec(t, ctx, c, cr, "live", "unmatched", 0)
+	s.verdict(t, ctx, c, cr, s.nodef, s.reeng, false, 0)
+	// Mixed: a route-only neighbour (reeng) and a live-attributed one (collab) →
+	// thread collab. Mutated: two projects → no thread step → default collab.
+	s.routeOnly(t, ctx, s.hoc, "t-mixed", 7*h, s.reeng)
+	n2, n2r := s.msg(t, ctx, s.hoc, "t-mixed", "inbound", 6*h)
+	s.dec(t, ctx, n2, n2r, "live", "attributed", s.collab)
+	d, dr := s.msg(t, ctx, s.hoc, "t-mixed", "inbound", 5*h)
+	s.dec(t, ctx, d, dr, "live", "unmatched", 0)
+	s.verdict(t, ctx, d, dr, s.hoc, s.reeng, false, 0)
+
+	// CONTROL, live: a live-attributed neighbour still fires step 1.
+	l1, l1r := s.msg(t, ctx, s.hoc, "t-liveneighbour", "inbound", 6*h)
+	s.dec(t, ctx, l1, l1r, "live", "attributed", s.reeng)
+	e, er := s.msg(t, ctx, s.hoc, "t-liveneighbour", "inbound", 5*h)
+	s.dec(t, ctx, e, er, "live", "unmatched", 0)
+	s.verdict(t, ctx, e, er, s.hoc, s.collab, false, 0)
+	// CONTROL, gate: a neighbour the gate resolved to an attribution fires it too.
+	rule := s.id(t, ctx, `INSERT INTO capture_rules (project_id, criteria_type, pattern, priority, enabled, note)
+	                      VALUES ($1,'sender','itest-caproute-gate@nowhere.example.test',1,false,'itest-caproute') RETURNING id`, s.reeng)
+	g1, g1r := s.msg(t, ctx, s.hoc, "t-gateneighbour", "inbound", 6*h)
+	s.dec(t, ctx, g1, g1r, "live", "unmatched", 0)
+	s.exec(t, ctx, `INSERT INTO capture_decisions (message_id, raw_source_item_id, mode, action, project_id, matched_rule_id,
+	                                               external_system, external_key, reason)
+	                VALUES ($1,$2,'gate','attributed',$3,$4,'jira','ITEST-1','itest-caproute')`, g1, g1r, s.reeng, rule)
+	f, fr := s.msg(t, ctx, s.hoc, "t-gateneighbour", "inbound", 5*h)
+	s.dec(t, ctx, f, fr, "live", "unmatched", 0)
+	s.verdict(t, ctx, f, fr, s.hoc, s.collab, false, 0)
+
+	st := s.apply(t, ctx)
+
+	for name, w := range map[string]struct {
+		msg, project int64
+		step         string
+	}{
+		"route-only neighbour, ungrounded → default": {a, s.collab, "default"},
+		"mixed thread → the live attribution":        {d, s.collab, "thread"},
+		"CONTROL live neighbour":                     {e, s.reeng, "thread"},
+		"CONTROL gate neighbour":                     {f, s.reeng, "thread"},
+	} {
+		r, ok := s.route(t, ctx, w.msg)
+		if !ok || r.step != w.step || r.project != w.project {
+			t.Errorf("%s: route = %+v (found %v), want step %q project %d. SPEC B-D2 amendment: the thread step reads "+
+				"rules/gate attribution only; a route never begets a route", name, r, ok, w.step, w.project)
+		}
+	}
+	for name, m := range map[string]int64{"route-only neighbour, no verdict": b, "route-only neighbour, no default": c} {
+		if r, ok := s.route(t, ctx, m); ok {
+			t.Errorf("%s: message %d was routed (%+v); a neighbour's route row must not fire the thread step", name, m, r)
+		}
+	}
+	if st.Unrouted[capture.RouteReasonPendingVerdict] != 1 || st.Unrouted[capture.RouteReasonNoDefault] != 1 {
+		t.Errorf("Unrouted = %v, want pending_verdict 1 and no_default 1", st.Unrouted)
+	}
+}
+
+// Review finding B, the order-dependent case: within ONE pass the first
+// message on a thread is routed by the default, and the next message must NOT
+// follow it as `thread` — its own grounded verdict decides, or it waits.
+// MUTATION: drop `AND cd.mode <> 'route'` → p2 gets thread/collab, q2 gets
+// thread/collab.
+func TestCaptureRoute_Integration_WithinAPassADefaultRouteIsNotThreadEvidence(t *testing.T) {
+	ctx := context.Background()
+	s := newRASuite(t, ctx)
+	h := time.Hour
+	p1, p1r := s.msg(t, ctx, s.hoc, "t-chain", "inbound", 5*h) // oldest first: routed first
+	s.dec(t, ctx, p1, p1r, "live", "unmatched", 0)
+	s.verdict(t, ctx, p1, p1r, s.hoc, s.reeng, false, 0) // ungrounded → default collab
+	p2, p2r := s.msg(t, ctx, s.hoc, "t-chain", "inbound", 4*h)
+	s.dec(t, ctx, p2, p2r, "live", "unmatched", 0)
+	p2v := s.verdict(t, ctx, p2, p2r, s.hoc, s.reeng, true, 0) // grounded → model reeng
+	q1, q1r := s.msg(t, ctx, s.hoc, "t-chain-pending", "inbound", 5*h)
+	s.dec(t, ctx, q1, q1r, "live", "unmatched", 0)
+	s.verdict(t, ctx, q1, q1r, s.hoc, s.reeng, false, 0) // → default collab
+	q2, q2r := s.msg(t, ctx, s.hoc, "t-chain-pending", "inbound", 4*h)
+	s.dec(t, ctx, q2, q2r, "live", "unmatched", 0) // no verdict
+
+	s.apply(t, ctx)
+	for _, m := range []int64{p1, q1} {
+		if r, ok := s.route(t, ctx, m); !ok || r.step != "default" || r.project != s.collab {
+			t.Fatalf("fixture: message %d = %+v (found %v), want a default row for collab", m, r, ok)
+		}
+	}
+	if r, ok := s.route(t, ctx, p2); !ok || r.step != "model" || r.project != s.reeng || r.extraction != p2v {
+		t.Errorf("the second message = %+v (found %v), want its own grounded model verdict (reeng, extraction %d), "+
+			"not the first message's default route as thread evidence", r, ok, p2v)
+	}
+	if r, ok := s.route(t, ctx, q2); ok {
+		t.Errorf("a message with no verdict followed a same-pass default route as `thread`: %+v", r)
+	}
+}
+
+// Review fix 3: route_apply caches the account's candidates for the pass; a
+// route_candidate_remove between that read and the insert must win. The
+// insert revalidates the (account, project) row in the same statement; gone →
+// nothing written, counted candidate_revoked, retried next pass.
+// MUTATION: drop the `WHERE cand.current` guard from insertRouteDecision → the
+// revoked message gets a model row for reengine.
+func TestCaptureRoute_Integration_ARevokedCandidateIsNotRoutedFromAStaleCache(t *testing.T) {
+	ctx := context.Background()
+	s := newRASuite(t, ctx)
+	m, mr := s.msg(t, ctx, s.hoc, "t-revoked", "inbound", 2*time.Hour)
+	s.dec(t, ctx, m, mr, "live", "unmatched", 0)
+	s.verdict(t, ctx, m, mr, s.hoc, s.reeng, true, 0) // grounded → reeng
+	ctl, ctlr := s.msg(t, ctx, s.hoc, "t-revoked-control", "inbound", 2*time.Hour)
+	s.dec(t, ctx, ctl, ctlr, "live", "unmatched", 0)
+	s.verdict(t, ctx, ctl, ctlr, s.hoc, s.collab, true, 0) // grounded → collab, still a candidate
+
+	// The pass's cache, read BEFORE the removal.
+	cached := []capture.RouteCandidate{{ProjectID: s.collab, IsDefault: true}, {ProjectID: s.reeng}}
+	s.exec(t, ctx, `DELETE FROM source_account_projects WHERE source_account_id = $1 AND project_id = $2`, s.hoc, s.reeng)
+
+	st, found, err := capture.ApplyRouteWithCandidates(ctx, s.pool, m, raWindow, cached)
+	if err != nil || !found {
+		t.Fatalf("ApplyRouteWithCandidates(revoked) = found %v, err %v", found, err)
+	}
+	if r, ok := s.route(t, ctx, m); ok {
+		t.Errorf("a route was written for a revoked candidate from the stale cache: %+v", r)
+	}
+	if st.Written != 0 || st.Unrouted[capture.RouteReasonCandidateRevoked] != 1 {
+		t.Errorf("stats = Written %d Unrouted %v, want Written 0 and candidate_revoked 1", st.Written, st.Unrouted)
+	}
+
+	// CONTROL: the same stale cache, a project still current → written.
+	st, found, err = capture.ApplyRouteWithCandidates(ctx, s.pool, ctl, raWindow, cached)
+	if err != nil || !found {
+		t.Fatalf("ApplyRouteWithCandidates(control) = found %v, err %v", found, err)
+	}
+	if r, ok := s.route(t, ctx, ctl); !ok || r.step != "model" || r.project != s.collab || st.Written != 1 {
+		t.Errorf("POSITIVE CONTROL: route = %+v (found %v), Written %d; want a model row for collab", r, ok, st.Written)
+	}
+
+	// The revoked message stayed in the inbox and retries against the CURRENT
+	// set: collab alone → single.
+	s.apply(t, ctx)
+	if r, ok := s.route(t, ctx, m); !ok || r.step != "single" || r.project != s.collab {
+		t.Errorf("next pass: revoked message = %+v (found %v), want a single row for collab (retried, current set)", r, ok)
+	}
+}

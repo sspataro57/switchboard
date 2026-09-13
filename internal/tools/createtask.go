@@ -135,6 +135,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// (start-from-now). humanOnly and deliberately NOT in
 		// internal/mcpserver/schemas.go. See orchestratorcursor.go.
 		{"orchestrator_cursor_advance", validateCursorAdvance, orchestratorCursorAdvance},
+		// SWT-40 Part B (B-D1, B8): the only writers of source_account_projects,
+		// the routing tier's closed candidate sets. humanOnly and deliberately NOT
+		// in internal/mcpserver/schemas.go. See routecandidates.go.
+		{"route_candidate_add", validateRouteCandidateAdd, routeCandidateAdd},
+		{"route_candidate_remove", validateRouteCandidateRemove, routeCandidateRemove},
 	} {
 		t := t
 		reg.Register(executor.Tool{

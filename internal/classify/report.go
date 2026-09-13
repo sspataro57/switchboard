@@ -40,6 +40,12 @@ func ReportForWorker(ctx context.Context, pool *pgxpool.Pool, w io.Writer, since
 		renderInquiryReport(w, s)
 		return nil
 	}
+	// The route lane's printer (SWT-40 B9), for the same reason: its own
+	// contract, its own counts, and the personal/residue text untouched.
+	if lane, ok := LaneByWorkerType(workerType); ok && lane.Name == LaneRoute.Name {
+		renderRouteReport(w, s, since)
+		return nil
+	}
 
 	var lines []string
 	// allFlags, not Flags: the report prints EVERY flagged line, exactly as it
