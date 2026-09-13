@@ -44,6 +44,13 @@ type Stats struct {
 	// the poller's search path fails whole. Nothing branches on this in a
 	// sync_runs payload; the ticketstatus counters surface it.
 	FetchFailed int `json:"fetch_failed,omitempty"`
+	// FetchedKeys is every key the candidate-driven lookup GOT and stored
+	// (inserted, updated or unchanged), in fetch order (SWT-40 review fix 1).
+	// An unchanged refetch leaves ingested_at alone (upsertRaw's hash
+	// short-circuit), so this is the only per-key record that a snapshot was
+	// verified by this call; ticketstatus.EnsureSnapshots turns it into
+	// Snapshot.VerifiedAt. In-memory only: never serialized into sync_runs.stats.
+	FetchedKeys []string `json:"-"`
 }
 
 type Config struct {

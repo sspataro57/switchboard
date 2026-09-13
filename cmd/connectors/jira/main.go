@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"time"
 
@@ -57,19 +56,9 @@ func run(full, normalizeOnly, all bool) error {
 	// The token-decrypting factory, built once and shared by the poller and the
 	// ticket-status pass's candidate-driven lookup. NIL when OPS_TOKEN_KEY is
 	// absent — the reconciler then skips its lookup half LOUDLY (SWT-32 D21)
-	// while the status half still runs from stored raw.
-	var factory jira.ClientFactory
-	if key := os.Getenv("OPS_TOKEN_KEY"); key != "" {
-		factory = func(ctx context.Context, acct jira.Account) (*jira.Client, error) {
-			var token string
-			if err := pool.QueryRow(ctx,
-				`SELECT pgp_sym_decrypt(refresh_token_encrypted, $2) FROM source_accounts WHERE id=$1`,
-				acct.ID, key).Scan(&token); err != nil {
-				return nil, fmt.Errorf("decrypt token for %s: %w", acct.Email, err)
-			}
-			return jira.NewClient(http.DefaultClient, acct.SiteBaseURL, acct.Email, token), nil
-		}
-	}
+	// while the status half still runs from stored raw. One spelling, shared
+	// with pipelined's capture-time gate (jira.TokenClientFactory).
+	factory := jira.TokenClientFactory(pool, os.Getenv("OPS_TOKEN_KEY"))
 
 	if !normalizeOnly {
 		if factory == nil {

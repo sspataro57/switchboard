@@ -180,6 +180,10 @@ type storedRule struct {
 	// projectName is projects.name — the title's fallback label when a
 	// thread-keyed task's message carries no sender (SWT-31 criterion 3).
 	projectName string
+	// gateOn is projects.ticket_assignee_gate, read from the COLUMN with the
+	// rules (SWT-40 D-D1): a jira-keyed match on a gated project is `held`, and
+	// the pipelined gate stage looks the ticket up before any task exists.
+	gateOn bool
 }
 
 // pendingMessage is one inbound message the pass must decide about.
@@ -217,6 +221,10 @@ const (
 	actionAttributed = "attributed"
 	actionTask       = "task"
 	actionTaskLog    = "task_log"
+	// actionHeld (SWT-40 D-D1, migration 0029): a jira-keyed match on a gated
+	// project. It names the project, rule and key and acts on nothing; the
+	// pipelined gate stage resolves it into a mode='gate' row (gate.go).
+	actionHeld = "held"
 )
 
 // EvaluateRules is the driver: load the rules, take the advisory lock, evaluate
@@ -392,7 +400,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT r.id, p.slug, p.name, r.criteria_type, r.pattern, r.key_regex, r.priority, r.enabled,
 		        r.project_id, COALESCE(r.subproject,''), COALESCE(r.external_system,''),
-		        COALESCE(r.url_template,'')
+		        COALESCE(r.url_template,''), p.ticket_assignee_gate
 		   FROM capture_rules r
 		   JOIN projects p ON p.id = r.project_id
 		  WHERE r.enabled
@@ -407,7 +415,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		var s storedRule
 		if err := rows.Scan(&s.rule.ID, &s.rule.Project, &s.projectName, &s.rule.Kind, &s.rule.Pattern,
 			&s.rule.ExternalKeyRegex, &s.rule.Priority, &s.rule.Enabled,
-			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate); err != nil {
+			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate, &s.gateOn); err != nil {
 			return nil, fmt.Errorf("scan capture rule: %w", err)
 		}
 		// Rule.Source is the evaluator's carrier for `external_system` (Evaluate
@@ -456,7 +464,14 @@ func pendingMessages(ctx context.Context, pool *pgxpool.Pool, cfg RulesConfig) (
 	        LEFT JOIN source_accounts sa ON sa.id = ri.source_account_id
 	        LEFT JOIN normalized_threads nt ON nt.id = m.thread_id
 	       WHERE m.direction = 'inbound'
-	         AND ($1::timestamptz IS NULL OR COALESCE(m.sent_at, m.created_at) >= $1)`
+	         AND ($1::timestamptz IS NULL OR COALESCE(m.sent_at, m.created_at) >= $1)
+	         AND NOT EXISTS (
+	           SELECT 1 FROM capture_decisions g
+	            WHERE g.message_id = m.id AND g.mode = 'gate')`
+	// SWT-40 D-D2, the shadow-overwrite guard: a message the gate resolved is
+	// excluded in EVERY mode, --all included. Every latest-decision reader
+	// follows ORDER BY id DESC, so a newer shadow row would bury the gate's
+	// resolution — the message's one action — for all of them.
 	if !cfg.All {
 		// Skip messages this MODE has already decided — not just live ones.
 		//
@@ -587,6 +602,19 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, pm pendingMessage,
 
 	system, key := winner.extSystem, outcome.externalKey
 	d.extSystem, d.extKey = &system, &key
+
+	if system == "jira" && winner.gateOn {
+		// SWT-40 D-D1: the ticket is checked against Jira BEFORE a task exists
+		// (O5), and capture never calls Jira itself — the lookup credential
+		// lives only where the gate stage runs. So a would-be task or task_log
+		// on a gated project is held: project, rule and key recorded, nothing
+		// created. The pipelined gate stage resolves it (gate.go). The gate is
+		// the COLUMN, loaded with the rules (the SWT-21 "test the column" rule).
+		d.action = actionHeld
+		d.reason = fmt.Sprintf("rule %d (%s): %s %s on %s, whose ticket assignee gate is on; held for the "+
+			"gate stage's Jira lookup", winner.rule.ID, winner.rule.Kind, system, key, winner.rule.Project)
+		return d, winner, nil
+	}
 
 	existing, found, err := taskForExternalRef(ctx, pool, system, key)
 	if err != nil {

@@ -1149,12 +1149,6 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// its ticket's "Data model changes" section. Anything else above 0017 is
 		// a migration nobody's ticket owns.
 		//
-		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
-		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
-		// asserts only its own file; the numbers nobody owns are caught HERE,
-		// because the migrate runner keys on schema_migrations.version with NO
-		// checksum — a stray or edited file is skipped SILENTLY and the schema
-		// diverges with no error anywhere.
 		// 24 is SWT-33's (this branch, ai_inquiry) and 25 is SWT-34's
 		// (delivered statuses, merged first) — the two were built in parallel
 		// and this line is where their ledgers meet, exactly as SWT-34's review
@@ -1166,12 +1160,27 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// admits 'partial'), named by the "Fix — data model" section of
 		// docs/bugs/slackweb-collab-export-stale_DIAGNOSIS.md. A bug fix owns
 		// its migration the way a SPEC does.
+		// 28 is SWT-43's (delivery-deny: deliveries.status admits 'rejected', plus
+		// rejection_note, redraft_requested_at and two CHECKs), named by its SPEC's
+		// "Data model changes" section. SWT-40 (inquiry-promote) ALSO names 0028 in
+		// its SPEC: whichever branch merges SECOND renumbers its files, its
+		// per-ticket guard and this line (delivery-deny criterion 3).
+		// 29 is SWT-40 Part D's (inquiry-promote: capture_decisions admits
+		// action 'held' and mode 'gate', the gate shape CHECKs and the partial
+		// capture_decisions_gate_uniq), named by its SPEC's data-model section
+		// as 0027_capture_ticket_gate and renumbered: 0027 went to SWT-39 and
+		// 0028 is claimed by SWT-43 on another branch — whichever merges second
+		// renumbers, and this line learns it.
 		// 30 is SWT-45's (jira-activity-revive: capture_rules.revive/addressed,
 		// tasks.closed_*/surfaced_*, ticket_status_syncs.surfaced_seen_at and the
-		// 'resurfaced' last_action), named by its SPEC's data-model section. 28
-		// (SWT-43) and 29 (SWT-40 Part D) are owned on unmerged branches; whichever
-		// merges adds its own number here.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 30 {
+		// 'resurfaced' last_action), named by its SPEC's data-model section.
+		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
+		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
+		// asserts only its own file; the numbers nobody owns are caught HERE,
+		// because the migrate runner keys on schema_migrations.version with NO
+		// checksum — a stray or edited file is skipped SILENTLY and the schema
+		// diverges with no error anywhere.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

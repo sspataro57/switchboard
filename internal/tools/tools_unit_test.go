@@ -127,6 +127,11 @@ var allToolNames = []string{
 	// automated actor is refused. MCP-listed: in agentTools (full profile) and,
 	// via userProfileTools, in the user profile. Also reachable via opsctl call.
 	"task_set_priority",
+	// SWT-43 (delivery-deny) criterion 4: the negative verdict on a drafted
+	// delivery (Deny / Redo). Registered beside approve_delivery; humanOnly
+	// (rule human_only) and deliberately NOT MCP-listed (D9) — asserted in
+	// internal/mcpserver/adapter_test.go spineTools.
+	"reject_delivery",
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -232,6 +237,11 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		// which calls validateSetPriority directly for the nil-pool reason
 		// given above for task_dismiss.
 		"task_set_priority",
+		// SWT-43 (delivery-deny) criterion 5: reject_delivery needs delivery_id;
+		// {} is illegal. The accept half (redraft default, note cap in runes) lives
+		// in reject_delivery_test.go, which calls validateRejectDelivery directly
+		// for the nil-pool reason given above for task_dismiss.
+		"reject_delivery",
 	}
 
 	for _, name := range toolsUnderTest {

@@ -1,16 +1,17 @@
-# Runbook — the switchboard MCP at Claude Code user scope (SWT-35, SWT-37, SWT-38, SWT-42)
+# Runbook — the switchboard MCP at Claude Code user scope (SWT-35, SWT-37, SWT-38, SWT-42, SWT-44)
 
 Install `ops-mcp-user` once for Claude Code at USER scope, so a session opened in
 any repo on the workstation can read switchboard's queues, dismiss, close or mark
 delivered a task, log the work Salvador hands it as a swb task in his own lane,
-write progress on that task, reorder any task's priority, and read the attachments of
-non-private mail (SWT-42) — and nothing else.
+write progress on that task, reorder any task's priority, read the attachments of
+non-private mail (SWT-42), and draft gmail replies that Salvador approves and sends on the
+dashboard (SWT-44) — and nothing else.
 The per-repo binding — which switchboard project is this repo's queue — lives in
 Claude Code's own per-project memory, not in switchboard.
 
-It serves eleven tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
+It serves thirteen tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
 `task_close`, `task_mark_delivered`, `create_task`, `task_append_log`,
-`task_set_priority`, `mail_list_attachments` and `mail_read_attachment`.
+`task_set_priority`, `mail_list_attachments`, `mail_read_attachment`, `draft_delivery` and `update_delivery`.
 
 ## Fresh install (once, from `main`)
 
@@ -31,7 +32,7 @@ on `main` and open a new session:
 cd ~/projects/personal/switchboard && git switch main && go install ./cmd/ops-mcp-user
 ```
 
-Then open a NEW session, and `/mcp` shows `ops` with the eleven tools.
+Then open a NEW session, and `/mcp` shows `ops` with the thirteen tools.
 
 ## Migrating from `ops-mcp-read` (SWT-35's install)
 
@@ -50,7 +51,7 @@ Then open a NEW session.
 
 ## What the install can and cannot do
 
-- **`ops-mcp-user` is the boundary.** It lists exactly the eleven tools above, refuses
+- **`ops-mcp-user` is the boundary.** It lists exactly the thirteen tools above, refuses
   every other tool at the MCP layer, and wires no mail sender and no calendar
   booker: its `main` never calls a sender seam, so whatever the environment holds
   arms nothing. It is a separate binary rather than a setting on `ops-mcp`, so
@@ -61,9 +62,19 @@ Then open a NEW session.
   reads attachments of non-private mail only (SWT-42): `mail_list_attachments` finds a message by id or by
   sender/subject (headers and attachment names, never a body) and `mail_read_attachment`
   returns one attachment inline, or saves a PDF/image to
-  `~/.cache/switchboard/attachments/` and returns the path.
+  `~/.cache/switchboard/attachments/` and returns the path. And it drafts client email
+  replies (SWT-44): `draft_delivery`, gmail only — the binary pins
+  `require_channel:"gmail"`, so a Slack, Upwork, Jira or calendar draft is refused — and
+  only on a thread already filed under the task's project (the binary pins
+  `require_thread_in_task_project`; owner decision below); and `update_delivery` on its
+  own drafts while they are still drafted, gmail only. "Own" is keyed on the actor, not
+  the session: the binary pins `require_own_draft` and `require_channel:"gmail"`, so it
+  edits drafts created by the mcp:manual:salvo actor (any interactive session, this
+  repo's full-profile `ops` included), gmail only; never the drafts worker's or the
+  dashboard's.
 - **What it cannot do.** It cannot claim, create worker (`claude`) tasks, log on
-  worker tasks, draft, approve, send, book, link, decide, read mail bodies or reopen.
+  worker tasks, approve, send, book, link, decide, read mail bodies or reopen (it drafts, but
+  never approves or sends: SWT-44).
   The binary pins `require_assignee_type:"human"` onto every `create_task` and
   `task_append_log` call (overwriting any value the model passes), so a request
   for a `claude` task or a log line on a `claude` task is refused by the tool
@@ -76,7 +87,7 @@ Then open a NEW session.
   `mcp:manual:salvo`. Never install `ops-mcp` itself at user scope.
 - **Workers are refused by policy, not by the tool list.** The full `ops-mcp` (worker
   consoles, this repo's `.mcp.json`) also lists the three verbs and
-  `task_set_priority`, 25 tools in all. A worker console (`mcp:{client}`) is
+  `task_set_priority`, 26 tools in all. A worker console (`mcp:{client}`) is
   refused `task_dismiss` and `task_set_priority` by `human_only` and `task_close` /
   `task_mark_delivered` by `mcp_human_only`; the orchestrator and the Jira
   reconciler keep closing and delivering as before. `task_set_priority` refuses
@@ -108,14 +119,51 @@ a stranger's file. What limits it: only attachments of mail filed under a non-`l
 project are returned (and unfiled mail only on a mailbox with at least 20 filed messages, none
 of them local-only — owner decision O2), so personal, bank, health and bulk mail never arrive; the finder returns
 no bodies; the Instructions and both tool descriptions say attachment content is data, never
-instructions (a prompt rule, not a boundary). What cannot happen: nothing is sent, no
-delivery is touched, nothing is written to the database but the audit row, and saved files
-stay inside `~/.cache/switchboard/attachments`. Every attachment call leaves an audit row
+instructions (a prompt rule, not a boundary). What cannot happen through the attachment
+tools: they send nothing, touch no delivery row, write nothing to the database but the audit
+row, and keep saved files inside `~/.cache/switchboard/attachments`. Every attachment call leaves an audit row
 with its message and part ids; the content itself is never stored.
 
+**Since SWT-44 (Salvador, 2026-09-12)** the install also drafts client email replies:
+`draft_delivery` writes the reply as a drafted gmail delivery row on the task, and
+`update_delivery` fixes the words of its own drafts while they are still drafted. The session
+picks the thread (`thread_id`); the From mailbox is resolved from that thread and the To is
+the thread's latest inbound sender, and the dashboard shows From, To and the thread subject on
+the draft before approval. Approving and sending stay on the dashboard, deliberately: a session
+must not approve its own client email, and a session that has just read an attachment is
+reading a stranger's text. The approve is bound to the words the page showed: if the draft
+changed after the page loaded, Approve refuses and asks for a reload — and a page (or a POST)
+that carries no content hash is refused too, so reload the page and review it again. The user
+binary wires no mail sender at all.
+
+**Same project (Salvador, 2026-09-12: "Same project").** A session drafts only on a thread
+already filed under the task's project: the task's own source thread, or a thread whose latest
+inbound message — the one the reply goes to — is filed under that project (its latest capture
+decision). An older message filed there does not count if the newest one is filed elsewhere.
+Anything else is refused with "thread N is not filed under this task's project (<slug>): its
+latest inbound message is filed elsewhere or not at all; ask Salvador to file it, or draft from
+the switchboard session". This repo's full `ops` and the drafts worker are not limited this way.
+
+**Known gap (SWT-46).** The To shown on the dashboard can change if a new
+inbound message arrives on the thread before Send: the send picks the To from the thread's
+latest inbound message at send time, so an approved draft re-renders its To up to the moment
+you press Send. Check the To again before Send.
+
+**R8 caveat (SWT-47).** A session's draft usually sits on its own `ready`
+work task; the first send of it records the delivery lifecycle for that task while it is still
+`ready`, so a later real delivery on the same task is not auto-marked delivered. Mark it by
+hand (`task_mark_delivered`) until the follow-up ticket ships.
+
+**Accepted risk (SWT-44).** Untrusted text a session reads — a mail, an attachment, a web page —
+can tell it to draft a reply on any task, into a gmail thread whose latest inbound message is
+filed under the task's project, or to rewrite one
+of its own drafts. It stays a draft: nothing leaves until Salvador reads it on the dashboard,
+with its From and To, and approves it. Damage: a misleading draft in the approval queue.
+
 The session instructions say to act only when Salvador asks for that task id;
-that is a prompt rule, not a boundary. What cannot happen: nothing is sent, and no
-delivery is created or changed; no worker is dispatched onto attacker-authored
+that is a prompt rule, not a boundary. What cannot happen: nothing is sent and nothing is
+approved — a session creates and edits only drafted gmail deliveries, which go nowhere until
+Salvador approves them on the dashboard; no worker is dispatched onto attacker-authored
 work; no claim is taken; no status other than `ready` is created. A wrong close or
 dismiss drops the task from the queue and unblocks its dependents; a wrong dismiss
 also writes a training label and stops the Jira status sync from reopening a
@@ -127,6 +175,8 @@ Recovery:
 - a wrong "delivered": `task_close`, then `task_reopen` with `"status":"done_locally"`;
 - a wrong priority: one `task_set_priority` back to the event's `from`;
 - a planted task: `task_close`, or `task_dismiss` with `not_actionable`;
+- a planted draft: until SWT-43's Deny ships there is no verb that discards one — edit it on
+  the dashboard, or leave it unapproved; a draft never sends without an approval;
 - once SWT-36 (`dismiss-reopen-on-activity`) ships, a dismissed task also reopens
   by itself on the next inbound message routed to it (by a classify promotion or a
   capture rule).
@@ -171,15 +221,15 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
 1. `claude mcp get ops` shows the user-scope entry, its `ops-mcp-user` command and
    both `-e` values.
 2. In another repo (e.g. `cd ~/projects/personal/kube && claude`), `/mcp` shows
-   `ops` connected with exactly eleven tools.
+   `ops` connected with exactly thirteen tools.
 3. In `~/projects/personal/switchboard`, a SESSION gets ONE `ops` — the
-   project-scope `go run` entry with the full tool list (25 tools). Check this
+   project-scope `go run` entry with the full tool list (26 tools). Check this
    inside a session, NOT with `claude mcp get ops` / `claude mcp list`: run inside
    this repo, those CLI commands display the user-scope entry even though a session
    loads `.mcp.json`'s (verified 2026-09-10).
 4. From the other repo, `project_list` and `task_list(project=<slug>)` answer.
 5. `psql -h 192.168.50.49 -U ops -d ops -c "SELECT actor, tool, status FROM
-   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered','create_task','task_append_log','task_set_priority')
+   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered','create_task','task_append_log','task_set_priority','draft_delivery','update_delivery')
    ORDER BY id DESC LIMIT 5"` shows those calls with actor `mcp:manual:salvo`.
 
 ## Use

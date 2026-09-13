@@ -2,12 +2,15 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -97,6 +100,24 @@ type draftDeliveryArgs struct {
 	// drafts worker sets "done_locally"; it can only narrow, never widen, so it
 	// is harmless on the MCP surface and deliberately absent from its schema.
 	ExpectTaskStatus string `json:"expect_task_status,omitempty"`
+	// RequireChannel (SWT-44 review) is pinned to "gmail" by the user-scope
+	// MCP profile (mcpserver.userProfilePins, after injectWorkerID, by
+	// overwrite): a session in any repo drafts email replies — From resolved
+	// from the thread, To shown on the dashboard before approval — and never a
+	// Slack, Upwork, Jira or calendar delivery. It only narrows, so it is absent
+	// from every schema, and the validator REFUSES a differing channel rather
+	// than rewriting it, so the model is told the truth.
+	RequireChannel string `json:"require_channel,omitempty"`
+	// RequireThreadInTaskProject (SWT-44, owner decision "Same project",
+	// Salvador 2026-09-12) is pinned to "true" by the user-scope MCP profile:
+	// a session drafts only on a thread already filed under the task's project
+	// — the task's own source_thread_id, or a thread whose LATEST INBOUND
+	// message (the reply's recipient, latestInboundMessage) has a LATEST
+	// capture_decisions row (any mode) naming the task's project.
+	// Checked in draftDelivery's transaction, under the task lock, before the
+	// insert. Same pattern as RequireChannel: only narrows, hidden from every
+	// schema; the full profile and the drafts worker send none.
+	RequireThreadInTaskProject string `json:"require_thread_in_task_project,omitempty"`
 }
 
 func validateDraftDelivery(args []byte) error {
@@ -106,6 +127,11 @@ func validateDraftDelivery(args []byte) error {
 	}
 	if a.TaskID == 0 {
 		return errors.New("missing task_id")
+	}
+	// First, so the refusal names the real reason rather than a channel rule
+	// the caller was never going to be allowed to satisfy.
+	if a.RequireChannel != "" && a.Channel != a.RequireChannel {
+		return fmt.Errorf("channel %q is refused here: this caller drafts %s deliveries only", a.Channel, a.RequireChannel)
 	}
 	if a.ExpectTaskStatus != "" && !slices.Contains(taskStatuses, a.ExpectTaskStatus) {
 		return fmt.Errorf("expect_task_status %q is not a task status", a.ExpectTaskStatus)
@@ -154,6 +180,11 @@ func validateDraftDelivery(args []byte) error {
 	}
 	if a.Channel == "gmail" && a.ThreadID == nil {
 		return errors.New("gmail drafts require thread_id (From is resolved from the thread)")
+	}
+	// The same-project pin is a check ON a thread: without one it would check
+	// nothing, so a pinned call must name it.
+	if a.RequireThreadInTaskProject == "true" && a.ThreadID == nil {
+		return errors.New("this caller drafts only on a thread filed under the task's project: thread_id is required")
 	}
 	if (a.Channel == "upwork_chat" || a.Channel == "jira_comment" || a.Channel == "slack_reply") && a.TargetRef == "" {
 		return errors.New("upwork_chat/jira_comment/slack_reply drafts require target_ref")
@@ -439,6 +470,19 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 			return fmt.Errorf("task %d is %s, not %s as the caller read it: the work moved on, so no draft",
 				a.TaskID, status, a.ExpectTaskStatus)
 		}
+		// SWT-43 review (Codex): the drafts-worker path also re-checks the
+		// queue's own predicate under this lock, so two passes that both read
+		// the Deliver task cannot both draft. See refuseBlockingDelivery.
+		if a.ExpectTaskStatus != "" {
+			if err := refuseBlockingDelivery(ctx, tx, a.TaskID); err != nil {
+				return err
+			}
+		}
+		if a.RequireThreadInTaskProject == "true" {
+			if err := refuseThreadOutsideTaskProject(ctx, tx, a.TaskID, *a.ThreadID); err != nil {
+				return err
+			}
+		}
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
 			                         from_account_id, thread_id, target_client_ref, created_by,
@@ -457,6 +501,105 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": deliveryID})
+}
+
+// BlockingDeliverySQL is the ONE spelling of "this delivery row blocks the
+// drafts worker from drafting for its task" (SWT-43), over a deliveries row
+// aliased d. Every delivery blocks except a rejected row with a redraft
+// requested (Redo): a plain Deny keeps blocking, and the new draft blocks
+// again, which is the loop bound (one human click per re-draft). Status is
+// spelled out rather than trusting deliveries_rejection_fields_check alone.
+// drafts.DeliverTasks lists a Deliver task only when NO row matches it, and
+// draftDelivery re-checks it under the task lock on the drafts-worker path.
+const BlockingDeliverySQL = `NOT (d.status = 'rejected' AND d.redraft_requested_at IS NOT NULL)`
+
+// ErrDeliveryBlocksDraft is draftDelivery's refusal on the drafts-worker path
+// (expect_task_status set) when the task already has a blocking delivery:
+// another worker drafted first, or a draft or a plain Deny is already there.
+// The drafts worker treats it as a skip, not a failure.
+var ErrDeliveryBlocksDraft = errors.New("the task already has a delivery that blocks a new draft")
+
+// refuseBlockingDelivery refuses a drafts-worker draft (expect_task_status
+// set) when the task already has a blocking delivery (BlockingDeliverySQL).
+// DeliverTasks is a read, not a claim, so two drafts passes can both list one
+// Deliver task and both call the model. This runs inside draftDelivery's
+// transaction AFTER the task row FOR UPDATE, so the two serialise here, and
+// the second sees the first's committed row (READ COMMITTED: each statement
+// reads after the lock wait) and is refused. That closes the Redo race (two
+// drafts from one click) and the same race for a first draft. Plain callers (a
+// session, the full profile, the dashboard, opsctl) send no expect_task_status
+// and keep drafting siblings.
+func refuseBlockingDelivery(ctx context.Context, tx pgx.Tx, taskID int64) error {
+	var id int64
+	var status string
+	err := tx.QueryRow(ctx,
+		`SELECT d.id, d.status FROM deliveries d
+		  WHERE d.task_id = $1 AND `+BlockingDeliverySQL+`
+		  ORDER BY d.id DESC LIMIT 1`, taskID).Scan(&id, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check task %d for a blocking delivery: %w", taskID, err)
+	}
+	return fmt.Errorf("task %d already has delivery %d (%s), which blocks a new draft (another drafts pass wrote "+
+		"it first, or it is waiting on Salvador): %w", taskID, id, status, ErrDeliveryBlocksDraft)
+}
+
+// refuseThreadOutsideTaskProject is the user profile's same-project rule
+// (owner decision "Same project", Salvador 2026-09-12). It follows the
+// RECIPIENT: the thread is filed under the task's project when it is (a) the
+// task's own source_thread_id (SWT-20 provenance), or (b) its LATEST INBOUND
+// message — the very message the reply goes to, picked by
+// latestInboundMessage, the helper ResolveGmailRoute uses, so the rule and
+// the send cannot disagree about which message that is — has a LATEST
+// capture_decisions row (`ORDER BY id DESC LIMIT 1`, any mode, the repo's
+// latest-decision convention: classify/store.go, mailattach.go) naming the
+// task's project. An older message filed here does not qualify a thread whose
+// newest inbound mail is filed elsewhere, and outbound messages never count:
+// our own send is not evidence of where the conversation belongs. Runs in
+// draftDelivery's transaction, after the task row lock, before the insert.
+//
+// What it guarantees: the draft's thread is filed under the task's project.
+// It does NOT limit which project a session drafts into — the same session
+// can create_task in any project.
+func refuseThreadOutsideTaskProject(ctx context.Context, tx pgx.Tx, taskID, threadID int64) error {
+	var slug string
+	var taskProject int64
+	var sourceThread bool
+	err := tx.QueryRow(ctx, `
+		SELECT p.slug, t.project_id, COALESCE(t.source_thread_id = $2, false)
+		  FROM tasks t JOIN projects p ON p.id = t.project_id
+		 WHERE t.id = $1`, taskID, threadID).Scan(&slug, &taskProject, &sourceThread)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("task %d not found", taskID)
+	}
+	if err != nil {
+		return fmt.Errorf("check thread %d against task %d's project: %w", threadID, taskID, err)
+	}
+	if sourceThread {
+		return nil
+	}
+	refused := fmt.Errorf("thread %d is not filed under this task's project (%s): its latest inbound message is "+
+		"filed elsewhere or not at all; ask Salvador to file it, or draft from the switchboard session", threadID, slug)
+	latest, err := latestInboundMessage(ctx, tx, threadID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return refused // nothing inbound: nothing filed, and no one to reply to
+	}
+	if err != nil {
+		return fmt.Errorf("check thread %d against task %d's project: %w", threadID, taskID, err)
+	}
+	var decided *int64
+	err = tx.QueryRow(ctx,
+		`SELECT project_id FROM capture_decisions WHERE message_id = $1 ORDER BY id DESC LIMIT 1`,
+		latest.id).Scan(&decided)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("check thread %d against task %d's project: %w", threadID, taskID, err)
+	}
+	if decided == nil || *decided != taskProject {
+		return refused
+	}
+	return nil
 }
 
 // refuseClosedTask SHARE-locks the delivery's TASK row and refuses a closed
@@ -478,22 +621,32 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 // final comment) must still go out. A stale draft on a task marked delivered by
 // hand stays behind the human approval gate.
 func refuseClosedTask(ctx context.Context, tx pgx.Tx, deliveryID int64) error {
-	var taskID int64
-	var status string
-	err := tx.QueryRow(ctx,
-		`SELECT t.id, t.status FROM deliveries d JOIN tasks t ON t.id = d.task_id
-		  WHERE d.id=$1 FOR SHARE OF t`, deliveryID).Scan(&taskID, &status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("delivery %d not found", deliveryID)
-	}
+	taskID, status, err := lockDeliveryTask(ctx, tx, deliveryID)
 	if err != nil {
-		return fmt.Errorf("lock task of delivery %d: %w", deliveryID, err)
+		return err
 	}
 	if status == "closed" {
 		return fmt.Errorf("delivery %d's task %d is closed: switchboard never approves or sends a delivery for "+
 			"closed work; reopen the task first", deliveryID, taskID)
 	}
 	return nil
+}
+
+// lockDeliveryTask SHARE-locks the delivery's task row and returns its id and
+// status: the ONE spelling of the task → delivery lock order (refuseClosedTask's
+// rationale above). refuseClosedTask and rejectDelivery both call it;
+// rejectDelivery does not refuse closed work (SWT-43 criterion 8).
+func lockDeliveryTask(ctx context.Context, tx pgx.Tx, deliveryID int64) (taskID int64, status string, err error) {
+	err = tx.QueryRow(ctx,
+		`SELECT t.id, t.status FROM deliveries d JOIN tasks t ON t.id = d.task_id
+		  WHERE d.id=$1 FOR SHARE OF t`, deliveryID).Scan(&taskID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", fmt.Errorf("delivery %d not found", deliveryID)
+	}
+	if err != nil {
+		return 0, "", fmt.Errorf("lock task of delivery %d: %w", deliveryID, err)
+	}
+	return taskID, status, nil
 }
 
 func splitGmailThreadKey(key string) (email, gmailThreadID string, err error) {
@@ -510,6 +663,23 @@ type updateDeliveryArgs struct {
 	DeliveryID int64   `json:"delivery_id"`
 	Subject    *string `json:"subject,omitempty"`
 	Body       *string `json:"body,omitempty"`
+	// RequireOwnDraft (SWT-44 review) is pinned to "true" by the user-scope MCP
+	// profile (mcpserver.userProfilePins, after injectWorkerID, by overwrite):
+	// the caller edits only drafts whose created_by is its own actor. The actor
+	// is "mcp:" + OPS_WORKER_ID, and every interactive install — the user-scope
+	// one AND this repo's full-profile ops — runs as manual:salvo, so "own"
+	// means created by the mcp:manual:salvo actor (any interactive session),
+	// never the drafts worker's or the dashboard's. It cannot tell one session
+	// from another; RequireChannel below keeps it to gmail. It only narrows, so
+	// it is absent from every schema; the dashboard, opsctl and the full
+	// profile send none and edit any draft, as before.
+	RequireOwnDraft string `json:"require_own_draft,omitempty"`
+	// RequireChannel (SWT-44, second review) is pinned to "gmail" by the same
+	// profile, matching draft_delivery's pin: without it the shared actor would
+	// let a user-scope session rewrite a slack_reply, jira_comment,
+	// upwork_chat or calendar draft that this repo's full-profile session
+	// wrote. Checked under the row lock, in updateDelivery.
+	RequireChannel string `json:"require_channel,omitempty"`
 }
 
 func validateUpdateDelivery(args []byte) error {
@@ -522,6 +692,12 @@ func validateUpdateDelivery(args []byte) error {
 	}
 	if a.Subject == nil && a.Body == nil {
 		return errors.New("nothing to update (subject or body required)")
+	}
+	// SWT-44 review: a present body must say something — an empty one would
+	// sit in the approval queue as a blank email. subject "" stays legal: it
+	// clears the subject, as it always has.
+	if a.Body != nil && strings.TrimSpace(*a.Body) == "" {
+		return errors.New("body is empty: a delivery must say something (omit body to keep the current one)")
 	}
 	return nil
 }
@@ -537,19 +713,54 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 	}
 	if a.Body != nil {
 		body = google.ScrubAIAttribution(*a.Body)
+		// The validator saw the body before the scrub; a body that was nothing
+		// but an attribution trailer is empty now.
+		if strings.TrimSpace(body) == "" {
+			return nil, fmt.Errorf("delivery %d: body is empty once attribution lines are removed; a delivery must say something", a.DeliveryID)
+		}
 	}
-	tag, err := pool.Exec(ctx,
-		`UPDATE deliveries SET
-		   subject = CASE WHEN $2 THEN NULLIF($3,'') ELSE subject END,
-		   body    = CASE WHEN $4 THEN $5 ELSE body END,
-		   updated_at = now()
-		 WHERE id=$1 AND status='drafted'`,
-		a.DeliveryID, a.Subject != nil, subject, a.Body != nil, body)
+	// One transaction, the delivery row locked: the drafted and ownership checks
+	// and the write see the same row, so neither an approve nor a re-draft can
+	// slip between them.
+	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		var status, channel, createdBy string
+		if err := tx.QueryRow(ctx,
+			`SELECT status, channel, COALESCE(created_by,'') FROM deliveries WHERE id=$1 FOR UPDATE`,
+			a.DeliveryID).Scan(&status, &channel, &createdBy); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("delivery %d not found", a.DeliveryID)
+			}
+			return fmt.Errorf("lock delivery %d: %w", a.DeliveryID, err)
+		}
+		if status != "drafted" {
+			return fmt.Errorf("delivery %d is not drafted (editing an approved draft would bypass approval)", a.DeliveryID)
+		}
+		if a.RequireChannel != "" && channel != a.RequireChannel {
+			return fmt.Errorf("delivery %d is a %s delivery: this caller edits %s drafts only; change it on the dashboard",
+				a.DeliveryID, channel, a.RequireChannel)
+		}
+		// draft_delivery stores created_by = executor.ActorFrom(ctx), the same
+		// string compared here: mcp:manual:salvo for every interactive session,
+		// user-scope and full-profile alike.
+		if a.RequireOwnDraft == "true" {
+			if actor := executor.ActorFrom(ctx); createdBy != actor {
+				return fmt.Errorf("delivery %d was drafted by %s, not by %s: this caller edits only its own drafts "+
+					"(created by its actor, gmail only); change it on the dashboard", a.DeliveryID, createdBy, actor)
+			}
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE deliveries SET
+			   subject = CASE WHEN $2 THEN NULLIF($3,'') ELSE subject END,
+			   body    = CASE WHEN $4 THEN $5 ELSE body END,
+			   updated_at = now()
+			 WHERE id=$1`,
+			a.DeliveryID, a.Subject != nil, subject, a.Body != nil, body); err != nil {
+			return fmt.Errorf("update delivery %d: %w", a.DeliveryID, err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("update delivery %d: %w", a.DeliveryID, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return nil, fmt.Errorf("delivery %d is not drafted (editing an approved draft would bypass approval)", a.DeliveryID)
+		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": a.DeliveryID})
 }
@@ -576,8 +787,57 @@ func validateDeliveryIDOnly(args []byte) error {
 	return nil
 }
 
+// DeliveryContentHash is the ONE spelling of "the words of a delivery" for the
+// content-bound approval (SWT-44 review): lowercase hex sha256 of the subject,
+// a NUL, then the body. The NUL keeps words from moving across the
+// subject/body boundary under the same hash. A NULL subject is "", the
+// dashboard's COALESCE and approve_delivery's.
+func DeliveryContentHash(subject, body string) string {
+	sum := sha256.Sum256([]byte(subject + "\x00" + body))
+	return hex.EncodeToString(sum[:])
+}
+
+// approveDeliveryArgs binds the human gate to what the approver saw (SWT-44
+// review). The dashboard renders DeliveryContentHash(subject, body) into the
+// Approve form and posts it back as ExpectContentHash; an edit landing between
+// the render and the click (a session's update_delivery) then makes the
+// approve refuse instead of passing words nobody read. Omitted = the old
+// behaviour, for opsctl and full-profile MCP callers, which name a delivery
+// id without being shown a page. It only narrows, so no MCP schema lists it.
+//
+// approve_delivery stays human-only (policy human_only) and is on no user
+// profile: the dashboard is the review surface, and its route REQUIRES the
+// hash (dashboard approveAction refuses a POST without one), so the optional
+// form here serves only the human CLI and this repo's own session.
+type approveDeliveryArgs struct {
+	DeliveryID        int64  `json:"delivery_id"`
+	ExpectContentHash string `json:"expect_content_hash,omitempty"`
+}
+
+func validateApproveDelivery(args []byte) error {
+	var a approveDeliveryArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return fmt.Errorf("parse args: %w", err)
+	}
+	if a.DeliveryID == 0 {
+		return errors.New("missing delivery_id")
+	}
+	return checkContentHashShape(a.ExpectContentHash)
+}
+
+// checkContentHashShape refuses a malformed expect_content_hash, for approve
+// and reject alike. A malformed hash can never match, and refusing it as
+// "changed since it was shown" would send the human to reload for the wrong
+// reason. Empty means omitted.
+func checkContentHashShape(h string) error {
+	if h != "" && (len(h) != sha256.Size*2 || strings.Trim(h, "0123456789abcdef") != "") {
+		return fmt.Errorf("expect_content_hash %q is not a lowercase hex sha256 (tools.DeliveryContentHash)", h)
+	}
+	return nil
+}
+
 func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, error) {
-	var a deliveryIDOnlyArgs
+	var a approveDeliveryArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, fmt.Errorf("parse args: %w", err)
 	}
@@ -586,11 +846,12 @@ func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 		if err := refuseClosedTask(ctx, tx, a.DeliveryID); err != nil {
 			return err
 		}
-		var status string
+		var status, subject, body string
 		var extID *string
 		if err := tx.QueryRow(ctx,
-			`SELECT status, sent_external_id FROM deliveries WHERE id=$1 FOR UPDATE`,
-			a.DeliveryID).Scan(&status, &extID); err != nil {
+			`SELECT status, sent_external_id, COALESCE(subject,''), COALESCE(body,'')
+			   FROM deliveries WHERE id=$1 FOR UPDATE`,
+			a.DeliveryID).Scan(&status, &extID, &subject, &body); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("delivery %d not found", a.DeliveryID)
 			}
@@ -601,6 +862,11 @@ func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 		case status == "failed" && extID == nil:
 		default:
 			return fmt.Errorf("delivery %d is %s; only drafted (or failed without a sent id) can be approved", a.DeliveryID, status)
+		}
+		// Compared under the FOR UPDATE lock update_delivery also takes, so no
+		// edit can land between this check and the status write below.
+		if a.ExpectContentHash != "" && a.ExpectContentHash != DeliveryContentHash(subject, body) {
+			return fmt.Errorf("delivery %d changed since it was shown to you; reload and review it again", a.DeliveryID)
 		}
 		// approval_source records WHICH authority let this row out (SWT-12).
 		// Written in the same statement as the status transition: a crash must
@@ -623,6 +889,183 @@ func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": a.DeliveryID, "status": "approved"})
+}
+
+// ---- reject_delivery (SWT-43) ----------------------------------------------------
+
+// maxRejectNoteRunes caps the note: it travels into the drafts worker's prompt.
+// Runes, not bytes, so an accented note is not refused at half length.
+const maxRejectNoteRunes = 2000
+
+type rejectDeliveryArgs struct {
+	DeliveryID int64  `json:"delivery_id"`
+	Note       string `json:"note,omitempty"`
+	Redraft    bool   `json:"redraft,omitempty"`
+	// ExpectContentHash binds the verdict to the words the human was shown
+	// (SWT-43 review, SWT-44's approve pattern): DeliveryContentHash(subject,
+	// body), compared under the delivery row lock. The dashboard route requires
+	// it; omitted keeps opsctl working unbound.
+	ExpectContentHash string `json:"expect_content_hash,omitempty"`
+}
+
+func validateRejectDelivery(args []byte) error {
+	var a rejectDeliveryArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		// A non-boolean redraft lands here: it is refused, never coerced.
+		return fmt.Errorf("parse args (delivery_id int, note string, redraft bool): %w", err)
+	}
+	if a.DeliveryID == 0 {
+		return errors.New("missing delivery_id")
+	}
+	if n := utf8.RuneCountInString(a.Note); n > maxRejectNoteRunes {
+		return fmt.Errorf("note is %d runes; the limit is %d", n, maxRejectNoteRunes)
+	}
+	return checkContentHashShape(a.ExpectContentHash)
+}
+
+// rejectDelivery is the human negative verdict (Deny, or Redo with redraft).
+// It moves an unsent row to the terminal status 'rejected' and records the
+// verdict as labelled data (an approvals row plus a delivery_rejected event).
+// With redraft it also stamps redraft_requested_at, the one thing that makes
+// that row stop blocking the drafts worker. It is humanOnly and off MCP (D9).
+//
+// Lock order is task → delivery, through lockDeliveryTask. Unlike approve and
+// send it does NOT refuse a closed task: cleaning up a stale draft is exactly
+// what closed work needs. The task status it reads is Redo's precondition (D7).
+func rejectDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, error) {
+	var a rejectDeliveryArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, fmt.Errorf("parse args: %w", err)
+	}
+	var note *string
+	if strings.TrimSpace(a.Note) != "" {
+		note = &a.Note
+	}
+
+	changed := false
+	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		taskID, taskStatus, err := lockDeliveryTask(ctx, tx, a.DeliveryID)
+		if err != nil {
+			return err
+		}
+		var status, channel, subject, body string
+		var extID, stored *string
+		var confirmed, redraftRequested, sendFailed bool
+		if err := tx.QueryRow(ctx,
+			`SELECT status, channel, sent_external_id, confirmed_at IS NOT NULL,
+			        redraft_requested_at IS NOT NULL, rejection_note,
+			        COALESCE(subject,''), COALESCE(body,''), error IS NOT NULL
+			   FROM deliveries WHERE id=$1 FOR UPDATE`,
+			a.DeliveryID).Scan(&status, &channel, &extID, &confirmed, &redraftRequested, &stored,
+			&subject, &body, &sendFailed); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("delivery %d not found", a.DeliveryID)
+			}
+			return fmt.Errorf("lock delivery %d: %w", a.DeliveryID, err)
+		}
+		refuse := func(reason string) error {
+			return fmt.Errorf("delivery %d (%s, %s) cannot be rejected: %s", a.DeliveryID, status, channel, reason)
+		}
+		// SWT-43 review: bound to the words shown (SWT-44's content hash),
+		// compared under this row lock, which update_delivery also takes, so no
+		// edit lands between the check and the verdict.
+		if a.ExpectContentHash != "" && a.ExpectContentHash != DeliveryContentHash(subject, body) {
+			return fmt.Errorf("delivery %d changed since it was shown to you; reload and review it again", a.DeliveryID)
+		}
+		// D7: a draft can only be written for done_locally work (draft_delivery's
+		// expect_task_status), so a redraft flag anywhere else would never be honoured.
+		needDoneLocally := func() error {
+			if taskStatus != "done_locally" {
+				advice := "Deny it instead"
+				if status == "rejected" { // the D6 upgrade: the row is already denied
+					advice = "it is already denied and stays that way"
+				}
+				return refuse(fmt.Sprintf("its task %d is %s, and a new draft can only be written for "+
+					"done_locally work; %s", taskID, taskStatus, advice))
+			}
+			return nil
+		}
+		// D4: sendJiraComment writes failed with a NULL id for EVERY error, so the
+		// comment may have landed (and the jira matcher still claims failed rows).
+		const d4 = "a jira_comment whose send failed may have been sent: the Jira send cannot tell a refusal " +
+			"from a lost response, so 'switchboard did not send this' could be false (D4)"
+
+		upgrade := false
+		switch status {
+		case "drafted", "approved":
+			// The D4 hole (go-reviewer): approve accepts failed-without-id, so a
+			// failed jira_comment approved for a retry reads plain 'approved'.
+			// sendJiraComment writes `error` on every failure and approve does
+			// not clear it (only a successful send or mark_delivery_sent does),
+			// so an approved jira_comment carrying an error is the same
+			// may-have-landed row.
+			if status == "approved" && channel == "jira_comment" && sendFailed {
+				return refuse(d4)
+			}
+		case "failed":
+			if channel == "jira_comment" {
+				return refuse(d4)
+			}
+			if extID != nil || confirmed {
+				return refuse("it carries a sent id or a confirmation, so it may have been sent")
+			}
+		case "rejected":
+			switch {
+			case !redraftRequested && !a.Redraft, redraftRequested && a.Redraft:
+				return nil // replay: no-op success, writes nothing
+			case redraftRequested && !a.Redraft:
+				return refuse("a redraft was already requested and the drafts worker may have written the " +
+					"new draft; deny the new draft instead (D6)")
+			}
+			upgrade = true // D6: plain Deny → Redo
+		default: // sending, sent
+			return refuse("it is sending or sent; the words may already be on the wire")
+		}
+		if a.Redraft {
+			if err := needDoneLocally(); err != nil {
+				return err
+			}
+		}
+
+		eventNote := note
+		if upgrade {
+			if _, err := tx.Exec(ctx,
+				`UPDATE deliveries SET redraft_requested_at=now(), rejection_note=COALESCE($2, rejection_note),
+				        updated_at=now()
+				  WHERE id=$1`, a.DeliveryID, note); err != nil {
+				return fmt.Errorf("request redraft of delivery %d: %w", a.DeliveryID, err)
+			}
+			if note == nil {
+				eventNote = stored
+			}
+		} else {
+			if _, err := tx.Exec(ctx,
+				`UPDATE deliveries SET status='rejected', rejection_note=$2,
+				        redraft_requested_at=CASE WHEN $3::boolean THEN now() END, updated_at=now()
+				  WHERE id=$1`, a.DeliveryID, note, a.Redraft); err != nil {
+				return fmt.Errorf("reject delivery %d: %w", a.DeliveryID, err)
+			}
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO approvals (subject_type, subject_id, status, decided_by, decided_at)
+				 VALUES ('delivery', $1, 'rejected', $2, now())`,
+				a.DeliveryID, executor.ActorFrom(ctx)); err != nil {
+				return fmt.Errorf("insert approval: %w", err)
+			}
+		}
+		if _, err := insertTaskEvent(ctx, tx, taskID, "delivery_rejected", map[string]any{
+			"delivery_id": a.DeliveryID, "channel": channel, "redraft": a.Redraft, "note": eventNote,
+		}); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return marshalResult(map[string]any{
+		"delivery_id": a.DeliveryID, "status": "rejected", "redraft": a.Redraft, "changed": changed,
+	})
 }
 
 // ---- send_delivery -------------------------------------------------------------
@@ -710,29 +1153,17 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 			return fmt.Errorf("delivery %d has no thread", a.DeliveryID)
 		}
 
-		// Resolve threading material.
-		var threadKey string
-		if err := tx.QueryRow(ctx,
-			`SELECT thread_key FROM normalized_threads WHERE id=$1`, *d.threadID).Scan(&threadKey); err != nil {
-			return fmt.Errorf("resolve thread %d: %w", *d.threadID, err)
-		}
-		_, gt, err := splitGmailThreadKey(threadKey)
+		// Where it goes — From, To and the threading material — comes from
+		// ResolveGmailRoute, the ONE spelling the dashboard shows on the draft
+		// before approval (SWT-44 review): two spellings could show Salvador one
+		// recipient and send to another.
+		route, err := ResolveGmailRoute(ctx, tx, *fromAcct, *d.threadID)
 		if err != nil {
 			return err
 		}
-		gThread = gt
-
-		var to, inReplyTo string
-		if err := tx.QueryRow(ctx,
-			`SELECT COALESCE(sender,''), COALESCE(external_message_id,'')
-			 FROM normalized_messages
-			 WHERE thread_id=$1 AND direction='inbound'
-			 ORDER BY sent_at DESC, id DESC LIMIT 1`, *d.threadID).Scan(&to, &inReplyTo); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("thread %d has no inbound message to reply to", *d.threadID)
-			}
-			return fmt.Errorf("resolve reply target: %w", err)
-		}
+		gThread = route.GmailThread
+		d.fromEmail = route.From // the row's own account, the join above read it too
+		to, inReplyTo := route.To, route.InReplyTo
 
 		var refs []string
 		rows, err := tx.Query(ctx,
@@ -820,6 +1251,74 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": a.DeliveryID, "status": "sent", "sent_external_id": msgID})
+}
+
+// GmailRoute is where a gmail delivery goes: the mailbox it is sent From, the
+// address it is sent To, and the threading material the send needs.
+type GmailRoute struct {
+	From        string // the delivery's from account (source_accounts.account_email)
+	To          string // the sender of the thread's latest inbound message
+	InReplyTo   string // that message's Message-ID
+	GmailThread string // the provider thread id, from the thread key
+	Subject     string // the thread's subject (normalized_threads.subject)
+}
+
+// ResolveGmailRoute is the ONE spelling of where a gmail send goes (SWT-44
+// review): send_delivery's phase 1 builds its message from it, under the
+// delivery lock, and the dashboard shows its From, To and Subject on a draft
+// before Salvador approves it. It only reads; q is the send's pgx.Tx or the
+// dashboard's pool. The errors are the send path's own words. On error the
+// route carries what resolved before the failure (the dashboard shows those
+// parts and "(unresolved)" for the rest); the send uses none of it.
+func ResolveGmailRoute(ctx context.Context, q store.Querier, fromAccountID, threadID int64) (GmailRoute, error) {
+	var r GmailRoute
+	if err := q.QueryRow(ctx,
+		`SELECT account_email FROM source_accounts WHERE id=$1`, fromAccountID).Scan(&r.From); err != nil {
+		return r, fmt.Errorf("resolve from account %d: %w", fromAccountID, err)
+	}
+	var threadKey string
+	if err := q.QueryRow(ctx,
+		`SELECT thread_key, COALESCE(subject,'') FROM normalized_threads WHERE id=$1`, threadID).
+		Scan(&threadKey, &r.Subject); err != nil {
+		return r, fmt.Errorf("resolve thread %d: %w", threadID, err)
+	}
+	_, gt, err := splitGmailThreadKey(threadKey)
+	if err != nil {
+		return r, err
+	}
+	r.GmailThread = gt
+	m, err := latestInboundMessage(ctx, q, threadID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return r, fmt.Errorf("thread %d has no inbound message to reply to", threadID)
+		}
+		return r, fmt.Errorf("resolve reply target: %w", err)
+	}
+	r.To, r.InReplyTo = m.sender, m.messageID
+	return r, nil
+}
+
+// inboundMessage is the part of a thread's reply target the send and the
+// same-project rule read.
+type inboundMessage struct {
+	id        int64
+	sender    string
+	messageID string
+}
+
+// latestInboundMessage is the ONE spelling of "the message a gmail reply on
+// this thread answers": the thread's latest INBOUND message, `ORDER BY sent_at
+// DESC, id DESC`. ResolveGmailRoute takes its To and In-Reply-To from it, and
+// refuseThreadOutsideTaskProject checks ITS filing — so the same-project rule
+// follows the recipient. pgx.ErrNoRows (unwrapped) when nothing is inbound.
+func latestInboundMessage(ctx context.Context, q store.Querier, threadID int64) (inboundMessage, error) {
+	var m inboundMessage
+	err := q.QueryRow(ctx,
+		`SELECT id, COALESCE(sender,''), COALESCE(external_message_id,'')
+		 FROM normalized_messages
+		 WHERE thread_id=$1 AND direction='inbound'
+		 ORDER BY sent_at DESC, id DESC LIMIT 1`, threadID).Scan(&m.id, &m.sender, &m.messageID)
+	return m, err
 }
 
 // ---- mark_delivery_sent (assisted tier) -----------------------------------------

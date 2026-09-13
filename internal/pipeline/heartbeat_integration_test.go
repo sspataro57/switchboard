@@ -151,7 +151,12 @@ func TestStageHeartbeat_Integration_RetainedWorkingThenIdle(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatalf("the catch-up pass never started")
 	}
-	// A FRESH subscriber, connected mid-pass, gets `working` from the retained slot.
+	// Wait until `working` has been published: heartbeats go out from their own
+	// goroutine, so the first one can reach an already-subscribed client LIVE
+	// (retained=false). Only then does a FRESH subscriber prove the retained slot.
+	ch0, stop0 := watchStatus(t, broker, "itest-pipeline-hb-sub0", stage)
+	waitState(t, ch0, fleet.StateWorking, 5*time.Second)
+	stop0()
 	ch, stop := watchStatus(t, broker, "itest-pipeline-hb-sub1", stage)
 	m := waitState(t, ch, fleet.StateWorking, 5*time.Second)
 	stop()

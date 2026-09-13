@@ -86,6 +86,7 @@ func LookupIssues(ctx context.Context, c *Client, sink Sink, acct Account, keys 
 		if err := upsertRaw(ctx, sink, acct.ID, IssueRawID(key), issueOnly, &stats); err != nil {
 			return fail(err)
 		}
+		stats.FetchedKeys = append(stats.FetchedKeys, key)
 	}
 
 	if err := sink.FinishRun(ctx, runID, "ok", stats, ""); err != nil {

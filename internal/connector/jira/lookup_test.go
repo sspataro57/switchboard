@@ -368,3 +368,30 @@ func TestLookupIssues_AMissingIssueIsCountedAndDoesNotAbortTheRest(t *testing.T)
 		t.Errorf("raw rows written = %d, want 2 (the two issues that exist)", len(sink.inserts))
 	}
 }
+
+// SWT-40 Part D review fix 1: the caller learns WHICH keys were fetched, not
+// just how many. An unchanged refetch leaves ingested_at alone (upsertRaw's
+// hash short-circuit), so the capture-time gate needs the per-key fact to know
+// a snapshot was verified by this pass. Never serialized into sync_runs.stats.
+func TestLookupIssues_ReportsWhichKeysItFetched(t *testing.T) {
+	f := newFakeJira()
+	defer f.close()
+	lookupFixtures(f) // ILK-1..3 exist; ILK-9 does not
+	sink := newJiraFakeSink()
+
+	stats, err := jira.LookupIssues(context.Background(), newLookupClient(f), sink,
+		lookupAccount(f.url()), []string{"ILK-1", "ILK-9", "ILK-3"}, jira.Config{})
+	if err != nil {
+		t.Fatalf("LookupIssues: %v", err)
+	}
+	if got := strings.Join(stats.FetchedKeys, ","); got != "ILK-1,ILK-3" {
+		t.Errorf("Stats.FetchedKeys = [%s], want [ILK-1,ILK-3] (the failed ILK-9 excluded)", got)
+	}
+	raw, err := json.Marshal(stats)
+	if err != nil {
+		t.Fatalf("marshal stats: %v", err)
+	}
+	if strings.Contains(string(raw), "ILK-") {
+		t.Errorf("Stats marshals its fetched keys into sync_runs.stats: %s", raw)
+	}
+}

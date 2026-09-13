@@ -288,3 +288,80 @@ requested against dismissal D`, and the printed stats gain `"reopened"`. Every
 reason code reopens (owner's decision). Plain `task_close`d tasks never do.
 Shadow reopens nothing. To keep a task down for good after it came back,
 dismiss it again: that writes a second, open row.
+
+## Project-name rules (SWT-40 Part A)
+
+A message whose SUBJECT LINE names a project is attributed to it by a data rule,
+priority 3. That is below every source-specific rule (tickets 90/50, workspaces
+10, bulk senders 5) and above the T0360B84U catch-all (1), so a stronger signal
+always wins and marketing mail naming a project stays in bulk.
+
+- **Pattern shape:** `(?i)\A[^\n]*\b<alias>\b`. `body_regex` matches `Subject +
+  "\n" + BodyText`, and `\A[^\n]*` pins the match to the first line: the subject
+  (for Slack, the channel name). A body mention is left to the routing tier
+  (Part B).
+- **Aliases are data, never generated from `projects.name`** (`personal`,
+  `foundry`, `bulk` are ordinary words). An alias goes in only after a Go-regexp
+  export shows zero unexplained out-of-project subject matches. Postgres reads
+  `\b` as a backspace, so test in Go, never in SQL.
+- **Live since 2026-09-12:**
+
+  | rule | project | criteria | pattern |
+  |---|---|---|---|
+  | 60 | collaboratory | body_regex | `(?i)\A[^\n]*\b(?:ce)?collaboratory\b` (`\b` does not fire inside "cecollaboratory") |
+  | 61 | reengine | body_regex | `(?i)\A[^\n]*\bre-?engine\b` |
+  | 62 | collaboratory | sender | `cecollaboratory.com` |
+
+- **Pre-add export, 2026-09-12:** 26,062 inbound messages over 180 days.
+  - The collaboratory alias matched 504, with 0 out-of-project matches. All 7
+    Rochester "Questions About Collaboratory Activities Integration" messages
+    matched, and 40 unmatched mails were newly attributed.
+  - The reengine alias matched 0.
+  - `cecollaboratory.com`: 13 inbound messages all-time, all unmatched; nothing
+    moved out of another project.
+
+## Re-pointing already-decided messages
+
+A new rule never re-decides a message that already has a LIVE decision. The live
+pass skips it, and `--all` is refused in live mode. To make a new ATTRIBUTION-ONLY
+rule apply to history, run a shadow pass:
+
+```bash
+echo "CAPTURE_RULES_MODE=${CAPTURE_RULES_MODE:-<unset, so shadow>}"   # must be unset
+opsctl capture-rules run --since 4320h --all
+```
+
+It writes a newer shadow row per inbound message in the window. Every
+latest-decision reader follows the newest row in any mode, so attribution moves.
+A shadow row never creates or logs a task, so this does NOT work for
+task-creating rules.
+
+**The 2026-09-12 pass** (`--since 4320h`, 180 days, 26,062 messages considered):
+
+| group | before | after |
+|---|---|---|
+| collaboratory-named subjects | 40 unmatched + 60 undecided + 92 attributed + 309 task_log + 3 task | 190 attributed + 311 task_log + 3 task, all collaboratory |
+| #a-millon inbound, last 180 days | 428 collaboratory (rule 9) + 10 reengine LHH | 428 bulk + 10 reengine LHH (rule 1 unchanged) |
+
+Tasks 72/75/93/94 (the a-millon LHH tasks) were unchanged. Use a window at least
+as wide as the history the new rule must cover: 720h missed 15 older unmatched
+mails.
+
+## #a-millon → bulk (SWT-40 O4)
+
+`#a-millon` (`C1C1TSLJH` in workspace `T0360B84U`) carries HOC3/HOC4/LlamaSite
+deploys, Salesforce incidents and LHH ticket links. Salvador, 2026-09-11: "those
+are HOC/LLamasite not my projects. not even ReEngine".
+
+- **Rule 63:** `thread_key_prefix` `slack:T0360B84U:C1C1TSLJH` → `bulk`,
+  attribution only, **priority 99**.
+- **Why below 100:** an LHH link in a-millon still reaches rule 1 (priority 100)
+  and, with Part D, the Jira assignee gate. The ticket decides, not the channel.
+- **Why 99 rather than just above 1:** it must also outrank rule 10 (Treetop
+  keys, 90) and rule 59 (95). Otherwise a WEB/API/OPS mention in a HOC channel
+  would become a collaboratory task.
+- **Case-sensitive prefix:** `thread_key_prefix` is a case-SENSITIVE
+  `strings.HasPrefix`, and stored keys keep `T0360B84U`. One prefix covers the
+  unthreaded key and every `…:C1C1TSLJH:{root}` thread key. Checked 2026-09-12:
+  8,559 messages match the prefix, the same count as messages whose raw
+  conversation id is `C1C1TSLJH`. No longer conversation id shares the prefix.

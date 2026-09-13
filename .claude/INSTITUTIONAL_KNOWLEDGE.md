@@ -539,7 +539,8 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   MCP") and, since SWT-38, `create_task`, `task_append_log`,
   `task_set_priority` (nine tools; see "Task capture over MCP") and, since
   SWT-42, `mail_list_attachments`, `mail_read_attachment` (eleven; see "Mail
-  attachments over MCP"). Its main
+  attachments over MCP") and, since SWT-44, `draft_delivery`, `update_delivery`
+  (thirteen; see "Gmail drafting over MCP"). Its main
   still calls no `tools.Set*` seam, so NO sender is wired
   (connector code is linked via internal/tools but stays nil). Not an env
   setting on ops-mcp: that was tried and fails open (unset had to mean full for
@@ -563,7 +564,7 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   the same name as `.mcp.json`'s).
 - **LANDMINE: `claude mcp get/list` lie about same-name precedence.** Inside
   this repo they show the user-scope `ops`, yet a session here loads
-  `.mcp.json`'s full `ops` (25 tools since SWT-42; a session in `kube` gets 11).
+  `.mcp.json`'s full `ops` (26 tools since SWT-44; a session in `kube` gets 13).
   Verify precedence from inside a session, never from the CLI listing.
 - `claude -p` from a shell uses `ANTHROPIC_API_KEY` (exported, no credit) over
   the claude.ai login: prefix `env -u ANTHROPIC_API_KEY` for smoke sessions.
@@ -581,8 +582,9 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   (the user-scope `ops-mcp-user`) and from this repo's full `ops`. Accepted
   risk: untrusted text read in any session (mail, Slack, a web page) can tell
   it to dismiss/close/deliver any task in any project, and policy sees
-  `mcp:manual:salvo`, a human. Nothing is sent and no delivery is touched;
-  recovery is `task_reopen` (and, once SWT-36 ships, a dismissal reopens on
+  `mcp:manual:salvo`, a human. Nothing is sent and these three verbs touch no
+  delivery (since SWT-44 the same sessions also draft gmail replies — see
+  "Gmail drafting over MCP"); recovery is `task_reopen` (and, once SWT-36 ships, a dismissal reopens on
   the next inbound message routed to it). The Instructions' "only when Salvador asks" line is a
   prompt rule, not a boundary.
 - The user profile SWT-37 shipped had six tools; SWT-38 made it NINE
@@ -657,7 +659,9 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - The user profile (`ops-mcp-user`, every other repo's session) gained
   `create_task`, `task_append_log` and the new `task_set_priority`: a session
   logs the work Salvador hands it as a swb task, writes progress on it, closes
-  it with `task_close`, and reorders any task. No claim, run or delivery power.
+  it with `task_close`, and reorders any task. No claim or run power; since
+  SWT-44 it drafts gmail replies but never approves or sends one (see "Gmail
+  drafting over MCP").
 - **`assignee_type` is a ROUTING field, not "who types".** `human` = Salvador's
   lane (no worker console routes it — `getNext` selects only
   `assignee_type='claude'`); `claude` = the console queue for the project's
@@ -710,7 +714,8 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `mail_read_attachment` (index | filename | part_id; text inline ≤100 KiB
   per page with `offset`, else `to_file` → `<UserCacheDir>/switchboard/attachments/<raw>/<idx>-<name>`,
   0600, swept after 7 days). Both are in BOTH profiles (owner decision O1) — the
-  user profile is now eleven tools, full 25. Read-only, not humanOnly, not
+  user profile was then eleven tools, full 25 (thirteen and 26 since SWT-44).
+  Read-only, not humanOnly, not
   snapshotGated: audit row only, never the content. Part numbering is
   `pathString`, the same numbering `planOversizeFetch` writes into a manifest.
 - **Before SWT-42 the mail tools had NO locality gate** — `mail_search` /
@@ -737,7 +742,117 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   the body, so a named .txt on an HTML-only oversize message is not listed.
 - Attachment content is untrusted third-party text; the Instructions line says
   read-as-data. Accepted risk as in SWT-37: a session that reads a malicious
-  attachment still holds the write verbs.
+  attachment still holds the write verbs — and, since SWT-44, gmail drafting
+  (never approving or sending).
+
+### Gmail drafting over MCP (SWT-44, user-profile-drafts)
+
+- **The tools.** The user profile (`ops-mcp-user`, every other repo's session)
+  lists `draft_delivery` and `update_delivery` (thirteen tools);
+  `update_delivery` is also MCP-listed in the full profile (26). It stays
+  `humanOnly`. A session writes a client email reply as a `drafted` delivery row
+  and fixes its words; Salvador approves and sends on the dashboard.
+- **Gmail only.** Pin `draft_delivery: {require_channel: "gmail"}`
+  (`mcpserver.userProfilePins`, SWT-38 C4 pattern: OVERWRITE after
+  `injectWorkerID`, hidden from every schema, only narrows).
+  `validateDraftDelivery` REFUSES a differing channel, first, and never rewrites
+  it. No Slack, Upwork, Jira or calendar row from a session that reads
+  untrusted text.
+- **"Own" drafts = the actor's, gmail only.** Pins `update_delivery:
+  {require_own_draft: "true", require_channel: "gmail"}`: the handler locks the
+  row (FOR UPDATE) and refuses unless `deliveries.created_by =
+  executor.ActorFrom(ctx)` AND `channel = 'gmail'`. The actor is `mcp:` +
+  OPS_WORKER_ID, and the user-scope install and this repo's full-profile `ops`
+  both run as `manual:salvo` — so the pin means drafts created by the
+  mcp:manual:salvo actor (any interactive session), gmail only; never the
+  drafts worker's (`drafts:gpt`) or the dashboard's. It CANNOT tell one session
+  from another; the channel pin (second review round) is what stops a
+  user-scope session rewriting a full-profile slack_reply / jira_comment /
+  upwork_chat / calendar draft. The full profile, dashboard and opsctl send no
+  pin and edit any draft. A present body that is empty or whitespace (before or
+  after the attribution scrub) is refused; `subject: ""` still clears the
+  subject.
+- **Same project (owner decision, Salvador 2026-09-12: "Same project").** Pin
+  `draft_delivery: {require_thread_in_task_project: "true"}`: a user-profile
+  gmail draft is allowed only on a thread already filed under the task's
+  project. `refuseThreadOutsideTaskProject`, inside draftDelivery's tx after the
+  task lock and before the insert, accepts (a) `thread_id =
+  tasks.source_thread_id`, or (b) the thread's LATEST INBOUND message — the
+  reply's recipient, picked by `latestInboundMessage`, the same helper
+  `ResolveGmailRoute` uses (`ORDER BY sent_at DESC, id DESC`), so the rule and
+  the send agree on the message — has a LATEST capture_decisions row (`ORDER BY
+  id DESC LIMIT 1`, any mode) with `project_id = tasks.project_id`. The rule
+  follows the recipient: an older message filed here does NOT qualify a thread
+  whose newest inbound mail is filed elsewhere or unmatched. Outbound messages
+  never count. Refusal: "thread N is not filed under this task's project
+  (<slug>): its latest inbound message is filed elsewhere or not at all; ask
+  Salvador to file it, or draft from the switchboard session" (not "the
+  dashboard": it cannot file mail; not "a capture rule": a new rule does not
+  re-file already-decided mail). Full profile and drafts worker: no pin,
+  unchanged. Fixture note: `capture_decisions_live_uniq` allows ONE live row
+  per message — a test that re-points a message writes the later decisions as
+  shadow.
+  - **What it guarantees.** A session can `create_task` in ANY project, so the
+    rule means "the draft's thread is filed under the task's project" — it
+    ties draft to thread, and is NOT a limit on which project a session can
+    draft into.
+  - **Shadow decisions count.** The latest decision in ANY mode, per the repo's
+    latest-decision convention (classify/store.go, mailattach.go). That is
+    also what lets a shadow `--all` re-filing pass qualify a thread.
+  - **Accepted residual race (Codex).** The check and the insert are not
+    serialized against a concurrent capture pass re-filing the thread (or a
+    new inbound message landing). The window is one transaction; nothing sends
+    without Salvador's dashboard approve; the dashboard shows From/To; and
+    SWT-46 will persist the recipient at draft/approval.
+- **Content-bound approval.** `approve_delivery` takes an optional
+  `expect_content_hash` = `tools.DeliveryContentHash(subject, body)` (lowercase
+  hex sha256 of subject, NUL, body; a NULL subject is `""`), compared under the
+  delivery FOR UPDATE lock; a mismatch refuses ("changed since it was shown to
+  you") and the row stays drafted. The dashboard renders the hash into the
+  Approve form (hidden `content_hash`, computed in `listDeliveries`);
+  `approveAction` passes it through, built with `json.Marshal`, and REFUSES a
+  POST without one ("reload the page and review it again") before the executor
+  — a stale pre-deploy page or a crafted POST cannot approve unbound. The tool
+  keeps it optional for opsctl and full-profile MCP: it stays human-only, and
+  the dashboard is the review surface. Not in any MCP schema.
+- **The dashboard shows From/To before approval.** `tools.ResolveGmailRoute`
+  is the ONE spelling of where a gmail send goes (From account, To = the
+  thread's latest inbound sender, In-Reply-To, provider thread, thread subject):
+  `send_delivery` phase 1 builds its message from it, and `listDeliveries` shows
+  it on drafted/approved/failed gmail rows (a sent row is not recomputed: a
+  newer inbound would misstate where it went). Other channels show
+  `target_ref`; anything unresolvable reads `(unresolved)`. The session picks
+  the thread, so the recipient is the SESSION's choice among ingested threads —
+  bounded, on the user profile, by the same-project pin (the thread's latest
+  inbound message must be filed under the task's project) — and the dashboard,
+  not the resolution, is the check.
+- **Known gap — the To can change before Send (NOT fixed here; SWT-46).** Send re-resolves To from the thread's latest inbound
+  message AT SEND TIME (pre-existing behaviour), so the To shown can change if
+  a new inbound message arrives before Send, and an approved row re-renders its
+  To up to Send. The fix is persisting the route at approval; it folds into the
+  cc/reply-all ticket, which must store explicit recipients anyway.
+- **Approve and send stay off the profile.** A session must not approve its
+  own client email: that is the human gate the policy matrix puts on
+  client-facing mail (invariant 4), and these sessions read untrusted text
+  (SWT-42 attachments). The user binary wires no sender anyway.
+- **The actor path.** `ops-mcp-user`'s `OPS_WORKER_ID` must be `manual:*`
+  (the runbook's `manual:salvo`). `draft_delivery` is not policy-gated, so any
+  id drafts, but `update_delivery` is `humanOnly`: a worker-shaped id (`salvo`,
+  `acme`) gets `human_only` and cannot fix even its own draft.
+  `worker.ValidateWorkerID` guards opsworker's ids, not this binary's env.
+- **Recovery for a planted draft:** Deny it on the dashboard (SWT-43; a plain
+  Deny, not Redo), or edit it. Either way it never sends unapproved.
+- **R8 caveat — recorded for a follow-up ticket (SWT-47),
+  NOT fixed here.** R8 fires on
+  `delivery_sent` for the delivery's TASK: `task_mark_delivered` refuses a task
+  that is not `done_locally`, the engine logs that and continues, and the
+  `record_orchestration` delivery_lifecycle dedup key lands anyway — so a LATER
+  real delivery on that task is deduped into silence (the
+  `internal/orchestrator/rules.go:275-282` hazard SWT-28 fenced for calendar
+  only). Before SWT-44 drafts came from the drafts worker on done_locally
+  parents; now a session drafting on its own `human`/`ready` work task is the
+  COMMON path, and the first send of such a draft writes the dedup key while
+  the task is still `ready`.
 
 ### The pipeline wake-ups (SWT-40 Part E, inquiry-promote)
 
@@ -770,6 +885,93 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - `fleet.newClient` now disconnects on a connect that timed out (a late CONNACK used to leave an unowned
   client reconnecting forever), and `PublishStatus` waits at most 10 s for its ack.
 - **E5** (`classify promote --lane`) ships with Part C.
+
+### The capture-time assignee gate (SWT-40 Part D, inquiry-promote)
+
+- **Capture never calls Jira.** A jira-keyed match whose rule's project has `ticket_assignee_gate` (read
+  from the column in `loadRules`) is recorded `held`: project, rule and key named, nothing created, in
+  shadow and live alike. Capture runs in every connector main, and an LHH link arrives via slackweb and
+  google too. The lookup credential (`OPS_TOKEN_KEY` plus the stored token) lives only in connector-jira
+  and pipelined. A capture-time GET would spread the secret everywhere, or silently skip the check where
+  it is absent. Runbook: `docs/runbooks/ticket-status-sync.md` "Capture-time assignee gate".
+- **The resolution is a SECOND row, `mode='gate'`** (`capture.RunGate`, the pipelined `gate` stage,
+  lock `0x5157_0015`). The live claim is spent by `held`, which acted on nothing, so the gate row is the
+  message's one action. Actions: `task` / `task_log`, via capture's own helpers as `capture:gate`, or
+  `attributed`, with the reconciler's drop reason or `gate_unverified_expired`. An unreadable hold
+  writes NOTHING and stays held (`pending_lookup`). The gate row is the latest decision, so every
+  `ORDER BY id DESC` reader follows it.
+- **LANDMINE, the third partial unique index on `capture_decisions.message_id`.**
+  `capture_decisions_gate_uniq ... WHERE mode='gate'` sits next to the live one, and every `ON CONFLICT`
+  must restate its predicate. `gate_structure_test.go` scans `internal/` and `cmd/` for it.
+- **`pendingMessages` excludes gate-resolved messages in EVERY mode, `--all` included.** Otherwise the
+  documented shadow `--all` re-pointing pass writes newer rows that bury the resolution for every reader.
+- **One predicate, one fetch path.** The gate calls `ticketstatus.Warranted` (extracted from `Decide`)
+  and `ticketstatus.EnsureSnapshots` (extracted from `Run`), so it cannot create a task the reconciler
+  closes 15 min later, and the two share the stored snapshot cache (TTL 1h). `gate.go` may not name
+  `LookupIssues`, `RouteLookup`, the TTL reader or the delivered-status matcher. `ticket_delivered_statuses`
+  may only be read in `ticketstatus/store.go` and opsctl (SWT-34 criterion 22), so the gate gets the set
+  through `ticketstatus.DeliveredStatusesByProject`.
+- **Rate:** at most 50 distinct keys looked up per pass; holds on other keys are skipped untouched and
+  counted `GateStats.BudgetSkipped`. pipelined's processed count is `GateStats.Resolved`, never pending
+  holds: a re-counted pending hold would make the stage loop re-run at once, faster than the sweep.
+  Expiry is strictly after 72h from when the HOLD was written (the held row's `created_at`, not the
+  message's `sent_at`), and the inbox includes expired holds so they resolve.
+- **Freshness rule (review fix 1).** A stored snapshot decides a hold only if `Snapshot.VerifiedAt >=`
+  the message's first-seen time (`normalized_messages.created_at`, which no upsert rewrites). The gate
+  passes `ticketstatus.Config.MinFresh` (per key, the newest held message's first-seen time), which
+  forces a fetch past the TTL; the reconciler passes nil, so its TTL logic is untouched. A failed
+  forced fetch leaves the hold pending until expiry, never decided from the older snapshot.
+  **LANDMINE: `ingested_at` does NOT move on an unchanged refetch** (`upsertRaw`'s hash short-circuit).
+  So `VerifiedAt` is `ingested_at` OR the DB clock at the start of this call's successful GET (from
+  `jira.Stats.FetchedKeys`, in-memory, `json:"-"`). Comparing `ingested_at` alone starves every mention of
+  an unchanged ticket until it expires. Keys routed to no lookup account are never force-fetched, so
+  their holds wait for the poller to store a newer copy. Mutations: drop `MinFresh` → the D-D6 test goes red;
+  drop the `VerifiedAt` check → the Jira-down test goes red.
+- **Fetch, then lock (review fix 3).** `RunGate` probes `0x5157_0015` (busy → `ErrGateLockHeld`, no GET),
+  releases it, fetches via `EnsureSnapshots`, THEN takes the lock, re-reads the inbox and decides.
+  Capture's lock is never held across Jira HTTP. Token-built clients (`jira.TokenClientFactory`) carry a
+  30 s `http.Client` timeout, `LookupRequestTimeout`, which also covers the connector-jira poller.
+- **One decide step (review fix 2).** `decideGateHolds` (budget, freshness, per-message ref re-query,
+  `DecideGate`) is shared by `RunGate` and `DryRunGate`. `opsctl capture-rules gate --dry-run [--shadow]`
+  prints `message=… key=… outcome=…` from the stored snapshots only (no fetch, no lock, no writes).
+  `--shadow` reads the latest shadow `held` rows and is refused without `--dry-run`.
+- **Claim, act, complete (review round 2, fix 1).** Gate `task` AND `task_log` rows are both claimed with
+  `task_id` NULL before any executor call, and `recordDecisionTask` fills `task_id` only after the calls
+  succeed (for `task_log`: `task_append_log`, then the guarded reopen). Migration 0029's
+  `capture_decisions_gate_task_pin` therefore pins only `attributed ⇒ task_id NULL`. The report's
+  "claimed with no task" WARNING counts live/gate `task` and gate `task_log` rows with NULL `task_id`: a
+  pass that died after the claim. For a `task_log`, the log may or may not have landed; the reason text
+  names the target task. Mutation: claim `task_log` with `task_id` set → the failing-append test
+  (`gate_scope_integration_test.go`) goes red.
+- **Tenant scope (review round 2, fix 2).** The gate sets `ticketstatus.Config.ScopeToRoute`. A stored row
+  counts as a key's snapshot only if it came from the account `RouteLookup` routes the key to (by prefix
+  scope). For a key no lookup account claims, it falls back to the one `provider='jira'` poller account
+  storing it. An ambiguous route, or two storing pollers, gives no snapshot: pending, then fail-closed
+  expiry. The reconciler leaves the flag false, so its Count > 1 ambiguity refusal is unchanged.
+  `Snapshot.SourceAccountID` is the storing row's `source_account_id`. Mutation: drop the filter → the
+  two-snapshot test goes pending and the lone-foreign test creates a task.
+- **`VerifiedAt` for a key fetched in this call is the fetch START** (`clock_timestamp()` before the GET),
+  unconditionally, and only for the row the fetching account stored (round 2, fix 3). It is never
+  max(ingested_at, start): the response describes the ticket as of the request.
+- **FOLLOW-UP (not fixed): `external_refs` dedup is not tenant-qualified (follow-up SWT-49) either.** `taskForExternalRef`
+  and the unique key are `(system, external_key)`, so two Jira sites sharing a prefix would share one ref.
+  This is latent today because the sites use different prefixes.
+- **FOLLOW-UP (not fixed): unchanged-content verification lives only in memory.** `VerifiedAt` from a GET
+  that returned unchanged content is not stored (`ingested_at` does not move). So a pass that fetches and
+  then loses the capture lock (`ErrGateLockHeld` on the second take) re-fetches the same keys next pass,
+  up to 50 GETs. Persisting a verified-at time per stored snapshot would fix it.
+- **Gate turned off with holds pending** → they resolve with the gate off (the column is read every pass):
+  tasks with no assignee check.
+- **Deploy consequence:** until the connector images carrying Part D are deployed, OLD capture binaries
+  keep creating tasks for gated projects. That is the old behaviour, not a regression. Order: 0029, then
+  the connector bump, then `PIPELINE_STAGES=gate` plus `OPS_TOKEN_KEY` on pipelined. Without the key,
+  every hold expires `gate_unverified_expired` (fail closed, no task). **LANDMINE: 0029 BEFORE any image
+  built from main.** On a db without 0029, a new capture binary fails the action CHECK on the first gated
+  match, and that stalls capture for every connector.
+- The shared token-decrypting factory is `jira.TokenClientFactory(pool, key)`, which returns nil for an
+  empty key. connector-jira, opsctl and pipelined all use it.
+- `TestDecideGate_BodyIsPure` slices from `func DecideGate(` to the next `\nfunc `, so the next
+  function's doc comment counts as "body". `DecideGate` is kept last in `gate.go` for that reason.
 
 ### Link preservation (SWT-25)
 
@@ -1084,7 +1286,10 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
 
 - Lifecycle tools: `draft_delivery` (agent-facing, THE route for client-visible
   words; gmail From resolved server-side from the thread — never caller-chosen),
-  spine-facing `update_delivery`/`approve_delivery`/`send_delivery`/
+  `update_delivery` (MCP-listed since SWT-44, still humanOnly; the user profile
+  pins it to gmail drafts created by the mcp:manual:salvo actor, i.e. any
+  interactive session — see "Gmail drafting over MCP"), and
+  spine-facing `approve_delivery`/`send_delivery`/
   `mark_delivery_sent`/`task_mark_delivered`/`set_sending_frozen`.
 - Policy matrix (internal/policy Matrix wrapping the static list): rules
   `kill_switch` (ops_flags row sending_frozen), `rate_limit` (10/channel/hour,
@@ -1107,6 +1312,67 @@ connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard ha
 - GO-LIVE PENDING: gmail sends need the SWT-7 OAuth runbook + re-consent with
   `google.Scopes` (now includes gmail.send) + manual
   `UPDATE source_accounts SET send_enabled=true` per allowed account.
+- **`rejected` is a terminal delivery status (SWT-43, delivery-deny).** Written
+  ONLY by `reject_delivery {delivery_id, note?, redraft?}` (humanOnly, off MCP;
+  dashboard Deny/Redo). It means "switchboard did not and will not send this
+  row". The rejectable set is `drafted`, `approved`, and `failed` with no sent
+  id and no confirmation — **EXCEPT `jira_comment`**: `sendJiraComment` writes
+  failed+NULL for every error, the comment may have landed, and the jira
+  matcher still claims `failed` rows, so rejecting one would turn a landed
+  comment into a false `outbound_observed` hand-send. **The same refusal covers
+  an `approved` `jira_comment` with `error IS NOT NULL`** (SWT-43 review):
+  approve accepts failed-without-id for a retry and does not clear `error`
+  (only a successful send or `mark_delivery_sent` does), so a failed-then-
+  approved Jira row is the same may-have-landed row. `sending`/`sent` never.
+  The verdict is an `approvals` row `('delivery', id, 'rejected', actor)` plus a
+  `delivery_rejected` task event that NO orchestrator rule reacts to (the
+  Deliver task stays open; never infer delivery state into task state).
+- **Deny/Redo are bound to the words shown, like Approve (SWT-44's hash).**
+  Both reject forms carry the hidden `content_hash`
+  (`tools.DeliveryContentHash`). `reject_delivery` takes an optional
+  `expect_content_hash`, compared under the delivery FOR UPDATE lock; a mismatch
+  refuses with "changed since it was shown to you; reload and review it again".
+  The dashboard's `actionReject` refuses a POST without a hash before the
+  executor, and opsctl may omit it.
+- **`deliveries.redraft_requested_at` is the drafts unblock.** The drafts
+  `NOT EXISTS` ignores exactly a rejected row with it set (Redo); a plain Deny
+  keeps blocking; the new draft blocks again. That is the loop bound — one
+  human click per re-draft — and it holds only while `reject_delivery` is the
+  column's sole writer (`TestRedraftRequestedAt_OnlyInternalToolsWritesIt`).
+  That scan covers `internal/` and `cmd/`, flags ANY assignment (the first cut
+  listed right-hand sides and missed `= CASE ...`, the shape the Redo UPDATE
+  itself uses), and has a probe, `TestRedraftWritePattern_Probe`.
+  Redo needs the work task `done_locally` (the only status a draft lands on).
+- **"Blocks a new draft" has ONE spelling: `tools.BlockingDeliverySQL`.** It is
+  used by `drafts.DeliverTasks`' NOT EXISTS AND by `draft_delivery`'s re-check
+  under the task FOR UPDATE whenever `expect_task_status` is set (the
+  drafts-worker path). DeliverTasks is a read, not a claim, so without the
+  re-check two drafts passes could each draft from one Redo, or from one first
+  draft. The loser gets `tools.ErrDeliveryBlocksDraft`, which the worker counts
+  as a skip. Plain callers (sessions, dashboard, opsctl) send no
+  `expect_task_status` and still draft siblings.
+- **The note reaches the redraft prompt as quoted data.** The rejected body and
+  Salvador's note sit between `<<<BEGIN/END REJECTED DRAFT>>>` and
+  `<<<BEGIN/END HIS REASON>>>`, and any marker copy inside them is broken up
+  (`neutraliseMarkers`). They are framed as his feedback to address, not
+  instructions. `SystemPrompt` is byte-unchanged. There is deliberately no
+  authorization beyond humanOnly: the note is his own text, typed behind
+  Keycloak.
+- **Silent wait (Future work, beside D7's residual).** A Redo stays "redraft
+  requested" with nothing drafting it, and nothing logged, whenever ANOTHER
+  non-rejected delivery exists on the same parent task. Examples: a session
+  drafted a sibling gmail reply, or an older drafted, approved or sent row sits
+  beside the rejected one. Every delivery on the parent blocks the drafts queue
+  except the Redo row itself, so the worker never lists the Deliver task. This
+  is the same shape as D7's residual (a Redo whose Deliver task was closed by
+  hand). Recovery today: deal with the sibling first (Deny it or send it), or
+  draft by hand. Surfacing both cases on the dashboard is SPEC Future work.
+- **Every new matcher's, reconciler's or send path's status set must exclude
+  `rejected`.** Today they exclude it by allowlist, pinned by tests;
+  `deliveries_rejected_unsent_check` is the schema backstop (a rejected row can
+  never carry `sent_external_id` or `confirmed_at`). A hand-sent copy of a
+  rejected draft is recorded as `outbound_observed` on the task, never as a
+  stamp on the rejected row.
 
 ## Google connector (shipped in SWT-7 — code complete, OAuth PENDING)
 
@@ -1263,6 +1529,9 @@ the executor. Runbook: `docs/runbooks/capture-rules.md`.
   `count(*)==1` assertion drifted). Clean up your own leftovers first, in FK
   order (children before parents), scoped by a test-owned actor/slug.
 - _Known infra issues: none yet — record flakes and races here the first time they bite._
+- **LANDMINE (2026-09-12): the compose Postgres is SHARED by every worktree and agent.** Capture suites take capture's advisory lock 0x5157_0015 and delete `capture_decisions` wholesale, so two branches running integration tests at once corrupt each other ("another pass holds advisory lock", rows vanishing). Run a branch's integration suite in its own database: `psql 'postgres://ops:ops@localhost:5433/ops?sslmode=disable' -c "CREATE DATABASE ops_<branch>"`, `make migrate LOCAL_DB_URL='postgres://ops:ops@localhost:5433/ops_<branch>?sslmode=disable'`, then point `DATABASE_URL` at it. Advisory locks are per-database, so this isolates them too.
+- **Known flake (SWT-48): `TestAttributionTrend_*` in internal/capture fail from 20:00 to 24:00 EDT** (local date != UTC date). They pass with `TZ=UTC`. Pre-existing on main; it is not a regression in whatever branch you are testing.
+- **LANDMINE: an edited migration never reaches a DB that already applied it.** `cmd/tools/migrate` keys on `schema_migrations.version` with no checksum. Editing a numbered file in place is fine only if NO database (prod or the shared compose `ops`) has applied it yet; otherwise fix that DB by hand or rebuild it. 2026-09-12: 0029's task_id pin was edited after the compose `ops` DB had applied it and was patched by hand; prod never had the old version.
 
 ---
 

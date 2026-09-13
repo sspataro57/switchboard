@@ -60,6 +60,10 @@ const (
 	dsGmailThread = "gmail:itest-dstore:18f0dstore01"
 	dsJiraThread  = "jira:dstore.jira.com:WEB-4242"
 	dsSlackThread = "slack:TDSTORE:C0DSTORE"
+	// SWT-43 (delivery-deny) criterion 26: a gmail thread whose MAILBOX segment is
+	// dsAccount, so a real draft_delivery can resolve From from it. Owned by
+	// redraft_integration_test.go, cleaned here with the others.
+	dsRedraftThread = "gmail:itest-dstore@gmail.example.test:18f0redraft01"
 )
 
 func dsLegacyKey(client string) string       { return "upwork_crm:" + client + ":upwork" }
@@ -76,6 +80,7 @@ func dsCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		dsLegacyKey(dsClientOneRoom), dsRoomedKey(dsClientOneRoom, dsRoomA),
 		dsLegacyKey(dsClientTwoRooms), dsRoomedKey(dsClientTwoRooms, dsRoomA), dsRoomedKey(dsClientTwoRooms, dsRoomB),
 		dsRoomedKey(dsClientTwoRooms, dsRoomC),
+		dsRedraftThread,
 	}
 	stmts := []struct {
 		sql  string
