@@ -676,6 +676,13 @@ the `route_apply` stage in `pipelined`, woken by `route_classified`, under captu
   Mutation: drop the exclusion in `pendingMessages`.
 - B7. Arming: `route_after` NULL → nothing is written. A step-3 verdict recorded before
   `route_after` is not applied.
+  *Amended 2026-09-13 (test-author ambiguity 1):* the route CLASSIFY inbox treats a verdict as
+  current only when it was recorded at or after its account's `route_after`. Unarmed, any route
+  verdict excludes the message, so shadow classifies each message once. Armed, a message whose
+  route verdicts all predate `route_after` is back in the inbox. Without this, the shadow period's
+  verdicts would keep the 115 out of V6.5's post-arming backfill, and they would never route. The
+  applied verdict is always a post-arming one, so B7's forward-only rule holds. The cost is one
+  extra local call per shadow-verdicted message, once.
 - B8. `route_candidate_add {account_email, project, description, is_default?}` and
   `route_candidate_remove`: humanOnly, off MCP, audited.
   - `add` refuses an unknown account, an unknown project, an empty description, and a second

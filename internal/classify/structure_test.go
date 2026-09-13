@@ -1179,13 +1179,20 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// data-model section as 0028_inquiry_promotion.sql and renumbered: 0028
 		// went to SWT-43, 0029 to Part D, 0030 to SWT-45. The two branches
 		// merged without a collision.
+		// 32 is SWT-40 Part B's (inquiry-promote, the local-LLM routing tier:
+		// capture_decisions admits mode 'route' with route_step and
+		// ai_extraction_id, the capture_decisions_route_shape CHECK, the partial
+		// capture_decisions_route_uniq, the source_account_projects config table
+		// and source_accounts.route_after), named by its SPEC's data-model
+		// section as 0029_route_tier.sql and renumbered: 0029 went to Part D,
+		// 0030 to SWT-45 and 0031 to Part C.
 		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
 		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
 		// asserts only its own file; the numbers nobody owns are caught HERE,
 		// because the migrate runner keys on schema_migrations.version with NO
 		// checksum — a stray or edited file is skipped SILENTLY and the schema
 		// diverges with no error anywhere.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 {
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}
@@ -1207,13 +1214,25 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 // may read raw_source_items or decode MIME. The links arrive in a COLUMN, filled
 // by the normalizer; a second decoder beside the normalizer is the side door
 // invariant 1 exists to prevent, and SWT-22 rejected it explicitly.
+//
+// AMENDED BY SWT-40 Part B (B-D9), 2026-09-13: the classify store's account
+// join is a NAMED carve-out. The route inbox has to know which source account
+// received a message (the closed candidate set is per account, B-D1), and that
+// fact lives only on raw_source_items.source_account_id. So raw_source_items
+// may appear in exactly ONE place — the value of the const named
+// routeAccountJoin, which must select source_account_id — and raw_json stays
+// banned everywhere: the carve-out is a join for one id column, never a read
+// of the provider payload.
+const bd9CarveOut = "routeAccountJoin"
+
 func TestClassifyPackage_FetchesNothingAndDecodesNoMIME(t *testing.T) {
 	banned := []struct{ token, why string }{
 		{`"net/http"`, "criterion 24: nothing fetches a link, anywhere, ever — no HEAD to expand a tracking redirect, no title fetch, no screenshot"},
 		{`"net/url"`, "the application resolves an INDEX to a stored URL; it never parses, rewrites or unwraps one"},
 		{`"mime"`, "invariant 1: nothing in internal/classify decodes MIME — that is the normalizer's job and a second decoder is the side door raw-first exists to close"},
-		{"raw_source_items", "invariant 1: the classifier reads normalized rows and the links COLUMN, never raw"},
+		{"raw_json", "invariant 1, restated by SWT-40 B-D9: the account join selects source_account_id and nothing else — the provider payload is never read here"},
 	}
+	carveOuts := 0
 	for _, rel := range csSources(t, "internal/classify") {
 		code := csGoCode(t, rel)
 		for _, b := range banned {
@@ -1221,6 +1240,62 @@ func TestClassifyPackage_FetchesNothingAndDecodesNoMIME(t *testing.T) {
 				t.Errorf("%s mentions %q in code (comments stripped) — %s", rel, b.token, b.why)
 			}
 		}
+
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, filepath.Join("..", "..", rel), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", rel, err)
+		}
+		inCarve := map[token.Pos]bool{}
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range vs.Names {
+					if name.Name != bd9CarveOut || i >= len(vs.Values) {
+						continue
+					}
+					carveOuts++
+					var sql strings.Builder
+					ast.Inspect(vs.Values[i], func(n ast.Node) bool {
+						if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							inCarve[lit.Pos()] = true
+							if s, err := strconv.Unquote(lit.Value); err == nil {
+								sql.WriteString(s)
+							}
+						}
+						return true
+					})
+					if !strings.Contains(sql.String(), "raw_source_items") || !strings.Contains(sql.String(), "source_account_id") {
+						t.Errorf("%s: const %s does not join raw_source_items for source_account_id:\n%s — B-D9's carve-out "+
+							"is exactly that join", rel, bd9CarveOut, sql.String())
+					}
+				}
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			if strings.Contains(lit.Value, "raw_source_items") && !inCarve[lit.Pos()] {
+				t.Errorf("%s (%s) mentions raw_source_items outside the one named constant %s — invariant 1: the "+
+					"classifier reads normalized rows and the links COLUMN; B-D9's join is the only raw touch",
+					rel, fset.Position(lit.Pos()), bd9CarveOut)
+			}
+			return true
+		})
+	}
+	if carveOuts != 1 {
+		t.Errorf("internal/classify declares %d const(s) named %s, want exactly 1. B-D9: the route inbox's account "+
+			"join (raw_source_items.source_account_id) lives in ONE named constant, so the raw touch is one line a "+
+			"reviewer can find", carveOuts, bd9CarveOut)
 	}
 }
 
