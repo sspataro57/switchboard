@@ -1,11 +1,19 @@
 -- 0030 jira-activity-revive (SWT-45, docs/tickets/jira-activity-revive_SPEC.md).
 --
+-- Deploy order: apply BEFORE any image built with this file runs. New code selects
+-- capture_rules.revive/.addressed on every capture pass and writes tasks.closed_at on
+-- every close, so a new image on a db without 0030 fails both. Old images are
+-- unaffected by 0030 (docs/runbooks/HANDOFF-kube-jira-activity-revive.md).
+--
 -- (1) Activity is a RULE property (J1). revive: this rule's matches are Jira activity
 -- (owner decision 1). addressed: they are addressed to Salvador (decision 3) and so
 -- override a gated project's assignee check. overrides = revive AND (NOT gate OR
 -- addressed), decided in Go (capture), never here. revive needs an explicit key_regex:
 -- a key derived from a pattern's first group is how rule 10 keys by PREFIX, and a
--- reviving prefix rule would resurrect a catch-all task on every mention.
+-- reviving prefix rule would resurrect a catch-all task on every mention. The CHECK
+-- asks only for SOME external_system; capture_rule_add refuses any but 'jira' (Part
+-- D's hold keys on jira, so another system would bypass the gate), and capture treats
+-- a non-jira reviving rule as inert.
 -- Rules are armed by capture_rule_add (the executor), never by a migration.
 ALTER TABLE capture_rules
   ADD COLUMN revive    BOOLEAN NOT NULL DEFAULT false,
@@ -20,8 +28,12 @@ ALTER TABLE capture_rules
 -- status='closed') and NULLed on reopen. No CHECK ties them to status: integration
 -- fixtures INSERT closed tasks directly. No backfill: a NULL closed_at (pre-0030, or a
 -- close by an old binary during rollout) makes the revive guard fall back to
--- updated_at, which is >= the last close instant because closeTransition stamps it and
--- nothing lowers it. surfaced_* = the last time something other than the reconciler
+-- updated_at, the task's last stamped write. On a closed task only closeTransition
+-- stamps it (logs and surfacing do not), so it is the close instant for any close made
+-- through the executor. It is LATER if a hand-run UPDATE touched updated_at after the
+-- close (then a message ingested in between does not revive), and EARLIER if the task
+-- reached 'closed' by a write that did not stamp it (hand SQL, a fixture INSERT; then a
+-- message ingested in between DOES revive). surfaced_* = the last time something other than the reconciler
 -- put this task on the board (activity revive, overriding-rule creation, a human's
 -- plain reopen); message NULL = a human. The reconciler reads it; only executor
 -- handlers write it. No index: read by primary key only.

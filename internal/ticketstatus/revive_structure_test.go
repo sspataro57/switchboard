@@ -12,13 +12,15 @@ package ticketstatus_test
 // UNCHANGED (criterion 6): 0023 is applied and unamendable, and its five values
 // are still what 0023 says. The six-value set is pinned against 0030 here.
 //
-// RED TODAY: migrations/0030_*.sql does not exist; neither counter line prints
-// resurfaced; the runbook still carries "The gap, until qa-question-resurface
-// ships"; the IK has no SWT-45 entry. The ledger and time.Now guards are green
-// (the ledger was taught 30 alongside these tests; decide.go never needed a
-// clock). The package's test binary does not compile until
-// decide_resurface_test.go's fields exist, so these were verified with that
-// file moved aside.
+// What each test asserts: exactly one migrations/0030_*.sql, named
+// 0030_jira_activity_revive.sql, with criteria 2-4 and 6's shape (SQL and
+// comments checked apart); its last_action CHECK allows exactly six values;
+// internal/classify/structure_test.go's ledger names 30 one by one; decide.go
+// calls no time.Now/Since/Until; Stats has Resurfaced and both ticket_status
+// lines print it; the ticket-status-sync runbook has "Surfaced by activity",
+// no longer "The gap, until qa-question-resurface ships", and its D9 paragraph
+// names the overriding-rule exception; the IK has an SWT-45 heading covering
+// F7, F8, the closed_at/updated_at fallback and J10's cost.
 //
 // NO ADVISORY-LOCK LITERAL IS SPELLED HERE (criterion 7; structure_test.go's
 // recorded reason).

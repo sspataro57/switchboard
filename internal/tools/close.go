@@ -484,8 +484,14 @@ const skipMessagePredatesClose = "message_predates_close"
 //	    the latest judgement that put the task down; message.created_at > guard,
 //	    strictly, on the ONE Postgres clock — else skipped: message_predates_close.
 //	    The updated_at fallback covers a close with no recorded closed_at
-//	    (pre-0030, or an old binary): closeTransition stamps updated_at at every
-//	    close and nothing lowers it. It is spelled here and nowhere else.
+//	    (pre-0030, or an old binary). updated_at is the task's last STAMPED write;
+//	    on a closed task only closeTransition stamps it (task_append_log and
+//	    task_mark_surfaced do not), so for an executor close it is the close
+//	    instant. It errs both ways when something else wrote the row: a hand-run
+//	    UPDATE of updated_at after the close moves the guard later (a missed
+//	    revive); a close written without stamping it (hand SQL, a fixture INSERT)
+//	    leaves the guard before the real close (a message ingested in between
+//	    revives). It is spelled here and nowhere else.
 //	(e) the target is restoreTarget(closed_from_status)
 //	(f) closeTransition to the target
 //	(g) stamp the open dismissal, if any, with the message (exactly one row)

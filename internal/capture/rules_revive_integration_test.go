@@ -1100,3 +1100,119 @@ func TestCaptureRevive_Integration_ARuleAddedLaterDoesNotBackfill(t *testing.T) 
 			"messages act; the ~654 historically mentioned keys must not become tasks retroactively", got)
 	}
 }
+
+// ---- criterion 11 through capture: the pre-0030 close (closed_at NULL) -------
+
+// A task closed before 0030 has closed_at NULL, and the revive guard falls back
+// to updated_at. Through a real capture pass: a message ingested BEFORE that
+// instant is logged and not revived; one ingested after it revives. The first
+// pass's task_append_log must not move updated_at — capture logs FIRST and
+// revives second, so a log that stamped updated_at would make every pre-0030
+// task unrevivable.
+//
+// MUTATION: COALESCE(t.closed_at, t.updated_at) -> t.closed_at in reviveGuarded
+// -> the guard is NULL, the handler errors, and the second pass goes red.
+func TestCaptureRevive_Integration_APre0030CloseFallsBackToUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	s := newCRVSuite(t, ctx)
+	s.mailRule(t, ctx, true)
+
+	task, _ := s.closedTask(t, ctx, "CRV-80")
+	closedAt := s.dbNow(t, ctx).Add(-10 * time.Minute)
+	// Fixture: what a pre-0030 close looks like — status closed, no close record,
+	// updated_at = the close instant (the old closeTransition stamped only that).
+	s.exec(t, ctx, `UPDATE tasks SET closed_at = NULL, closed_from_status = NULL, updated_at = $2 WHERE id = $1`,
+		task, closedAt)
+
+	before := s.mailMsg(t, ctx, crvMailFrom, "inbound", "(CRV-80) Old news", "",
+		closedAt.Add(-time.Minute), closedAt.Add(-time.Minute))
+	first := s.pass(t, ctx, capture.RulesModeLive)
+	if got := s.status(t, ctx, task); got != "closed" || first.Revived != 0 {
+		t.Fatalf("a message ingested BEFORE the pre-0030 close's updated_at revived the task (%q, revived=%d); "+
+			"want closed / 0 (message_predates_close)", got, first.Revived)
+	}
+	if n := s.audits(t, ctx, task, "task_reopen", crvActor); n != 1 {
+		t.Errorf("task_reopen audit rows = %d, want 1: capture asked, and the HANDLER refused on the fallback", n)
+	}
+	var updated time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT updated_at FROM tasks WHERE id = $1`, task).Scan(&updated); err != nil {
+		t.Fatalf("read updated_at: %v", err)
+	}
+	if !updated.Equal(closedAt) {
+		t.Fatalf("updated_at moved %s -> %s across a log-only pass: the fallback instant is no longer the close "+
+			"(the log for message %d stamped it)", closedAt, updated, before)
+	}
+
+	after := s.mailMsg(t, ctx, crvMailFrom, "inbound", "Katie Evans mentioned you on CRV-80", "",
+		closedAt.Add(time.Minute), closedAt.Add(time.Minute))
+	second := s.pass(t, ctx, capture.RulesModeLive)
+	if got := s.status(t, ctx, task); got != "ready" || second.Revived != 1 {
+		t.Errorf("a message ingested AFTER the pre-0030 close's updated_at left the task %q (revived=%d); want ready / 1 "+
+			"— closed_at NULL must fall back to updated_at, not refuse", got, second.Revived)
+	}
+	if at, by := s.surfaced(t, ctx, task); at == nil || by == nil || *by != after {
+		t.Errorf("surfaced_at=%v by=%v, want set / %d", at, by, after)
+	}
+}
+
+// ---- J18 through capture: a non-jira reviving rule is inert -------------------
+
+// Criterion 45's capture half. capture_rule_add refuses `revive` without
+// external_system='jira', but 0030's CHECK asks only for SOME system, so a
+// github reviving+addressed rule can still be stored by direct SQL. On a GATED
+// project it must neither revive nor surface: Part D's hold keys on
+// system == "jira", so without decideMessage's `system == "jira" &&` such a rule
+// would revive and surface past the assignee check.
+//
+// MUTATION: drop `system == "jira" &&` from decideMessage's `activity` -> red
+// (CRG-41's closed task revives; CRG-42's new task is surfaced).
+func TestCaptureRevive_Integration_ANonJiraRevivingRuleIsInert(t *testing.T) {
+	ctx := context.Background()
+	s := newCRVSuite(t, ctx)
+	rule := s.id(t, ctx,
+		`INSERT INTO capture_rules (project_id, criteria_type, pattern, external_system, key_regex, url_template,
+		                            priority, enabled, note, revive, addressed)
+		 VALUES ($1,'sender',$2,'github',$3,'https://github.test/{key}',92,true,'itest-caprev',false,false) RETURNING id`,
+		s.gated, crvGatedFrom, `^[^\n]*?\b(CRG-[0-9]+)\b`)
+	githubTask := func(key string) (int64, bool) {
+		var id int64
+		err := s.pool.QueryRow(ctx, `SELECT r.task_id FROM external_refs r JOIN tasks t ON t.id = r.task_id
+		                              WHERE r.system='github' AND r.external_key=$1 AND t.project_id=$2`, key, s.gated).Scan(&id)
+		return id, err == nil
+	}
+
+	// A github-linked task for CRG-41, created while the rule is plain, then closed.
+	start := s.dbNow(t, ctx).Add(-30 * time.Minute)
+	s.mailMsg(t, ctx, crvGatedFrom, "inbound", "Katie Evans mentioned you on CRG-41", "", start, start)
+	s.pass(t, ctx, capture.RulesModeLive)
+	task, ok := githubTask("CRG-41")
+	if !ok {
+		t.Fatalf("fixture: no github-linked task for CRG-41 after the plain rule's pass")
+	}
+	s.humanClose(t, ctx, task)
+	closedAt := s.dbNow(t, ctx)
+
+	// Stored around capture_rule_add: revive + addressed on a github rule.
+	s.exec(t, ctx, `UPDATE capture_rules SET revive = true, addressed = true WHERE id = $1`, rule)
+	m := s.mailMsg(t, ctx, crvGatedFrom, "inbound", "Katie Evans mentioned you on CRG-41", "", closedAt.Add(time.Second), closedAt)
+	s.mailMsg(t, ctx, crvGatedFrom, "inbound", "Katie Evans mentioned you on CRG-42", "", closedAt.Add(time.Second), closedAt)
+
+	stats := s.pass(t, ctx, capture.RulesModeLive)
+
+	if got := s.status(t, ctx, task); got != "closed" {
+		t.Errorf("CRG-41's github-linked task is %q, want closed: a reviving rule on a non-jira system is inert (J18)", got)
+	}
+	if reason, _ := s.decisionReason(t, ctx, m, capture.RulesModeLive); strings.Contains(reason, "revive") {
+		t.Errorf("CRG-41's reason = %q, want no revive wording", reason)
+	}
+	created, found := githubTask("CRG-42")
+	if !found {
+		t.Fatalf("no github-linked task for CRG-42: the rule still creates, it just is not activity")
+	}
+	if at, _ := s.surfaced(t, ctx, created); at != nil {
+		t.Errorf("CRG-42's task was surfaced (%v) by a non-jira rule on a gated project (J18)", at)
+	}
+	if stats.Revived != 0 || stats.SurfacedCreated != 0 {
+		t.Errorf("RulesStats revived=%d surfaced_created=%d, want 0 / 0", stats.Revived, stats.SurfacedCreated)
+	}
+}

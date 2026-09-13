@@ -401,7 +401,10 @@ OR addressed)`:
 
 The tool and migration 0030's CHECKs refuse two combinations:
 
-- `--revive` needs `--external-system` and an explicit `--key-regex` that
+- `--revive` needs `--external-system jira` (the tool refuses any other system:
+  Part D's hold keys on jira, so a reviving github/slack rule would bypass a gated
+  project's assignee check; the CHECK asks only for some system, and capture
+  treats a non-jira reviving rule as inert) and an explicit `--key-regex` that
   captures the WHOLE ticket key. Without a `key_regex` the key is the pattern's
   first group. That is how rule 10 (`(WEB|API|OPS)-[0-9]+`) keys by PREFIX, and a
   reviving prefix rule would resurrect the catch-all tasks 56/57/60 on every
@@ -438,8 +441,45 @@ opsctl capture-rules add --project collaboratory --type sender --pattern jira@tr
   considers him involved in, and it is the only copy that revives, so a comment
   that arrives twice revives once.
 
-**Reengine's addressed rule (J4).** Seed it only if pre-check 0d confirmed the
-subject shapes. Use the literal wording 0d returned, and a priority above rules
+**His own Jira COMMENTS never revive (J17); his edits can.** Jira can mail him
+about his own changes ("Anonymous (JIRA)"). Capture skips a revive, or a
+creation, when the ticket's connector thread `jira:{site_host}:{KEY}` holds an
+OUTBOUND message (his comment) sent between 10 minutes before and 2 minutes
+after the email. The decision reason says `own_action`: on a closed task the
+email is only logged (`revive skipped`); for a ticket with no task it is
+`attributed` (`no task created`).
+
+- **Comments only.** His field and status edits leave no outbound message (the
+  connector stores no changelog), so their Anonymous notices revive or create.
+  On prod that is 182 of the 208 Anonymous Treetop emails. The only protection
+  is turning off Jira's "Notify me about my own changes", and Verification 0c
+  gates J2's seeding on it.
+- **A named actor is someone else.** An email whose From names another person,
+  `"Katie Evans (JIRA)" <…>`, is decided at once even inside the window around
+  his comment (reason `actor named`): no skip, no wait. Only "Anonymous (JIRA)",
+  or a From with no "(JIRA)" shape, goes through the window.
+- **Deferred, then BLIND.** If connector-jira has not yet polled past the email
+  (no `ok` run started after it, or the key's comment rows not yet normalized),
+  the message is left undecided: a `capture rules: message N deferred` log line,
+  `"deferred"` on the counter line, and a retry every pass. That lasts up to 30
+  minutes from ingest. Then the pass decides as if clear (fail-open): the reason
+  says the guard ran BLIND, and `"blind"` on the counter line counts it.
+- Keys no provider='jira' account's scopes cover (lookup-only LHH) are not
+  guarded: nothing stores his comments there.
+
+**`--limit` reads the oldest first.** A hand-run `opsctl capture-rules run
+--limit N` takes the N OLDEST pending messages (by sent_at). A deferred message
+stays pending, so for up to 30 minutes deferred rows can use up the whole limit,
+and the run decides nothing new. Raise N, or wait for the next jira tick.
+`--limit` is for the narrow smoke only; no CronJob sets it.
+
+**Live horizon floor.** A live pass refuses a horizon under 2h
+(`--since` or `CAPTURE_RULES_SINCE`) with an error. A deferred message writes no
+decision row, so a shorter window could let it age out undecided. A value that
+doesn't parse, or isn't positive, still falls back to 720h without a word.
+
+**Reengine's addressed rule (J4). NOT seeded:** pre-check 0d returned 0 rows on
+prod (2026-09-12). Seed it only if a later 0d confirms the subject shapes. Use the literal wording 0d returned, and a priority above rules
 1 and 2 and below 95:
 
 ```bash

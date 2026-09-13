@@ -27,16 +27,26 @@ const DefaultLookupTTL = time.Hour
 // as `unpolled`, before any HTTP request exists to be aimed.
 var issueKeyPattern = regexp.MustCompile(`^([A-Z][A-Z0-9]*)-[A-Z0-9]+$`)
 
+// KeyPrefix is key's project prefix, the thing an account's scopes claim; ok is
+// false for anything issueKeyPattern cannot read. The ONE spelling, shared with
+// capture's own-action guard (SWT-45), which asks which poller covers a key.
+func KeyPrefix(key string) (string, bool) {
+	m := issueKeyPattern.FindStringSubmatch(key)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
 // RouteLookup picks the lookup account whose declared scopes claim key's
 // project prefix (D18). outcome is one of "routed" | "unpolled" | "ambiguous" —
 // the counter names criterion 43 prints. A refusal hands back the zero Account:
 // nothing to fetch with.
 func RouteLookup(key string, accounts []jira.Account) (jira.Account, string) {
-	m := issueKeyPattern.FindStringSubmatch(key)
-	if m == nil {
+	prefix, ok := KeyPrefix(key)
+	if !ok {
 		return jira.Account{}, "unpolled"
 	}
-	prefix := m[1]
 
 	var claimed []jira.Account
 	for _, a := range accounts {

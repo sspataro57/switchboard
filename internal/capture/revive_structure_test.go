@@ -7,11 +7,12 @@ package capture
 // "Activity rules (SWT-45)" section (criteria 17 and 40). ZERO I/O beyond
 // reading this repo. Reuses mustReadRepoFile from rules_structure_test.go.
 //
-// RED TODAY: revive.go does not exist; no main prints "revived" or
-// "surfaced_created"; opsctl has no --revive / --addressed; the runbook has no
-// activity section. (This file compiles on its own, but the package's test
-// binary also holds revive_test.go, which does not compile until overrides
-// exists.)
+// Each test pins a fact that holds once SWT-45 is implemented: revive.go
+// declares overrides and imports no context, pgx, environment or provider;
+// every printer of the capture counter line also prints "revived" and
+// "surfaced_created"; opsctl's add declares both bool flags and its list
+// selects both columns; the runbook's activity section names the flags, the
+// truth table, the J2/J4 commands, F8 and J10's cost.
 
 import (
 	"os"
@@ -74,6 +75,17 @@ func TestCaptureCounterLines_PrintRevivedAndSurfacedCreated(t *testing.T) {
 				t.Errorf("%s prints the capture counters without %s. Criterion 28: zeros included — "+
 					"a revive that happened and a revive that could not happen must not print the same line, "+
 					"and Verification step 8 keys on these two counters", rel, want)
+			}
+		}
+		// J17 (second review batch): the own-action guard's undecided and blind
+		// outcomes are visible on the same line, zeros included. A deferral writes
+		// no decision row and a blind decision fails open, so the log line is the
+		// only place either shows up without a query. The gate line
+		// (cmd/opsctl/gate.go) prints them as constant 0, as it does revived.
+		for _, want := range []string{`\"deferred\":%d`, `\"blind\":%d`} {
+			if !strings.Contains(src, want) {
+				t.Errorf("%s prints the capture counters without %s (SPEC J17: RulesStats.Deferred and .Blind, "+
+					"zeros included)", rel, want)
 			}
 		}
 		return nil

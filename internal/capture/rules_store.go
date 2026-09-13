@@ -28,8 +28,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sspataro57/switchboard/internal/connector/jira"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/textmatch"
+	"github.com/sspataro57/switchboard/internal/ticketstatus"
 )
 
 // RulesAdvisoryLockKey serializes the pass across the four connector CronJobs,
@@ -56,6 +58,18 @@ const (
 // (`opsctl capture-rules run --live --since 8760h`).
 const DefaultRulesHorizon = DefaultObserveHorizon
 
+// MinLiveRulesHorizon is the shortest LIVE horizon normalize accepts (SWT-45
+// J17). The own-action guard's deferral writes NO decision row, so a deferred
+// message is decided only while it is still inside the horizon. The horizon is
+// measured on sent_at, the deferral from ingest, so a message must stay inside
+// the window for: its sent→ingest lag (mail delivery plus a */15 connector tick),
+// OwnActionMaxWait (30m), and one more */15 pass to make the post-bound
+// decision. 2h covers those 45 minutes plus 75 minutes of margin — five missed
+// */15 ticks, or a slow mail relay — before a deferred message could age out
+// undecided. Shadow is not floored: it acts on nothing, and its short horizons
+// are diffing tools.
+const MinLiveRulesHorizon = 2 * time.Hour
+
 // DefaultRulesActor is the actor every executor call this pass makes is attributed
 // to when the caller names none. SPEC "API / MCP tool changes" spells the shape
 // `capture:{connector}`; a connector main that knows which one it is should set
@@ -75,6 +89,11 @@ const (
 // RulesConfig is the pass's per-run configuration.
 //
 // Mode and Horizon are SPEC §6. Limit bounds one run (the narrow live smoke).
+// It is smoke-only, and it has a head-of-line effect: the pending query reads
+// oldest first (sent_at, id), and an own-action-deferred message stays pending,
+// so up to OwnActionMaxWait a run with Limit N can spend its N on deferred rows
+// and decide nothing new. No CronJob sets Limit; a hand-run `--limit` should
+// expect that (docs/runbooks/capture-rules.md).
 //
 // Actor and All are additive on the shared contract and both default safely, so a
 // caller that sets neither gets exactly the contracted behaviour:
@@ -101,6 +120,13 @@ type RulesConfig struct {
 // answered reopened:true for (also counted in Appended); SurfacedCreated counts
 // tasks an overriding rule created and task_mark_surfaced surfaced (also
 // counted in TasksCreated).
+//
+// Deferred (SWT-45 J17) counts messages the own-action guard left undecided
+// because the ticket's Jira thread is not yet known synced past them: no
+// decision row, not Considered, pending again next pass. Counted in both modes.
+// Blind counts decisions the guard made BLIND: still not synced after
+// OwnActionMaxWait, so the pass decided as if clear (fail-open, SPEC J17).
+// Each is also Considered and its reason says BLIND. Counted in both modes.
 type RulesStats struct {
 	Considered      int
 	Matched         int
@@ -110,6 +136,8 @@ type RulesStats struct {
 	Reopened        int
 	Revived         int
 	SurfacedCreated int
+	Deferred        int
+	Blind           int
 }
 
 // RulesMode reads CAPTURE_RULES_MODE. Anything that is not exactly "live" —
@@ -165,6 +193,14 @@ func (c RulesConfig) normalize() (RulesConfig, error) {
 		// Structural, not caller-supplied: the anti-flood bound must not depend on
 		// every caller remembering it.
 		c.Horizon = DefaultRulesHorizon
+	}
+	if c.Mode == RulesModeLive && c.Horizon < MinLiveRulesHorizon {
+		// A positive CAPTURE_RULES_SINCE / --since below the floor lands here: it
+		// errors the pass rather than silently widening the window.
+		return c, fmt.Errorf("capture rules: live horizon %s is below the %s floor: a message the own-action "+
+			"guard defers (up to %s from ingest) writes no decision row and would age out of the window undecided; "+
+			"set CAPTURE_RULES_SINCE / --since to at least %s", c.Horizon, MinLiveRulesHorizon, OwnActionMaxWait,
+			MinLiveRulesHorizon)
 	}
 	if c.Actor == "" {
 		c.Actor = DefaultRulesActor
@@ -231,6 +267,12 @@ type ruleDecision struct {
 	// tasks.surfaced_* (the SWT-36 D7 precedent).
 	revive  bool
 	surface bool
+	// deferred: the own-action guard (J17) could not yet decide, so NO row is
+	// written and the message stays pending — the live claim is not spent.
+	deferred bool
+	// blind: the guard decided past OwnActionMaxWait without the freshness it
+	// wanted (the reason says BLIND). Carried for RulesStats.Blind only.
+	blind bool
 }
 
 // Actions, spelled exactly as capture_decisions.action's CHECK (SPEC §4).
@@ -303,6 +345,14 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 		if err != nil {
 			return stats, err
 		}
+		if decision.deferred {
+			// SWT-45 J17: deciding now could revive a task on his own Jira
+			// action the poller has not stored yet. Writing nothing leaves the
+			// message pending; OwnActionMaxWait bounds how long.
+			stats.Deferred++
+			log.Printf("capture rules: message %d deferred: %s", pm.msg.ID, decision.reason)
+			continue
+		}
 
 		decisionID, inserted, err := insertDecision(ctx, pool, cfg.Mode, pm, decision)
 		if err != nil {
@@ -317,6 +367,9 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 			continue
 		}
 		stats.Considered++
+		if decision.blind {
+			stats.Blind++
+		}
 		if decision.action == actionUnmatched {
 			stats.Unmatched++
 		} else {
@@ -649,7 +702,11 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 
 	// SWT-45 J1: is this match activity that revives a closed task or surfaces
 	// a new one? The flags and the gate are all COLUMNS, loaded with the rules.
-	activity := overrides(winner.revive, winner.addressed, winner.gateOn)
+	// Only a jira-keyed match can be activity: the Part D hold below keys on
+	// system == "jira", so a reviving rule on any other system would slip past
+	// a gated project's assignee check. capture_rule_add refuses such a rule;
+	// this keeps one stored some other way inert.
+	activity := system == "jira" && overrides(winner.revive, winner.addressed, winner.gateOn)
 	requested := "revive requested"
 	surfacing := "surface requested"
 	if mode != RulesModeLive {
@@ -692,8 +749,23 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 			// decides (ingested after the close, an open dismissal included).
 			// Activity on an OPEN task only logs (J10), or the ticket-closed
 			// email would pin every done ticket's task open.
-			d.revive = true
-			d.reason += fmt.Sprintf("; task %d is closed and rule %d is activity; %s", taskID, winner.rule.ID, requested)
+			verdict, note, err := ownActionGuard(ctx, pool, pm, key)
+			if err != nil {
+				return d, winner, err
+			}
+			switch verdict {
+			case ownActionDefer:
+				d.deferred = true
+				d.reason += note
+			case ownActionSkip:
+				// J17: his own action. Log only — neither the revive nor
+				// SWT-36's dismissal reopen: the mail is not new activity.
+				d.reason += note + "; revive skipped"
+			default:
+				d.revive = true
+				d.blind = verdict == ownActionBlind
+				d.reason += fmt.Sprintf("; task %d is closed and rule %d is activity; %s", taskID, winner.rule.ID, requested) + note
+			}
 		case existing.dismissalID != 0:
 			d.dismissalID = existing.dismissalID
 			d.reason += fmt.Sprintf("; task %d was dismissed (%s); reopen requested against dismissal %d",
@@ -705,10 +777,170 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 	d.reason = fmt.Sprintf("rule %d (%s): first message for %s %s on %s; create one task",
 		winner.rule.ID, winner.rule.Kind, system, key, winner.rule.Project)
 	if activity {
-		d.surface = true
-		d.reason += fmt.Sprintf("; rule %d is activity; %s", winner.rule.ID, surfacing)
+		verdict, note, err := ownActionGuard(ctx, pool, pm, key)
+		if err != nil {
+			return d, winner, err
+		}
+		switch verdict {
+		case ownActionDefer:
+			d.deferred = true
+			d.reason += note
+		case ownActionSkip:
+			// J17: no task for his own action. Attribution only, so no other
+			// rule can pick the message up: first match already won.
+			d.action = actionAttributed
+			d.reason += note + "; no task created"
+		default:
+			d.surface = true
+			d.blind = verdict == ownActionBlind
+			d.reason += fmt.Sprintf("; rule %d is activity; %s", winner.rule.ID, surfacing) + note
+		}
 	}
 	return d, winner, nil
+}
+
+// ownActionGuard runs the own-action guard (SWT-45 J17, ownaction.go) for an
+// activity match that would revive or create, and returns its verdict with the
+// reason suffix the decision records ("" when clear). A blind verdict is also
+// logged: the guard wanted a fact it never got.
+func ownActionGuard(ctx context.Context, pool *pgxpool.Pool, pm pendingMessage, key string) (string, string, error) {
+	obs, hit, err := ownActionFacts(ctx, pool, key, pm)
+	if err != nil {
+		return "", "", err
+	}
+	from, to := ownActionWindow(pm.sentAt)
+	verdict := decideOwnAction(obs)
+	switch verdict {
+	case ownActionNotApplicable:
+		return verdict, fmt.Sprintf("; own-action guard not applicable (no jira poller covers %s)", key), nil
+	case ownActionNamed:
+		note := fmt.Sprintf("; own-action guard: actor named (%q, not his), proceeding without waiting", obs.actor)
+		if obs.found {
+			note += fmt.Sprintf("; his outbound message %d (%q) is inside [%s, %s] but the email names another actor",
+				hit.messageID, hit.sender, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+		}
+		return verdict, note, nil
+	case ownActionSkip:
+		return verdict, fmt.Sprintf("; %s: outbound message %d on %s sent %s, inside [%s, %s] around this message",
+			ownActionSkip, hit.messageID, hit.threadKey, hit.sentAt.UTC().Format(time.RFC3339),
+			from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339)), nil
+	case ownActionDefer:
+		return verdict, fmt.Sprintf("; own-action guard deferred: %s not known synced past %s (waited %s of %s)",
+			key, ownActionSyncedPast(pm.sentAt).UTC().Format(time.RFC3339), obs.waited.Round(time.Second), OwnActionMaxWait), nil
+	case ownActionBlind:
+		note := fmt.Sprintf("; own-action guard ran BLIND: %s still not known synced past %s after %s",
+			key, ownActionSyncedPast(pm.sentAt).UTC().Format(time.RFC3339), OwnActionMaxWait)
+		log.Printf("capture rules: message %d%s", pm.msg.ID, note)
+		return verdict, note, nil
+	}
+	return verdict, "", nil
+}
+
+// ownActionHit is the outbound message that made a match his own action.
+type ownActionHit struct {
+	messageID int64
+	threadKey string
+	sentAt    time.Time
+	sender    string // normalized_messages.sender: his Jira display name, as the connector stores it
+}
+
+// ownActionFacts reads the own-action guard's inputs for key K and message pm
+// (SWT-45 J17). Reads only; every instant it binds comes from ownaction.go.
+//
+//   - pollers: provider='jira' accounts whose scopes claim K's prefix
+//     (ticketstatus.KeyPrefix, RouteLookup's rule). Only a poller stores his
+//     comments, on `jira:{site_host}:{K}` (jira.SiteHost of domain_default,
+//     the connector's own thread-key spelling).
+//   - found: an OUTBOUND message on one of those threads with sent_at inside
+//     ownActionWindow. Both predicates are the guard: an inbound comment in
+//     the window is someone else's, an outbound one outside it is old.
+//   - fresh: EVERY such poller has an 'ok' sync_runs row that STARTED after
+//     ownActionSyncedPast (its JQL then covered the comment), and no raw row of
+//     K under it awaits normalization (a comment fetched but not yet a message).
+//   - waited: now() minus the message's ingest, on the database clock.
+func ownActionFacts(ctx context.Context, pool *pgxpool.Pool, key string, pm pendingMessage) (ownActionObservation, ownActionHit, error) {
+	obs := ownActionObservation{actor: namedJiraActor(pm.msg.Sender)}
+	var hit ownActionHit
+	prefix, ok := ticketstatus.KeyPrefix(key)
+	if !ok {
+		return obs, hit, nil
+	}
+	rows, err := pool.Query(ctx,
+		`SELECT id, COALESCE(domain_default,''), scopes FROM source_accounts WHERE provider = 'jira' ORDER BY id`)
+	if err != nil {
+		return obs, hit, fmt.Errorf("own-action guard: select jira pollers: %w", err)
+	}
+	var pollers []int64
+	var threads []string
+	for rows.Next() {
+		var id int64
+		var domain string
+		var scopes []string
+		if err := rows.Scan(&id, &domain, &scopes); err != nil {
+			rows.Close()
+			return obs, hit, fmt.Errorf("own-action guard: scan jira poller: %w", err)
+		}
+		for _, s := range scopes {
+			if s == prefix {
+				pollers = append(pollers, id)
+				threads = append(threads, "jira:"+jira.SiteHost(domain)+":"+key)
+				break
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return obs, hit, fmt.Errorf("own-action guard: iterate jira pollers: %w", err)
+	}
+	obs.pollers = len(pollers)
+	if obs.pollers == 0 {
+		return obs, hit, nil
+	}
+
+	from, to := ownActionWindow(pm.sentAt)
+	err = pool.QueryRow(ctx,
+		`SELECT o.id, nt.thread_key, o.sent_at, COALESCE(o.sender,'')
+		   FROM normalized_messages o
+		   JOIN normalized_threads nt ON nt.id = o.thread_id
+		  WHERE nt.thread_key = ANY($1)
+		    AND o.direction = 'outbound'
+		    AND o.sent_at >= $2 AND o.sent_at <= $3
+		  ORDER BY o.sent_at, o.id LIMIT 1`, threads, from, to).Scan(&hit.messageID, &hit.threadKey, &hit.sentAt, &hit.sender)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return obs, hit, fmt.Errorf("own-action guard: look for his action on %s: %w", key, err)
+	default:
+		obs.found = true
+		obs.hisName = hit.sender
+	}
+	if _, settled := ownActionSettled(obs); settled {
+		// A named-other actor, or his outbound message in the window: the
+		// verdict is already fixed, so the freshness reads below are skipped.
+		return obs, hit, nil
+	}
+
+	var stale int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM unnest($1::bigint[]) AS p(id)
+		  WHERE NOT EXISTS (SELECT 1 FROM sync_runs r
+		                     WHERE r.source_account_id = p.id AND r.status = 'ok' AND r.started_at > $2)
+		     OR EXISTS (SELECT 1 FROM raw_source_items ri
+		                 WHERE ri.source_account_id = p.id AND ri.normalized_at IS NULL
+		                   AND (ri.external_id = $3 OR ri.external_id LIKE $4))`,
+		pollers, ownActionSyncedPast(pm.sentAt), jira.IssueRawID(key), jira.CommentRawIDPrefix(key)+"%").Scan(&stale); err != nil {
+		return obs, hit, fmt.Errorf("own-action guard: read poller freshness for %s: %w", key, err)
+	}
+	obs.fresh = stale == 0
+
+	var secs float64
+	if err := pool.QueryRow(ctx,
+		`SELECT EXTRACT(EPOCH FROM (now() - created_at))::float8 FROM normalized_messages WHERE id = $1`,
+		pm.msg.ID).Scan(&secs); err != nil {
+		return obs, hit, fmt.Errorf("own-action guard: read ingest time of message %d: %w", pm.msg.ID, err)
+	}
+	obs.waited = time.Duration(secs * float64(time.Second))
+	return obs, hit, nil
 }
 
 // evaluateAll records every rule that matched, not just the winner, by calling

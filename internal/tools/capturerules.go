@@ -148,9 +148,13 @@ func parseCaptureRuleAdd(args []byte) (captureRuleAddArgs, error) {
 			"activity first (pass revive too)")
 	}
 	if a.Revive {
-		if a.ExternalSystem == "" {
-			return a, errors.New("revive requires external_system: an attribution-only rule creates nothing and " +
-				"so can revive nothing")
+		if a.ExternalSystem != "jira" {
+			// An attribution-only rule creates nothing and so can revive nothing.
+			// Any other system is refused too: SWT-40 Part D's hold keys on
+			// system == "jira", so a reviving github/slack/gmail rule on a gated
+			// project would create and surface past the assignee check.
+			return a, fmt.Errorf("revive requires external_system jira (got %q): activity is Jira activity, and "+
+				"the gated-project assignee check only holds jira-keyed matches", a.ExternalSystem)
 		}
 		if a.KeyRegex == "" {
 			// F1: with no key_regex the key is the pattern's FIRST group, which is

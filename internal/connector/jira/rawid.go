@@ -10,6 +10,13 @@ func IssueRawID(key string) string {
 	return "issue:" + key
 }
 
+// CommentRawIDPrefix is the ONE spelling of the prefix every comment of key is
+// stored under (`comment:{KEY}:{id}`): ingestIssue writes it, and capture's
+// own-action guard (SWT-45) asks whether any of them still awaits normalization.
+func CommentRawIDPrefix(key string) string {
+	return "comment:" + key + ":"
+}
+
 // ParseIssueRawID is IssueRawID's inverse: ok is false for a comment raw id
 // (`comment:{KEY}:{id}`), for a bare issue key, and for anything else. The
 // normalizer's issue/comment switch is this pair's only reader; a HasPrefix in

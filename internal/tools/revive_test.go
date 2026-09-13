@@ -193,6 +193,26 @@ func TestParseCaptureRuleAdd_ActivityFlags(t *testing.T) {
 			why:    "an attribution-only rule creates nothing and so can revive nothing; J1 refuses the combination",
 		},
 		{
+			// SWT-45 review fix: Part D's hold keys on system == "jira", so a
+			// reviving rule on any other system would create and surface past a
+			// gated project's assignee check. Refused for every non-jira system.
+			name:   "revive with external_system github",
+			args:   with(j2, "external_system", "github", "revive", true),
+			wantIn: []string{"revive", "external_system", "jira"},
+			why:    "a non-jira reviving rule bypasses the SWT-40 Part D assignee gate",
+		},
+		{
+			name:   "revive with external_system slack",
+			args:   with(j2, "external_system", "slack", "revive", true),
+			wantIn: []string{"revive", "external_system", "jira"},
+			why:    "same bypass; slack is a legal external_system for a NON-reviving rule",
+		},
+		{
+			name:   "github without revive stays legal (today's shape)",
+			args:   with(j2, "external_system", "github"),
+			wantOK: true,
+		},
+		{
 			name:   "addressed without revive",
 			args:   with(j2, "addressed", true),
 			wantIn: []string{"addressed", "revive"},

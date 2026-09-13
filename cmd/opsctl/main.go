@@ -392,7 +392,7 @@ func parseCaptureRuleAdd(argv []string) (string, json.RawMessage, error) {
 	priority := fs.Int("priority", 0, "evaluation priority; evaluation order is priority DESC, id ASC and first match wins")
 	note := fs.String("note", "", "why this rule exists")
 	revive := fs.Bool("revive", false, "SWT-45: matches are Jira activity; revive the ticket's closed task or create one, "+
-		"and surface it past the reconciler (needs --external-system and --key-regex)")
+		"and surface it past the reconciler (needs --external-system jira and --key-regex)")
 	addressed := fs.Bool("addressed", false, "SWT-45: matches are addressed to him and override a gated project's "+
 		"assignee check (implies activity; pass --revive too)")
 	if err := fs.Parse(argv); err != nil {
@@ -425,8 +425,8 @@ func parseCaptureRuleAdd(argv []string) (string, json.RawMessage, error) {
 			payload[o.key] = o.value
 		}
 	}
-	// Sent only when set; the TOOL enforces J1's two rules (revive needs a key
-	// regex and an external system; addressed needs revive).
+	// Sent only when set; the TOOL enforces J1/J18's rules (revive needs a key
+	// regex and external_system jira; addressed needs revive).
 	if *revive {
 		payload["revive"] = true
 	}
@@ -565,8 +565,8 @@ func runCaptureRulesRun(argv []string) error {
 	// Printed unconditionally, zeros included, and before the error check: a pass
 	// that matched nothing and a pass that never ran must not look the same.
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
-		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d}\n",
-		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated)
+		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d}\n",
+		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated, stats.Deferred, stats.Blind)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
 	}

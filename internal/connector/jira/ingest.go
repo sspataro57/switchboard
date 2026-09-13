@@ -201,7 +201,7 @@ func ingestIssue(ctx context.Context, c *Client, sink Sink, acct Account, key st
 			return fmt.Errorf("comment on %s missing id: %.100s", key, cm)
 		}
 		stats.CommentsFetched++
-		if err := upsertRaw(ctx, sink, acct.ID, "comment:"+key+":"+meta.ID, cm, stats); err != nil {
+		if err := upsertRaw(ctx, sink, acct.ID, CommentRawIDPrefix(key)+meta.ID, cm, stats); err != nil {
 			return err
 		}
 	}
