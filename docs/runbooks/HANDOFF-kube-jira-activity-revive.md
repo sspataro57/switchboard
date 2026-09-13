@@ -4,14 +4,14 @@
 
 The switchboard session builds and pushes the image. The kube session owns the manifests in `kube/switchboard`. Do the steps in order, one at a time. Nothing here adds a workload, an env var or a Service.
 
-**Image:** `192.168.50.20:5000/switchboard:<tag>`. The tag is filled in when SWT-45 merges. Use ONE tag for everything below.
+**Image:** `192.168.50.20:5000/switchboard:0.7.15` (`sha256:8f596fcaa024c9a02f96990dd6e7b37e1d1996f0157728fc2cef7d553de9f5f9`, main 42ef053; handed off 2026-09-13). It also carries SWT-40 Part C, so keep Part C's settings as they are: classify-promote pinned to `--lane personal`, and pipelined's `PIPELINE_STAGES` unchanged until that handoff's step 4. Use ONE tag for everything below.
 
 ## 1. Migration first
 
 Apply `migrations/0030_jira_activity_revive.sql` to the `ops` db with the usual one-shot `migrate` Job on the new image. From a workstation, `DATABASE_URL="$OPS_DATABASE_URL" go run ./cmd/tools/migrate --dir migrations` does the same.
 
-- Before: `SELECT max(version) FROM schema_migrations` must be `0029`. If 0028/0029 are not applied, stop: 0030 assumes them.
-- After: expect `0030`. Also check `SELECT count(*) FROM pg_constraint WHERE conrelid='ticket_status_syncs'::regclass AND contype='c' AND pg_get_constraintdef(oid) LIKE '%last_action%'` returns `1`. The migration's own `DO $$` self-check already raises otherwise.
+- Before: 0028 and 0029 must be in `schema_migrations`, and 0030 must not be. If 0028/0029 are not applied, stop: 0030 assumes them. 0031 (SWT-40 Part C) may already be applied; it merged first and touches only `projects`, so `max(version)` can read `0031` here. That is expected.
+- After: 0030 is present. Also check `SELECT count(*) FROM pg_constraint WHERE conrelid='ticket_status_syncs'::regclass AND contype='c' AND pg_get_constraintdef(oid) LIKE '%last_action%'` returns `1`. The migration's own `DO $$` self-check already raises otherwise.
 - Old images are unaffected by 0030. They never read the new columns. Their closes leave `closed_at` NULL, and the revive guard falls back to `updated_at` for those.
 
 ## 2. Connectors and pipelined: one tag, together
