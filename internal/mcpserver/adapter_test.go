@@ -99,7 +99,10 @@ var wantAgentTools = []string{
 	"mark_done_local",
 	"create_child_task",
 	"record_decision",
-	"draft_delivery",     // agent-facing since SWT-8: THE route for client-visible words
+	"draft_delivery", // agent-facing since SWT-8: THE route for client-visible words
+	// SWT-44: MCP-listed so a session can fix the words it drafted. Still
+	// policy.humanOnly, so a worker console is refused; the user profile lists it.
+	"update_delivery",
 	"link_external_ref",  // agent-facing since SWT-9: workers link their PRs/issues
 	"mark_delivery_sent", // agent-facing since SWT-12 (Q1): resolve a 'sending' Slack row
 	// SWT-11 (criterion 16): read-only, served from normalized_messages rather
@@ -207,6 +210,15 @@ var spineTools = []string{
 	// ticketstatus:jira), which is precisely why its absence from the MCP surface
 	// is asserted rather than assumed.
 	"task_reopen",
+	// SWT-43 (delivery-deny) criterion 7, D9: reject_delivery is humanOnly AND off
+	// the MCP surface in every profile. It joins mark_delivery_failed and
+	// prefill_delivery: a delivery verdict on a worker's own words belongs to the
+	// human, and the brief put MCP profile changes out of scope. The asymmetry is
+	// recorded, not fixed: approve_delivery and send_delivery ARE MCP-listed
+	// (schemas.go), so an interactive ops session can approve but not reject
+	// (SPEC Future work, "MCP symmetry"). The profile loops in profile_test.go
+	// then prove the read and user profiles refuse it too.
+	"reject_delivery",
 }
 
 func TestDraftDeliverySchema_IncludesSlackReply(t *testing.T) {

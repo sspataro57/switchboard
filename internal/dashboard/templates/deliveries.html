@@ -15,6 +15,8 @@
     .status-approved { color: #0a5dab; }
     .status-sent     { color: #1a7f37; }
     .status-failed   { color: #b3261e; }
+    .status-rejected { color: #6b6b6b; text-decoration: line-through; }
+    .status-rejected .muted { text-decoration: none; }
     textarea { width: 100%; min-height: 5rem; font: inherit; }
     input[type=text] { width: 100%; font: inherit; }
     button { margin: .1rem .15rem .1rem 0; cursor: pointer; }
@@ -48,20 +50,28 @@
     <a href="/deliveries?status=approved">approved</a>
     <a href="/deliveries?status=sent">sent</a>
     <a href="/deliveries?status=failed">failed</a>
+    <a href="/deliveries?status=rejected">rejected</a>
   </p>
 
   <table>
-    <tr><th>#</th><th>Task</th><th>Channel</th><th>When</th><th>Status</th><th>Draft</th><th>Actions</th></tr>
+    <tr><th>#</th><th>Task</th><th>Channel</th><th>Goes to</th><th>When</th><th>Status</th><th>Draft</th><th>Actions</th></tr>
     {{range .Deliveries}}
     <tr>
       <td>{{.ID}}</td>
       <td>#{{.TaskID}} {{.TaskTitle}}<div class="muted">by {{.CreatedBy}}</div></td>
       <td>{{.Channel}}</td>
+      {{/* SWT-44: where the send would go, before approval. Gmail's comes from
+           tools.ResolveGmailRoute, the send path's own resolution. */}}
+      <td>{{if eq .Channel "gmail"}}{{if .From}}<div>From: {{.From}}</div><div>To: {{.To}}</div><div class="muted">Thread: {{.ThreadSubject}}</div>{{end}}{{else}}{{.TargetRef}}{{end}}</td>
       <td>{{if .StartsAt}}{{.StartsAt}} → {{.EndsAt}}{{end}}</td>
       <td class="status-{{.Status}}">{{.Status}}
         {{if .SentAt}}<div class="muted">sent {{.SentAt}}</div>{{end}}
         {{if .ConfirmedAt}}<div class="muted">confirmed {{.ConfirmedAt}}</div>{{end}}
         {{if .Error}}<div class="muted">err: {{.Error}}</div>{{end}}
+        {{if eq .Status "rejected"}}
+          {{if .RejectionNote}}<div class="muted">reason: {{.RejectionNote}}</div>{{end}}
+          {{if .RedraftRequested}}<div class="muted">redraft requested</div>{{end}}
+        {{end}}
       </td>
       <td>
         {{if eq .Status "drafted"}}
@@ -77,7 +87,9 @@
       </td>
       <td>
         {{if eq .Status "drafted"}}
-        <form class="inline" method="post" action="/deliveries/{{.ID}}/approve"><button>Approve</button></form>
+        {{/* SWT-44: the approve is bound to the words rendered above; an edit
+             made after this page loaded makes it refuse. */}}
+        <form class="inline" method="post" action="/deliveries/{{.ID}}/approve"><input type="hidden" name="content_hash" value="{{.ContentHash}}"><button>Approve</button></form>
         {{end}}
         {{if eq .Status "approved"}}
           {{if eq .Channel "gmail"}}
@@ -102,6 +114,22 @@
           <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-sent"><button>It's in Slack</button></form>
           <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-failed"><button>Not in Slack</button></form>
           {{end}}
+        {{end}}
+        {{/* SWT-43: Deny = rejected, no new draft; Redo = rejected, and the drafts
+             worker writes a fresh one using the reason. Refusals (e.g. a failed
+             jira_comment) surface as the flash. */}}
+        {{if or (eq .Status "drafted") (eq .Status "approved") (eq .Status "failed")}}
+        <form method="post" action="/deliveries/{{.ID}}/reject"><input type="hidden" name="content_hash" value="{{.ContentHash}}">
+          <input type="text" name="note" placeholder="reason (optional)">
+          <button name="redraft" value="false">Deny</button>
+          <button name="redraft" value="true">Redo</button>
+        </form>
+        {{end}}
+        {{if and (eq .Status "rejected") (not .RedraftRequested)}}
+        <form method="post" action="/deliveries/{{.ID}}/reject"><input type="hidden" name="content_hash" value="{{.ContentHash}}">
+          <input type="text" name="note" placeholder="reason (optional)">
+          <button name="redraft" value="true">Redo</button>
+        </form>
         {{end}}
       </td>
     </tr>

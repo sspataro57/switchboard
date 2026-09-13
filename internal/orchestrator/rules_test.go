@@ -739,3 +739,47 @@ func TestEvaluate_CaptureEventsFireNothing(t *testing.T) {
 		})
 	}
 }
+
+// ---- SWT-43 (delivery-deny) criterion 28 ---------------------------------------
+//
+// A rejection writes a `delivery_rejected` event on the work task (D10) so the
+// verdict and note show in its log. NO rule reacts to it: the Deliver task
+// stays open in Salvador's lane (D5), and delivery state is never inferred
+// into task state (the "failing a delivery R8 already processed" landmine).
+// Evaluate's default branch already returns nil for it; this pins that, so
+// nobody later routes it into R8 as if it were delivery_sent.
+//
+// Green before implementation BY DESIGN (the event type is new, the default
+// branch already ignores it). Mutation: add `case "delivery_rejected":` routed
+// to ruleDeliveryLifecycle -> red. internal/orchestrator is not edited.
+func TestEvaluate_DeliveryRejectedFiresNothing(t *testing.T) {
+	now := time.Date(2026, 9, 12, 9, 30, 0, 0, time.Local)
+	f := orch.Facts{
+		Task:           orch.TaskFacts{ID: 1, ProjectSlug: "acme", ProjectDelivery: "dashboard", Status: "done_locally", HasUnmetDep: true},
+		Dependents:     []orch.DependentTask{{ID: 2, Status: "blocked", AllDepsSatisfied: true}},
+		ExpiredClaims:  []orch.ExpiredClaim{{TaskID: 3, WorkerID: "w", Status: "claimed"}},
+		Orchestrations: []orch.Orchestration{{Rule: "feedback_task", FeedbackRequestID: 9, TaskID: 1}},
+		BriefCounts:    []orch.ProjectCounts{{ProjectSlug: "acme", Ready: 1}},
+	}
+	cfg := orch.Config{BriefProject: "acme", BriefHour: 0}
+
+	// Positive control, TestEvaluate_CaptureEventsFireNothing's: these facts DO
+	// fire for an event meant for them, so an empty result below is the event
+	// type's doing, not the fixture's.
+	control := orch.Event{ID: 900, TaskID: 1, Type: "status_changed",
+		Payload: map[string]any{"from": "ready", "to": "closed", "reason": "itest"}, Now: now}
+	if len(orch.Evaluate(control, f, cfg)) == 0 {
+		t.Fatal("POSITIVE CONTROL FAILED: status_changed->closed with an unblockable dependent fired nothing; " +
+			"this fixture cannot tell a no-op from a dead rule")
+	}
+
+	for _, redraft := range []bool{false, true} {
+		ev := orch.Event{ID: 901, TaskID: 1, Type: "delivery_rejected",
+			Payload: map[string]any{"delivery_id": float64(77), "channel": "gmail", "redraft": redraft,
+				"note": "shorter, no apology"}, Now: now}
+		if actions := orch.Evaluate(ev, f, cfg); len(actions) != 0 {
+			t.Errorf("delivery_rejected (redraft=%v) must fire nothing (SWT-43 criterion 28, D5/D10): a "+
+				"rejection touches no task; got %s", redraft, dump(actions))
+		}
+	}
+}

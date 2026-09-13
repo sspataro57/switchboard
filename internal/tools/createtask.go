@@ -76,7 +76,10 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"propose_slots", validateProposeSlots, proposeSlots},
 		{"draft_delivery", validateDraftDelivery, draftDelivery},
 		{"update_delivery", validateUpdateDelivery, updateDelivery},
-		{"approve_delivery", validateDeliveryIDOnly, approveDelivery},
+		{"approve_delivery", validateApproveDelivery, approveDelivery},
+		// SWT-43: the negative verdict (Deny / Redo). humanOnly; deliberately NOT
+		// in internal/mcpserver/schemas.go (D9). See delivery.go.
+		{"reject_delivery", validateRejectDelivery, rejectDelivery},
 		{"send_delivery", validateDeliveryIDOnly, sendDelivery},
 		// SWT-28: the calendar auto tier's verb — approve + send a drafted
 		// calendar row in one audited call. NOT human-only (Q1 = b); the gates

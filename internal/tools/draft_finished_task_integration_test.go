@@ -24,6 +24,7 @@ package tools_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -98,8 +99,16 @@ func TestDraftDelivery_Integration_ExpectTaskStatus(t *testing.T) {
 	if after := deliveryCount(t, ctx, s); after != before {
 		t.Errorf("a refused expect_task_status draft wrote %d row(s)", after-before)
 	}
-	// Positive control: the expectation holds → allowed.
+	// Positive control: the expectation holds → allowed. The sibling drafted
+	// above now blocks the drafts path (SWT-43 review fix 2: expect_task_status
+	// never drafts beside a blocking delivery), so clear it first.
 	setTaskStatus(t, ctx, s, "done_locally")
+	if err := s.tryDraft(ctx, `,"expect_task_status":"done_locally"`); !errors.Is(err, tools.ErrDeliveryBlocksDraft) {
+		t.Errorf("draft_delivery expecting done_locally beside a drafted sibling = %v, want ErrDeliveryBlocksDraft", err)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM deliveries WHERE task_id=$1`, s.taskID); err != nil {
+		t.Fatalf("clear the task's deliveries: %v", err)
+	}
 	if err := s.tryDraft(ctx, `,"expect_task_status":"done_locally"`); err != nil {
 		t.Errorf("draft_delivery expecting done_locally on a done_locally task = %v, want allowed", err)
 	}

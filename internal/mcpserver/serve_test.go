@@ -21,6 +21,10 @@ package mcpserver
 // mail_read_attachment join BOTH profiles (owner decision O1). Full: 23 + 2 =
 // 25. User: 9 + 2 = 11. Read: 3, unchanged — the fail-closed floor gains
 // nothing. EXPECTED RED until schemas.go and userProfileTools gain both names.
+//
+// SWT-44 (user-profile-drafts): update_delivery becomes MCP-listed (still
+// policy.humanOnly), so Full: 25 + 1 = 26. The user profile gains
+// draft_delivery and update_delivery: User: 11 + 2 = 13. Read: 3, unchanged.
 
 import (
 	"context"
@@ -45,9 +49,9 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		tools   int
 	}{
 		// Literal counts (SWT-38 criterion 19; SWT-42 criteria 21/22): see the header.
-		{ProfileFull, 25},
+		{ProfileFull, 26},
 		{ProfileRead, 3},
-		{ProfileUser, 11},
+		{ProfileUser, 13},
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()
