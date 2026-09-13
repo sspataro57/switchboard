@@ -13,10 +13,13 @@ package tools_test
 //
 // ---- IMPOSED SURFACE (internal/tools/routecandidates.go) ---------------------
 //
-//	route_candidate_add    {account_email, project, description, is_default?}
-//	route_candidate_remove {account_email, project}
+//	route_candidate_add    {account_email, project, description, is_default?, provider?}
+//	route_candidate_remove {account_email, project, provider?}
 //	  account_email: source_accounts.account_email (refused when it names no
-//	                 account, or more than one across providers)
+//	                 account, or more than one across providers and no
+//	                 provider was given)
+//	  provider:      optional source_accounts.provider; when given, non-empty
+//	                 after trimming (B8 amendment 2026-09-13)
 //	  project:       projects.slug
 //	  description:   non-empty after trimming (it reaches the prompt, B-D4)
 //
@@ -69,6 +72,17 @@ func TestValidate_RouteCandidateTools_RefuseMalformedArgs(t *testing.T) {
 		{"route_candidate_remove", `{}`, "empty"},
 		{"route_candidate_remove", `{"project":"collaboratory"}`, "no account_email"},
 		{"route_candidate_remove", `{"account_email":"a@example.test"}`, "no project"},
+		// provider (B8 amendment 2026-09-13): optional, but when given it must say
+		// something. An empty one would read as "no provider" and fall back to the
+		// ambiguous refusal, hiding a typo in the caller.
+		{"route_candidate_add", `{"account_email":"a@example.test","project":"collaboratory","description":"d","provider":""}`,
+			"an empty provider"},
+		{"route_candidate_add", `{"account_email":"a@example.test","project":"collaboratory","description":"d","provider":" \t "}`,
+			"a whitespace-only provider"},
+		{"route_candidate_remove", `{"account_email":"a@example.test","project":"collaboratory","provider":""}`,
+			"an empty provider"},
+		{"route_candidate_remove", `{"account_email":"a@example.test","project":"collaboratory","provider":"  "}`,
+			"a whitespace-only provider"},
 	} {
 		t.Run(tc.tool+"/"+tc.why, func(t *testing.T) {
 			_, err := ex.Execute(ctx, executor.Call{Tool: tc.tool, Actor: "opsctl:salvo", Args: json.RawMessage(tc.args)})

@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sspataro57/switchboard/internal/store"
@@ -24,15 +25,44 @@ import (
 
 const routeCandidatesListTimeout = 30 * time.Second
 
+const routeProviderUsage = "the account's source_accounts.provider (e.g. google); needed when the address exists " +
+	"under several providers"
+
+// routeProviderFlag adds --provider to the flag set. It returns a function that
+// sets payload["provider"] only when --provider was passed, and refuses an
+// explicitly empty one rather than dropping it (a dropped provider would fall
+// back to the tool's single-match rule, hiding the caller's typo).
+func routeProviderFlag(fs *flag.FlagSet) func(payload map[string]any) error {
+	provider := fs.String("provider", "", routeProviderUsage)
+	return func(payload map[string]any) error {
+		set := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "provider" {
+				set = true
+			}
+		})
+		if !set {
+			return nil
+		}
+		if strings.TrimSpace(*provider) == "" {
+			return fmt.Errorf("--provider, when given, must be non-empty")
+		}
+		payload["provider"] = strings.TrimSpace(*provider)
+		return nil
+	}
+}
+
 // parseRouteCandidateAdd builds the route_candidate_add call. It checks only
-// presence; the TOOL refuses an unknown or ambiguous account, an unknown
-// project, an empty description, a listed project and a second default.
+// presence; the TOOL refuses an unknown or ambiguous account (an address under
+// several providers needs --provider), an unknown project, an empty
+// description, a listed project and a second default.
 func parseRouteCandidateAdd(argv []string) (string, json.RawMessage, error) {
 	fs := flag.NewFlagSet("route-candidates add", flag.ContinueOnError)
 	account := fs.String("account", "", "the receiving account's account_email (required)")
 	project := fs.String("project", "", "project slug (required)")
 	description := fs.String("description", "", "what this project covers, shown to the model on the candidate's line (required)")
 	isDefault := fs.Bool("default", false, "the account's default: where a message lands when the model makes no grounded choice (at most one)")
+	withProvider := routeProviderFlag(fs)
 	if err := fs.Parse(argv); err != nil {
 		return "", nil, err
 	}
@@ -42,6 +72,9 @@ func parseRouteCandidateAdd(argv []string) (string, json.RawMessage, error) {
 	payload := map[string]any{"account_email": *account, "project": *project, "description": *description}
 	if *isDefault {
 		payload["is_default"] = true
+	}
+	if err := withProvider(payload); err != nil {
+		return "", nil, err
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -56,13 +89,18 @@ func parseRouteCandidateRemove(argv []string) (string, json.RawMessage, error) {
 	fs := flag.NewFlagSet("route-candidates remove", flag.ContinueOnError)
 	account := fs.String("account", "", "the receiving account's account_email (required)")
 	project := fs.String("project", "", "project slug (required)")
+	withProvider := routeProviderFlag(fs)
 	if err := fs.Parse(argv); err != nil {
 		return "", nil, err
 	}
 	if *account == "" || *project == "" {
 		return "", nil, fmt.Errorf("--account and --project are required")
 	}
-	raw, err := json.Marshal(map[string]any{"account_email": *account, "project": *project})
+	payload := map[string]any{"account_email": *account, "project": *project}
+	if err := withProvider(payload); err != nil {
+		return "", nil, err
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "", nil, fmt.Errorf("marshal args: %w", err)
 	}

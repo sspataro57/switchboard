@@ -736,17 +736,25 @@ that mailbox's mail into the project, so it is written only through the humanOnl
 executor tools, from opsctl:
 
 ```
-opsctl route-candidates add --account salvador@handsonconnect.org --project collaboratory --default \
+opsctl route-candidates add --account salvador@handsonconnect.org --provider google --project collaboratory --default \
   --description "university partner integrations: activities, sync, request/response validation"
-opsctl route-candidates add --account salvador@handsonconnect.org --project reengine \
+opsctl route-candidates add --account salvador@handsonconnect.org --provider google --project reengine \
   --description "the ReEngine platform and its LHH tickets"
 opsctl route-candidates list      # per account: numbered as the prompt numbers them; SHADOW or armed since …
-opsctl route-candidates remove --account … --project …
+opsctl route-candidates remove --account … --provider google --project …
 ```
 
+`--provider google` is needed because `salvador@handsonconnect.org` exists in
+`source_accounts` under three providers (`google`, `jira`, `jira_lookup`);
+without it the tool refuses the address as ambiguous. The mailbox being routed
+is the `google` account. `--provider` is optional for an address that exists
+under one provider only (SPEC B8 amendment 2026-09-13).
+
 At most one default per account. `add` refuses an unknown or ambiguous account
-(one address under two providers), an unknown project, an empty description, a
-project the account already lists, and a second default. The description is
+(one address under several providers and no `--provider`), a `--provider` the
+address has no account under (the error names the providers it does have), an
+unknown project, an empty description, a project the account already lists,
+and a second default. The description is
 what the model reads on the candidate's line: write what the project covers,
 never a sender's name.
 

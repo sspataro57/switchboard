@@ -721,6 +721,14 @@ so it retries on the next pass against the current set.
     default.
   - `opsctl route-candidates add|remove|list`.
   - The test enumerates the IK's actor shapes.
+  - *Amended 2026-09-13 (the prod seed was refused as ambiguous):* both tools take an optional
+    `provider` (`--provider`). The account is matched on `(lower(account_email), provider)`: the
+    email is case-insensitive and the provider exact, so a wrong-case provider fails safe.
+    - With a provider: an unknown one is refused and the error lists the providers that exist,
+      even on a single-provider address, where it never falls back to the only account.
+    - An empty or whitespace provider is refused.
+    - Without a provider, nothing changes: one match proceeds, zero is refused, and several are
+      refused with "pass provider: one of …".
 - B9. `classify report --lane route` breaks down by account and step, including `pending_verdict`
   and `ungrounded`. `rulesreport` gives route rows their own line. `/funnel` reads the lane
   through the lane loop.
