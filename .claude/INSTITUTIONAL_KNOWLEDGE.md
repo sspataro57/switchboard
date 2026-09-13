@@ -1531,6 +1531,7 @@ the executor. Runbook: `docs/runbooks/capture-rules.md`.
 - _Known infra issues: none yet — record flakes and races here the first time they bite._
 - **LANDMINE (2026-09-12): the compose Postgres is SHARED by every worktree and agent.** Capture suites take capture's advisory lock 0x5157_0015 and delete `capture_decisions` wholesale, so two branches running integration tests at once corrupt each other ("another pass holds advisory lock", rows vanishing). Run a branch's integration suite in its own database: `psql 'postgres://ops:ops@localhost:5433/ops?sslmode=disable' -c "CREATE DATABASE ops_<branch>"`, `make migrate LOCAL_DB_URL='postgres://ops:ops@localhost:5433/ops_<branch>?sslmode=disable'`, then point `DATABASE_URL` at it. Advisory locks are per-database, so this isolates them too.
 - **Known flake (SWT-48): `TestAttributionTrend_*` in internal/capture fail from 20:00 to 24:00 EDT** (local date != UTC date). They pass with `TZ=UTC`. Pre-existing on main; it is not a regression in whatever branch you are testing.
+- **LANDMINE: an edited migration never reaches a DB that already applied it.** `cmd/tools/migrate` keys on `schema_migrations.version` with no checksum. Editing a numbered file in place is fine only if NO database (prod or the shared compose `ops`) has applied it yet; otherwise fix that DB by hand or rebuild it. 2026-09-12: 0029's task_id pin was edited after the compose `ops` DB had applied it and was patched by hand; prod never had the old version.
 
 ---
 
