@@ -2030,3 +2030,148 @@ decides under the tasks row lock and restores `closed_from_status` (else
   HUMAN actor (dashboard:/opsctl:/manual:), not merely
   `reopened_by_message_id IS NULL` — a reconciler reopen racing a fresh human
   dismissal can stamp it with a NULL message id (pre-existing, seconds wide).
+
+## Jira activity revives closed tasks (SWT-45, jira-activity-revive)
+
+Two `capture_rules` flags (migration 0030) make a rule's matches Jira activity:
+`revive` (revive the ticket's closed task, or create one, and SURFACE it) and
+`addressed` (addressed to him; overrides a gated project's assignee check).
+`overrides = revive AND (NOT gate OR addressed)`, a pure function in
+`internal/capture/revive.go`. Runbooks: `docs/runbooks/capture-rules.md`
+"Activity rules (SWT-45)", `docs/runbooks/ticket-status-sync.md` "Surfaced by
+activity (SWT-45)".
+
+- **LANDMINE (F7): absence from an MCP schema is not a boundary for arguments.**
+  The MCP adapter passes arguments through: `injectWorkerID` rewrites the raw
+  JSON, and nothing filters it against the schema. A worker can set ANY argument
+  of any tool it can reach, documented or not. So surfacing is its own spine
+  tool, `task_mark_surfaced`, off both MCP profiles (not humanOnly: capture
+  calls it), and never a `create_task` argument. The same reasoning keeps
+  `task_reopen`, and with it the revive form, off MCP.
+- **LANDMINE (F8): a capture rule cannot be edited, and its pattern cannot be
+  re-added.** `capture_rules` is UNIQUE `(project_id, criteria_type, pattern)`,
+  and no tool changes pattern, key_regex, priority or flags. "Disable and re-add"
+  collides unless the pattern text changes. Get a key_regex right the first
+  time, by running it in Go over an export (Postgres reads `\b` as a backspace).
+  Existing rules cannot gain the flags. A `capture_rule_update` tool is future
+  work.
+- **The close record, and its fallback.** `closeTransition`, the one writer of
+  `status='closed'`, writes `tasks.closed_at` and `closed_from_status` on a
+  close and NULLs both on a reopen; an idempotent re-close keeps them. There is
+  no backfill and no CHECK, because fixtures INSERT closed tasks directly. A
+  NULL `closed_at` (a pre-0030 close, or one by an old binary during rollout)
+  makes the revive guard fall back to `updated_at`, the task's last STAMPED
+  write. On a closed task only closeTransition stamps it (`task_append_log`
+  and `task_mark_surfaced` do not; a capture-pass integration test proves the
+  log-then-revive order leaves it alone), so for any close made through the
+  executor it IS the close instant. It is NOT "conservative only": it errs
+  both ways when something outside the executor wrote the row. A hand-run
+  UPDATE of `updated_at` after the close moves the guard later, so a message
+  ingested in between does not revive. A close written without stamping it
+  (hand SQL `SET status='closed'`, a fixture INSERT with an old `updated_at`)
+  leaves the guard BEFORE the real close, so a message ingested in between
+  revives although it predates the close. The fallback is spelled once, in
+  `reviveGuarded`'s SQL.
+- **The revive guard is ingest time, as in SWT-36:** `m.created_at >
+  GREATEST(COALESCE(closed_at, updated_at), open dismissal's created_at)`,
+  strictly, compared in SQL under the row lock. A message decided under no
+  reviving rule has spent its live claim, so adding a rule later backfills
+  nothing.
+- **The cost (J10): the close email.** Every Jira close sends mail. If it lands
+  after the reconciler's close, it revives the task, and the reconciler then
+  HOLDS it (`last_action='resurfaced'`, one log line). The hold lasts until a
+  hand close, which sticks, or a change in status category, status name or
+  assignee. Jira batches mail, so expect this often. Activity on an OPEN task
+  only logs; if it surfaced, no done ticket's task would ever close.
+- **The reconciler's hold.** `Observation.SurfacedAt` is compared with the
+  recorded `surfaced_seen_at` using `time.Equal`, never `==`: the value comes
+  back from Postgres in the Local zone. `upsertState` writes `surfaced_seen_at`
+  only when `Decision.RecordSeen`, and otherwise preserves it with COALESCE. A
+  NULL written by an active-work pass would make an old surfacing look new when
+  the worker released the task. A human's plain `task_reopen` surfaces too
+  (message NULL), keyed on `policy.HumanActor`; the reconciler's own reopen
+  never does.
+- **Part D interaction (this branch merged second).** `decideMessage` holds a
+  gated jira match only if `!overrides(...)`, and on a gated project that means
+  `!addressed`. A revive-only rule on a gated project is still held. The gate
+  stage never revives or surfaces: its `task_log` on a closed task only logs
+  (SPEC Part D section; a gate-path revive is future work). `opsctl capture-rules
+  gate` prints `revived`/`surfaced_created` as constant 0 for that reason.
+- **The own-action guard (J17) is a backstop for his own COMMENTS only.** With
+  Jira's "Notify me about my own changes" on, Jira mails him ("Anonymous
+  (JIRA)") about his own changes. That mail is inbound and would revive, or
+  create, a task for his own action. Capture skips an activity revive or
+  creation when the ticket's connector thread (`jira:{site_host}:{KEY}`) holds
+  an OUTBOUND message sent in [email − 10m, email + 2m]. Those are
+  `OwnActionLead`/`OwnActionLag` in `internal/capture/ownaction.go`.
+  - **LANDMINE: it does not cover his EDITS.** Prod has 208 Anonymous Treetop
+    emails; only 26 correlate with a comment of his. The other 182 are
+    field/status-edit notices (146 have no outbound message even in
+    [−60m, +10m]), and the connector stores no changelog (0 of 2,431 issue raw
+    rows), so nothing names an edit's actor. Those revive or create. The only
+    protection against his own edits is the owner turning the Jira setting off.
+    Do NOT "fix" this with an Anonymous-sender suppression: 182 Anonymous
+    emails that are not his comments would then be dropped on a guess.
+  - **Named-actor exemption.** A From of Jira's shape `"<Name> (JIRA)"` whose
+    Name is neither the placeholder `Anonymous` nor the stored sender of the
+    outbound message the window found is SOMEONE ELSE's action: it proceeds at
+    once, with no window skip, no freshness reads and no wait (reason `actor
+    named`). Prod email 158474, "Katie Evans mentioned you on WEB-10355",
+    arrived 8.6 min after his own comment on that ticket, and the window alone
+    would have suppressed it. The name check only EXEMPTS. The placeholder
+    never suppresses anything by itself.
+  - Residual: an Anonymous email about someone else's action, inside the
+    window around his own comment, is still suppressed.
+  - The revive path logs and records `own_action … revive skipped`. The create
+    path records `attributed … no task created`, so no lower rule takes the
+    message.
+  - The race: a key's poller is any provider='jira' account whose scopes claim
+    its prefix. The thread is known synced when EVERY such poller has an `ok`
+    sync_run that STARTED after email + 4m and holds no unnormalized raw row of
+    the key. Until then the message is DEFERRED: no capture_decisions row, a
+    `capture rules: message N deferred` log line, `RulesStats.Deferred`, and a
+    retry every pass. The deferral lasts at most 30 min from ingest
+    (`OwnActionMaxWait`); after that the pass decides with the guard BLIND
+    (fail-open), the reason says so, and `RulesStats.Blind` counts it. Every
+    capture counter line prints `"deferred"` and `"blind"`.
+  - **Live horizon floor.** A deferral writes no decision row, so a live
+    horizon shorter than the deferral could let a message age out undecided.
+    `RulesConfig.normalize` refuses a LIVE horizon below `MinLiveRulesHorizon`
+    (2h). A positive `CAPTURE_RULES_SINCE` / `--since` under 2h now ERRORS
+    every live pass. Garbage or non-positive values still fall back silently
+    to 720h, unchanged. Prod leaves `CAPTURE_RULES_SINCE` unset.
+  - `opsctl capture-rules run --limit N` reads the oldest N first, so deferred
+    rows can use up the limit for up to 30 min. `--limit` is smoke-only.
+  - A key no poller covers (lookup-only reengine/LHH) is "not applicable":
+    nothing stores his comments there. The owner turning the Jira setting off
+    is the primary fix; the guard is the backstop.
+  - The cost: someone ELSE's activity on the same ticket inside that window
+    around his own comment does not revive either.
+- **LANDMINE (rollout order, 0030; docs/runbooks/HANDOFF-kube-jira-activity-revive.md).**
+  1. Apply 0030 FIRST (kube one-shot migrate Job). New code selects
+     `capture_rules.revive` on every capture pass and writes `tasks.closed_at`
+     on every close, so a new image on a db without 0030 fails both.
+  2. Roll ONE image tag to every connector CronJob and pipelined together. A new
+     capture that revives, running beside an old jira-image reconciler that
+     ignores surfacing, re-closes the task: one flip per message until the
+     images match.
+  3. Then orchestratord and the dashboard (they call `task_close`; until rolled
+     their closes carry `closed_at` NULL, which the fallback covers).
+  4. `go install ./cmd/ops-mcp-user` here and on 192.168.50.30.
+  5. Seed revive rules only after EVERY workload runs the new image. An old
+     capture binary does not read the flags: it would take J2 as a plain
+     priority-92 rule, creating unsurfaced per-ticket tasks and logging on
+     closed ones without reviving.
+  6. Seed J2 only after the owner has turned off Jira's "Notify me about my own
+     changes" AND the SPEC's 0c gate passes. That gate is an UNCORRELATED count
+     of Anonymous Treetop mail received after the setting change, observed for
+     a full working day or more. 0 → seed. Any → STOP and ask the owner, who
+     decides an exclusion in the rule's DATA. The sender predicate is
+     `ILIKE '%anonymous (jira)%'`: prod stores the From QUOTED, so
+     `'anonymous%'` never matches.
+     J4 is not seeded (0 Avviato addressed shapes on prod).
+- **capture_rule_add refuses `revive` unless `external_system='jira'`.** Part
+  D's hold keys on `system == "jira"`, so a reviving github/slack/gmail rule on
+  a gated project would create and surface past the assignee check. The 0030
+  CHECK asks only for a system, so capture also treats a non-jira reviving rule
+  as inert (`activity := system == "jira" && overrides(...)`).

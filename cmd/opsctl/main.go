@@ -391,6 +391,10 @@ func parseCaptureRuleAdd(argv []string) (string, json.RawMessage, error) {
 	urlTemplate := fs.String("url-template", "", "external_url builder; must contain {key}")
 	priority := fs.Int("priority", 0, "evaluation priority; evaluation order is priority DESC, id ASC and first match wins")
 	note := fs.String("note", "", "why this rule exists")
+	revive := fs.Bool("revive", false, "SWT-45: matches are Jira activity; revive the ticket's closed task or create one, "+
+		"and surface it past the reconciler (needs --external-system jira and --key-regex)")
+	addressed := fs.Bool("addressed", false, "SWT-45: matches are addressed to him and override a gated project's "+
+		"assignee check (implies activity; pass --revive too)")
 	if err := fs.Parse(argv); err != nil {
 		return "", nil, err
 	}
@@ -420,6 +424,14 @@ func parseCaptureRuleAdd(argv []string) (string, json.RawMessage, error) {
 		if o.value != "" {
 			payload[o.key] = o.value
 		}
+	}
+	// Sent only when set; the TOOL enforces J1/J18's rules (revive needs a key
+	// regex and external_system jira; addressed needs revive).
+	if *revive {
+		payload["revive"] = true
+	}
+	if *addressed {
+		payload["addressed"] = true
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -455,7 +467,7 @@ func runCaptureRulesList(argv []string) error {
 	rows, err := pool.Query(ctx,
 		`SELECT r.id, p.slug, COALESCE(r.subproject,''), r.criteria_type, r.pattern,
 		        COALESCE(r.external_system,''), COALESCE(r.key_regex,''), COALESCE(r.url_template,''),
-		        r.priority, r.enabled, COALESCE(r.note,'')
+		        r.priority, r.enabled, COALESCE(r.note,''), r.revive, r.addressed
 		   FROM capture_rules r JOIN projects p ON p.id = r.project_id
 		  ORDER BY r.priority DESC, r.id`)
 	if err != nil {
@@ -468,9 +480,9 @@ func runCaptureRulesList(argv []string) error {
 		var id int64
 		var slug, subproject, criteria, pattern, extSystem, keyRegex, urlTemplate, note string
 		var priority int
-		var enabled bool
+		var enabled, revive, addressed bool
 		if err := rows.Scan(&id, &slug, &subproject, &criteria, &pattern,
-			&extSystem, &keyRegex, &urlTemplate, &priority, &enabled, &note); err != nil {
+			&extSystem, &keyRegex, &urlTemplate, &priority, &enabled, &note, &revive, &addressed); err != nil {
 			return fmt.Errorf("scan capture_rule: %w", err)
 		}
 		n++
@@ -495,6 +507,14 @@ func runCaptureRulesList(argv []string) error {
 			}
 			if urlTemplate != "" {
 				detail += fmt.Sprintf(" url %s", urlTemplate)
+			}
+			// SWT-45: the activity flags ride on the key line (migration 0030's
+			// CHECK keeps them off attribution-only rules).
+			if revive {
+				detail += " revive"
+			}
+			if addressed {
+				detail += " addressed"
 			}
 			fmt.Println(detail)
 		}
@@ -545,8 +565,8 @@ func runCaptureRulesRun(argv []string) error {
 	// Printed unconditionally, zeros included, and before the error check: a pass
 	// that matched nothing and a pass that never ran must not look the same.
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
-		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d}\n",
-		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened)
+		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d}\n",
+		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated, stats.Deferred, stats.Blind)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
 	}
@@ -669,10 +689,10 @@ func runTicketStatusSync(argv []string) error {
 	})
 	fmt.Printf("ticket_status: considered=%d closed_ticket_done=%d closed_ticket_delivered=%d "+
 		"closed_not_assigned=%d reopened=%d "+
-		"refused_active=%d suppressed_dismissed=%d converged=%d unpolled=%d ambiguous=%d unreadable=%d "+
+		"refused_active=%d suppressed_dismissed=%d resurfaced=%d converged=%d unpolled=%d ambiguous=%d unreadable=%d "+
 		"fetched=%d fetch_skipped_ttl=%d fetch_failed=%d\n",
 		st.Considered, st.ClosedTicketDone, st.ClosedTicketDelivered, st.ClosedNotAssigned, st.Reopened,
-		st.RefusedActive, st.SuppressedDismissed, st.Converged, st.Unpolled, st.Ambiguous, st.Unreadable,
+		st.RefusedActive, st.SuppressedDismissed, st.Resurfaced, st.Converged, st.Unpolled, st.Ambiguous, st.Unreadable,
 		st.Fetched, st.FetchSkippedTTL, st.FetchFailed)
 	return err
 }

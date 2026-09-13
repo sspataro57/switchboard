@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sspataro57/switchboard/internal/executor"
+	"github.com/sspataro57/switchboard/internal/policy"
 )
 
 // task_close and record_orchestration — spine-facing (SPEC 05-orchestrator-loop) —
@@ -101,8 +102,17 @@ func closeTransition(ctx context.Context, tx pgx.Tx, taskID int64, to, reason st
 	} else if status != "closed" {
 		return status, false, nil // reopen replay: already open, no event
 	}
-	if _, err := tx.Exec(ctx,
-		`UPDATE tasks SET status=$2, updated_at=now() WHERE id=$1`, taskID, to); err != nil {
+	// SWT-45 J5: the close record rides on the ONE status writer. A close stamps
+	// closed_at and the status it was closed FROM; a reopen clears both. The
+	// idempotent close above returns before this point, so a replay never moves
+	// the instant the revive guard compares against.
+	update := `UPDATE tasks SET status=$2, updated_at=now(), closed_at=NULL, closed_from_status=NULL WHERE id=$1`
+	args := []any{taskID, to}
+	if to == "closed" {
+		update = `UPDATE tasks SET status=$2, updated_at=now(), closed_at=now(), closed_from_status=$3 WHERE id=$1`
+		args = append(args, status)
+	}
+	if _, err := tx.Exec(ctx, update, args...); err != nil {
 		return status, false, fmt.Errorf("transition task %d to %s: %w", taskID, to, err)
 	}
 	if _, err := insertTaskEvent(ctx, tx, taskID, "status_changed",
@@ -167,12 +177,17 @@ func closeTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, er
 // neither. With them the call is GUARDED: the handler decides, under the tasks
 // row lock, whether that inbound message overtook that dismissal (D4). The
 // caller supplies ids only, never a time or a direction.
+//
+// Revive (SWT-45 J6) is the third form: {task_id, message_id, revive:true,
+// reason}. The handler finds the open dismissal itself and the record decides
+// the target, so dismissal_id and status are refused with it.
 type reopenArgs struct {
 	TaskID      int64  `json:"task_id"`
 	Status      string `json:"status,omitempty"`
 	Reason      string `json:"reason"`
 	DismissalID int64  `json:"dismissal_id,omitempty"`
 	MessageID   int64  `json:"message_id,omitempty"`
+	Revive      bool   `json:"revive,omitempty"`
 }
 
 func (a reopenArgs) guarded() bool { return a.DismissalID != 0 || a.MessageID != 0 }
@@ -187,6 +202,21 @@ func validateReopen(args []byte) error {
 	}
 	if a.Reason == "" {
 		return errors.New("missing reason")
+	}
+	if a.Revive {
+		// SWT-45 criterion 9. A revive without a message would run as a PLAIN
+		// reopen: no inbound check and no ingested-after-close guard.
+		switch {
+		case a.MessageID <= 0:
+			return fmt.Errorf("revive requires message_id > 0 (got message_id=%d)", a.MessageID)
+		case a.DismissalID != 0:
+			return fmt.Errorf("dismissal_id %d is forbidden with revive: the revive finds the task's open "+
+				"dismissal itself, under the row lock", a.DismissalID)
+		case a.Status != "":
+			return fmt.Errorf("status %q is forbidden with revive: the task's close record decides the target "+
+				"(closed_from_status, else ready)", a.Status)
+		}
+		return nil
 	}
 	if a.guarded() {
 		// SWT-36 criterion 1. A half-guarded call must never validate: it would
@@ -236,6 +266,9 @@ func reopenTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, e
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, fmt.Errorf("parse args: %w", err)
 	}
+	if a.Revive {
+		return reviveGuarded(ctx, pool, a)
+	}
 	if a.guarded() {
 		return reopenGuarded(ctx, pool, a)
 	}
@@ -257,6 +290,17 @@ func reopenTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, e
 			`UPDATE task_dismissals SET reopened_at = now(), reopened_by = $2
 			  WHERE task_id = $1 AND reopened_at IS NULL`, a.TaskID, actor); err != nil {
 			return fmt.Errorf("stamp open dismissal of task %d: %w", a.TaskID, err)
+		}
+		// SWT-45 J8: a HUMAN's plain reopen surfaces the task (message NULL), so
+		// the reconciler holds it instead of re-closing a done ticket's task on
+		// the next jira tick. "Human" has ONE definition; the reconciler's own
+		// reopen and every other automated actor never surface.
+		if policy.HumanActor(actor) {
+			if _, err := tx.Exec(ctx,
+				`UPDATE tasks SET surfaced_at = now(), surfaced_by_message_id = NULL WHERE id = $1`,
+				a.TaskID); err != nil {
+				return fmt.Errorf("surface task %d: %w", a.TaskID, err)
+			}
 		}
 		return nil
 	})
@@ -350,35 +394,9 @@ func reopenGuarded(ctx context.Context, pool *pgxpool.Pool, a reopenArgs) ([]byt
 		}
 
 		// (e)
-		target := "ready"
-		for _, s := range openStatuses {
-			if closedFrom == s {
-				target = closedFrom
-				break
-			}
-		}
-		// Codex re-reviews: dependency gating is event-driven (R4 blocks a READY
-		// task when a dependency is added; R5 unblocks a BLOCKED one when its
-		// dependencies complete), and neither fires for a CLOSED task. So while
-		// it was dismissed, a task's dependencies may have been satisfied (a
-		// verbatim `blocked` would strand it) or a new unmet one added (a
-		// verbatim `ready` would let a worker claim it early), and
-		// closed → ready|blocked fires neither rule. For those two targets the
-		// guarded reopen therefore re-derives the gate from the dependencies
-		// themselves (depUnsatisfiedPredicate, the tools package's one
-		// spelling): blocked while any is unmet, else ready.
-		if target == "blocked" || target == "ready" {
-			var unmet bool
-			if err := tx.QueryRow(ctx,
-				`SELECT EXISTS (SELECT 1 FROM task_dependencies d
-				   JOIN tasks dt ON dt.id = d.depends_on_task_id
-				   WHERE d.task_id=$1 AND dt.status `+depUnsatisfiedPredicate+`)`, a.TaskID).Scan(&unmet); err != nil {
-				return fmt.Errorf("check dependencies of task %d: %w", a.TaskID, err)
-			}
-			target = "ready"
-			if unmet {
-				target = "blocked"
-			}
+		target, err := restoreTarget(ctx, tx, a.TaskID, closedFrom)
+		if err != nil {
+			return err
 		}
 		reason := fmt.Sprintf("reopened after dismissal (%s, dismissed %s by %s): message %d from %s, ingested %s — %s",
 			code, dismissedAt.UTC().Format(time.RFC3339), dismissedBy,
@@ -401,6 +419,174 @@ func reopenGuarded(ctx context.Context, pool *pgxpool.Pool, a reopenArgs) ([]byt
 		result["status"] = target
 		result["reopened"] = true
 		result["dismissal_id"] = a.DismissalID
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return marshalResult(result)
+}
+
+// restoreTarget is the ONE spelling of where a guarded reopen lands (SWT-36 D5,
+// SWT-45 criterion 14), shared by reopenGuarded and reviveGuarded: the recorded
+// pre-close status when it is an open status, else ready.
+//
+// Codex re-reviews (SWT-36): dependency gating is event-driven (R4 blocks a
+// READY task when a dependency is added; R5 unblocks a BLOCKED one when its
+// dependencies complete), and neither fires for a CLOSED task. So while it was
+// closed, a task's dependencies may have been satisfied (a verbatim `blocked`
+// would strand it) or a new unmet one added (a verbatim `ready` would let a
+// worker claim it early), and closed → ready|blocked fires neither rule. For
+// those two targets the target is therefore re-derived from the dependencies
+// themselves, through the tools package's one dependency predicate: blocked
+// while any is unmet, else ready. Runs inside the caller's transaction, under
+// its row lock.
+func restoreTarget(ctx context.Context, tx pgx.Tx, taskID int64, closedFrom string) (string, error) {
+	target := "ready"
+	for _, s := range openStatuses {
+		if closedFrom == s {
+			target = closedFrom
+			break
+		}
+	}
+	if target != "blocked" && target != "ready" {
+		return target, nil
+	}
+	var unmet bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM task_dependencies d
+		   JOIN tasks dt ON dt.id = d.depends_on_task_id
+		   WHERE d.task_id=$1 AND dt.status `+depUnsatisfiedPredicate+`)`, taskID).Scan(&unmet); err != nil {
+		return "", fmt.Errorf("check dependencies of task %d: %w", taskID, err)
+	}
+	if unmet {
+		return "blocked", nil
+	}
+	return "ready", nil
+}
+
+// skipMessagePredatesClose is the revive's guard skip (SWT-45 J6 d): the
+// message was ingested at or before the latest judgement that put the task
+// down.
+const skipMessagePredatesClose = "message_predates_close"
+
+// reviveGuarded is the activity revive (SWT-45 J6), the third form of
+// task_reopen, inside ONE transaction under the tasks row lock (the lock
+// task_dismiss and reopenGuarded take, in the same order):
+//
+//	(a) the message must exist and be INBOUND — else an ERROR (invariant 5 at
+//	    the verb; checked first so a caller bug is never a quiet skip)
+//	(b) the task must be closed                  — else skipped: not_closed
+//	    (delivered, and every duplicate copy after the first revive)
+//	(c) read closed_at, updated_at, closed_from_status and the task's OPEN
+//	    dismissal, found here under the lock (no caller-supplied id to go stale)
+//	(d) guard = GREATEST(COALESCE(closed_at, updated_at), dismissal.created_at),
+//	    the latest judgement that put the task down; message.created_at > guard,
+//	    strictly, on the ONE Postgres clock — else skipped: message_predates_close.
+//	    The updated_at fallback covers a close with no recorded closed_at
+//	    (pre-0030, or an old binary). updated_at is the task's last STAMPED write;
+//	    on a closed task only closeTransition stamps it (task_append_log and
+//	    task_mark_surfaced do not), so for an executor close it is the close
+//	    instant. It errs both ways when something else wrote the row: a hand-run
+//	    UPDATE of updated_at after the close moves the guard later (a missed
+//	    revive); a close written without stamping it (hand SQL, a fixture INSERT)
+//	    leaves the guard before the real close (a message ingested in between
+//	    revives). It is spelled here and nowhere else.
+//	(e) the target is restoreTarget(closed_from_status)
+//	(f) closeTransition to the target
+//	(g) stamp the open dismissal, if any, with the message (exactly one row)
+//	(h) surfaced_at = now(), surfaced_by_message_id = the message
+func reviveGuarded(ctx context.Context, pool *pgxpool.Pool, a reopenArgs) ([]byte, error) {
+	actor := executor.ActorFrom(ctx)
+	result := map[string]any{"task_id": a.TaskID, "reopened": false}
+
+	err := inTx(ctx, pool, func(tx pgx.Tx) error {
+		status, err := lockTask(ctx, tx, a.TaskID)
+		if err != nil {
+			return err
+		}
+		result["status"] = status
+
+		// (a)
+		var direction, sender string
+		var ingestedAt time.Time
+		if err := tx.QueryRow(ctx,
+			`SELECT direction, COALESCE(sender,''), created_at FROM normalized_messages WHERE id=$1`,
+			a.MessageID).Scan(&direction, &sender, &ingestedAt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("message_id %d: no such normalized message", a.MessageID)
+			}
+			return fmt.Errorf("read message %d: %w", a.MessageID, err)
+		}
+		if direction != "inbound" {
+			return fmt.Errorf("message_id %d is %s; only an INBOUND message can revive a closed task "+
+				"(our own sends re-enter via ingestion — invariant 5)", a.MessageID, direction)
+		}
+
+		// (b)
+		if status != "closed" {
+			result["skipped"] = skipNotClosed
+			return nil
+		}
+
+		// (c) + (d): one query, one clock; the caller never supplies a time.
+		var closedFrom, dismissalCode string
+		var dismissalID int64
+		var guard time.Time
+		var after bool
+		if err := tx.QueryRow(ctx,
+			`SELECT COALESCE(t.closed_from_status,''), COALESCE(d.id,0), COALESCE(d.reason_code,''),
+			        g.at, m.created_at > g.at
+			   FROM tasks t
+			   JOIN normalized_messages m ON m.id = $2
+			   LEFT JOIN task_dismissals d ON d.task_id = t.id AND d.reopened_at IS NULL
+			   CROSS JOIN LATERAL (SELECT GREATEST(COALESCE(t.closed_at, t.updated_at), d.created_at) AS at) g
+			  WHERE t.id = $1`,
+			a.TaskID, a.MessageID).Scan(&closedFrom, &dismissalID, &dismissalCode, &guard, &after); err != nil {
+			return fmt.Errorf("read the close record of task %d: %w", a.TaskID, err)
+		}
+		if !after {
+			result["skipped"] = skipMessagePredatesClose
+			return nil
+		}
+
+		// (e) + (f)
+		target, err := restoreTarget(ctx, tx, a.TaskID, closedFrom)
+		if err != nil {
+			return err
+		}
+		reason := fmt.Sprintf("revived by activity: message %d from %s, ingested %s, after the task was put "+
+			"down at %s — %s", a.MessageID, orNoneStr(sender), ingestedAt.UTC().Format(time.RFC3339),
+			guard.UTC().Format(time.RFC3339), a.Reason)
+		if dismissalID != 0 {
+			reason += fmt.Sprintf(" (overtakes dismissal %d, %s)", dismissalID, dismissalCode)
+		}
+		if _, _, err := closeTransition(ctx, tx, a.TaskID, target, reason); err != nil {
+			return err
+		}
+
+		// (g)
+		if dismissalID != 0 {
+			tag, err := tx.Exec(ctx,
+				`UPDATE task_dismissals SET reopened_at = now(), reopened_by = $2, reopened_by_message_id = $3
+				  WHERE id = $1 AND reopened_at IS NULL`, dismissalID, actor, a.MessageID)
+			if err != nil {
+				return fmt.Errorf("stamp dismissal %d: %w", dismissalID, err)
+			}
+			if tag.RowsAffected() != 1 {
+				return fmt.Errorf("stamp dismissal %d: %d rows affected, want 1", dismissalID, tag.RowsAffected())
+			}
+			result["dismissal_id"] = dismissalID
+		}
+
+		// (h)
+		if _, err := tx.Exec(ctx,
+			`UPDATE tasks SET surfaced_at = now(), surfaced_by_message_id = $2 WHERE id = $1`,
+			a.TaskID, a.MessageID); err != nil {
+			return fmt.Errorf("surface task %d: %w", a.TaskID, err)
+		}
+		result["status"] = target
+		result["reopened"] = true
 		return nil
 	})
 	if err != nil {

@@ -76,6 +76,11 @@ type captureRuleAddArgs struct {
 	URLTemplate    string `json:"url_template,omitempty"`
 	Priority       *int   `json:"priority,omitempty"`
 	Note           string `json:"note,omitempty"`
+	// SWT-45 J1: revive = this rule's matches are Jira activity (revive a
+	// closed task, or create one, and surface it); addressed = they are
+	// addressed to Salvador and so override a gated project's assignee check.
+	Revive    bool `json:"revive,omitempty"`
+	Addressed bool `json:"addressed,omitempty"`
 }
 
 // parseCaptureRuleAdd unmarshals and applies every check that needs no
@@ -135,6 +140,30 @@ func parseCaptureRuleAdd(args []byte) (captureRuleAddArgs, error) {
 	if a.URLTemplate != "" && !strings.Contains(a.URLTemplate, "{key}") {
 		return a, fmt.Errorf("url_template %q must contain the {key} placeholder", a.URLTemplate)
 	}
+
+	// SWT-45 J1, the same two rules as migration 0030's CHECKs, refused here
+	// first so the error names the field rather than a constraint.
+	if a.Addressed && !a.Revive {
+		return a, errors.New("addressed requires revive: a rule whose matches are addressed to him is Jira " +
+			"activity first (pass revive too)")
+	}
+	if a.Revive {
+		if a.ExternalSystem != "jira" {
+			// An attribution-only rule creates nothing and so can revive nothing.
+			// Any other system is refused too: SWT-40 Part D's hold keys on
+			// system == "jira", so a reviving github/slack/gmail rule on a gated
+			// project would create and surface past the assignee check.
+			return a, fmt.Errorf("revive requires external_system jira (got %q): activity is Jira activity, and "+
+				"the gated-project assignee check only holds jira-keyed matches", a.ExternalSystem)
+		}
+		if a.KeyRegex == "" {
+			// F1: with no key_regex the key is the pattern's FIRST group, which is
+			// how rule 10 keys by PREFIX. A reviving prefix rule would resurrect a
+			// catch-all task on every mention.
+			return a, errors.New("revive requires an explicit key_regex that captures the WHOLE ticket key; " +
+				"without one the key is the pattern's first group (rule 10 keys by prefix)")
+		}
+	}
 	return a, nil
 }
 
@@ -169,11 +198,12 @@ func captureRuleAdd(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 	var ruleID int64
 	err = pool.QueryRow(ctx,
 		`INSERT INTO capture_rules
-		   (project_id, subproject, criteria_type, pattern, external_system, key_regex, url_template, priority, note)
-		 VALUES ($1, NULLIF($2,''), $3, $4, NULLIF($5,''), NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,''))
+		   (project_id, subproject, criteria_type, pattern, external_system, key_regex, url_template, priority, note,
+		    revive, addressed)
+		 VALUES ($1, NULLIF($2,''), $3, $4, NULLIF($5,''), NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,''), $10, $11)
 		 RETURNING id`,
 		projectID, a.Subproject, a.CriteriaType, a.Pattern, a.ExternalSystem,
-		a.KeyRegex, a.URLTemplate, priority, a.Note).Scan(&ruleID)
+		a.KeyRegex, a.URLTemplate, priority, a.Note, a.Revive, a.Addressed).Scan(&ruleID)
 	if err != nil {
 		return nil, fmt.Errorf("insert capture rule (one rule per project+criteria_type+pattern — "+
 			"disable the existing one with capture_rule_set_enabled instead of re-adding?): %w", err)

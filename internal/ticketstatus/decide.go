@@ -12,10 +12,16 @@
 // write through the executor as ticketstatus:jira (invariant 3).
 package ticketstatus
 
+import "time"
+
 // Observation is everything Decide may know about one candidate ref: the two
 // ticket facts as read from the STORED raw snapshot, the identity to compare
 // against, the project's gate, the task as it stands, and whether a human
 // dismissed it (D4).
+//
+// decide.go imports "time" only for the surfacing VALUES below; it never reads
+// the clock (a structural test bans it), so the decision table keeps proving
+// something (invariant 7).
 type Observation struct {
 	TicketKey      string // diagnostic; the prose reasons name it
 	StatusCategory string // jira.Facts — 'new' | 'indeterminate' | 'done'
@@ -38,6 +44,14 @@ type Observation struct {
 	// which is also why the column is named in the driver's query and nowhere
 	// else.
 	DeliveredStatuses []string
+	// SurfacedAt is tasks.surfaced_at (SWT-45 J11), a VALUE: the last time
+	// something other than this pass put the task on the board — an activity
+	// revive, an overriding-rule creation, or a human's plain reopen. Zero =
+	// NULL, and then every decision is byte-identical to SWT-32/34's.
+	SurfacedAt time.Time
+	// SurfacedByMessageID is tasks.surfaced_by_message_id; 0 = NULL (a human's
+	// plain reopen). Diagnostic: the log line names it; nothing branches on it.
+	SurfacedByMessageID int64
 }
 
 // State is the ticket_status_syncs row for this external_ref, or nil when this
@@ -52,22 +66,32 @@ type State struct {
 	// the same category and assignee would otherwise get no second log line —
 	// and its existing log would name a status the ticket has left.
 	StatusName string
+	// SurfacedSeen is ticket_status_syncs.surfaced_seen_at (SWT-45 J11): the
+	// tasks.surfaced_at value this pass last observed while the task was open.
+	// Zero = NULL. A SurfacedAt that differs from it is a NEW surfacing.
+	SurfacedSeen time.Time
 }
 
 // Decision is what one observation becomes. Action is spelled as
 // ticket_status_syncs.last_action stores it — none | closed | reopened |
-// refused_active | suppressed_dismissed — plus `unreadable` for evidence gaps,
-// which is NOT a last_action (an unreadable ref gets no state row at all:
-// status_category is NOT NULL with a three-value CHECK). Act is about the
-// EXECUTOR: every decision except unreadable writes/updates the state row;
-// Act=false means it does so without calling task_close / task_reopen /
-// task_append_log — the pair that makes criterion 44's idempotence a pure fact.
+// refused_active | suppressed_dismissed | resurfaced (SWT-45) — plus
+// `unreadable` for evidence gaps, which is NOT a last_action (an unreadable ref
+// gets no state row at all: status_category is NOT NULL with a three-value
+// CHECK). Act is about the EXECUTOR: every decision except unreadable
+// writes/updates the state row; Act=false means it does so without calling
+// task_close / task_reopen / task_append_log — the pair that makes criterion
+// 44's idempotence a pure fact.
 type Decision struct {
 	Warranted     bool
 	Action        string
-	DropReason    string // 'ticket_done' | 'not_assigned'; "" unless dropped
+	DropReason    string // 'ticket_done' | 'ticket_delivered' | 'not_assigned'; "" unless not warranted
 	RestoreStatus string // the reopen target; "" otherwise
 	Act           bool
+	// RecordSeen (SWT-45 J11): the driver records surfaced_seen_at :=
+	// Observation.SurfacedAt, CONSUMING the surfacing. True for (warranted and
+	// open) and (not warranted and restorable); otherwise the recorded value is
+	// preserved. Active work records nothing.
+	RecordSeen bool
 }
 
 // restorable is D6's set as Decide consults it: the statuses a reopen may
@@ -100,10 +124,31 @@ func Decide(obs Observation, state *State) Decision {
 		return Decision{Action: "unreadable"}
 	}
 
+	// SWT-45 J11: something other than this pass put the task on the board since
+	// the pass last saw it. Exact instant equality (time.Equal, never ==: a
+	// timestamptz round trip through the driver is exact but comes back in the
+	// Local zone). A
+	// zero SurfacedAt is never new, which is what keeps every pre-existing
+	// decision byte-identical.
+	newSurfacing := !obs.SurfacedAt.IsZero() && (state == nil || !obs.SurfacedAt.Equal(state.SurfacedSeen))
+
 	if !warranted {
 		switch {
 		case restorable(obs.TaskStatus):
-			return Decision{Warranted: false, Action: "closed", DropReason: drop, Act: true}
+			if newSurfacing {
+				// Activity (or a human) surfaced it after this pass last saw it:
+				// log ONE line and hold it. Closing it here is the bounce — one
+				// flip per message, forever (J12).
+				return Decision{Warranted: false, Action: "resurfaced", DropReason: drop, Act: true, RecordSeen: true}
+			}
+			if state != nil && state.LastAction == "resurfaced" && state.StatusCategory == obs.StatusCategory &&
+				state.StatusName == obs.StatusName && state.Assignee == obs.Assignee {
+				// Held, and the ticket's facts are the ones the hold recorded:
+				// converged, no executor call. A facts change falls through and
+				// closes (the only way the reconciler ends a hold).
+				return Decision{Warranted: false, Action: "resurfaced", DropReason: drop, Act: false, RecordSeen: true}
+			}
+			return Decision{Warranted: false, Action: "closed", DropReason: drop, Act: true, RecordSeen: true}
 		case activeWork(obs.TaskStatus):
 			// One log line per OBSERVATION, not per pass: a re-assignment is a
 			// fact the task's log has not recorded yet; an unchanged one is 96
@@ -132,7 +177,10 @@ func Decide(obs Observation, state *State) Decision {
 
 	// Warranted.
 	if obs.TaskStatus != "closed" {
-		return Decision{Warranted: true, Action: "none"}
+		// A surfacing observed while the ticket still warrants the task is
+		// consumed here, so a later drop closes normally instead of being held
+		// by activity the drop has already answered (J11).
+		return Decision{Warranted: true, Action: "none", RecordSeen: !activeWork(obs.TaskStatus)}
 	}
 	if state == nil || state.LastAction != "closed" {
 		// Closed by someone else — a human, R8, a hand-run task_close. Not ours

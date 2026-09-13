@@ -95,8 +95,21 @@ func runCaptureRulesGate(argv []string) error {
 
 // printGateStats prints the counters unconditionally, zeros included: a pass
 // that found nothing and a pass that never ran must not look the same.
+//
+// revived and surfaced_created (SWT-45 criterion 28) are ALWAYS 0 here, by
+// design rather than by omission: the gate stage never revives a closed task and
+// never surfaces one it creates (the SPEC's Part D section — a warranted-only
+// task needs no hold, and non-addressed activity follows the gate). They are
+// printed so every capture counter line reads the same.
+//
+// deferred and blind (SWT-45 J17) are ALWAYS 0 here for the same reason: they
+// count the own-action guard, which runs only on the revive/surface path, and
+// the gate stage takes neither.
 func printGateStats(mode string, st capture.GateStats) {
+	const revived, surfacedCreated, deferred, blind = 0, 0, 0, 0
 	fmt.Printf("capture_gate: {\"mode\":%q,\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,"+
+		"\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,"+
 		"\"attributed\":%d,\"pending_lookup\":%d,\"budget_skipped\":%d,\"resolved\":%d}\n",
-		mode, st.TasksCreated, st.Appended, st.Reopened, st.Attributed, st.PendingLookup, st.BudgetSkipped, st.Resolved)
+		mode, st.TasksCreated, st.Appended, st.Reopened, revived, surfacedCreated, deferred, blind,
+		st.Attributed, st.PendingLookup, st.BudgetSkipped, st.Resolved)
 }

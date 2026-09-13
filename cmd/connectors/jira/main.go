@@ -114,8 +114,8 @@ func run(full, normalizeOnly, all bool) error {
 	// err: the counts go out unconditionally, zeros included, so "matched
 	// nothing" and "never ran" are different lines in a CronJob log.
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
-		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d}\n",
-		rulesCfg.Mode, rules.Considered, rules.Matched, rules.Unmatched, rules.TasksCreated, rules.Appended, rules.Reopened)
+		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d}\n",
+		rulesCfg.Mode, rules.Considered, rules.Matched, rules.Unmatched, rules.TasksCreated, rules.Appended, rules.Reopened, rules.Revived, rules.SurfacedCreated, rules.Deferred, rules.Blind)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
 	}
@@ -134,11 +134,11 @@ func run(full, normalizeOnly, all bool) error {
 	ts, err := ticketstatus.Run(ctx, pool, ex, ticketstatus.Config{Lookup: factory})
 	fmt.Printf("ticket_status: {\"considered\":%d,\"closed_ticket_done\":%d,\"closed_ticket_delivered\":%d,"+
 		"\"closed_not_assigned\":%d,"+
-		"\"reopened\":%d,\"refused_active\":%d,\"suppressed_dismissed\":%d,\"converged\":%d,"+
+		"\"reopened\":%d,\"refused_active\":%d,\"suppressed_dismissed\":%d,\"resurfaced\":%d,\"converged\":%d,"+
 		"\"unpolled\":%d,\"ambiguous\":%d,\"unreadable\":%d,"+
 		"\"fetched\":%d,\"fetch_skipped_ttl\":%d,\"fetch_failed\":%d}\n",
 		ts.Considered, ts.ClosedTicketDone, ts.ClosedTicketDelivered, ts.ClosedNotAssigned,
-		ts.Reopened, ts.RefusedActive, ts.SuppressedDismissed, ts.Converged,
+		ts.Reopened, ts.RefusedActive, ts.SuppressedDismissed, ts.Resurfaced, ts.Converged,
 		ts.Unpolled, ts.Ambiguous, ts.Unreadable,
 		ts.Fetched, ts.FetchSkippedTTL, ts.FetchFailed)
 	if err != nil {

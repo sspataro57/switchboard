@@ -365,3 +365,155 @@ are HOC/LLamasite not my projects. not even ReEngine".
   unthreaded key and every `…:C1C1TSLJH:{root}` thread key. Checked 2026-09-12:
   8,559 messages match the prefix, the same count as messages whose raw
   conversation id is `C1C1TSLJH`. No longer conversation id shares the prefix.
+
+## Activity rules (SWT-45)
+
+Two flags on a rule turn its matches into Jira activity. Set them with
+`opsctl capture-rules add --revive [--addressed]`; they are stored in
+`capture_rules.revive` and `.addressed` (migration 0030). `capture-rules list`
+prints them at the end of the key line.
+
+- **`--revive`**: a match is Jira activity (owner decision 1: any activity —
+  mentions, comments, assignments, status changes, the close notification).
+  - The ticket's task is CLOSED: capture logs the message, then calls the revive
+    form of `task_reopen`. The handler reopens it to the status it held (else
+    `ready`) only if the message was ingested after the close, and after any open
+    dismissal. It then SURFACES the task, so the reconciler holds it instead of
+    re-closing it (`docs/runbooks/ticket-status-sync.md`, "Surfaced by
+    activity").
+  - The ticket has no task: capture creates one, then surfaces it with
+    `task_mark_surfaced`.
+  - The task is OPEN (ready, delivered, in progress...): capture only logs.
+- **`--addressed`**: the match is addressed to him ("X mentioned you on K", "X
+  assigned K to you"), which overrides a gated project's assignee check
+  (decision 3). It implies activity; pass `--revive` too.
+
+Whether a match overrides is one truth table, `overrides = revive AND (NOT gate
+OR addressed)`:
+
+| project gate | `--revive` | `--addressed` | what a match does |
+|---|---|---|---|
+| off | no | no | today's behaviour: create, or log |
+| off | yes | either | revive a closed task, or create; surface it |
+| on | no | no | `held` for the SWT-40 Part D gate, unchanged |
+| on | yes | no | `held` for the gate, unchanged; the gate's own log never revives |
+| on | yes | yes | NOT held: revive or create and surface at capture time, with no Jira lookup |
+
+The tool and migration 0030's CHECKs refuse two combinations:
+
+- `--revive` needs `--external-system jira` (the tool refuses any other system:
+  Part D's hold keys on jira, so a reviving github/slack rule would bypass a gated
+  project's assignee check; the CHECK asks only for some system, and capture
+  treats a non-jira reviving rule as inert) and an explicit `--key-regex` that
+  captures the WHOLE ticket key. Without a `key_regex` the key is the pattern's
+  first group. That is how rule 10 (`(WEB|API|OPS)-[0-9]+`) keys by PREFIX, and a
+  reviving prefix rule would resurrect the catch-all tasks 56/57/60 on every
+  mention. Rule 10 can never carry the flag.
+- `--addressed` needs `--revive`.
+
+**Rules cannot be edited, and the same pattern cannot be re-added.**
+`capture_rules` is UNIQUE on `(project_id, criteria_type, pattern)`, and no tool
+changes a rule's pattern, key_regex, priority or flags. A "disable and re-add"
+collides on that unique key unless the pattern text changes. So a key regex must
+be right the first time: run it in Go over an exported corpus first, because
+Postgres reads `\b` as a backspace. The same fact means existing rules (1, 2,
+3–5) cannot gain the flags.
+
+**The Treetop notification rule (J2).** Seed it only after the SPEC's blocking
+pre-checks 0a–0e pass, including the zero-row own-action check:
+
+```bash
+opsctl capture-rules add --project collaboratory --type sender --pattern jira@treetopllc.jira.com \
+  --external-system jira --key-regex '^[^\n]*?\b((?:WEB|API|OPS)-[0-9]+)\b' \
+  --url-template 'https://treetopllc.jira.com/browse/{key}' --priority 92 --revive \
+  --note "SWT-45: Treetop Jira notification mail keys to the ticket in its SUBJECT; revives/creates"
+```
+
+- **Priority 92** outranks rule 10 (90), so Jira mail leaves the prefix
+  buckets, and stays below rule 59 (95).
+- **The key comes from the SUBJECT line only.** The key text is subject + "\n" +
+  body, and Go's `^` without `(?m)` is start of text, so `^[^\n]*?` never reads
+  the body. A digest with no key in its subject derives no key and is
+  attribution only.
+- **The connector side (rules 3–5) stays non-reviving.** The Jira poller reads
+  whole projects, so a reviving connector rule would turn a comment on ANY
+  WEB/API/OPS ticket into a task. The email copy covers every ticket Jira
+  considers him involved in, and it is the only copy that revives, so a comment
+  that arrives twice revives once.
+
+**His own Jira COMMENTS never revive (J17); his edits can.** Jira can mail him
+about his own changes ("Anonymous (JIRA)"). Capture skips a revive, or a
+creation, when the ticket's connector thread `jira:{site_host}:{KEY}` holds an
+OUTBOUND message (his comment) sent between 10 minutes before and 2 minutes
+after the email. The decision reason says `own_action`: on a closed task the
+email is only logged (`revive skipped`); for a ticket with no task it is
+`attributed` (`no task created`).
+
+- **Comments only.** His field and status edits leave no outbound message (the
+  connector stores no changelog), so their Anonymous notices revive or create.
+  On prod that is 182 of the 208 Anonymous Treetop emails. The only protection
+  is turning off Jira's "Notify me about my own changes", and Verification 0c
+  gates J2's seeding on it.
+- **A named actor is someone else.** An email whose From names another person,
+  `"Katie Evans (JIRA)" <…>`, is decided at once even inside the window around
+  his comment (reason `actor named`): no skip, no wait. Only "Anonymous (JIRA)",
+  or a From with no "(JIRA)" shape, goes through the window.
+- **Deferred, then BLIND.** If connector-jira has not yet polled past the email
+  (no `ok` run started after it, or the key's comment rows not yet normalized),
+  the message is left undecided: a `capture rules: message N deferred` log line,
+  `"deferred"` on the counter line, and a retry every pass. That lasts up to 30
+  minutes from ingest. Then the pass decides as if clear (fail-open): the reason
+  says the guard ran BLIND, and `"blind"` on the counter line counts it.
+- Keys no provider='jira' account's scopes cover (lookup-only LHH) are not
+  guarded: nothing stores his comments there.
+
+**`--limit` reads the oldest first.** A hand-run `opsctl capture-rules run
+--limit N` takes the N OLDEST pending messages (by sent_at). A deferred message
+stays pending, so for up to 30 minutes deferred rows can use up the whole limit,
+and the run decides nothing new. Raise N, or wait for the next jira tick.
+`--limit` is for the narrow smoke only; no CronJob sets it.
+
+**Live horizon floor.** A live pass refuses a horizon under 2h
+(`--since` or `CAPTURE_RULES_SINCE`) with an error. A deferred message writes no
+decision row, so a shorter window could let it age out undecided. A value that
+doesn't parse, or isn't positive, still falls back to 720h without a word.
+
+**Reengine's addressed rule (J4). NOT seeded:** pre-check 0d returned 0 rows on
+prod (2026-09-12). Seed it only if a later 0d confirms the subject shapes. Use the literal wording 0d returned, and a priority above rules
+1 and 2 and below 95:
+
+```bash
+opsctl capture-rules add --project reengine --type body_regex \
+  --pattern '\A[^\n]*(?:\bmentioned you on LHH-[0-9]+|\bassigned LHH-[0-9]+ to you)' \
+  --external-system jira --key-regex '\A[^\n]*?\b(LHH-[0-9]+)\b' \
+  --url-template 'https://avviato.atlassian.net/browse/{key}' --priority <max(rule1,rule2)+1> \
+  --revive --addressed --note "SWT-45 decision 3: LHH mail addressed to him overrides the gate"
+```
+
+Rules 1 and 2 are untouched, and everything they match keeps following the
+gate. Part D's D-D6 path changes only for mail this rule claims: an "assigned
+LHH-n to you" email now creates its task at capture time instead of being held.
+
+**Mentions count too (Salvador, 2026-09-12).** A Slack or GitHub message that
+names a ticket key is Jira activity as well. When capture-rule-ticket-keys
+replaces rule 10, its successor carries `--revive` with a whole-key key regex
+(`\b((?:WEB|API|OPS)-[0-9]+)\b`). Only NEW messages act. A message already
+decided keeps its one live decision, and `--all` is refused in live mode. There
+is no backfill, so historically mentioned keys do not become tasks
+retroactively.
+
+**The cost, read before arming (J10).** Every Jira close sends a notification
+email. If the close email arrives before the reconciler sees the close, it only
+logs and the task closes normally. If it arrives after the reconciler's close,
+it is activity after the close: it revives the task and the reconciler holds it
+open. Jira Cloud batches notification mail, so closing a Treetop ticket will
+often leave its task back on the board until one hand close, which sticks.
+
+**Counters.** Every `capture_rules:` line prints `"revived"` (closed tasks
+revived) and `"surfaced_created"` (tasks an activity rule created and
+surfaced), zeros included. The `capture_gate:` line prints both as 0 always,
+because the gate never revives or surfaces.
+
+**Rollback.** `opsctl call --tool capture_rule_set_enabled --args
+'{"rule_id":<id>,"enabled":false}'` for each activity rule. Tasks already
+surfaced stay held until closed by hand, and a hand close sticks.
