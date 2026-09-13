@@ -632,10 +632,12 @@ func TestPromoteInquiry_Integration_InboxOneFixturePerClause(t *testing.T) {
 	}
 }
 
-// Part B's `route` mode is not on this branch (0029's mode CHECK has no
-// 'route'), so the route fixture runs only once B's migration is applied; the
-// structure test TestPromoteInquiryInbox_LatestDecisionHasNoModePredicate is
-// its always-on half.
+// C2: "latest action='attributed' in any mode, including route and gate (a
+// fixture each)". Part C shipped this fixture skipping until Part B's
+// migration existed. SWT-40 Part B made the `route` mode real
+// (migrations/0032_route_tier.sql, the SPEC's 0029), so the skip is now a
+// FAILURE: a database without 0032 is a database this suite cannot vouch for.
+// B6: after a route row, the inquiry promotion inbox sees the message.
 func TestPromoteInquiry_Integration_RouteAttributionIsFollowed(t *testing.T) {
 	ctx := context.Background()
 	s := newIQPSuite(t, ctx)
@@ -645,7 +647,8 @@ func TestPromoteInquiry_Integration_RouteAttributionIsFollowed(t *testing.T) {
 		t.Fatalf("read capture_decisions_mode_check: %v", err)
 	}
 	if !strings.Contains(def, "route") {
-		t.Skip("capture_decisions has no 'route' mode yet (Part B's migration); the no-mode-predicate scan covers it")
+		t.Fatalf("capture_decisions_mode_check does not admit 'route' (%s): migrations/0032_route_tier.sql (SWT-40 "+
+			"Part B) is not applied to this database. `make migrate` against it first", def)
 	}
 	m, r := s.message(t, ctx, iqpMsg{label: "routed", key: gmailKey("routed"), sentAt: s.ago(2 * time.Hour)})
 	s.decision(t, ctx, m, "live", "unmatched", 0)

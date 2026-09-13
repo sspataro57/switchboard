@@ -14,8 +14,8 @@
 //	OPS_TOKEN_KEY    the gate stage's Jira lookup credential. Unset: no lookup;
 //	                 holds stay pending until they expire (fail closed)
 //	OPS_LOCAL_PROVIDER_URL, OPS_LOCAL_MODEL
-//	                 the inquiry stage's local model (an IP literal; no hosted
-//	                 fallback). Unset: every message is skipped and recorded
+//	                 the inquiry and route stages' local model (an IP literal; no
+//	                 hosted fallback). Unset: every message is skipped and recorded
 //
 // Flags: --stages overrides PIPELINE_STAGES; --sweep overrides the 5 m sweep.
 //
@@ -57,11 +57,13 @@ type stageImpl struct {
 	pass  func(*pgxpool.Pool) pipeline.PassFunc
 }
 
-// stageImpls is every stage this build implements. Part B adds its two.
-// A stage named in PIPELINE_STAGES but absent here is refused at startup,
-// never silently skipped.
+// stageImpls is every stage this build implements. A stage named in
+// PIPELINE_STAGES but absent here is refused at startup, never silently
+// skipped.
 var stageImpls = map[pipeline.Stage]stageImpl{
 	pipeline.StageGate:           {limit: gateStageLimit, pass: gatePass},                     // Part D (gate.go)
+	pipeline.StageRoute:          {limit: routeStageLimit, pass: routePass},                   // Part B (route.go)
+	pipeline.StageRouteApply:     {limit: routeApplyStageLimit, pass: routeApplyPass},         // Part B (route.go)
 	pipeline.StageInquiry:        {limit: inquiryStageLimit, pass: inquiryPass},               // Part C (inquiry.go)
 	pipeline.StageInquiryPromote: {limit: inquiryPromoteStageLimit, pass: inquiryPromotePass}, // Part C (inquiry.go)
 }

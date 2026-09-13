@@ -721,3 +721,171 @@ a pass is stuck. To resolve one by hand:
    that includes the 72h fence).
 
 Automatic recovery of stranded claims is the follow-up ticket SWT-50.
+
+## Routing lane (SWT-40 Part B)
+
+The fourth lane, `route` (`worker_type=classify_route`, prompt `route-v2`, contract
+`route_verdict`). It answers one question for a message the capture rules left
+**unmatched**: which of its receiving account's candidate projects does it belong
+to? Spec: `docs/tickets/inquiry-promote_SPEC.md`, Part B. The pipelined stages
+are in `docs/runbooks/pipeline.md` ("The route stages").
+
+**Closed candidate sets, per receiving account.** Only accounts with rows in
+`source_account_projects` are routed at all. A row is the authorisation to move
+that mailbox's mail into the project, so it is written only through the humanOnly
+executor tools, from opsctl:
+
+```
+opsctl route-candidates add --account salvador@handsonconnect.org --project collaboratory --default \
+  --description "university partner integrations: activities, sync, request/response validation"
+opsctl route-candidates add --account salvador@handsonconnect.org --project reengine \
+  --description "the ReEngine platform and its LHH tickets"
+opsctl route-candidates list      # per account: numbered as the prompt numbers them; SHADOW or armed since …
+opsctl route-candidates remove --account … --project …
+```
+
+At most one default per account. `add` refuses an unknown or ambiguous account
+(one address under two providers), an unknown project, an empty description, a
+project the account already lists, and a second default. The description is
+what the model reads on the candidate's line: write what the project covers,
+never a sender's name.
+
+**What the model decides, and what the spine decides.** The model answers
+`{project_index, evidence, reason}`: an index into the numbered candidate list
+(or `null`) and a VERBATIM quote. It is never asked how sure it is (the constant
+of section 2 above). Two deterministic rules replace that:
+- `ResolveCandidate` turns the index into one of the account's own rows (`null`,
+  0 or out of range → none), the way `ResolveLink` resolves a link.
+- **Grounding**: a choice counts only if the evidence, whitespace-collapsed and
+  case-folded, is a substring of the subject or the body, and is at least two
+  words and 8 characters long (`GroundMinWords`, `GroundMinChars`). A
+  paraphrase is ungrounded. So is a quote of the sender, because a shared sender
+  is not enough, and so is a trivial span like "the" (SPEC B-D4 amendment,
+  2026-09-13; prompt `route-v2`).
+
+Both are decided at classify time and recorded on the verdict
+(`fields.project_id`, `fields.grounded`), so `route_apply` never re-reads a body.
+
+**The four steps** (`capture.DecideRoute`, pure), applied by the `route_apply`
+stage to an inbound message on an ARMED account whose live decision is
+`unmatched` and whose latest decision is still `unmatched`:
+
+| step | when |
+|---|---|
+| `thread` | the thread's other messages are attributed to exactly one project by the rules or the gate, and it is a candidate (a neighbour's route row never counts: a route never begets a route) |
+| `single` | the account has exactly one candidate |
+| `model` | the newest verdict is grounded and names a candidate |
+| `default` | otherwise, the account's default (O3); no default → the message stays unmatched (`no_default`) |
+
+No verdict yet → `pending_verdict`: a missing verdict never falls to the
+default. A verdict recorded before the account's `route_after` →
+`verdict_before_arming`: not applied and not defaulted (steps 1-2 still apply).
+A candidate removed (`route-candidates remove`) while a pass is running →
+`candidate_revoked`: the insert re-checks the candidate row, writes nothing, and
+the message retries on the next pass against the current candidates.
+
+**What a route is.** A `capture_decisions` row with `mode='route'`,
+`action='attributed'`, a `route_step`, and `ai_extraction_id` iff the step is
+`model`. No rule, no task, no tool call, nothing sent. One per message, forever
+(`capture_decisions_route_uniq`). It becomes the message's latest decision, so
+the inquiry lane and its promotion follow it, and the residue and triage inboxes
+drop it. A later shadow `--all` capture pass writes nothing for it. Accepted
+residuals: a rule added after routing does not re-point a routed message, and
+removing a candidate does not unroute what was routed.
+
+**Shadow, then arming.** With `source_accounts.route_after` NULL the account is
+in shadow: the `route` stage records verdicts, `route_apply` writes nothing.
+Read the shadow with:
+
+```
+classify report --lane route [--since 168h]
+```
+
+It breaks the lane down by receiving account: verdicts (`grounded`, `ungrounded`
+— a candidate chosen but not quoted, so the default applies — and `no choice`),
+`pending_verdict` (live-unmatched on a candidate account with no current verdict),
+and route_apply's rows by step (zero while in shadow).
+
+**The go-live gate is an eval against the rules tier's own answers** (B-D7).
+Take 120 or more messages on the mailbox that RULES attributed to one of its
+candidates, hide the answer and score agreement per project:
+
+```sql
+-- read-only on prod; export to a scratch file OUTSIDE the repo
+SELECT nm.id AS message_id, p.slug AS label, nm.subject
+  FROM normalized_messages nm
+  JOIN raw_source_items ri ON ri.id = nm.raw_source_item_id
+  JOIN source_accounts sa ON sa.id = ri.source_account_id
+  JOIN LATERAL (SELECT cd.matched_rule_id, cd.action, cd.project_id FROM capture_decisions cd
+                 WHERE cd.message_id = nm.id ORDER BY cd.id DESC LIMIT 1) latest ON true
+  JOIN projects p ON p.id = latest.project_id
+ WHERE sa.account_email = 'salvador@handsonconnect.org'
+   AND nm.direction = 'inbound'
+   AND latest.matched_rule_id IS NOT NULL
+   AND latest.action IN ('attributed', 'task', 'task_log')
+   AND latest.project_id IN (SELECT project_id FROM source_account_projects WHERE source_account_id = sa.id)
+ ORDER BY random() LIMIT 150;
+```
+
+Write each row as `{"message_id":…,"label":"<slug>","subject_sha256":"<classify.SubjectHash(subject)>","stratum":"rules"}`
+into `docs/evals/route-from-rules.jsonl`. Hash in Go with `classify.SubjectHash`,
+as the other label files are (Postgres reads `\b` and friends differently, and
+the file carries no content). Then:
+
+```
+classify eval --lane route      # --labels defaults to docs/evals/route-from-rules.jsonl
+```
+
+The loader requires `stratum: rules` on every line and a slug-shaped label, and
+the eval refuses a label that is not a `projects.slug`. It prints a label × routed
+count table, agreement per project, and every disagreement by id. A ratio prints
+only at 120 scored labels or more (`EvalResultThreshold`). The label set is biased
+easy, so **read every disagreement by hand before arming.**
+
+**Overall agreement is inflated by default fallbacks.** A message the model leaves
+unrouted (no choice, or ungrounded) lands on the account's default, which agrees
+with every default-project label for free. The number that measures the model is
+the non-default candidate's row: on handsonconnect, **read the `reengine` row**,
+not the overall figure. The eval takes `--checkpoint` like every lane (per-message
+resume; the file is removed on success). A verdict that does not parse, or never
+arrives, is scored as a miss and counted on the `misses:` line; it never aborts
+the batch. Then skim the real
+routes for the unmatched mail (the dry-run list: `classify report --lane route`
+plus the `pending_verdict` counts).
+
+**Hard precondition: arm an account only after EVERY capture binary runs the
+Part B image.** That means all connector CronJobs, `pipelined`, and any hand-run
+`opsctl`, rebuilt from main. A pre-Part-B capture pass excludes only gate rows,
+so an old binary's shadow `--all` pass would write a newer `unmatched` row above
+a route row and bury it for every latest-decision reader. There is no DB guard:
+no route row exists before arming, so the ordering is the guard (SPEC B-D7
+amendment 2026-09-13).
+
+**Arming is a human decision, per account, by hand:**
+
+```sql
+UPDATE source_accounts SET route_after = now() WHERE account_email = 'salvador@handsonconnect.org';
+```
+
+Nothing in code sets or clears it (a structure test scans for that). Step 3 is
+forward-only on the verdict clock: a verdict recorded before `route_after` is never
+applied. So once armed, the route classify inbox treats a verdict as current only
+if it was recorded at or after `route_after` (SPEC amendment 2026-09-13). Every
+message whose verdicts all predate arming is back in the inbox exactly once, and
+the post-arming backfill re-classifies it:
+
+```
+classify run --lane route --since 720h     # one fresh verdict per shadow-verdicted message, once
+```
+
+`route_apply` then routes it on its next sweep or `route_classified` wake. To
+disarm, set the column back to NULL by hand; rows already written stay.
+
+**Locality.** Every message this lane reads is unmatched, so it carries
+Attribution = AttrUnmatched and `ClassOf` restricts it (the residue lane's
+mechanism). The prompt carries only the message and the candidate rows: no thread
+context, no links. `cmd/classify` and `pipelined` build the router with no hosted
+client. An all-skipped pass means the local model is down; a hosted fallback is
+never the fix.
+
+**`--since` is required** on `classify run --lane route` (the refusal says so).

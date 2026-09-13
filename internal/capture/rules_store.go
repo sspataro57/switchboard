@@ -562,11 +562,13 @@ func pendingMessages(ctx context.Context, pool *pgxpool.Pool, cfg RulesConfig) (
 	         AND ($1::timestamptz IS NULL OR COALESCE(m.sent_at, m.created_at) >= $1)
 	         AND NOT EXISTS (
 	           SELECT 1 FROM capture_decisions g
-	            WHERE g.message_id = m.id AND g.mode = 'gate')`
-	// SWT-40 D-D2, the shadow-overwrite guard: a message the gate resolved is
-	// excluded in EVERY mode, --all included. Every latest-decision reader
-	// follows ORDER BY id DESC, so a newer shadow row would bury the gate's
-	// resolution — the message's one action — for all of them.
+	            WHERE g.message_id = m.id AND g.mode IN ('gate', 'route'))`
+	// SWT-40 D-D2 / B6, the shadow-overwrite guard: a message the gate resolved
+	// or the routing tier routed is excluded in EVERY mode, --all included.
+	// Every latest-decision reader follows ORDER BY id DESC, so a newer shadow
+	// row would bury the gate's resolution or the route — the message's current
+	// attribution — for all of them. Accepted residual (B-D5): a rule added
+	// after routing does not re-point a routed message.
 	if !cfg.All {
 		// Skip messages this MODE has already decided — not just live ones.
 		//

@@ -328,9 +328,9 @@ func buildRouter() (*provider.Router, string) {
 
 func runCmd(argv []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue | inquiry")
+	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue | inquiry | route")
 	limit := fs.Int("limit", 0, "max messages this run (0 = all pending)")
-	since := fs.Duration("since", 0, "only messages with sent_at within this window (0 = all; REQUIRED on the residue and inquiry lanes)")
+	since := fs.Duration("since", 0, "only messages with sent_at within this window (0 = all; REQUIRED on the residue, inquiry and route lanes)")
 	if err := fs.Parse(argv); err != nil {
 		return err
 	}
@@ -375,7 +375,7 @@ func runCmd(argv []string) error {
 
 func reportCmd(argv []string) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
-	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue | inquiry")
+	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue | inquiry | route")
 	since := fs.Duration("since", 0, "only runs within this window (0 = all)")
 	if err := fs.Parse(argv); err != nil {
 		return err
@@ -399,7 +399,7 @@ func reportCmd(argv []string) error {
 
 func evalCmd(argv []string) error {
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
-	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue | inquiry")
+	laneName := fs.String("lane", classify.LanePersonal.Name, "personal | residue | inquiry | route")
 	labelsPath := fs.String("labels", "",
 		"the hand-checked labelled set (default: the lane's own fixture)")
 	ckptPath := fs.String("checkpoint", "",
@@ -444,6 +444,47 @@ func evalCmd(argv []string) error {
 	}
 	defer pool.Close()
 
+	// SWT-40 B10: a route label names a project, and a label that is not a
+	// projects.slug scores against a class the tier can never produce. Checked
+	// here, where the pool is, before anything is sent to the model.
+	if lane.Name == classify.LaneRoute.Name {
+		var slugs []string
+		seen := map[string]bool{}
+		for _, l := range labels {
+			if !seen[l.Label] {
+				seen[l.Label] = true
+				slugs = append(slugs, l.Label)
+			}
+		}
+		rows, err := pool.Query(ctx, `SELECT slug FROM projects WHERE slug = ANY($1)`, slugs)
+		if err != nil {
+			return fmt.Errorf("check route label slugs: %w", err)
+		}
+		known := map[string]bool{}
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan project slug: %w", err)
+			}
+			known[s] = true
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate project slugs: %w", err)
+		}
+		var unknown []string
+		for _, s := range slugs {
+			if !known[s] {
+				unknown = append(unknown, s)
+			}
+		}
+		if len(unknown) > 0 {
+			return fmt.Errorf("%s labels name projects that do not exist: %s — every route label must be a "+
+				"projects.slug", *labelsPath, strings.Join(unknown, ", "))
+		}
+	}
+
 	// buildRouter resolves the model ONCE, into the client itself, so `eval` and
 	// `run` cannot score and classify different models — see the CLASSIFY_MODEL
 	// note there. Eval prints the model the server reports, which is the truthful
@@ -469,6 +510,12 @@ func evalCmd(argv []string) error {
 // subjectHashShape is the only shape classify.SubjectHash produces: 16
 // lowercase hex characters.
 var subjectHashShape = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+// routeLabelShape is a project slug's shape: the route lane's label names the
+// project, and a label that could hold free text is a place client text rides
+// along into a committed file. The value is then checked against
+// projects.slug (evalCmd).
+var routeLabelShape = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 // loadLabels reads the JSONL fixture. It refuses a line carrying message
 // CONTENT: the file is committed, and a subject or body in it would put personal
@@ -541,6 +588,26 @@ func loadLabels(path string, lane classify.Lane) ([]classify.Label, error) {
 		if !classify.LabelStratumAllowed(l.Stratum) {
 			return nil, fmt.Errorf(`%s:%d stratum is outside the closed vocabulary (uniform | enriched | `+
 				`domain_gate)`, path, line)
+		}
+		// SWT-40 B10: the route lane's labels are project SLUGS (multi-class), and
+		// every line is the rules tier's own answer, stratum `rules` (B-D7). The
+		// slugs are checked against projects.slug by evalCmd, which holds the pool.
+		if lane.Name == classify.LaneRoute.Name {
+			if !routeLabelShape.MatchString(l.Label) {
+				return nil, fmt.Errorf("%s:%d label = %q, want a project slug — the route lane's labels name the "+
+					"project the rules attributed the message to", path, line, l.Label)
+			}
+			if l.Stratum != classify.RouteLabelStratum {
+				return nil, fmt.Errorf("%s:%d stratum = %q, want %q on every route label: the set is the rules tier's "+
+					"answers, deterministic and biased easy, and the file must say so (B-D7)", path, line, l.Stratum,
+					classify.RouteLabelStratum)
+			}
+			out = append(out, l)
+			continue
+		}
+		if l.Stratum == classify.RouteLabelStratum {
+			return nil, fmt.Errorf("%s:%d carries stratum %q, which is the route lane's (the rules tier's answers); "+
+				"the %s lane's labels are human judgements", path, line, l.Stratum, lane.Name)
 		}
 		if l.Stratum != "" && lane.Name == classify.LanePersonal.Name {
 			return nil, fmt.Errorf("%s:%d carries a stratum on the personal lane, whose labelled set has none — "+

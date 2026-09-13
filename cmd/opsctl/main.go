@@ -7,6 +7,7 @@
 //	opsctl answer-feedback --id N --answer "..." [--resume]
 //	opsctl capture-rules <list|add|run|report|gate> [flags]
 //	opsctl ticket-status <sync|report> [flags]   (SWT-32: the jira reconciler by hand)
+//	opsctl route-candidates <add|remove|list> [flags]   (SWT-40 Part B: the routing tier's candidate sets)
 package main
 
 import (
@@ -33,7 +34,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules|ticket-status> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules|ticket-status|route-candidates> [flags]")
 		os.Exit(2)
 	}
 
@@ -42,6 +43,27 @@ func main() {
 	var err error
 
 	switch os.Args[1] {
+	case "route-candidates":
+		// SWT-40 Part B (routecandidates.go): add/remove are tool calls and fall
+		// through to the executor path below; list is a read.
+		if len(os.Args) < 3 {
+			err = fmt.Errorf("usage: opsctl route-candidates <add|remove|list> [flags]")
+			break
+		}
+		switch os.Args[2] {
+		case "add":
+			toolName, args, err = parseRouteCandidateAdd(os.Args[3:])
+		case "remove":
+			toolName, args, err = parseRouteCandidateRemove(os.Args[3:])
+		case "list":
+			if err := runRouteCandidatesList(os.Args[3:]); err != nil {
+				fmt.Fprintln(os.Stderr, "opsctl:", err)
+				os.Exit(1)
+			}
+			return
+		default:
+			err = fmt.Errorf("unknown route-candidates command %q (usage: opsctl route-candidates <add|remove|list> [flags])", os.Args[2])
+		}
 	case "create-task":
 		toolName, args, err = parseCreateTask(os.Args[2:])
 	case "call":

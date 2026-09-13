@@ -133,7 +133,45 @@
   <h2>Classify shadow summary</h2>
   {{range .Lanes}}
   <h3>{{.Name}} lane</h3>
-  {{if .Inquiry}}
+  {{if .Route}}
+  <div class="headline">
+    <div><strong>{{.Summary.Classified}}</strong> verdicts</div>
+    <div><strong>{{.Summary.Flagged}}</strong> grounded</div>
+    <div><strong>{{.Summary.Skipped}}</strong> skipped</div>
+  </div>
+  {{if .Summary.ByKind}}
+  <ul class="reasons">
+    {{range $k, $v := .Summary.ByKind}}<li>chose {{$k}} — {{$v}}</li>{{end}}
+  </ul>
+  {{end}}
+  {{if .Summary.RouteAccounts}}
+  <h4>By receiving account</h4>
+  <table>
+    <tr><th>Account</th><th>State</th><th class="num">Verdicts</th><th class="num">Grounded</th>
+      <th class="num">Ungrounded</th><th class="num">No choice</th><th class="num">Pending verdict</th>
+      <th class="num">Thread</th><th class="num">Single</th><th class="num">Model</th><th class="num">Default</th></tr>
+    {{range .Summary.RouteAccounts}}
+    <tr>
+      <td>{{.Account}}</td>
+      <td>{{if .Armed}}armed{{else}}shadow{{end}}</td>
+      <td class="num">{{.Verdicts}}</td>
+      <td class="num">{{.Grounded}}</td>
+      <td class="num">{{.Ungrounded}}</td>
+      <td class="num">{{.NoChoice}}</td>
+      <td class="num">{{.PendingVerdict}}</td>
+      <td class="num">{{index .Steps "thread"}}</td>
+      <td class="num">{{index .Steps "single"}}</td>
+      <td class="num">{{index .Steps "model"}}</td>
+      <td class="num">{{index .Steps "default"}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+  <p class="muted"><em>grounded</em> — the evidence is a verbatim span of the message (route step model).
+    <em>ungrounded</em> — a candidate was chosen but not quoted; the account's default applies.
+    <em>pending verdict</em> — no current verdict yet; a missing verdict never falls to the default.
+    Steps are route rows written by <code>route_apply</code>; a shadow account writes none.</p>
+  {{else if .Inquiry}}
   <div class="headline">
     <div><strong>{{.Summary.Classified}}</strong> classified</div>
     <div><strong>{{.Summary.Flagged}}</strong> flagged</div>

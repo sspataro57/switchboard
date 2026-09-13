@@ -42,6 +42,16 @@ package classify_test
 //
 // The Lane struct gains a Contract field; everything else in this file is SWT-23's
 // and must stay green byte for byte.
+//
+// AMENDED BY SWT-40 Part B (inquiry-promote, B-D3), 2026-09-13. The same two
+// guards are REWRITTEN again, never deleted: "four lanes, three contracts".
+// The argument for the fourth lane is in docs/tickets/inquiry-promote_SPEC.md
+// (B-D3): residue's contract is pinned equal to personal's, and the inquiry
+// lane needs project context an unmatched message lacks, so routing gets its
+// own lane (`route`, worker_type classify_route) and its own contract.
+//
+//   - TestLane_ThereAreExactlyThreeAndTheyAreDeclaredInGo -> ...ExactlyFour...
+//   - TestLane_ThreeLanesTwoContracts -> TestLane_FourLanesThreeContracts.
 
 import (
 	"context"
@@ -125,7 +135,13 @@ func (s *lnStore) PendingMessages(ctx context.Context, cfg classify.Config) ([]c
 // binding: a FOURTH lane is a fourth worker_type, a fourth prompt nothing
 // measured and a fourth population whose class nobody argued about. Deleting
 // this test is a failure — it is where that argument gets written down.
-func TestLane_ThereAreExactlyThreeAndTheyAreDeclaredInGo(t *testing.T) {
+//
+// REWRITTEN AGAIN BY SWT-40 Part B (B-D3): four. The fourth argument was
+// written down in docs/tickets/inquiry-promote_SPEC.md — `route` chooses a
+// project from a CLOSED candidate set for a message the rules left unmatched,
+// a question neither the actionability contract nor the inquiry contract asks.
+// A FIFTH lane still needs its own SPEC.
+func TestLane_ThereAreExactlyFourAndTheyAreDeclaredInGo(t *testing.T) {
 	declared := map[string]string{} // var name -> file
 	for _, rel := range csSources(t, "internal/classify") {
 		fset := token.NewFileSet()
@@ -164,14 +180,14 @@ func TestLane_ThereAreExactlyThreeAndTheyAreDeclaredInGo(t *testing.T) {
 		}
 	}
 
-	if len(declared) != 3 {
-		t.Fatalf("internal/classify declares %d package-level Lane value(s) (%v); SWT-33 criterion 3 says "+
-			"there are EXACTLY THREE — LanePersonal, LaneResidue and LaneInquiry. A FOURTH lane is a "+
-			"fourth worker_type, a fourth prompt nothing measured and a fourth population whose class "+
+	if len(declared) != 4 {
+		t.Fatalf("internal/classify declares %d package-level Lane value(s) (%v); SWT-40 B-D3 says "+
+			"there are EXACTLY FOUR — LanePersonal, LaneResidue, LaneInquiry and LaneRoute. A FIFTH lane is a "+
+			"fifth worker_type, a fifth prompt nothing measured and a fifth population whose class "+
 			"nobody argued about — if one is genuinely wanted, the argument belongs in a SPEC, not in a "+
-			"var block, exactly as SWT-33's did", len(declared), declared)
+			"var block, exactly as SWT-33's and SWT-40's did", len(declared), declared)
 	}
-	for _, want := range []string{"LanePersonal", "LaneResidue", "LaneInquiry"} {
+	for _, want := range []string{"LanePersonal", "LaneResidue", "LaneInquiry", "LaneRoute"} {
 		if _, ok := declared[want]; !ok {
 			t.Errorf("no package-level Lane named %q; declared: %v", want, declared)
 		}
@@ -278,7 +294,11 @@ func TestLane_ValuesAreTheTwoContracts(t *testing.T) {
 // the equality directly. LanePersonal.Contract == LaneResidue.Contract is
 // exactly the property "one contract, both lanes" was standing for, and it goes
 // red on a fork of EITHER of them rather than on the mere presence of a field.
-func TestLane_ThreeLanesTwoContracts(t *testing.T) {
+//
+// REWRITTEN AGAIN BY SWT-40 Part B (B-D3): FOUR lanes, THREE contracts. The
+// route lane's contract ({project_index, evidence, reason}) is its own; the
+// shared actionability contract is still shared, byte for byte.
+func TestLane_FourLanesThreeContracts(t *testing.T) {
 	// The struct's shape, still pinned: the five values every lane carries, plus
 	// the Contract. A sixth unexplained field is still a fork.
 	fields := map[string]bool{}
@@ -318,14 +338,18 @@ func TestLane_ThreeLanesTwoContracts(t *testing.T) {
 	// other two share one. Counted rather than compared pairwise, because
 	// pairwise is where the third one gets forgotten.
 	seen := map[string]bool{}
-	for _, l := range []classify.Lane{classify.LanePersonal, classify.LaneResidue, classify.LaneInquiry} {
+	for _, l := range []classify.Lane{classify.LanePersonal, classify.LaneResidue, classify.LaneInquiry, classify.LaneRoute} {
 		seen[fmt.Sprintf("%+v", l.Contract)] = true
 	}
-	if len(seen) != 2 {
-		t.Errorf("the three lanes carry %d distinct contracts, want exactly 2 (the shared actionability "+
-			"contract, and the inquiry lane's own). %d would mean the inquiry lane is scoring `actionable` "+
-			"against needs_reply labels; 3 would mean the residue lane forked away from the personal one "+
-			"and SWT-23's comparison silently stopped meaning anything", len(seen), len(seen))
+	if len(seen) != 3 {
+		t.Errorf("the four lanes carry %d distinct contracts, want exactly 3 (the shared actionability "+
+			"contract, the inquiry lane's own and the route lane's own — SWT-40 B-D3). Fewer would mean one "+
+			"lane is scoring another's question; 4 would mean the residue lane forked away from the personal "+
+			"one and SWT-23's comparison silently stopped meaning anything", len(seen))
+	}
+	if reflect.DeepEqual(classify.LaneRoute.Contract, classify.LaneInquiry.Contract) ||
+		reflect.DeepEqual(classify.LaneRoute.Contract, classify.LanePersonal.Contract) {
+		t.Errorf("the route lane shares another lane's contract; B-D3 gives it its own")
 	}
 
 	// And the shared one is still the ACTIONABILITY contract, unchanged. Without

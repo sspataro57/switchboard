@@ -104,6 +104,13 @@ var humanOnly = map[string]bool{
 	// orchestrator included). humanOnly, NOT mcpHumanOnly, and not MCP-listed:
 	// reachable only through opsctl/dashboard. Not send-shaped.
 	"orchestrator_cursor_advance": true,
+	// SWT-40 Part B (B-D1, B8): a route candidate row is the AUTHORISATION to
+	// move a mailbox's unmatched mail into a project whose ai_locality may be
+	// wider than its origin (IK SWT-21) — the capture_rule_add argument: an
+	// automated caller that could add one could route any account's traffic into
+	// a project of its choosing. humanOnly, NOT mcpHumanOnly, and not MCP-listed.
+	// Not send-shaped: nothing leaves the system.
+	"route_candidate_add": true, "route_candidate_remove": true,
 }
 
 // mcpHumanOnly tools require a human identity WHEN THEY ARRIVE OVER MCP

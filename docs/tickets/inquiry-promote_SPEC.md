@@ -595,6 +595,16 @@ No verdict yet → `pending_verdict`: a missing verdict never falls to the defau
 no GPU; they are why the latest Rochester message follows its thread once Part A has attributed the
 rest.
 
+*Amended 2026-09-13 (review fix, thread step):* the thread step reads rules/gate attribution only;
+a route never begets a route. A neighbour counts by its latest decision that is NOT `mode='route'`
+(the filter sits inside the latest-decision lookup), and a neighbour whose only attribution is a
+route row contributes nothing. Without this, one weakly grounded, wrong model route (or a default)
+would be deterministic thread evidence, win over every later message's fresh verdict at step 1, and
+route the whole rest of the thread. Falling back to an OLDER non-route attribution under a route
+row cannot happen while B-D7's precondition holds: a route row is written only when the message's
+latest decision is `unmatched`, and new binaries write nothing non-route above it. Only an old
+binary's shadow `--all` pass could, and the precondition excludes those.
+
 **B-D3 — A fourth classify lane, `route` (`worker_type='classify_route'`), with its own contract,
 kept separate from residue and inquiry.**
 - Residue's contract is pinned equal to personal's (SWT-23), so folding routing into it breaks that
@@ -611,6 +621,14 @@ reason: string}`.
   whitespace-collapsed, case-folded substring of the sender, subject or body. Otherwise → step 4.
 - For the handsonconnect mailbox, reengine is chosen only on quoted evidence, and everything else
   lands on collaboratory. That is O3, made deterministic.
+- *Amended 2026-09-13 (review fix, grounding):* the evidence must be a span of the SUBJECT or
+  BODY only. The sender field no longer counts, since a shared sender is not enough, as the prompt
+  itself says. After the fold, the evidence must also be at least 2 words (`GroundMinWords`) and at
+  least 8 characters (`GroundMinChars`), so "e", "the" or "hi" ground nothing. The prompt tells
+  the model both rules. Because its text changed, the prompt version is now `route-v2` (B1).
+  **Residual:** the floor does not close the hole. A common phrase such as "thank you" or "let me
+  know" still grounds any choice, because the evidence need not relate to the chosen candidate.
+  The backstop is B-D7's hand-read of every eval disagreement before arming (see Future work).
 
 **B-D5 — The applied decision is a `capture_decisions` row with `mode='route'`.**
 - Why not `live`: a second live row per message is impossible under
@@ -628,6 +646,12 @@ verdict)` and a driver that writes rows directly (capture's own log) and calls n
 the `route_apply` stage in `pipelined`, woken by `route_classified`, under capture's lock
 `0x5157_0015` (E-D4).
 
+*Amended 2026-09-13 (review fix, candidate revocation):* a pass caches each account's candidates,
+so the insert revalidates. It writes only if a `source_account_projects` row for (the message's
+receiving account, the chosen project) still exists, in the same statement as the insert. If the
+row is gone, nothing is written and the message counts as unrouted with reason `candidate_revoked`,
+so it retries on the next pass against the current set.
+
 **B-D7 — Shadow → go-live** (the SWT-17/30 precedent).
 - Verdicts accumulate in `ai_extractions`.
 - Arming is per account: `UPDATE source_accounts SET route_after = now() WHERE account_email =
@@ -638,6 +662,13 @@ the `route_apply` stage in `pipelined`, woken by `route_classified`, under captu
     `stratum:rules`. It is biased easy.
   - Every disagreement is read by hand before arming.
   - Salvador only skims the dry-run list of the real routes for the 115.
+- *Amended 2026-09-13 (review fix, mixed versions): HARD PRECONDITION.* Arm an account only after
+  EVERY capture binary runs the Part B image: all connector CronJobs, `pipelined`, and any hand-run
+  `opsctl`, rebuilt from main. The reason: a pre-Part-B capture `pendingMessages` excludes only
+  `mode='gate'`. An old binary's shadow `--all` pass would therefore write a newer `unmatched` row
+  above a route row, and every latest-decision reader would see `unmatched` again. No route row
+  exists until an account is armed and `route_apply` runs, so this is an operational ordering, not
+  a DB guard.
 
 **B-D8 — Locality.** The lane is local-only (router `general=nil`). Unmatched messages are
 `ClassRestricted` through `ClassOf`. The prompt carries only the message and the candidate rows.
@@ -648,7 +679,8 @@ the `route_apply` stage in `pipelined`, woken by `route_classified`, under captu
 - `raw_json` stays banned.
 
 **Acceptance criteria — Part B**
-- B1. `classify.LaneRoute` (`route`, `classify_route`, `route-v1`) with `RouteContract`. The schema
+- B1. `classify.LaneRoute` (`route`, `classify_route`, `route-v2` since the B-D4 amendment of
+  2026-09-13; originally `route-v1`) with `RouteContract`. The schema
   has no `confidence`, `url` or `link*`. One bilingual prompt with no sender or client literals.
   The guards are rewritten.
 - B2. The route inbox, integration-tested, with one fixture per clause and each mutation red:
@@ -676,6 +708,13 @@ the `route_apply` stage in `pipelined`, woken by `route_classified`, under captu
   Mutation: drop the exclusion in `pendingMessages`.
 - B7. Arming: `route_after` NULL → nothing is written. A step-3 verdict recorded before
   `route_after` is not applied.
+  *Amended 2026-09-13 (test-author ambiguity 1):* the route CLASSIFY inbox treats a verdict as
+  current only when it was recorded at or after its account's `route_after`. Unarmed, any route
+  verdict excludes the message, so shadow classifies each message once. Armed, a message whose
+  route verdicts all predate `route_after` is back in the inbox. Without this, the shadow period's
+  verdicts would keep the 115 out of V6.5's post-arming backfill, and they would never route. The
+  applied verdict is always a post-arming one, so B7's forward-only rule holds. The cost is one
+  extra local call per shadow-verdicted message, once.
 - B8. `route_candidate_add {account_email, project, description, is_default?}` and
   `route_candidate_remove`: humanOnly, off MCP, audited.
   - `add` refuses an unknown account, an unknown project, an empty description, and a second
@@ -865,7 +904,8 @@ the count and the oldest claim per lane; `--since` does not narrow it). The manu
 
 Migrations are numbered in ship order: **0027 (D)**, **0028 (C)**, **0029 (B)**. Parts A and E
 have none. The numbers are provisional: take the next free one at implementation time, because
-`capture-rule-ticket-keys` may claim one first.
+`capture-rule-ticket-keys` may claim one first. *As shipped: D is 0029, C is 0031 and B is
+`0032_route_tier.sql`; 0030 went to SWT-45.*
 
 **`0027_capture_ticket_gate.sql` (Part D).** Confirm the inline constraint names against prod
 first, as 0015 did: `capture_decisions_action_check` and `capture_decisions_mode_check`.
@@ -896,7 +936,7 @@ ALTER TABLE projects ADD COLUMN inquiry_promote_after TIMESTAMPTZ;  -- NULL = of
 O7's Holding-first is a Go constant (`inquiryCreateStatus`), not a column. No schema change for
 it.
 
-**`0029_route_tier.sql` (Part B).**
+**`0032_route_tier.sql` (Part B; provisionally 0029).**
 ```sql
 ALTER TABLE capture_decisions DROP CONSTRAINT capture_decisions_mode_check;
 ALTER TABLE capture_decisions ADD CONSTRAINT capture_decisions_mode_check
@@ -926,7 +966,8 @@ ALTER TABLE source_accounts ADD COLUMN route_after TIMESTAMPTZ;  -- NULL = routi
 - No seeding anywhere. Config goes in through tools (0015's recorded reason).
 - No new work tables. `held`, `gate` and `route` rows are decisions.
 - C-D12 reads existing tables.
-- If B ships before D, 0029's mode list omits `'gate'` and D adds it.
+- If B ships before D, B's mode list omits `'gate'` and D adds it. (Moot as shipped: 0032 follows
+  D's 0029 and keeps `'gate'`.)
 
 ## API / MCP tool changes
 
@@ -996,7 +1037,7 @@ No work payloads and no commands. The orchestrator's `ops/workers/{id}/cmd` topi
   - `internal/connector/slackweb/normalize.go`, `threadscope_test.go`;
   - `docs/runbooks/local-classifier.md`.
 - **Part B:**
-  - migration 0029;
+  - migration 0032 (`0032_route_tier.sql`);
   - `internal/classify/route.go`, `lane.go`, `store.go`, `eval.go`, `summary.go`/`report.go`,
     `lane_test.go`, `structure_test.go`;
   - `internal/capture/route.go`;
@@ -1183,7 +1224,7 @@ No work payloads and no commands. The orchestrator's `ops/workers/{id}/cmd` topi
         row under `review`, `deliveries` unchanged and `classify promote --outcomes`;
      5. **about two weeks later**, Salvador reads `--outcomes` and, if satisfied, ships the one-line
         `inquiryCreateStatus = "ready"` change (out of scope here).
-  5. **B:** apply 0029 → `route-candidates add` → enable `route` + `route_apply` in shadow (not
+  5. **B:** apply 0032 → `route-candidates add` → enable `route` + `route_apply` in shadow (not
      armed) → the V5 reads → arm `route_after` → one `classify run --lane route --since 720h`
      backfill → confirm the 115.
 
@@ -1222,6 +1263,12 @@ No work payloads and no commands. The orchestrator's `ops/workers/{id}/cmd` topi
 
 ## Future work
 
+- **Candidate-specific grounding for the route lane.** Today's grounding floor (B-D4) stops
+  trivial quotes but not generic phrases ("thank you", "let me know") that ground any choice. A
+  candidate-specific check, where the evidence must overlap the chosen candidate's description or
+  name, would close it. Decide it after the first eval's disagreement read shows how often this
+  happens.
+
 - **Immediate follow-up: convert classify-personal, classify-residue and the classify-promote
   personal lane to `pipelined` stages.** They subscribe to `captured` (and a new
   `personal_classified`) through E's contract unchanged, and delete their CronJobs. Only connector
@@ -1246,3 +1293,19 @@ No work payloads and no commands. The orchestrator's `ops/workers/{id}/cmd` topi
   example, skip after N recorded failures), or a limit over messages that can still succeed.
 - **Automatic recovery of stranded claims** (SWT-50): today a `task_id` NULL claim is only
   reported (C-D14) and resolved by hand.
+- **Route-lane starvation** (2026-09-13, Part B review). The route classify inbox has the inquiry
+  inbox's shape: oldest first, 25 per pass. A message that errors on every classify attempt stays
+  in the inbox and is retried first on every sweep, so 25 of them would fill every pass and starve
+  newer mail. It needs the same per-message failure memory or backoff as the inquiry entry above.
+- **The 168h route window vs the 720h route_apply window** (2026-09-13, Part B review). The `route`
+  stage classifies within 168h and `route_apply` applies within 720h. A message older than 168h
+  with no current verdict (arming invalidated its shadow verdict, or it was never classified) sits
+  as `pending_verdict` until it ages out of the 720h window, unless the V6.5 hand backfill
+  (`--since 720h`) reaches it. Align the windows, or have `route_apply`'s window follow the
+  lane's.
+- **Inquiry starvation on the shared GPU lock during a route backlog drain** (2026-09-13, Part B
+  review). `route` and `inquiry` share `0x5157_0022`. While a large route backlog drains (the
+  post-arming backfill, or a first shadow pass over an account's history), each route pass takes
+  the lock and the `inquiry` stage keeps losing it, so client asks wait behind routing. It needs
+  either a lock per stage with GPU fairness elsewhere, or inquiry-first ordering inside one GPU
+  worker. Noted in `docs/runbooks/pipeline.md` and the kube HANDOFF.

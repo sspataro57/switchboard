@@ -1015,6 +1015,50 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - **The readout** is `classify promote --lane inquiry --outcomes` (first dismissal per promoted task; precision
   only, a ratio only at 120 decided).
 
+### The routing tier (SWT-40 Part B, inquiry-promote)
+
+- **Rules first, then the model, on a CLOSED set.** The fourth classify lane, `route` (`worker_type=classify_route`,
+  `route-v2`, its own contract `{project_index, evidence, reason}`), picks one of the receiving account's
+  `source_account_projects` rows for a message the rules left `unmatched`. Only accounts with candidate rows are
+  routed at all; a row is the authorisation to move that mailbox's mail into the project, so it is written only by
+  the humanOnly, off-MCP `route_candidate_add` / `route_candidate_remove` (`opsctl route-candidates`). Runbook:
+  `docs/runbooks/local-classifier.md` "Routing lane".
+- **No self-reported certainty; grounding instead.** `ResolveCandidate` maps the index to one of the account's own
+  rows, and `Grounded` requires the evidence (whitespace-collapsed, case-folded) to be a substring of the SUBJECT or
+  BODY (never the sender: a shared sender is not enough), at least `GroundMinWords` (2) words and `GroundMinChars`
+  (8) characters. Without the floor, "e" or "the" grounds anything. Both are decided at classify time and recorded
+  (`fields.project_id`, `fields.grounded`).
+- **The applied decision is a `capture_decisions` row with `mode='route'`**, written by `capture.RunRouteApply` (the
+  pipelined `route_apply` stage, lock `0x5157_0015`) directly, as capture's own log: no executor, no task. Schema
+  (0032): `route_step` typed, `action='attributed'`, no rule, no task, `ai_extraction_id` iff step `model`. Steps,
+  in `capture.DecideRoute` (pure): thread → single → model → default; no verdict = `pending_verdict` (never the
+  default).
+- **A route never begets a route.** The thread step (`routeThreadProjects`) counts each neighbour by its latest
+  NON-route decision (`cd.mode <> 'route'` inside the LATERAL): rules/gate attribution only. Drop that filter and one
+  wrong model route becomes deterministic thread evidence for every later message on the thread.
+- **The route insert revalidates the candidate.** `insertRouteDecision` writes only if the (account, project)
+  `source_account_projects` row still exists (same statement, `FOR KEY SHARE`); otherwise nothing is written and the
+  pass counts `candidate_revoked`, so a `route_candidate_remove` mid-batch is never overridden by the pass's cache.
+- **LANDMINE, the FOURTH partial unique index on `capture_decisions.message_id`:** `capture_decisions_route_uniq ...
+  WHERE mode='route'`, beside the live and gate ones. Every `ON CONFLICT (message_id)` restates its `WHERE mode = '…'`
+  (`gate_structure_test.go` scans `internal/` and `cmd/`). `pendingMessages` excludes `gate` AND `route` rows in every
+  mode, `--all` included, or a shadow re-pointing pass buries the route for every `ORDER BY id DESC` reader.
+- **Arming is `source_accounts.route_after`, set by hand, per account, after the eval gate** (NULL = shadow: verdicts
+  only, nothing written). No Go file may set it (`route_structure_test.go` scans every non-test file, comments included,
+  for an assignment to it). Step 3 is forward-only on the verdict clock. The route CLASSIFY inbox counts a verdict as
+  current only from `route_after` on (amendment 2026-09-13), so after arming the shadow-verdicted backlog is
+  re-classified once by the V6.5 backfill (`classify run --lane route --since 720h`).
+- **HARD PRECONDITION before arming any account: EVERY capture binary runs the Part B image** (all connector
+  CronJobs, `pipelined`, any hand-run `opsctl`, rebuilt from main). A pre-Part-B `pendingMessages` excludes only
+  `mode='gate'`, so an old binary's shadow `--all` pass writes a newer `unmatched` row above a route row and buries it
+  for every latest-decision reader. No route row exists before arming, so there is no DB guard: it is ordering
+  (SPEC B-D7 amendment 2026-09-13).
+- **B-D9's carve-out:** `internal/classify` may name `raw_source_items` only inside the const `routeAccountJoin`
+  (it selects `source_account_id`, the receiving account); `raw_json` is banned package-wide. Reuse the constant.
+- **The route eval scores against the RULES tier's answers** (`docs/evals/route-from-rules.jsonl`, `stratum: rules`,
+  labels are project slugs checked against `projects.slug`), multi-class, ratio only at 120. Biased easy: read every
+  disagreement before arming.
+
 ### Link preservation (SWT-25)
 
 - `normalized_messages.links` (0017): JSONB array of `{"text","url"}`, written

@@ -1,8 +1,8 @@
 # Handoff to the kube session: SWT-40 inquiry-promote
 
-**After this branch merges, migration 0029 must be applied to prod BEFORE any image built from main runs. A new capture binary on a db without 0029 fails the action CHECK on the first gated match and stalls capture for every connector.**
+**After this branch merges, migration 0029 must be applied to prod BEFORE any image built from main runs. A new capture binary on a db without 0029 fails the action CHECK on the first gated match and stalls capture for every connector.** Part B adds the same rule for 0032: apply it before the image that carries Part B runs anything (see Part B below).
 
-The switchboard session builds and pushes the image. The kube session owns the manifests in `kube/switchboard`. This file lists exactly what changes, part by part. Parts E, D and C are listed; B adds rows when it lands.
+The switchboard session builds and pushes the image. The kube session owns the manifests in `kube/switchboard`. This file lists exactly what changes, part by part: Parts E, D, C and B.
 
 ## Part E: the event pipeline (ready)
 
@@ -80,3 +80,31 @@ Without the two `OPS_LOCAL_*` variables the inquiry stage still runs, but every 
 2. `mosquitto_sub -h 192.168.50.45 -t 'ops/workers/+/status' -v | grep -E 'pipeline\.inquiry'` shows both stage heartbeats.
 3. `mosquitto_sub -h 192.168.50.45 -t 'ops/pipeline/#' -v` shows `inquiry_classified` after a pass that wrote a verdict, and `promoted` after a pass that created or attached.
 4. After arming: an ask in a Slack DM or a mail appears at `/tasks?project=collaboratory&status=holding` about an hour after capture (plus at most one 5-minute sweep). `deliveries` is unchanged.
+
+## Part B: the local-LLM routing tier
+
+**Image:** `192.168.50.20:5000/switchboard:<tag>`. The tag is filled in when Part B merges. One step at a time; steps 4 and 5 are not kube steps and are listed so the order is visible.
+
+1. **Migration first.** Apply `migrations/0032_route_tier.sql` to the `ops` db BEFORE the new image runs anything. Pre-check: `SELECT max(version) FROM schema_migrations` reads `0031`, and `SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'capture_decisions_mode_check'` lists `'shadow','live','gate'` (0032 drops and re-adds it with `'route'` appended). What it does, all additive: widens the mode CHECK by `'route'`; adds `capture_decisions.route_step` and `.ai_extraction_id`, the `capture_decisions_route_shape` CHECK and the partial unique index `capture_decisions_route_uniq`; creates the config table `source_account_projects` (empty: nothing is seeded); adds `source_accounts.route_after` (NULL: nothing is armed). Old images never write `mode='route'` and their conflict targets are unchanged, so the migration itself breaks nothing. They do not honour route rows, though: an old capture pass excludes only gate rows. See step 2.
+2. **The image roll.** Bump every workload to the new tag: connector-*, classify-*, classify-promote (keeping its `--lane personal` pin) and pipelined. The connector images carry the capture change that makes a shadow `--all` pass skip routed messages; there are none until step 5, so the order among them does not matter. **HARD PRECONDITION for step 5: every capture binary must run the Part B image before any account is armed.** That is all connector CronJobs, pipelined, and any hand-run opsctl, rebuilt from main. An old binary's shadow `--all` pass writes a newer `unmatched` row above a route row, and every latest-decision reader then sees the message as unmatched again (SPEC B-D7 amendment 2026-09-13). Confirm with `kubectl -n ops get cronjob,deploy -o wide` that no workload is on an older tag.
+3. **pipelined: enable `route` and `route_apply`, in SHADOW.** No new env: the route stage uses the `OPS_LOCAL_PROVIDER_URL`/`OPS_LOCAL_MODEL` Part C added. Shadow means no `route_after` is set anywhere: the `route` stage records verdicts only, and `route_apply` writes nothing for an unarmed account.
+4. **Candidates are seeded by the switchboard session, through opsctl** (not a kube step): `opsctl route-candidates add --account salvador@handsonconnect.org --project collaboratory --default --description "…"` and the same for `reengine` (O2, O3). Every add is an audited executor call as `opsctl:$USER`. Until an account has candidate rows, the route stage finds nothing to do.
+5. **Arming is a human decision after the eval gate (B-D7)**, not a kube step. Two HARD PREREQUISITES come first: (a) step 2's precondition holds (every capture binary on the Part B image, hand-run opsctl included); (b) the label file `docs/evals/route-from-rules.jsonl` exists. It is deliberately absent from the repo today: it needs prod data, and the switchboard session generates it with the runbook's documented query before any arming. With no label file there is no eval, and with no eval there is no arming. The switchboard session runs the shadow reads (`classify report --lane route`), the route eval against the rules' answers (`classify eval --lane route`, every disagreement read by hand), and Salvador skims the would-be routes. Only then does a human run `UPDATE source_accounts SET route_after = now() WHERE account_email = 'salvador@handsonconnect.org'` by hand, followed by the one-shot backfill `classify run --lane route --since 720h` (SPEC V6.5). Nothing in any manifest sets `route_after`.
+
+| workload | kind | change |
+|---|---|---|
+| connector-google, connector-jira, connector-slackweb, connector-upworkcrm, connector-gcal | CronJob (stays) | image bump only |
+| classify-personal, classify-residue | CronJob (stays) | image bump only |
+| classify-promote | CronJob (stays) | image bump; command stays `classify promote --lane personal` |
+| **pipelined** | Deployment (Part E) | image bump; env `PIPELINE_STAGES=gate,route,route_apply,inquiry,inquiry_promote` (adds `route` and `route_apply`); no other env change |
+
+**Expect a little more lock traffic.** `route` shares `0x5157_0022` with `inquiry` and the classify CronJobs, so they take turns on the GPU (a lost lock retries after 30 s). `route_apply` takes capture's `0x5157_0015` every 5 minutes and on every `route_classified`; a connector capture pass that overlaps it skips and its next tick recovers. Neither is an incident unless it happens on every tick.
+
+**A route backlog drain can starve `inquiry`.** While a large route backlog drains (the post-arming backfill, or the first shadow passes over an account's history), `route` holds `0x5157_0022` on most sweeps and `inquiry` keeps losing it, so client asks wait behind routing. If `inquiry pass` lines stop showing `processed>0` while asks are arriving, drop `route` from `PIPELINE_STAGES` until `inquiry` catches up, then put it back. The structural fix is SPEC Future work.
+
+## Part B smoke (V6 step 5)
+
+1. `kubectl -n ops logs deploy/pipelined` shows `pipelined serving stages=[gate route route_apply inquiry inquiry_promote]`, then `route pass` and `route_apply pass` lines after each `captured` wake and at least every 5 min. In shadow, `route_apply pass` shows `written=0`.
+2. `mosquitto_sub -h 192.168.50.45 -t 'ops/workers/+/status' -v | grep -E 'pipeline\.route'` shows both stage heartbeats (`pipeline.route`, `pipeline.route_apply`).
+3. Once candidates exist (step 4): `mosquitto_sub -h 192.168.50.45 -t 'ops/pipeline/#' -v` shows `route_classified` after a pass that wrote a verdict, and `classify report --lane route` shows verdicts for the account, `SHADOW`, with zero steps.
+4. After arming (step 5): `routed` appears after a `route_apply` pass that wrote rows, `opsctl capture-rules report` shows a `ROUTE` section with `route thread|single|model|default` lines, and `deliveries` and `tasks` are unchanged by the route stages.
