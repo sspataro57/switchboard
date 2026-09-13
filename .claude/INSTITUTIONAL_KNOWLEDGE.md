@@ -1442,6 +1442,8 @@ the executor. Runbook: `docs/runbooks/capture-rules.md`.
   `count(*)==1` assertion drifted). Clean up your own leftovers first, in FK
   order (children before parents), scoped by a test-owned actor/slug.
 - _Known infra issues: none yet — record flakes and races here the first time they bite._
+- **LANDMINE (2026-09-12): the compose Postgres is SHARED by every worktree and agent.** Capture suites take capture's advisory lock 0x5157_0015 and delete `capture_decisions` wholesale, so two branches running integration tests at once corrupt each other ("another pass holds advisory lock", rows vanishing). Run a branch's integration suite in its own database: `psql 'postgres://ops:ops@localhost:5433/ops?sslmode=disable' -c "CREATE DATABASE ops_<branch>"`, `make migrate LOCAL_DB_URL='postgres://ops:ops@localhost:5433/ops_<branch>?sslmode=disable'`, then point `DATABASE_URL` at it. Advisory locks are per-database, so this isolates them too.
+- **Known flake (SWT-48): `TestAttributionTrend_*` in internal/capture fail from 20:00 to 24:00 EDT** (local date != UTC date). They pass with `TZ=UTC`. Pre-existing on main; it is not a regression in whatever branch you are testing.
 
 ---
 
