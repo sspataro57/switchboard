@@ -530,9 +530,39 @@ func TestCaptureRevive_Integration_ANonRevivingRuleOnlyLogs(t *testing.T) {
 	}
 }
 
-// Criterion 18's gate half and criterion 20 through real rows. MUTATION: a
-// literal false for p.ticket_assignee_gate in loadRules -> the revive-only
-// rule revives CRG-1 and this goes red.
+// gatedClosedTask is closedTask for a key on the GATED project. Since SWT-40
+// Part D merged, the connector copy of a gated jira key is `held` (no task), so
+// the fixture task is created with the gate OFF — the column is read every pass
+// (IK: "Gate turned off with holds pending") — and the gate is re-armed before
+// the test acts.
+func (s *crvSuite) gatedClosedTask(t *testing.T, ctx context.Context, key string) (int64, time.Time) {
+	t.Helper()
+	s.exec(t, ctx, `UPDATE projects SET ticket_assignee_gate = false WHERE id = $1`, s.gated)
+	task, at := s.closedTask(t, ctx, key)
+	s.exec(t, ctx, `UPDATE projects SET ticket_assignee_gate = true WHERE id = $1`, s.gated)
+	return task, at
+}
+
+// decisionAction is the latest decision's action for a message in a mode.
+func (s *crvSuite) decisionAction(t *testing.T, ctx context.Context, msg int64, mode string) (string, bool) {
+	t.Helper()
+	var action string
+	err := s.pool.QueryRow(ctx, `SELECT action FROM capture_decisions WHERE message_id=$1 AND mode=$2 ORDER BY id DESC LIMIT 1`,
+		msg, mode).Scan(&action)
+	if err != nil {
+		return "", false
+	}
+	return action, true
+}
+
+// Criterion 18's gate half and criterion 20 through real rows. It is ALSO the
+// column-fed test for Part D's held clause (SWT-40 merged first, so this branch
+// owns the interaction): an addressed match on a gated project is not held; a
+// revive-only one still is. MUTATIONS:
+//   - a literal false for p.ticket_assignee_gate in loadRules -> the revive-only
+//     rule revives CRG-1 and this goes red;
+//   - drop `&& !activity` from decideMessage's held condition -> CRG-2's
+//     addressed mention is held and CRG-2 stays closed.
 func TestCaptureRevive_Integration_TheGateIsColumnFed(t *testing.T) {
 	ctx := context.Background()
 	s := newCRVSuite(t, ctx)
@@ -541,9 +571,9 @@ func TestCaptureRevive_Integration_TheGateIsColumnFed(t *testing.T) {
 	s.rule(t, ctx, s.gated, "body_regex", `\A[^\n]*(?:\bmentioned you on CRG-[0-9]+|\bassigned CRG-[0-9]+ to you)`,
 		`\A[^\n]*?\b(CRG-[0-9]+)\b`, 93, true, true)
 
-	status1, at1 := s.closedTask(t, ctx, "CRG-1")
-	status2, at2 := s.closedTask(t, ctx, "CRG-2")
-	s.mailMsg(t, ctx, crvGatedFrom, "inbound", "(CRG-1) moved to Done", "", at1.Add(time.Second), at1.Add(time.Second))
+	status1, at1 := s.gatedClosedTask(t, ctx, "CRG-1")
+	status2, at2 := s.gatedClosedTask(t, ctx, "CRG-2")
+	m1 := s.mailMsg(t, ctx, crvGatedFrom, "inbound", "(CRG-1) moved to Done", "", at1.Add(time.Second), at1.Add(time.Second))
 	m2 := s.mailMsg(t, ctx, crvGatedFrom, "inbound", "Ana Rossi mentioned you on CRG-2", "", at2.Add(time.Second), at2.Add(time.Second))
 	s.pass(t, ctx, capture.RulesModeLive)
 
@@ -551,12 +581,110 @@ func TestCaptureRevive_Integration_TheGateIsColumnFed(t *testing.T) {
 		t.Errorf("a REVIVE-ONLY rule on a gated project reopened CRG-1 (%q). Decision 3 / J1: on a gated project only "+
 			"`addressed` overrides — non-addressed activity follows the Part D gate", got)
 	}
+	if a, ok := s.decisionAction(t, ctx, m1, capture.RulesModeLive); !ok || a != "held" {
+		t.Errorf("CRG-1's revive-only status mail decided %q (found=%v), want held — Part D's gate, unchanged (S9)", a, ok)
+	}
+	if a, ok := s.decisionAction(t, ctx, m2, capture.RulesModeLive); !ok || a != "task_log" {
+		t.Errorf("CRG-2's ADDRESSED mention decided %q (found=%v), want task_log — decision 3: an addressed match "+
+			"overrides the gate and is never held", a, ok)
+	}
 	if got := s.status(t, ctx, status2); got != "ready" {
 		t.Errorf("an ADDRESSED rule on a gated project left CRG-2 %q, want ready. Decision 3: 'X mentioned you on K' "+
 			"overrides the assignee check (S8). (Once Part D merges, this is also the test for `&& !winner.addressed`.)", got)
 	}
 	if _, by := s.surfaced(t, ctx, status2); by == nil || *by != m2 {
 		t.Errorf("CRG-2's revive did not surface with the addressed message (by=%v)", by)
+	}
+}
+
+// ---- the Part D interaction, end to end (SWT-40 D-D1 x SWT-45 decision 3) -----
+
+// Beyond the column-fed test above, through real rows on the GATED project:
+//
+//	(a) an ADDRESSED match for a key with NO task creates it at capture time —
+//	    no `held` row, no Jira lookup — and surfaces it (S8; Part D's D-D6 path
+//	    changes for the mail the addressed rule claims);
+//	(b) a revive-only match for another new key is `held` and creates nothing;
+//	    the gate stage then resolves it, and a gate-path creation never surfaces;
+//	(c) a revive-only match on a CLOSED task is `held`, and the gate stage's
+//	    resolution LOGS on the closed task and never revives or surfaces it —
+//	    the SPEC's Part D section: "gate-path task_logs do not revive (decision
+//	    3: non-addressed activity follows the gate)"; a gate-path revive is
+//	    Future work, deliberately not built.
+//
+// The gate resolves from STORED snapshots (Lookup nil, no Jira): each snapshot
+// is written after its message was first seen, so it is fresh enough to decide.
+// MUTATION: drop `&& !activity` from decideMessage's held condition -> (a) is
+// held and CRG-10 gets no task.
+func TestCaptureRevive_Integration_AddressedOverridesTheGateAndTheGateNeverRevives(t *testing.T) {
+	ctx := context.Background()
+	s := newCRVSuite(t, ctx)
+	s.rule(t, ctx, s.gated, "sender", crvGatedFrom, `^[^\n]*?\b(CRG-[0-9]+)\b`, 92, true, false)
+	s.rule(t, ctx, s.gated, "body_regex", `\A[^\n]*(?:\bmentioned you on CRG-[0-9]+|\bassigned CRG-[0-9]+ to you)`,
+		`\A[^\n]*?\b(CRG-[0-9]+)\b`, 93, true, true)
+
+	closed, _ := s.gatedClosedTask(t, ctx, "CRG-12")
+
+	now := s.dbNow(t, ctx)
+	addressed := s.mailMsg(t, ctx, crvGatedFrom, "inbound", "Ana Rossi assigned CRG-10 to you", "", now, now)
+	fresh := s.mailMsg(t, ctx, crvGatedFrom, "inbound", "(CRG-11) moved to In Progress", "", now, now)
+	onClosed := s.mailMsg(t, ctx, crvGatedFrom, "inbound", "(CRG-12) Ana commented", "", now, now)
+	stats := s.pass(t, ctx, capture.RulesModeLive)
+
+	// (a)
+	if a, ok := s.decisionAction(t, ctx, addressed, capture.RulesModeLive); !ok || a != "task" {
+		t.Errorf("the addressed 'assigned CRG-10 to you' mail decided %q (found=%v), want task — not held", a, ok)
+	}
+	created, ok := s.taskOf(t, ctx, "CRG-10")
+	if !ok {
+		t.Fatalf("no task for CRG-10: an addressed match on a gated project must create at capture time (S8)")
+	}
+	if _, by := s.surfaced(t, ctx, created); by == nil || *by != addressed {
+		t.Errorf("CRG-10's task was not surfaced by the addressed mail (by=%v)", by)
+	}
+	if stats.TasksCreated != 1 || stats.SurfacedCreated != 1 || stats.Revived != 0 {
+		t.Errorf("live pass stats tasks_created=%d surfaced_created=%d revived=%d, want 1 / 1 / 0",
+			stats.TasksCreated, stats.SurfacedCreated, stats.Revived)
+	}
+	// (b) and (c): both held, nothing created or revived at capture time.
+	for _, m := range []struct {
+		id   int64
+		what string
+	}{{fresh, "CRG-11's status mail (new key)"}, {onClosed, "CRG-12's comment mail (closed task)"}} {
+		if a, ok := s.decisionAction(t, ctx, m.id, capture.RulesModeLive); !ok || a != "held" {
+			t.Errorf("%s decided %q (found=%v), want held — non-addressed activity follows the gate", m.what, a, ok)
+		}
+	}
+	if _, found := s.taskOf(t, ctx, "CRG-11"); found {
+		t.Errorf("capture created a task for the held CRG-11")
+	}
+
+	// The gate stage resolves both holds: both tickets are open and his.
+	s.snapshot(t, ctx, "CRG-11", "indeterminate", "In Progress")
+	s.snapshot(t, ctx, "CRG-12", "indeterminate", "In Progress")
+	gs, err := capture.RunGate(ctx, s.pool, s.ex, capture.GateConfig{})
+	if err != nil {
+		t.Fatalf("RunGate: %v", err)
+	}
+	if gs.TasksCreated != 1 || gs.Appended != 1 {
+		t.Fatalf("gate stats tasks_created=%d appended=%d (pending=%d), want 1 / 1 — setup: the stored snapshots did "+
+			"not decide the holds", gs.TasksCreated, gs.Appended, gs.PendingLookup)
+	}
+	// (b)
+	gateCreated := s.mustTask(t, ctx, "CRG-11")
+	if at, _ := s.surfaced(t, ctx, gateCreated); at != nil {
+		t.Errorf("the gate-created CRG-11 task was surfaced (%v); gate-path creations never surface", at)
+	}
+	// (c)
+	if got := s.status(t, ctx, closed); got != "closed" {
+		t.Errorf("the gate's task_log REVIVED CRG-12's closed task (%q). Part D's gate stage must never revive on its "+
+			"own: non-addressed activity follows the gate, and a gate-path revive is Future work", got)
+	}
+	if at, _ := s.surfaced(t, ctx, closed); at != nil {
+		t.Errorf("the gate surfaced CRG-12's closed task (%v)", at)
+	}
+	if n := s.audits(t, ctx, closed, "task_reopen", capture.GateActor); n != 0 {
+		t.Errorf("the gate called task_reopen %d time(s) on CRG-12's task (no open dismissal), want 0", n)
 	}
 }
 

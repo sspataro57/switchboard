@@ -86,7 +86,11 @@ ordinary again. If its ticket is Done or assigned away, this pass closes it in
 the same jira tick (capture runs first), so it ends closed with a log line —
 intended, the ticket's state outranks a comment — and because that close is
 the pass's own, it reopens later if the ticket warrants it. A human
-re-dismissal writes a new open row and re-arms the suppression.
+re-dismissal writes a new open row and re-arms the suppression. **Exception
+(SWT-45, overriding rules only):** a task revived by an overriding (activity)
+capture rule is SURFACED, and this pass holds it open instead of closing it in
+the same jira tick; see the SWT-45 section below. Every other reopen
+(non-overriding rules, promote) stays ordinary to the reconciler, as above.
 
 ## One-off reconciliation
 
@@ -146,23 +150,85 @@ prints each project's armed set and whether the row's own status is a member —
 an armed set that matches nothing otherwise looks identical to an unarmed one,
 and a mis-typed entry is the likely failure.
 
-**The gap, until `qa-question-resurface` ships.** Salvador also asked that a
-*fresh question* resurface a dropped task. That half is deferred, because a
-question is not a status change: bolting it onto `warranted` would let the very
-next pass re-close the task, giving a board row that flaps every 15 minutes. It
-needs its own recorded action plus a re-close suppression. In the meantime a
-client question on a dropped ticket IS still recorded — capture appends it as a
-`log` event on the closed task — it is simply surfaced nowhere. To read those by
-hand:
+Salvador also asked that a *fresh question* resurface a dropped task. That is
+now SWT-45's hold, widened to any Jira activity: see the next section.
+
+## Surfaced by activity (SWT-45)
+
+A question is not a status change, so bolting it onto `warranted` would let the
+very next pass re-close the task: a board row that flaps every 15 minutes.
+SWT-45 gives it its own recorded action, `resurfaced`, plus a re-close
+suppression. It subsumes SWT-34's `qa-question-resurface` for jira-keyed tasks,
+and dismissals still outrank it.
+
+**What surfaces a task.** `tasks.surfaced_at` (and `surfaced_by_message_id`)
+records the last time something other than this pass put the task on the board:
+
+- **An activity revive.** A reviving capture rule ("Activity rules (SWT-45)" in
+  `docs/runbooks/capture-rules.md`) matched a message about the ticket that was
+  ingested after the task was closed. Capture logs it, then the revive form of
+  `task_reopen` restores the status the task held (else `ready`).
+- **A creation by such a rule**, via `task_mark_surfaced`.
+- **A human's plain `task_reopen`, by hand** (message NULL):
+  `opsctl call --tool task_reopen --args '{"task_id":N,"reason":"..."}'`. Before
+  SWT-45 the next pass re-closed a hand reopen of a done ticket's task within
+  15 minutes; now it sticks. The reconciler's own reopen never surfaces.
+
+**The hold.** When the ticket no longer warrants the task, the task is
+restorable, and the surfacing is NEW (not the value this pass last recorded in
+`ticket_status_syncs.surfaced_seen_at`), the pass does not close it. It appends
+ONE log line naming the ticket, the drop fact, and the message (or "reopened by
+hand"). It then records `last_action='resurfaced'` with the drop fact in
+`drop_reason` and counts `resurfaced`. Later passes with the same facts are
+converged: no executor call, counted `converged`. `--dry-run` prints
+`action=resurfaced`.
+
+**How a hold ends:**
+
+- The ticket's status category, status name or assignee changes: the pass
+  closes the task as ever (S10). A later message ingested after that close
+  revives it again, so there is one flip per real Jira event, never per pass.
+- He closes or dismisses the task by hand: the pass never claims a human's
+  close, so it stays closed until newer activity revives it.
+
+**Activity on an OPEN task only logs.** If it surfaced the task, the
+ticket-closed email would land before the jira tick and pin every done ticket's
+task open.
+
+**The cost, read before arming a reviving rule.** Every Jira close sends a notification email.
+If the close email arrives before the reconciler sees the close, it only logs,
+the pass closes the task, and it stays closed. If it arrives after the
+reconciler's close, it is activity after the close: it revives the task and the
+pass holds it. Jira Cloud batches notification mail, so closing a Treetop ticket
+will often leave its task back on the board until one hand close.
+
+**Gated projects.** Only a rule flagged `addressed` ("X mentioned you on K", "X
+assigned K to you") overrides the assignee gate. Everything else on a gated
+ticket follows the capture-time gate below, unchanged, and the gate stage never
+revives or surfaces. One consequence for Part D's D-D6 path: assignment mail
+that reengine's addressed rule claims now creates its task at capture time,
+without a lookup, instead of being held.
+
+**Traffic no reviving rule covers.** A message matched by a rule WITHOUT
+`--revive` (the connector copies, rules 3–5, and any rule not yet flagged)
+still lands on a dropped task only as a `log` task_event on the closed task.
+It is recorded, but surfaced nowhere. To read those by hand:
 
 ```sql
-SELECT te.task_id, te.created_at, te.payload->>'message'
+SELECT te.task_id, s.drop_reason, te.created_at, te.payload->>'message'
   FROM task_events te
   JOIN ticket_status_syncs s ON s.task_id = te.task_id
- WHERE te.event_type = 'log' AND s.drop_reason = 'ticket_delivered'
+  JOIN tasks t ON t.id = te.task_id
+ WHERE te.event_type = 'log' AND t.status = 'closed'
+   AND s.drop_reason IN ('ticket_done', 'ticket_delivered', 'not_assigned')
    AND te.created_at > s.acted_at
  ORDER BY te.created_at DESC;
 ```
+
+**Backfill.** There is no code backfill. The SPEC's Verification 0f queries list
+closed tasks that got logs after their last close. Revive the ones you want by
+hand with the plain `task_reopen` above; it surfaces, so it sticks. A ticket
+with no task gets one from its next notification email.
 
 ## Capture-time assignee gate (SWT-40 Part D)
 

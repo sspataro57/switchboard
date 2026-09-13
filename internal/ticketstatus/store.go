@@ -81,8 +81,11 @@ type Config struct {
 type Stats struct {
 	Considered, ClosedTicketDone, ClosedTicketDelivered, ClosedNotAssigned, Reopened int
 	RefusedActive, SuppressedDismissed, Converged                                    int
-	Unpolled, Ambiguous, Unreadable                                                  int
-	Fetched, FetchSkippedTTL, FetchFailed                                            int
+	// Resurfaced (SWT-45 J11) counts ACTING holds: a surfaced task this pass
+	// logged and left open. A held task with unchanged facts counts Converged.
+	Resurfaced                            int
+	Unpolled, Ambiguous, Unreadable       int
+	Fetched, FetchSkippedTTL, FetchFailed int
 }
 
 // candidate is one external_refs row joined to its task and project.
@@ -95,6 +98,10 @@ type candidate struct {
 	delivered []string // projects.ticket_delivered_statuses (SWT-34), from the COLUMN
 	dismissed bool
 	state     *State
+	// surfacedAt / surfacedBy are tasks.surfaced_at / surfaced_by_message_id
+	// (SWT-45), from the COLUMNS; zero = NULL.
+	surfacedAt time.Time
+	surfacedBy int64
 }
 
 // Snapshot is one stored raw issue row, with the storing account's identity —
@@ -201,6 +208,9 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			TaskStatus:        c.taskStat,
 			Dismissed:         c.dismissed,
 			DeliveredStatuses: c.delivered,
+			// SWT-45 J11: VALUES from the tasks row, never looked up by Decide.
+			SurfacedAt:          c.surfacedAt,
+			SurfacedByMessageID: c.surfacedBy,
 		}
 		d := Decide(obs, c.state)
 
@@ -299,6 +309,8 @@ func count(stats *Stats, d Decision) {
 		stats.RefusedActive++
 	case "suppressed_dismissed":
 		stats.SuppressedDismissed++
+	case "resurfaced":
+		stats.Resurfaced++
 	}
 }
 
@@ -327,6 +339,15 @@ func decisionReason(obs Observation, d Decision) string {
 		return fmt.Sprintf("ticketstatus: %s warrants a task again (status %s/%s, assignee %s) but this task "+
 			"was DISMISSED by a human, which outranks the reconciler; it stays closed",
 			obs.TicketKey, obs.StatusCategory, obs.StatusName, orUnassigned(obs.Assignee))
+	case "resurfaced":
+		by := "the task was reopened by hand"
+		if obs.SurfacedByMessageID != 0 {
+			by = fmt.Sprintf("activity surfaced it (message %d)", obs.SurfacedByMessageID)
+		}
+		return fmt.Sprintf("ticketstatus: %s no longer warrants this task (%s; status %s/%s, assignee %s), but %s "+
+			"after this pass last saw it; leaving it open until the ticket's status, status name or assignee "+
+			"changes, or it is closed by hand",
+			obs.TicketKey, d.DropReason, obs.StatusCategory, obs.StatusName, orUnassigned(obs.Assignee), by)
 	default:
 		return ""
 	}
@@ -344,7 +365,7 @@ func act(ctx context.Context, ex *executor.Executor, c candidate, obs Observatio
 		tool = "task_reopen"
 		args["status"] = d.RestoreStatus
 		args["reason"] = reason
-	case "refused_active", "suppressed_dismissed":
+	case "refused_active", "suppressed_dismissed", "resurfaced":
 		tool = "task_append_log"
 		args["kind"] = "log"
 		args["message"] = reason
@@ -395,12 +416,22 @@ func upsertState(ctx context.Context, pool *pgxpool.Pool, c candidate, obs Obser
 		now := time.Now()
 		actedAt = &now
 	}
+	// SWT-45 criterion 34: surfaced_seen_at is written only when the decision
+	// consumes the surfacing, and PRESERVED otherwise (the COALESCE below) — a
+	// NULL written by an active-work pass would make an old surfacing read as
+	// new the moment the worker released the task.
+	var seen *time.Time
+	if d.RecordSeen && !obs.SurfacedAt.IsZero() {
+		seen = &obs.SurfacedAt
+	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO ticket_status_syncs
 		   (external_ref_id, task_id, status_category, status_name, assignee_account_id,
-		    assigned_to_self, last_action, drop_reason, closed_from_status, reason, observed_at, acted_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NULLIF($10,''), now(), $11)
+		    assigned_to_self, last_action, drop_reason, closed_from_status, reason, observed_at, acted_at,
+		    surfaced_seen_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NULLIF($10,''), now(), $11, $12)
 		 ON CONFLICT (external_ref_id) DO UPDATE SET
+		   surfaced_seen_at = COALESCE(EXCLUDED.surfaced_seen_at, ticket_status_syncs.surfaced_seen_at),
 		   task_id = EXCLUDED.task_id,
 		   status_category = EXCLUDED.status_category,
 		   status_name = EXCLUDED.status_name,
@@ -413,7 +444,7 @@ func upsertState(ctx context.Context, pool *pgxpool.Pool, c candidate, obs Obser
 		   observed_at = EXCLUDED.observed_at,
 		   acted_at = COALESCE(EXCLUDED.acted_at, ticket_status_syncs.acted_at)`,
 		c.refID, c.taskID, obs.StatusCategory, name, assignee,
-		assignedToSelf, d.Action, drop, closedFrom, reason, actedAt); err != nil {
+		assignedToSelf, d.Action, drop, closedFrom, reason, actedAt, seen); err != nil {
 		return fmt.Errorf("ticketstatus: record state for %s: %w", c.key, err)
 	}
 	return nil
@@ -428,7 +459,7 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 	       EXISTS (SELECT 1 FROM task_dismissals d
 	                WHERE d.task_id = t.id AND d.reopened_at IS NULL) AS dismissed,
 	       s.last_action, s.closed_from_status, s.status_category, s.assignee_account_id,
-	       s.status_name
+	       s.status_name, t.surfaced_at, t.surfaced_by_message_id, s.surfaced_seen_at
 	  FROM external_refs r
 	  JOIN tasks t ON t.id = r.task_id
 	  JOIN projects p ON p.id = t.project_id
@@ -450,9 +481,18 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 	for rows.Next() {
 		var c candidate
 		var lastAction, closedFrom, category, assignee, statusName *string
+		var surfacedAt, seen *time.Time
+		var surfacedBy *int64
 		if err := rows.Scan(&c.refID, &c.key, &c.taskID, &c.taskStat, &c.gateOn, &c.delivered, &c.dismissed,
-			&lastAction, &closedFrom, &category, &assignee, &statusName); err != nil {
+			&lastAction, &closedFrom, &category, &assignee, &statusName,
+			&surfacedAt, &surfacedBy, &seen); err != nil {
 			return nil, fmt.Errorf("ticketstatus: scan candidate: %w", err)
+		}
+		if surfacedAt != nil {
+			c.surfacedAt = *surfacedAt
+		}
+		if surfacedBy != nil {
+			c.surfacedBy = *surfacedBy
 		}
 		if lastAction != nil {
 			c.state = &State{LastAction: *lastAction}
@@ -469,6 +509,9 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 			// observation" key once a configured name can cause the drop.
 			if statusName != nil {
 				c.state.StatusName = *statusName
+			}
+			if seen != nil {
+				c.state.SurfacedSeen = *seen
 			}
 		}
 		out = append(out, c)

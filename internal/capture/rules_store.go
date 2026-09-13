@@ -94,16 +94,22 @@ type RulesConfig struct {
 }
 
 // RulesStats is one run's counters. Considered == Matched + Unmatched;
-// TasksCreated, Appended and Reopened are zero in shadow mode, always.
-// Reopened (SWT-36) counts dismissed tasks the guarded task_reopen answered
-// reopened:true for; every one of them is also counted in Appended.
+// TasksCreated, Appended, Reopened, Revived and SurfacedCreated are zero in
+// shadow mode, always. Reopened (SWT-36) counts dismissed tasks the guarded
+// task_reopen answered reopened:true for; every one of them is also counted in
+// Appended. Revived (SWT-45) counts closed tasks the revive form of task_reopen
+// answered reopened:true for (also counted in Appended); SurfacedCreated counts
+// tasks an overriding rule created and task_mark_surfaced surfaced (also
+// counted in TasksCreated).
 type RulesStats struct {
-	Considered   int
-	Matched      int
-	Unmatched    int
-	TasksCreated int
-	Appended     int
-	Reopened     int
+	Considered      int
+	Matched         int
+	Unmatched       int
+	TasksCreated    int
+	Appended        int
+	Reopened        int
+	Revived         int
+	SurfacedCreated int
 }
 
 // RulesMode reads CAPTURE_RULES_MODE. Anything that is not exactly "live" —
@@ -184,6 +190,11 @@ type storedRule struct {
 	// rules (SWT-40 D-D1): a jira-keyed match on a gated project is `held`, and
 	// the pipelined gate stage looks the ticket up before any task exists.
 	gateOn bool
+	// revive and addressed are capture_rules.revive / .addressed (SWT-45 J1),
+	// read from the COLUMNS with the rules. overrides(revive, addressed, gateOn)
+	// decides whether a match is activity that revives or surfaces.
+	revive    bool
+	addressed bool
 }
 
 // pendingMessage is one inbound message the pass must decide about.
@@ -213,6 +224,13 @@ type ruleDecision struct {
 	// criterion 13), 0 = none. Carried, never written to capture_decisions:
 	// the typed outcome lives in task_dismissals.reopened_by_message_id (D7).
 	dismissalID int64
+	// revive: a task_log on a CLOSED task by an overriding rule (SWT-45 J9) —
+	// log, then the revive form of task_reopen. surface: a task created by an
+	// overriding rule — create, link, provenance, then task_mark_surfaced.
+	// Carried, never written to capture_decisions: the typed outcome lives in
+	// tasks.surfaced_* (the SWT-36 D7 precedent).
+	revive  bool
+	surface bool
 }
 
 // Actions, spelled exactly as capture_decisions.action's CHECK (SPEC §4).
@@ -281,7 +299,7 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 
 	var stats RulesStats
 	for _, pm := range pending {
-		decision, winner, err := decideMessage(ctx, pool, pm, pure, byID)
+		decision, winner, err := decideMessage(ctx, pool, cfg.Mode, pm, pure, byID)
 		if err != nil {
 			return stats, err
 		}
@@ -337,14 +355,37 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 				return stats, err
 			}
 			stats.TasksCreated++
+			// SWT-45 J7/J9: surfacing LAST. A crash before it degrades to today:
+			// the reconciler may close the new task, and the next overriding
+			// message revives and surfaces it.
+			if decision.surface {
+				surfaced, err := markRuleSurfaced(ctx, ex, cfg.Actor, pm, taskID, *decision.extSystem, *decision.extKey)
+				if err != nil {
+					return stats, err
+				}
+				if surfaced {
+					stats.SurfacedCreated++
+				}
+			}
 		case actionTaskLog:
 			if err := appendRuleLog(ctx, ex, cfg.Actor, pm, *decision.taskID, *decision.extSystem, *decision.extKey); err != nil {
 				return stats, err
 			}
 			stats.Appended++
-			// SWT-36 D10: log first, THEN the guarded reopen — a crash between
-			// the two leaves exactly today's behaviour (logged, still closed).
-			if decision.dismissalID != 0 {
+			// SWT-36 D10 / SWT-45 J9: log first, THEN the reopen — a crash
+			// between the two leaves exactly today's behaviour (logged, still
+			// closed). The revive handles an open dismissal itself, so it takes
+			// precedence over SWT-36's guarded reopen.
+			if decision.revive {
+				revived, err := reviveRuleTask(ctx, ex, cfg.Actor, pm, *decision.taskID,
+					*decision.extSystem, *decision.extKey)
+				if err != nil {
+					return stats, err
+				}
+				if revived {
+					stats.Revived++
+				}
+			} else if decision.dismissalID != 0 {
 				reopened, err := reopenRuleTask(ctx, ex, cfg.Actor, pm, *decision.taskID, decision.dismissalID,
 					*decision.extSystem, *decision.extKey)
 				if err != nil {
@@ -400,7 +441,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT r.id, p.slug, p.name, r.criteria_type, r.pattern, r.key_regex, r.priority, r.enabled,
 		        r.project_id, COALESCE(r.subproject,''), COALESCE(r.external_system,''),
-		        COALESCE(r.url_template,''), p.ticket_assignee_gate
+		        COALESCE(r.url_template,''), p.ticket_assignee_gate, r.revive, r.addressed
 		   FROM capture_rules r
 		   JOIN projects p ON p.id = r.project_id
 		  WHERE r.enabled
@@ -415,7 +456,8 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		var s storedRule
 		if err := rows.Scan(&s.rule.ID, &s.rule.Project, &s.projectName, &s.rule.Kind, &s.rule.Pattern,
 			&s.rule.ExternalKeyRegex, &s.rule.Priority, &s.rule.Enabled,
-			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate, &s.gateOn); err != nil {
+			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate, &s.gateOn,
+			&s.revive, &s.addressed); err != nil {
 			return nil, fmt.Errorf("scan capture rule: %w", err)
 		}
 		// Rule.Source is the evaluator's carrier for `external_system` (Evaluate
@@ -562,7 +604,9 @@ func parseThreadParticipants(raw []byte) []int64 {
 // every routing question and answering none of them itself.
 //
 // It returns the decision and the winning rule (zero storedRule when unmatched).
-func decideMessage(ctx context.Context, pool *pgxpool.Pool, pm pendingMessage,
+// mode only words the reason: a live pass "requests" a revive, a shadow pass
+// says it "would" (SWT-45 criterion 25); the decision itself is mode-free.
+func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendingMessage,
 	rules []Rule, byID map[int64]storedRule) (ruleDecision, storedRule, error) {
 	outcome := evaluateAll(pm.msg, rules)
 	d := ruleDecision{action: actionUnmatched, matchedRuleIDs: outcome.matchedIDs, ambiguous: outcome.ambiguous}
@@ -603,13 +647,29 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, pm pendingMessage,
 	system, key := winner.extSystem, outcome.externalKey
 	d.extSystem, d.extKey = &system, &key
 
-	if system == "jira" && winner.gateOn {
+	// SWT-45 J1: is this match activity that revives a closed task or surfaces
+	// a new one? The flags and the gate are all COLUMNS, loaded with the rules.
+	activity := overrides(winner.revive, winner.addressed, winner.gateOn)
+	requested := "revive requested"
+	surfacing := "surface requested"
+	if mode != RulesModeLive {
+		requested, surfacing = "would revive", "would surface"
+	}
+
+	if system == "jira" && winner.gateOn && !activity {
 		// SWT-40 D-D1: the ticket is checked against Jira BEFORE a task exists
 		// (O5), and capture never calls Jira itself — the lookup credential
 		// lives only where the gate stage runs. So a would-be task or task_log
 		// on a gated project is held: project, rule and key recorded, nothing
 		// created. The pipelined gate stage resolves it (gate.go). The gate is
 		// the COLUMN, loaded with the rules (the SWT-21 "test the column" rule).
+		//
+		// SWT-45 decision 3 (refined): a match by an ADDRESSED rule ("X
+		// mentioned you on K", "X assigned K to you") overrides the gate and is
+		// NOT held — on a gated project overrides() is exactly `addressed`. All
+		// other activity on a gated ticket, revive-only rules included, still
+		// follows the gate, and the gate's own resolution never revives or
+		// surfaces (the SPEC's Part D section).
 		d.action = actionHeld
 		d.reason = fmt.Sprintf("rule %d (%s): %s %s on %s, whose ticket assignee gate is on; held for the "+
 			"gate stage's Jira lookup", winner.rule.ID, winner.rule.Kind, system, key, winner.rule.Project)
@@ -626,7 +686,15 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, pm pendingMessage,
 		d.taskID = &taskID
 		d.reason = fmt.Sprintf("rule %d (%s): %s %s already linked to task %d; append a log",
 			winner.rule.ID, winner.rule.Kind, system, key, taskID)
-		if existing.dismissalID != 0 {
+		switch {
+		case activity && existing.status == "closed":
+			// SWT-45 J9: activity on a CLOSED task revives it; the handler
+			// decides (ingested after the close, an open dismissal included).
+			// Activity on an OPEN task only logs (J10), or the ticket-closed
+			// email would pin every done ticket's task open.
+			d.revive = true
+			d.reason += fmt.Sprintf("; task %d is closed and rule %d is activity; %s", taskID, winner.rule.ID, requested)
+		case existing.dismissalID != 0:
 			d.dismissalID = existing.dismissalID
 			d.reason += fmt.Sprintf("; task %d was dismissed (%s); reopen requested against dismissal %d",
 				taskID, existing.dismissalCode, existing.dismissalID)
@@ -636,6 +704,10 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, pm pendingMessage,
 	d.action = actionTask
 	d.reason = fmt.Sprintf("rule %d (%s): first message for %s %s on %s; create one task",
 		winner.rule.ID, winner.rule.Kind, system, key, winner.rule.Project)
+	if activity {
+		d.surface = true
+		d.reason += fmt.Sprintf("; rule %d is activity; %s", winner.rule.ID, surfacing)
+	}
 	return d, winner, nil
 }
 
@@ -713,17 +785,23 @@ func withoutRule(rules []Rule, id int64) []Rule {
 // exists (D3). The partial unique index allows at most one open row per task,
 // so the LEFT JOINs cannot multiply the ref row. A task whose dismissal was
 // overtaken and which was then plain-closed carries none: plain-closed.
+//
+// SWT-45 criterion 19: it also returns the task's status, read from the
+// column, so a revive is requested only for a CLOSED task.
 func taskForExternalRef(ctx context.Context, pool *pgxpool.Pool, system, key string) (refTask, bool, error) {
 	var rt refTask
 	var dismissalID *int64
-	var dismissalCode *string
+	var dismissalCode, status *string
 	err := pool.QueryRow(ctx,
-		`SELECT r.task_id, d.id, d.reason_code
+		`SELECT r.task_id, d.id, d.reason_code, t.status
 		   FROM external_refs r
 		   LEFT JOIN tasks t ON t.id = r.task_id
 		   LEFT JOIN task_dismissals d ON d.task_id = t.id AND t.status = 'closed' AND d.reopened_at IS NULL
 		  WHERE r.system = $1 AND r.external_key = $2
-		  ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, system, key).Scan(&rt.taskID, &dismissalID, &dismissalCode)
+		  ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, system, key).Scan(&rt.taskID, &dismissalID, &dismissalCode, &status)
+	if status != nil {
+		rt.status = *status
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return refTask{}, false, nil
 	}
@@ -740,11 +818,12 @@ func taskForExternalRef(ctx context.Context, pool *pgxpool.Pool, system, key str
 }
 
 // refTask is taskForExternalRef's answer: the linked task and, when it is
-// dismissed, its open dismissal (0 / "" = none).
+// dismissed, its open dismissal (0 / "" = none), and its status (SWT-45).
 type refTask struct {
 	taskID        int64
 	dismissalID   int64
 	dismissalCode string
+	status        string
 }
 
 // insertDecision writes the capture_decisions row and reports whether it won the
@@ -944,6 +1023,68 @@ func reopenRuleTask(ctx context.Context, ex *executor.Executor, actor string,
 		return false, fmt.Errorf("parse task_reopen result for task %d: %w", taskID, err)
 	}
 	return out.Reopened, nil
+}
+
+// reviveRuleTask is the revive form of task_reopen (SWT-45 J6) through the
+// executor as the configured capture:{connector} actor: ids only. The handler
+// reads the message's direction and ingest time, the close record and any open
+// dismissal from columns under the row lock, and answers reopened:true or a
+// skip (not_closed, message_predates_close). An error fails the pass, the
+// reopenRuleTask policy.
+func reviveRuleTask(ctx context.Context, ex *executor.Executor, actor string,
+	pm pendingMessage, taskID int64, system, key string) (bool, error) {
+	args, err := json.Marshal(map[string]any{
+		"task_id":    taskID,
+		"message_id": pm.msg.ID,
+		"revive":     true,
+		"reason": fmt.Sprintf("capture: new inbound %s activity, message %d on %s %s",
+			ruleOrNone(pm.channel), pm.msg.ID, system, key),
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal task_reopen (revive) args for task %d: %w", taskID, err)
+	}
+	res, err := ex.Execute(ctx, executor.Call{
+		Tool: "task_reopen", Actor: actor, Args: args, TaskID: &taskID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("revive closed task %d (message %d): %w", taskID, pm.msg.ID, err)
+	}
+	var out struct {
+		Reopened bool `json:"reopened"`
+	}
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		return false, fmt.Errorf("parse task_reopen (revive) result for task %d: %w", taskID, err)
+	}
+	return out.Reopened, nil
+}
+
+// markRuleSurfaced is task_mark_surfaced (SWT-45 J7) through the executor, for
+// a task an overriding rule just created: the reconciler then holds it open
+// against a done ticket instead of closing it in the same tick.
+func markRuleSurfaced(ctx context.Context, ex *executor.Executor, actor string,
+	pm pendingMessage, taskID int64, system, key string) (bool, error) {
+	args, err := json.Marshal(map[string]any{
+		"task_id":    taskID,
+		"message_id": pm.msg.ID,
+		"reason": fmt.Sprintf("capture: created by activity, message %d on %s %s",
+			pm.msg.ID, system, key),
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal task_mark_surfaced args for task %d: %w", taskID, err)
+	}
+	res, err := ex.Execute(ctx, executor.Call{
+		Tool: "task_mark_surfaced", Actor: actor, Args: args, TaskID: &taskID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("surface task %d (message %d): %w", taskID, pm.msg.ID, err)
+	}
+	var out struct {
+		Surfaced bool `json:"surfaced"`
+	}
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		return false, fmt.Errorf("parse task_mark_surfaced result for task %d: %w", taskID, err)
+	}
+	return out.Surfaced, nil
 }
 
 // ruleTaskTitle is SPEC §7's "{external_key} — {subject-or-first-line}", truncated

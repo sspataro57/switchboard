@@ -125,6 +125,8 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// could aim them itself. NOT humanOnly — the capture engine
 		// (capture:{connector}) is its main caller. See internal/tools/provenance.go.
 		{"task_set_source_thread", validateSetSourceThread, taskSetSourceThread},
+		// SWT-45 J7: spine-facing (capture), off both MCP profiles, not humanOnly.
+		{"task_mark_surfaced", validateMarkSurfaced, markSurfaced},
 		// SWT-38 C5/C6: reorder any task on the 0..3 scale. humanOnly (rule
 		// human_only): no spine caller writes priority after creation, so every
 		// automated caller is refused. MCP-listed in both profiles. See priority.go.

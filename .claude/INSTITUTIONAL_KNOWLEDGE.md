@@ -1988,3 +1988,65 @@ decides under the tasks row lock and restores `closed_from_status` (else
   HUMAN actor (dashboard:/opsctl:/manual:), not merely
   `reopened_by_message_id IS NULL` — a reconciler reopen racing a fresh human
   dismissal can stamp it with a NULL message id (pre-existing, seconds wide).
+
+## Jira activity revives closed tasks (SWT-45, jira-activity-revive)
+
+Two `capture_rules` flags (migration 0030) make a rule's matches Jira activity:
+`revive` (revive the ticket's closed task, or create one, and SURFACE it) and
+`addressed` (addressed to him; overrides a gated project's assignee check).
+`overrides = revive AND (NOT gate OR addressed)`, a pure function in
+`internal/capture/revive.go`. Runbooks: `docs/runbooks/capture-rules.md`
+"Activity rules (SWT-45)", `docs/runbooks/ticket-status-sync.md` "Surfaced by
+activity (SWT-45)".
+
+- **LANDMINE (F7): absence from an MCP schema is not a boundary for arguments.**
+  The MCP adapter passes arguments through: `injectWorkerID` rewrites the raw
+  JSON, and nothing filters it against the schema. A worker can set ANY argument
+  of any tool it can reach, documented or not. So surfacing is its own spine
+  tool, `task_mark_surfaced`, off both MCP profiles (not humanOnly: capture
+  calls it), and never a `create_task` argument. The same reasoning keeps
+  `task_reopen`, and with it the revive form, off MCP.
+- **LANDMINE (F8): a capture rule cannot be edited, and its pattern cannot be
+  re-added.** `capture_rules` is UNIQUE `(project_id, criteria_type, pattern)`,
+  and no tool changes pattern, key_regex, priority or flags. "Disable and re-add"
+  collides unless the pattern text changes. Get a key_regex right the first
+  time, by running it in Go over an export (Postgres reads `\b` as a backspace).
+  Existing rules cannot gain the flags. A `capture_rule_update` tool is future
+  work.
+- **The close record, and its fallback.** `closeTransition`, the one writer of
+  `status='closed'`, writes `tasks.closed_at` and `closed_from_status` on a
+  close and NULLs both on a reopen; an idempotent re-close keeps them. There is
+  no backfill and no CHECK, because fixtures INSERT closed tasks directly. A
+  NULL `closed_at` (a pre-0030 close, or one by an old binary during rollout)
+  makes the revive guard fall back to `updated_at`. That is >= the last close
+  instant because closeTransition stamps it and nothing lowers it. The fallback
+  is spelled once, in `reviveGuarded`'s SQL.
+- **The revive guard is ingest time, as in SWT-36:** `m.created_at >
+  GREATEST(COALESCE(closed_at, updated_at), open dismissal's created_at)`,
+  strictly, compared in SQL under the row lock. A message decided under no
+  reviving rule has spent its live claim, so adding a rule later backfills
+  nothing.
+- **The cost (J10): the close email.** Every Jira close sends mail. If it lands
+  after the reconciler's close, it revives the task, and the reconciler then
+  HOLDS it (`last_action='resurfaced'`, one log line). The hold lasts until a
+  hand close, which sticks, or a change in status category, status name or
+  assignee. Jira batches mail, so expect this often. Activity on an OPEN task
+  only logs; if it surfaced, no done ticket's task would ever close.
+- **The reconciler's hold.** `Observation.SurfacedAt` is compared with the
+  recorded `surfaced_seen_at` using `time.Equal`, never `==`: the value comes
+  back from Postgres in the Local zone. `upsertState` writes `surfaced_seen_at`
+  only when `Decision.RecordSeen`, and otherwise preserves it with COALESCE. A
+  NULL written by an active-work pass would make an old surfacing look new when
+  the worker released the task. A human's plain `task_reopen` surfaces too
+  (message NULL), keyed on `policy.HumanActor`; the reconciler's own reopen
+  never does.
+- **Part D interaction (this branch merged second).** `decideMessage` holds a
+  gated jira match only if `!overrides(...)`, and on a gated project that means
+  `!addressed`. A revive-only rule on a gated project is still held. The gate
+  stage never revives or surfaces: its `task_log` on a closed task only logs
+  (SPEC Part D section; a gate-path revive is future work). `opsctl capture-rules
+  gate` prints `revived`/`surfaced_created` as constant 0 for that reason.
+- **Rollout.** Ship ONE image tag for every connector CronJob and pipelined
+  together. A new capture that revives, running beside an old jira-image
+  reconciler that ignores surfacing, re-closes the task: one flip per message
+  until the images match.
