@@ -222,6 +222,13 @@ func TestClassify_DoesNotRespellTheSlackThreadKeyRule(t *testing.T) {
 // import strings, so a call to slackweb.CommandBridge from here would pass it.
 // This allowlist is what stops the key helper's import from becoming a side
 // door to a send path (invariant 4).
+//
+// AMENDED BY SWT-40 Part C (C-D7, C6): the scope rule MOVED to the leaf package
+// internal/replyfold (replyfold.ScopeOf, which asks slackweb.IsRootedThreadKey),
+// shared with the inquiry promoter. So internal/classify now decides
+// thread_scope through replyfold.ScopeOf — that call is the positive control —
+// and may import slackweb from AT MOST one file (zero is fine), unaliased, for
+// the same two symbols.
 func TestClassify_UsesOnlyTheSlackKeyHelpersFromSlackweb(t *testing.T) {
 	allowed := map[string]bool{"IsRootedThreadKey": true, "Channel": true}
 	use := regexp.MustCompile(`\bslackweb\.([A-Za-z_]\w*)`)
@@ -254,14 +261,22 @@ func TestClassify_UsesOnlyTheSlackKeyHelpersFromSlackweb(t *testing.T) {
 			}
 		}
 	}
-	if importers != 1 {
-		t.Errorf("internal/classify imports internal/connector/slackweb from %d file(s), want exactly 1 "+
-			"(inquiry.go, for the thread-scope rule)", importers)
+	if importers > 1 {
+		t.Errorf("internal/classify imports internal/connector/slackweb from %d file(s), want at most 1 "+
+			"(the thread-scope rule now lives in internal/replyfold)", importers)
 	}
-	// Positive control: the helper really is used, or the scan checked nothing.
-	if !seen["IsRootedThreadKey"] {
-		t.Fatalf("no internal/classify source calls slackweb.IsRootedThreadKey; criterion 14's thread_scope " +
-			"decision must go through it, and an allowlist over zero uses proves nothing")
+	_ = seen
+	// Positive control: the scope decision really goes through the shared leaf,
+	// or the scan checked nothing (SWT-40 C-D7: ONE spelling, shared with promote).
+	var viaFold bool
+	for _, rel := range csSources(t, "internal/classify") {
+		if strings.Contains(csGoCode(t, rel), "replyfold.ScopeOf(") {
+			viaFold = true
+		}
+	}
+	if !viaFold {
+		t.Fatalf("no internal/classify source calls replyfold.ScopeOf; SWT-40 C-D7 moves the scope rule to " +
+			"internal/replyfold so classify and promote read one spelling of it")
 	}
 }
 

@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/replyfold"
 )
 
 // summaryFlagCap bounds Summary.Flags (criterion 13): 50 fits a page and stays
@@ -36,10 +38,14 @@ const summaryFlagCap = 50
 // THIS question (one conversation-level key held 9,704 messages on
 // 2026-09-10). Folding the second into the first would hide real open
 // inquiries behind a channel Salvador happened to speak in.
+//
+// Aliases of internal/replyfold's since SWT-40 Part C (C-D7): the fold moved
+// to that leaf, shared with the inquiry promoter, so the report and the gate
+// read one spelling.
 const (
-	StateOpen             = "open"
-	StateAnsweredInThread = "answered in thread"
-	StateSpokeSince       = "spoke in conversation since"
+	StateOpen             = replyfold.StateOpen
+	StateAnsweredInThread = replyfold.StateAnsweredInThread
+	StateSpokeSince       = replyfold.StateSpokeSince
 )
 
 // unrecordedChannel groups counts whose row carries no channel — skip rows
@@ -47,52 +53,14 @@ const (
 // still sums to the lane totals.
 const unrecordedChannel = "(unrecorded)"
 
-// repliedSinceSQL is the READ-TIME "still open" fold (SWT-33 criteria 17-18):
-// does the verdict's recorded thread carry an OUTBOUND message sent after the
-// classified message? It is the one deliberate join from a verdict back to
-// normalized_messages — a statement about the world NOW, not about what was
-// classified, so it reads thread_id, direction and sent_at and nothing else —
-// and it writes nothing: the verdict row is never updated, so the rule is
-// tunable without re-running the GPU and a mis-tuned rule loses no data.
-//
-// Its evidence is `direction = 'outbound'`, invariant 5's own marker. That
-// column was MEASURED to carry values on the armed project's threads before
-// this shipped (runbook, "The inquiry lane"), and the integration suite proves
-// the query reads it by mutating the seeded row three ways.
-//
-// SET-BASED ON PURPOSE: the latest outbound instant per thread, computed once,
-// then compared with the classified message's sent_at. The first cut was a
-// correlated EXISTS per verdict, and normalized_messages has no index on
-// thread_id — the same shape measured 21.5 s over 1,806 verdicts on the
-// production db (2026-09-10), a full scan per row. This is one scan per report.
-// "Some outbound after t" and "the latest outbound is after t" are the same
-// predicate.
-//
-// repliedSinceCol is the column it produces. Both halves are named constants
-// so the structure test can hold them to an ALLOWLIST of identifiers — the
-// aliases t and lo appear nowhere else, and nothing but thread_id, direction
-// and sent_at is read from the table (t.id is the join key to the verdict).
-//
-// TIES FAIL CLOSED (Codex adversarial re-review, 2026-09-10): "later" means a
-// strictly later sent_at, exactly as criterion 17 wrote it, so a reply stamped
-// in the same instant as the question does NOT answer it. The first review
-// round asked for a (sent_at, id) tie-break; the second showed why that is
-// wrong — the id is a BIGSERIAL insertion key, so a backfilled or
-// late-ingested OLDER message gets a HIGHER id, and on a timestamp tie that
-// would mark a real open inquiry answered and hide it. Reading "open" when
-// unsure is the safe error: the review surface shows one extra line, never one
-// fewer. max() ignores NULL stamps, so a NULL-stamped outbound can never be
-// "the latest".
-const repliedSinceCol = `COALESCE(lo.last_outbound > t.sent_at, false)`
-
-const repliedSinceSQL = `
-	      LEFT JOIN normalized_messages t
-	             ON t.id = (e.fields->>'normalized_message_id')::bigint
-	      LEFT JOIN (SELECT thread_id, max(sent_at) AS last_outbound
-	                   FROM normalized_messages
-	                  WHERE direction = 'outbound' AND thread_id IS NOT NULL
-	                  GROUP BY thread_id) lo
-	             ON lo.thread_id = NULLIF(e.fields->>'thread_id', '')::bigint`
+// The READ-TIME "still open" fold (SWT-33 criteria 17-18) is replyfold.JoinSQL
+// (the joins) and replyfold.RepliedSinceCol (the column), moved to that leaf
+// by SWT-40 Part C (C-D7) so the inquiry promoter gates on the SAME spelling
+// this report prints. It is the one deliberate join from a verdict back to the
+// message table, a statement about the world NOW: it reads thread_id,
+// direction and sent_at and nothing else, set-based (one scan per report),
+// with ties reading OPEN. replyfold.go carries the full reasoning, and
+// replyfold_test.go the identifier allowlist that moved with it.
 
 // Summary is one lane's shadow-classification numbers for a window.
 type Summary struct {
@@ -175,7 +143,7 @@ func Summarize(ctx context.Context, pool *pgxpool.Pool, since time.Duration, wor
 	// lanes select a constant so one scan serves all three.
 	replied, joins := `false`, ``
 	if inquiry {
-		replied, joins = repliedSinceCol, repliedSinceSQL
+		replied, joins = replyfold.RepliedSinceCol, replyfold.JoinSQL
 	}
 	q := `SELECT e.fields, r.created_at, ` + replied + `
 	      FROM ai_extractions e
@@ -266,7 +234,7 @@ func Summarize(ctx context.Context, pool *pgxpool.Pool, since time.Duration, wor
 		}
 		if inquiry {
 			fl.Channel, fl.Asker, fl.ThreadScope = f.Channel, f.Asker, f.ThreadScope
-			fl.State = inquiryState(f.ThreadScope, repliedSince)
+			fl.State = replyfold.State(f.ThreadScope, repliedSince)
 			s.countState(channel, fl.State)
 		}
 		s.allFlags = append(s.allFlags, fl)
@@ -282,21 +250,6 @@ func Summarize(ctx context.Context, pool *pgxpool.Pool, since time.Duration, wor
 		return s, err
 	}
 	return s, nil
-}
-
-// inquiryState places one flagged inquiry verdict in exactly one of the three
-// states. A replied-since verdict of scope `none` cannot occur (a message with
-// no thread has nothing to be replied in) and would stay open if it did — the
-// fold never upgrades a claim the data does not carry.
-func inquiryState(scope string, repliedSince bool) string {
-	switch {
-	case repliedSince && scope == ScopeThread:
-		return StateAnsweredInThread
-	case repliedSince && scope == ScopeConversation:
-		return StateSpokeSince
-	default:
-		return StateOpen
-	}
 }
 
 // countState adds one flagged verdict to the lane counters and its channel row.

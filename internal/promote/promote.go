@@ -34,6 +34,10 @@ var whitelist = map[string]bool{
 // ai_extractions. Decide consumes only Kind; the rest is what the executor
 // calls copy into the task (criterion 15: copied, never generated).
 type Verdict struct {
+	// Lane is which classify lane produced the verdict. The zero value is the
+	// personal lane (SWT-30), so every existing caller is unchanged (C1). On the
+	// inquiry lane (SWT-40 Part C) Kind carries ask_kind.
+	Lane Lane
 	Kind string
 
 	MessageID    int64
@@ -59,6 +63,16 @@ type Verdict struct {
 	// RunAt is when the verdict was recorded (ai_runs.created_at) — the clock
 	// the cutover compares against (Q2: the verdict clock ONLY).
 	RunAt time.Time
+
+	// The inquiry lane's stored facts (SWT-40 C-D9), copied into the task body
+	// verbatim; empty on the personal lane. StoredThreadID and ThreadKey are
+	// the thread identity the verdict recorded, never re-derived.
+	Asker             string
+	Channel           string
+	ThreadKey         string
+	ThreadScope       string
+	StoredThreadID    int64
+	ExternalMessageID string
 }
 
 // ExistingTask is the thread's oldest task that is NOT closed/delivered, or —
@@ -69,11 +83,16 @@ type Verdict struct {
 // pattern: the task's OPEN task_dismissals row (status='closed' AND
 // reopened_at IS NULL, D3), 0 = none. DismissalCode is its reason code, for
 // the promotion row's prose only — Decide never branches on it.
+//
+// AssigneeType is tasks.assignee_type, read for the inquiry lane's C-D13
+// gate (a non-human thread task is never attached to or reopened). Decide
+// never branches on it, and the personal lane never reads it.
 type ExistingTask struct {
 	ID            int64
 	Status        string
 	DismissalID   int64
 	DismissalCode string
+	AssigneeType  string
 }
 
 // Decision is what one verdict becomes. Action is classify_promotions.action
@@ -106,6 +125,11 @@ func open(status string) bool {
 //  3. a whitelisted kind (payment_due|deadline) -> ready task
 //  4. anything else -> holding, the review lane
 //
+// On the INQUIRY lane (SWT-40 C-D8) rules 1 and 2 are unchanged, and a create
+// uses inquiryCreateStatus ("holding" under O7, action review) instead of rules
+// 3-4: the personal whitelist is the personal lane's autonomy argument and
+// never applies to an inquiry verdict, whatever its kind string says.
+//
 // Pure: a function of (verdict, existing task) with zero I/O, unit-tested with
 // no pgx, no net and no provider (invariant 7). The attach rule is evaluated
 // FIRST — a re-classified message or a follow-up on the thread must never
@@ -116,6 +140,9 @@ func Decide(v Verdict, existing *ExistingTask) Decision {
 	}
 	if existing != nil && existing.DismissalID != 0 {
 		return Decision{Action: "attached", TaskID: existing.ID, ReopenDismissalID: existing.DismissalID}
+	}
+	if v.Lane == LaneInquiry {
+		return Decision{Action: actionForStatus(inquiryCreateStatus), Status: inquiryCreateStatus}
 	}
 	if whitelist[v.Kind] {
 		return Decision{Action: "task", Status: "ready"}

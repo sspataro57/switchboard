@@ -5,7 +5,14 @@
 //	classify run     [--lane personal|residue|inquiry] [--limit N] [--since 720h]
 //	classify report  [--lane personal|residue|inquiry] [--since 720h]
 //	classify eval    [--lane personal|residue|inquiry] [--labels <file>] [--checkpoint <file>]
-//	classify promote [--dry-run] [--limit N]
+//	classify promote [--lane personal|inquiry] [--dry-run] [--limit N]
+//	                 [--max-age <dur>, dry-run only] [--outcomes [--since <dur>]]
+//
+// SWT-40 Part C adds the inquiry lane to `promote`: stored inquiry verdicts
+// that pass a deterministic gate become Holding tasks, forward only from
+// projects.inquiry_promote_after, as promote:inquiry. --lane defaults to
+// personal, so the classify-promote CronJob is unchanged; the pipelined
+// inquiry_promote stage calls the same function directly.
 //
 // `promote` (SWT-30) is the one deliberate exit from shadow: it turns stored
 // PERSONAL-lane verdicts into tasks — whitelisted kinds (payment_due,
@@ -66,13 +73,13 @@ import (
 	"github.com/sspataro57/switchboard/internal/tools"
 )
 
-// promoteCmd drives one promotion pass (SWT-30). No --since and no cutover
-// flag on purpose: the bound is the stored projects.classify_promote_after.
+// promoteCmd drives one promotion pass (SWT-30), or prints the inquiry lane's
+// dismissal readout (--outcomes, SWT-40 C-D12). No cutover flag on purpose:
+// the bound is the stored projects.classify_promote_after (personal) or
+// projects.inquiry_promote_after (inquiry).
 func promoteCmd(argv []string) error {
-	fs := flag.NewFlagSet("promote", flag.ContinueOnError)
-	dryRun := fs.Bool("dry-run", false, "read the same rows, take the same decisions, write NOTHING; print the plan")
-	limit := fs.Int("limit", 0, "max verdicts this pass (0 = all eligible)")
-	if err := fs.Parse(argv); err != nil {
+	o, err := parsePromoteFlags(argv)
+	if err != nil {
 		return err
 	}
 
@@ -83,33 +90,170 @@ func promoteCmd(argv []string) error {
 	}
 	defer pool.Close()
 
+	if o.outcomes {
+		// Read-only: the fold is promote's, the threshold and marker are here.
+		c, err := promote.InquiryOutcomes(ctx, pool, o.since)
+		if err != nil {
+			return err
+		}
+		stuck, err := promote.StuckClaims(ctx, pool)
+		if err != nil {
+			return err
+		}
+		fmt.Print(formatOutcomes(c))
+		fmt.Print(formatStuckClaims(stuck))
+		return nil
+	}
+
 	// The full executor stack (orchestratord's wiring): validate -> policy ->
 	// audit -> handler. Invariant 3 — the promoter reaches tasks, task_events
 	// and provenance only through create_task / task_append_log /
-	// task_set_source_thread on this executor, as promote:classify.
+	// task_set_source_thread on this executor, as promote:classify (or
+	// promote:inquiry on the inquiry lane).
 	reg := executor.NewRegistry()
 	tools.Register(reg, pool)
 	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
 	ex := executor.New(reg, checker, audit.NewPGStore(pool))
 
-	stats, err := promote.Run(ctx, pool, ex, promote.Config{DryRun: *dryRun, Limit: *limit})
+	stats, err := promote.Run(ctx, pool, ex, promote.Config{
+		DryRun: o.dryRun, Limit: o.limit, Lane: o.lane, MaxAge: o.maxAge,
+	})
 	if err != nil {
 		return err
 	}
+	out, err := formatPromoteStats(o.lane, o.dryRun, stats)
+	if err != nil {
+		return err
+	}
+	fmt.Print(out)
+	return nil
+}
+
+// promoteOpts is `classify promote`'s parsed command line.
+type promoteOpts struct {
+	lane     promote.Lane
+	dryRun   bool
+	limit    int
+	maxAge   time.Duration
+	outcomes bool
+	since    time.Duration
+}
+
+// parsePromoteFlags parses and validates `classify promote`'s flags. --lane
+// defaults to personal, so the classify-promote CronJob's command is unchanged
+// (C1). A flag that would be silently ignored is refused instead.
+func parsePromoteFlags(argv []string) (promoteOpts, error) {
+	fs := flag.NewFlagSet("promote", flag.ContinueOnError)
+	lane := fs.String("lane", string(promote.LanePersonal), "personal | inquiry (the residue lane never promotes)")
+	dryRun := fs.Bool("dry-run", false, "read the same rows, take the same decisions, write NOTHING; print the plan")
+	limit := fs.Int("limit", 0, "max verdicts this pass (0 = all eligible; on the inquiry lane, verdicts acted on)")
+	maxAge := fs.Duration("max-age", 0,
+		"inquiry lane, --dry-run ONLY: widen the 72h age fence for a backfill read (refused on a live pass)")
+	outcomes := fs.Bool("outcomes", false,
+		"inquiry lane: print the dismissal readout (O7's flip signal) instead of promoting; writes nothing")
+	since := fs.Duration("since", 0, "with --outcomes: only promotions created within this window (0 = all)")
+	if err := fs.Parse(argv); err != nil {
+		return promoteOpts{}, err
+	}
+	if fs.NArg() > 0 {
+		return promoteOpts{}, fmt.Errorf("promote: unexpected arguments %v", fs.Args())
+	}
+	o := promoteOpts{
+		lane: promote.Lane(*lane), dryRun: *dryRun, limit: *limit,
+		maxAge: *maxAge, outcomes: *outcomes, since: *since,
+	}
+	switch o.lane {
+	case promote.LanePersonal, promote.LaneInquiry:
+	default:
+		return promoteOpts{}, fmt.Errorf("promote: unknown --lane %q (personal | inquiry; the residue lane never promotes)", *lane)
+	}
+	switch {
+	case o.limit < 0:
+		return promoteOpts{}, fmt.Errorf("promote: --limit must be >= 0")
+	case o.maxAge < 0 || o.since < 0:
+		return promoteOpts{}, fmt.Errorf("promote: --max-age and --since must be >= 0")
+	case o.maxAge != 0 && !o.dryRun:
+		return promoteOpts{}, fmt.Errorf("promote: --max-age is refused unless --dry-run: the 72h fence is what " +
+			"keeps historical asks from becoming tasks")
+	case o.maxAge != 0 && o.lane != promote.LaneInquiry:
+		return promoteOpts{}, fmt.Errorf("promote: --max-age applies to --lane inquiry only")
+	case o.since != 0 && !o.outcomes:
+		return promoteOpts{}, fmt.Errorf("promote: --since applies to --outcomes only")
+	case o.outcomes && o.lane != promote.LaneInquiry:
+		return promoteOpts{}, fmt.Errorf("promote: --outcomes reads the inquiry lane; pass --lane inquiry")
+	case o.outcomes && (o.dryRun || o.limit != 0 || o.maxAge != 0):
+		return promoteOpts{}, fmt.Errorf("promote: --outcomes is a read-only readout and takes only --since")
+	}
+	return o, nil
+}
+
+// formatPromoteStats renders one pass's line, trailing newline included. The
+// personal lane is BYTE-IDENTICAL to the pre-SWT-40 output (C1: the
+// classify-promote CronJob's log does not change); the inquiry lane adds its
+// lane and the gated counts by reason, every reason present, zeros included.
+func formatPromoteStats(lane promote.Lane, dryRun bool, st promote.Stats) (string, error) {
 	mode := "live"
-	if *dryRun {
+	if dryRun {
 		mode = "dry-run"
 	}
-	out, err := json.Marshal(map[string]any{
-		"mode": mode, "considered": stats.Considered, "created": stats.Created,
-		"review": stats.Review, "attached": stats.Attached, "lost_claims": stats.Lost,
-		"reopened": stats.Reopened,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal stats: %w", err)
+	m := map[string]any{
+		"mode": mode, "considered": st.Considered, "created": st.Created,
+		"review": st.Review, "attached": st.Attached, "lost_claims": st.Lost,
+		"reopened": st.Reopened,
 	}
-	fmt.Printf("promote: %s\n", out)
-	return nil
+	if lane == promote.LaneInquiry {
+		gated := map[string]int{}
+		for _, r := range promote.InquiryGateReasons() {
+			gated[r] = st.Gated[r]
+		}
+		m["lane"] = string(lane)
+		m["gated"] = gated
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return "", fmt.Errorf("marshal stats: %w", err)
+	}
+	return "promote: " + string(out) + "\n", nil
+}
+
+// formatOutcomes renders the C-D12 readout: the counts ALWAYS, and a ratio
+// (true positives over decided) only at >= classify.EvalResultThreshold
+// decided; below it, classify.EvalIndicativeMarker in its one spelling.
+// Decided is false + true positives: mis-clicks and exclusions are not labels.
+func formatOutcomes(c promote.OutcomeCounts) string {
+	var b strings.Builder
+	b.WriteString("inquiry promotion outcomes (each promoted task's FIRST dismissal):\n")
+	fmt.Fprintf(&b, "  false_positive: %d\n", c.FalsePositive)
+	fmt.Fprintf(&b, "  true_positive:  %d\n", c.TruePositive)
+	fmt.Fprintf(&b, "  mis_click:      %d\n", c.MisClick)
+	fmt.Fprintf(&b, "  excluded:       %d\n", c.Excluded)
+	fmt.Fprintf(&b, "  decided:        %d\n", c.Decided())
+	if d := c.Decided(); d >= classify.EvalResultThreshold {
+		fmt.Fprintf(&b, "  precision:      %.2f (%d / %d decided)\n", float64(c.TruePositive)/float64(d), c.TruePositive, d)
+	} else {
+		fmt.Fprintf(&b, "  %s (%d decided, below %d)\n", classify.EvalIndicativeMarker, d, classify.EvalResultThreshold)
+	}
+	return b.String()
+}
+
+// formatStuckClaims renders the claims with no task (classify_promotions.task_id
+// NULL), per lane, all time: --since does not narrow it, because a stuck claim
+// never recovers on its own. The resolution is in docs/runbooks/local-classifier.md.
+func formatStuckClaims(s []promote.StuckClaim) string {
+	var b strings.Builder
+	total := 0
+	for _, c := range s {
+		total += c.Count
+	}
+	fmt.Fprintf(&b, "stuck claims (task_id NULL, all time, every lane): %d\n", total)
+	for _, c := range s {
+		if c.Count == 0 {
+			fmt.Fprintf(&b, "  %s: 0\n", c.Lane)
+			continue
+		}
+		fmt.Fprintf(&b, "  %s: %d (oldest %s)\n", c.Lane, c.Count, c.Oldest.UTC().Format(time.RFC3339))
+	}
+	return b.String()
 }
 
 func main() {

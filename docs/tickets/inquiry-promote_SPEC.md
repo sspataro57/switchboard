@@ -782,6 +782,30 @@ is a read-only readout, not an eval.
 - **Printing:** counts always, and a ratio only at ≥ `EvalResultThreshold` decided. The fold lives
   in `promote`; the threshold and marker are applied in `cmd/classify`.
 
+**C-D13 — The inquiry lane never attaches to or reopens a non-human task** (go-reviewer,
+2026-09-12). `threadTask` picks the thread's open or dismissed task with no assignee filter. On the
+inquiry lane, an attach would `task_append_log` a summary of untrusted Slack or mail text onto an
+`assignee_type='claude'` task, whose log feeds a worker prompt that runs without permission checks
+(SWT-38 pinned the log verb to human tasks for that reason). A guarded `task_reopen` would put a
+claude task back in a console queue.
+- When the thread's open or dismissed task is not `human`, the verdict is gated `claude_task`: the
+  seventh reason, last in the order. It writes nothing and stays in the inbox until the 72h fence,
+  like every other gate.
+- It never falls through to a new task: Q3 (one open task per thread) holds.
+- `InquiryGate` stays pure: `ExistingTask` carries `assignee_type`, `InquiryCandidate.ThreadTask`
+  carries the task, and `runInquiry` reads the thread task only for a verdict that passed the six
+  C3 clauses. An empty assignee reads as not human (fail closed).
+- The personal lane is unchanged: it reads the same `ExistingTask` and ignores the field.
+
+**C-D14 — Stuck claims are visible, not repaired** (Codex review, 2026-09-12). Claim-before-act
+(criterion 12) means a crash or a transient error between the claim and the executor's
+create/attach leaves a `classify_promotions` row with `task_id` NULL, and the inbox excludes that
+message for good. The contract stays: at most once, never a duplicate task, shared with the
+personal lane and capture. On prod, 0 of 18 promotions were stuck on 2026-09-12. `classify promote
+--lane inquiry --outcomes` prints them after the counts as `stuck claims` (every lane, all time,
+the count and the oldest claim per lane; `--since` does not narrow it). The manual resolution is in
+`docs/runbooks/local-classifier.md`; automatic recovery is SWT-50.
+
 **Acceptance criteria — Part C**
 - C1. `classify promote --lane personal` (the default) is byte-identical to today.
 - C2. The inquiry inbox, one query:
@@ -796,7 +820,10 @@ is a read-only readout, not an eval.
 
   One fixture per clause, and cross-lane controls.
 - C3. The pure `promote.InquiryGate(c, now)` with reasons `rethreaded`, `kind`, `stale`,
-  `pending`, `answered`, `not_addressed`, with a table test.
+  `pending`, `answered`, `not_addressed`, with a table test. *Amended 2026-09-12:* plus C-D13's
+  `claude_task`, last, with unit cases and two integration tests (an open and a dismissed claude
+  task on the thread: gated, no promotion row, no log, no reopen, and a positive control that
+  flips the same task to human and sees it attach).
 - C4. Addressed integration tests (DM, top-level channel, rooted thread with an earlier post, a
   post only after → `answered`, group DM, gmail), plus two mutations (direction, strictness).
 - C5. `IsDirectMessageKey` unit tests. The key-spelling scan extends to `promote` and `replyfold`.
@@ -811,7 +838,12 @@ is a read-only readout, not an eval.
     same diff.
   - An integration test asserts that a created inquiry task is `holding`, with promotion action
     `review`.
-- C9. Claim-before-act; run-twice writes nothing; a personal-promoted message counts as `Lost`.
+- C9. Claim-before-act; run-twice writes nothing; a second verdict for one message in the same
+  pass counts as `Lost`. *Amended 2026-09-12:* a message the personal lane already claimed is NOT
+  counted `Lost`, and that is the intended behaviour. The inquiry inbox's `no promotion row`
+  clause excludes it before any claim is tried, and both lanes take `0x5157_0021`, so they cannot
+  race for it. `TestPromoteInquiry_Integration_LostClaimsAndThePersonalClaim` pins both halves.
+  A claim left with `task_id` NULL is reported by `--outcomes` (C-D14).
 - C10. A gated verdict writes no row and calls no tool. A pending verdict promotes on the first
   pass or sweep after its grace (fixture).
 - C11. The `inquiry` stats block with gated counts. `--dry-run`. `--max-age` is refused unless
@@ -1062,10 +1094,42 @@ No work payloads and no commands. The orchestrator's `ops/workers/{id}/cmd` topi
   - Part D's gate read from a constant, the gate row's restated `ON CONFLICT`, and the ref
     re-query dropped (two tasks for one key);
   - Part E's publish-before-commit.
+
+  **Part C results (2026-09-12, ops_isoc, `-tags integration -p 1 -count=1`, in a copy of the
+  worktree; baseline green).** Every mutation turned at least one test red:
+
+  | mutation | red |
+  |---|---|
+  | inbox: `worker_type` any lane | `InboxOneFixturePerClause`, `TestPromoteInquiryInbox_LatestDecisionHasNoModePredicate` |
+  | inbox: drop `r.status='ok'` | `InboxOneFixturePerClause` |
+  | inbox: drop `needs_reply` | `InboxOneFixturePerClause` |
+  | inbox: drop `nm.direction='inbound'` | `InboxOneFixturePerClause` |
+  | inbox: `latest.action <> 'unmatched'` | `InboxOneFixturePerClause` |
+  | inbox: latest decision filtered on `mode='live'` | `InboxOneFixturePerClause`, `TestPromoteInquiryInbox_LatestDecisionHasNoModePredicate` |
+  | inbox: drop `p.ai_inquiry` | `InboxOneFixturePerClause` |
+  | inbox: drop the cutover | `InboxOneFixturePerClause` |
+  | inbox: drop the `sent_at` fence | `InboxOneFixturePerClause` |
+  | inbox: drop `NOT EXISTS classify_promotions` | `LostClaimsAndThePersonalClaim` |
+  | inbox: newest first | `OldestFirst` |
+  | addressing: replyfold ignores direction | `AddressedToSalvador`, `OldestFirst`, `TestJoinSQL_ReadsOnlyThreadDirectionAndSentAt` |
+  | addressing: prior post `<=` (not strict) | `AddressedToSalvador`, `TestColumns_AreStrictInBothDirections` |
+  | addressing: gmail not addressed | `TestInquiryGate_EachReasonAlone`, `AddressedToSalvador` and 18 more integration tests |
+  | `IsDirectMessageKey` accepts `G…` | `TestIsDirectMessageKey`, `TestIsDirectMessageKey_AgreesWithTheKeysTheNormalizerBuilds`, `TestInquiryGate_EachReasonAlone`, `AddressedToSalvador` |
+  | outcomes fold on the LATEST dismissal | `OutcomesFoldOnTheFirstDismissal` |
+  | `inquiryCreateStatus = "ready"` without its test | `TestInquiryCreateStatus_IsHoldingUnderO7`, three `TestDecide_Inquiry…` tests, 14 integration tests |
+  | C-D13: drop the `claude_task` clause | `NeverAttachesToAnOpenClaudeTask`, `NeverReopensADismissedClaudeTask`, `TestInquiryGate_EachReasonAlone`, `TestInquiryGate_ReportsTheFirstReasonInCThreeOrder` |
+  | C-D13: `threadTask` stops selecting `assignee_type` | both claude tests, `AttachesToTheOpenTask`, `ReopensADismissedTask`, `OldestFirst`, `LostClaimsAndThePersonalClaim`, `OutcomesFoldOnTheFirstDismissal` |
+  | C-D14: stuck claims without `task_id IS NULL` | `StuckClaimsAreReported` |
+  | C-D14: stuck-claims lane join on `classify_inquiry` only | `StuckClaimsAreReported` |
+
+  Integration test names are `TestPromoteInquiry_Integration_<name>`.
 - **V4. Prod read-only, before implementation** (`BEGIN READ ONLY … ROLLBACK`; nothing frozen in
   tests):
   - (a) Export `(thread_key, raw conversation.type)` for every slack thread and run
     `IsDirectMessageKey` in Go. Zero disagreements, ≥1 DM per workspace.
+    **Result (prod, 2026-09-12):** `IsDirectMessageKey` agreed with the recorded
+    `conversation.type` on every slack thread: 63 `dm`, 24 `group_dm`, 134 public, 0
+    disagreements. C-D4 ships.
   - (b) The 16 flagged inquiry verdicts of 2026-09-10.
   - (c) Slack export freshness per workspace (Miss B).
   - (d) The handsonconnect mailbox breakdown and top senders.
@@ -1109,7 +1173,9 @@ No work payloads and no commands. The orchestrator's `ops/workers/{id}/cmd` topi
         task only if assigned;
      3. run the reconciler as usual (the backstop).
   4. **C:**
-     1. apply 0028, then enable `inquiry` + `inquiry_promote`;
+     1. apply 0028 (shipped as 0031), then enable `inquiry` + `inquiry_promote`. *Amended
+        2026-09-12:* run step 2's backfill BEFORE enabling the `inquiry` stage. Both take
+        `0x5157_0022`, and with the stage live they fight for it;
      2. run the one-shot `classify run --lane inquiry --since 336h` by hand for the backlog, and
         read `classify report`;
      3. set #110's provenance, then arm;
@@ -1173,3 +1239,10 @@ No work payloads and no commands. The orchestrator's `ops/workers/{id}/cmd` topi
 - The `normalized_messages.thread_id` index.
 - Outcome readouts per lane and step on `/funnel`, and a `wrong_project` dismissal code.
 - Route correction when a later rule disagrees.
+- **The inquiry classify inbox can be starved by messages that never classify** (2026-09-12). It
+  reads oldest first with a limit of 25. A message that always fails as unclassified stays in the
+  inbox and costs a GPU call on every sweep until it leaves the 72h window, and 25 such messages
+  would fill every pass and starve newer asks. Needs a per-message failure memory or backoff (for
+  example, skip after N recorded failures), or a limit over messages that can still succeed.
+- **Automatic recovery of stranded claims** (SWT-50): today a `task_id` NULL claim is only
+  reported (C-D14) and resolved by hand.

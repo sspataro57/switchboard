@@ -1,0 +1,19 @@
+-- SWT-40 Part C (inquiry-promote): the inquiry lane's own promotion cutover.
+--
+-- projects.inquiry_promote_after arms promotion of stored inquiry verdicts
+-- (worker_type classify_inquiry) into tasks, forward-only on the VERDICT clock
+-- (ai_runs.created_at >= inquiry_promote_after). One column per question
+-- (SWT-33 D3): classify_promote_after stays the personal lane's cutover and is
+-- untouched here.
+--
+-- NULL = off, and NULL is the fail-closed side. No default and no backfill:
+-- arming is a hand-run statement after task #110 has its provenance (C-D11,
+-- V6.4), a decision with a timestamp, never a deploy side effect.
+--
+-- O7's Holding-first is a Go constant (promote.inquiryCreateStatus), NOT a
+-- column: a typo in a row cannot widen autonomy unreviewed.
+--
+-- The SPEC names this file 0028_inquiry_promotion.sql. 0028 went to SWT-43,
+-- 0029 to Part D, and 0030 is claimed by SWT-45 on another branch, so Part C
+-- takes 0031. Additive: old binaries never read the column.
+ALTER TABLE projects ADD COLUMN inquiry_promote_after TIMESTAMPTZ;

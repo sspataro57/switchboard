@@ -38,9 +38,23 @@ type Config struct {
 	// performs no writes of any kind (no promotion rows either), and prints one
 	// line per decision (criterion 14).
 	DryRun bool
-	// Limit caps how many verdicts this pass considers (0 = all).
+	// Limit caps how many verdicts this pass considers (0 = all). On the
+	// inquiry lane it caps the verdicts ACTED ON (claimed or planned), never the
+	// rows read: a gated verdict stays in the inbox and must not starve newer
+	// passing ones.
 	Limit int
+	// Lane selects the verdicts this pass reads. The zero value is the
+	// personal lane (C1: every existing caller unchanged).
+	Lane Lane
+	// MaxAge widens the inquiry lane's age fence (InquiryMaxAge) for a
+	// DRY-RUN read only (V5); a live pass with it set is refused (C11).
+	MaxAge time.Duration
 }
+
+// ErrLockHeld is wrapped by Run when another pass holds AdvisoryLockKey, on
+// either lane. The CLI still exits non-zero; pipelined maps it to
+// pipeline.ErrLockHeld (retry, then the sweep).
+var ErrLockHeld = errors.New("promote: advisory lock held by another pass")
 
 // Stats summarises one pass. The printed plan is the CLI's contract; these
 // fields are informational.
@@ -51,6 +65,9 @@ type Stats struct {
 	Attached   int // log appends onto an open (or dismissed) task
 	Lost       int // claims lost to a concurrent or earlier row
 	Reopened   int // dismissed tasks task_reopen answered reopened:true for (SWT-36)
+	// Gated counts the inquiry lane's gated verdicts by reason, every reason
+	// present (zeros included); nil on the personal lane.
+	Gated map[string]int
 }
 
 // verdictRow is Verdict plus what the executor calls need but Decide does not.
@@ -68,6 +85,24 @@ type verdictRow struct {
 // outlives a returned pooled connection.
 func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Config) (Stats, error) {
 	var stats Stats
+	// Configuration refusals FIRST, before any I/O.
+	lane := cfg.Lane
+	if lane == "" {
+		lane = LanePersonal
+	}
+	if lane != LanePersonal && lane != LaneInquiry {
+		return stats, fmt.Errorf("promote: unknown lane %q (personal | inquiry; the residue lane never promotes)", cfg.Lane)
+	}
+	if cfg.MaxAge < 0 {
+		return stats, fmt.Errorf("promote: negative MaxAge %v", cfg.MaxAge)
+	}
+	if cfg.MaxAge > 0 && !cfg.DryRun {
+		return stats, errors.New("promote: --max-age is refused unless --dry-run (C11): the 72h fence is what " +
+			"keeps historical asks from becoming tasks")
+	}
+	if cfg.MaxAge > 0 && lane != LaneInquiry {
+		return stats, errors.New("promote: --max-age applies to the inquiry lane only")
+	}
 	if pool == nil {
 		return stats, errors.New("promote: nil database pool")
 	}
@@ -82,9 +117,15 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 		return stats, err
 	}
 	if !held {
-		return stats, fmt.Errorf("promote: another pass holds advisory lock 0x%X; refusing to run", AdvisoryLockKey)
+		return stats, fmt.Errorf("promote: another pass holds advisory lock 0x%X; refusing to run: %w",
+			AdvisoryLockKey, ErrLockHeld)
 	}
 	defer release()
+
+	// Both lanes share the lock: they cannot race for one message's claim.
+	if lane == LaneInquiry {
+		return runInquiry(ctx, pool, ex, cfg)
+	}
 
 	// Criterion 5: promotion is OFF until a human sets a cutover. Checked
 	// explicitly so the answer is a sentence rather than a silent empty inbox.
@@ -123,60 +164,70 @@ func Run(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, cfg Con
 			continue
 		}
 
-		promoID, claimed, err := claim(ctx, pool, v, d, reason)
-		if err != nil {
+		if err := act(ctx, pool, ex, v, d, reason, &stats); err != nil {
 			return stats, err
 		}
-		if !claimed {
-			// Whoever won the claim owns the action — a concurrent pass, or a
-			// second eligible verdict for the same message inside this one. One
-			// row per message, forever (criterion 11).
-			stats.Lost++
-			continue
-		}
-		stats.Considered++
-
-		switch d.Action {
-		case "attached":
-			if err := appendVerdictLog(ctx, ex, v, d.TaskID); err != nil {
-				return stats, err
-			}
-			if err := recordTask(ctx, pool, promoID, d.TaskID); err != nil {
-				return stats, err
-			}
-			// SWT-36 D10: the log line first, then the guarded reopen — a
-			// crash between the two leaves exactly today's behaviour. The task
-			// id is recorded BEFORE the reopen for the ordering reason below:
-			// the claim is spent, so a failed reopen must not also lose the
-			// pointer to the task the message was attached to.
-			if d.ReopenDismissalID != 0 {
-				reopened, err := reopenDismissed(ctx, ex, v, d)
-				if err != nil {
-					return stats, err
-				}
-				if reopened {
-					stats.Reopened++
-				}
-			}
-		default: // "task" | "review"
-			taskID, err := createVerdictTask(ctx, ex, v, d)
-			if err != nil {
-				return stats, err
-			}
-			// Record the task on its promotion row BEFORE provenance —
-			// capture.EvaluateRules' ordering, for the same reason: the claim is
-			// spent, so a later failure must not also lose the pointer to the
-			// task that was created.
-			if err := recordTask(ctx, pool, promoID, taskID); err != nil {
-				return stats, err
-			}
-			if err := setProvenance(ctx, ex, v, taskID); err != nil {
-				return stats, err
-			}
-		}
-		count(&stats, d)
 	}
 	return stats, nil
+}
+
+// act claims the message and carries out d, for either lane: the
+// claim-before-act half of criterion 12, then the executor calls as the lane's
+// actor.
+func act(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, v Verdict, d Decision, reason string, stats *Stats) error {
+	promoID, claimed, err := claim(ctx, pool, v, d, reason)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		// Whoever won the claim owns the action — a concurrent pass, or a
+		// second eligible verdict for the same message inside this one. One
+		// row per message, forever (criterion 11).
+		stats.Lost++
+		return nil
+	}
+	stats.Considered++
+
+	switch d.Action {
+	case "attached":
+		if err := appendVerdictLog(ctx, ex, v, d.TaskID); err != nil {
+			return err
+		}
+		if err := recordTask(ctx, pool, promoID, d.TaskID); err != nil {
+			return err
+		}
+		// SWT-36 D10: the log line first, then the guarded reopen — a
+		// crash between the two leaves exactly today's behaviour. The task
+		// id is recorded BEFORE the reopen for the ordering reason below:
+		// the claim is spent, so a failed reopen must not also lose the
+		// pointer to the task the message was attached to.
+		if d.ReopenDismissalID != 0 {
+			reopened, err := reopenDismissed(ctx, ex, v, d)
+			if err != nil {
+				return err
+			}
+			if reopened {
+				stats.Reopened++
+			}
+		}
+	default: // "task" | "review"
+		taskID, err := createVerdictTask(ctx, ex, v, d)
+		if err != nil {
+			return err
+		}
+		// Record the task on its promotion row BEFORE provenance —
+		// capture.EvaluateRules' ordering, for the same reason: the claim is
+		// spent, so a later failure must not also lose the pointer to the
+		// task that was created.
+		if err := recordTask(ctx, pool, promoID, taskID); err != nil {
+			return err
+		}
+		if err := setProvenance(ctx, ex, v, taskID); err != nil {
+			return err
+		}
+	}
+	count(stats, d)
+	return nil
 }
 
 func count(stats *Stats, d Decision) {
@@ -324,9 +375,9 @@ func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64, projec
 	}
 	var t ExistingTask
 	err = pool.QueryRow(ctx,
-		`SELECT id, status FROM tasks
+		`SELECT id, status, assignee_type FROM tasks
 		  WHERE source_thread_id = $1 AND project_id = $2 AND status NOT IN ('closed','delivered')
-		  ORDER BY id LIMIT 1`, *threadID, projectID).Scan(&t.ID, &t.Status)
+		  ORDER BY id LIMIT 1`, *threadID, projectID).Scan(&t.ID, &t.Status, &t.AssigneeType)
 	switch {
 	case err == nil:
 		return &t, nil, nil
@@ -338,11 +389,11 @@ func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64, projec
 
 	var dt ExistingTask
 	err = pool.QueryRow(ctx,
-		`SELECT t.id, t.status, d.id, d.reason_code
+		`SELECT t.id, t.status, d.id, d.reason_code, t.assignee_type
 		   FROM tasks t
 		   JOIN task_dismissals d ON d.task_id = t.id AND d.reopened_at IS NULL
 		  WHERE t.source_thread_id = $1 AND t.project_id = $2 AND t.status = 'closed'
-		  ORDER BY t.id LIMIT 1`, *threadID, projectID).Scan(&dt.ID, &dt.Status, &dt.DismissalID, &dt.DismissalCode)
+		  ORDER BY t.id LIMIT 1`, *threadID, projectID).Scan(&dt.ID, &dt.Status, &dt.DismissalID, &dt.DismissalCode, &dt.AssigneeType)
 	switch {
 	case err == nil:
 		return &dt, nil, nil
@@ -431,7 +482,7 @@ func createVerdictTask(ctx context.Context, ex *executor.Executor, v Verdict, d 
 	args, err := json.Marshal(map[string]any{
 		"project":       v.ProjectSlug,
 		"title":         taskTitle(v),
-		"body":          taskBody(v),
+		"body":          bodyFor(v),
 		"assignee_type": "human", // D6: personal has client NULL, so no worker queue can see it anyway
 		"priority":      0,
 		"status":        d.Status,
@@ -439,7 +490,7 @@ func createVerdictTask(ctx context.Context, ex *executor.Executor, v Verdict, d 
 	if err != nil {
 		return 0, fmt.Errorf("promote: marshal create_task args for message %d: %w", v.MessageID, err)
 	}
-	res, err := ex.Execute(ctx, executor.Call{Tool: "create_task", Actor: Actor, Args: args})
+	res, err := ex.Execute(ctx, executor.Call{Tool: "create_task", Actor: actorFor(v.Lane), Args: args})
 	if err != nil {
 		return 0, fmt.Errorf("promote: create task for message %d: %w", v.MessageID, err)
 	}
@@ -469,7 +520,7 @@ func appendVerdictLog(ctx context.Context, ex *executor.Executor, v Verdict, tas
 		return fmt.Errorf("promote: marshal task_append_log args for task %d: %w", taskID, err)
 	}
 	if _, err := ex.Execute(ctx, executor.Call{
-		Tool: "task_append_log", Actor: Actor, Args: args, TaskID: &taskID,
+		Tool: "task_append_log", Actor: actorFor(v.Lane), Args: args, TaskID: &taskID,
 	}); err != nil {
 		return fmt.Errorf("promote: append log to task %d (message %d): %w", taskID, v.MessageID, err)
 	}
@@ -492,7 +543,7 @@ func reopenDismissed(ctx context.Context, ex *executor.Executor, v Verdict, d De
 	if err != nil {
 		return false, fmt.Errorf("promote: marshal task_reopen args for task %d: %w", taskID, err)
 	}
-	res, err := ex.Execute(ctx, executor.Call{Tool: "task_reopen", Actor: Actor, Args: args, TaskID: &taskID})
+	res, err := ex.Execute(ctx, executor.Call{Tool: "task_reopen", Actor: actorFor(v.Lane), Args: args, TaskID: &taskID})
 	if err != nil {
 		return false, fmt.Errorf("promote: reopen dismissed task %d (dismissal %d, message %d): %w",
 			taskID, d.ReopenDismissalID, v.MessageID, err)
@@ -519,7 +570,7 @@ func setProvenance(ctx context.Context, ex *executor.Executor, v Verdict, taskID
 		return fmt.Errorf("promote: marshal task_set_source_thread args for task %d: %w", taskID, err)
 	}
 	if _, err := ex.Execute(ctx, executor.Call{
-		Tool: "task_set_source_thread", Actor: Actor, Args: args, TaskID: &taskID,
+		Tool: "task_set_source_thread", Actor: actorFor(v.Lane), Args: args, TaskID: &taskID,
 	}); err != nil {
 		return fmt.Errorf("promote: set source thread on task %d: %w", taskID, err)
 	}

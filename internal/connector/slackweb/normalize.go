@@ -130,3 +130,28 @@ func IsRootedThreadKey(threadKey string) bool {
 	}
 	return true
 }
+
+// IsDirectMessageKey reports whether a slack thread key names a 1:1 DIRECT
+// MESSAGE conversation, rooted or not (SWT-40 C-D4): the CONVERSATION segment
+// of slack:{ws}:{conv}[:{root}] starts with an upper-case `D`, the leaf's own DM
+// fallback and the shape production stores (slack:T0360B84U:D01EJRX6P45). It is
+// the one reading of that fact, beside channelThreadKey (the builder) and
+// IsRootedThreadKey (the other reader).
+//
+// Group DMs (mpim, legacy `G…` ids) are excluded: C-D3 addresses a 1:1 DM to
+// Salvador because he is the only person it can be addressed to, and a group
+// DM is a small channel. Segment COUNT and position decide, as they do for
+// IsRootedThreadKey, and the comparison is case-sensitive: the stored key
+// keeps Slack's exported case.
+func IsDirectMessageKey(threadKey string) bool {
+	parts := strings.Split(threadKey, ":")
+	if (len(parts) != 3 && len(parts) != 4) || parts[0] != "slack" {
+		return false
+	}
+	for _, p := range parts[1:] {
+		if p == "" {
+			return false
+		}
+	}
+	return strings.HasPrefix(parts[2], "D")
+}
