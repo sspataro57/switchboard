@@ -208,8 +208,11 @@ func TestParseCaptureRuleAdd_ActivityFlags(t *testing.T) {
 			why:    "same bypass; slack is a legal external_system for a NON-reviving rule",
 		},
 		{
+			// SWT-54 (criterion 2) refuses url_template on a github rule, so the
+			// j2 fixture's Jira url_template is dropped here; the case still pins
+			// that a NON-reviving github rule stays legal.
 			name:   "github without revive stays legal (today's shape)",
-			args:   with(j2, "external_system", "github"),
+			args:   with(j2, "external_system", "github", "url_template", nil),
 			wantOK: true,
 		},
 		{

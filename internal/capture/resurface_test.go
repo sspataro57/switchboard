@@ -58,9 +58,10 @@ import (
 // ---- criterion 3: resurfaces' truth table -------------------------------------
 
 // Every combination of {closed, ready, delivered, in_progress} x activity x
-// dismissed x connectorCopy x notifier x blankSender: 128 rows, true in exactly
-// one of them (closed and nothing else set), and never true for a non-closed
-// status.
+// dismissed x connectorCopy x notifier x blankSender x prNotice: 256 rows, true
+// in exactly one of them (closed and nothing else set), and never true for a
+// non-closed status. prNotice is the SWT-53/SWT-54 merge's cross-ticket
+// disqualifier (SWT-54 D4): a GitHub PR state notice never resurfaces.
 func TestResurfaces_TruthTable(t *testing.T) {
 	statuses := []string{"closed", "ready", "delivered", "in_progress"}
 	bools := []bool{false, true}
@@ -71,24 +72,27 @@ func TestResurfaces_TruthTable(t *testing.T) {
 				for _, conn := range bools {
 					for _, notifier := range bools {
 						for _, blank := range bools {
-							in := resurfaceInput{status: status, activity: activity, dismissed: dismissed,
-								connectorCopy: conn, notifier: notifier, blankSender: blank}
-							want := status == "closed" && !activity && !dismissed && !conn && !notifier && !blank
-							got, reason := resurfaces(in)
-							if got != want {
-								t.Errorf("resurfaces(%+v) = %v, want %v. CC3: true iff the linked task is CLOSED, "+
-									"the winner is not an activity match (SWT-45), the task has no open dismissal "+
-									"(SWT-36), the message is not the Jira connector's own copy (J3), the sender "+
-									"is not on the project's notifier list (CC4), and the sender is not blank "+
-									"(CC4b, fail closed)", in, got, want)
-							}
-							if got {
-								trues++
-							}
-							if !got && strings.TrimSpace(reason) == "" {
-								t.Errorf("resurfaces(%+v) = false with an EMPTY reason. Criterion 3: each false row "+
-									"returns a reason fragment, because the decision row is the only place a "+
-									"'why did this chat not resurface' question can be answered", in)
+							for _, notice := range bools {
+								in := resurfaceInput{status: status, activity: activity, dismissed: dismissed,
+									connectorCopy: conn, notifier: notifier, blankSender: blank, prNotice: notice}
+								want := status == "closed" && !activity && !dismissed && !conn && !notifier && !blank && !notice
+								got, reason := resurfaces(in)
+								if got != want {
+									t.Errorf("resurfaces(%+v) = %v, want %v. CC3: true iff the linked task is CLOSED, "+
+										"the winner is not an activity match (SWT-45), the task has no open dismissal "+
+										"(SWT-36), the message is not the Jira connector's own copy (J3), the sender "+
+										"is not on the project's notifier list (CC4), the sender is not blank "+
+										"(CC4b, fail closed), and the message is not a GitHub PR state notice "+
+										"(SWT-54 D4)", in, got, want)
+								}
+								if got {
+									trues++
+								}
+								if !got && strings.TrimSpace(reason) == "" {
+									t.Errorf("resurfaces(%+v) = false with an EMPTY reason. Criterion 3: each false row "+
+										"returns a reason fragment, because the decision row is the only place a "+
+										"'why did this chat not resurface' question can be answered", in)
+								}
 							}
 						}
 					}
@@ -98,8 +102,23 @@ func TestResurfaces_TruthTable(t *testing.T) {
 	}
 	// With four statuses and no other input, only (closed, all false) is true.
 	if trues != 1 {
-		t.Errorf("resurfaces was true in %d of 128 rows, want exactly 1 (closed, no activity, no dismissal, "+
-			"not the connector copy, not a notifier, not a blank sender)", trues)
+		t.Errorf("resurfaces was true in %d of 256 rows, want exactly 1 (closed, no activity, no dismissal, "+
+			"not the connector copy, not a notifier, not a blank sender, not a PR state notice)", trues)
+	}
+}
+
+// SWT-54 D4, the cross-ticket rule the SWT-53/SWT-54 merge adds: a GitHub PR
+// state notice (merged, closed or reopened) logged onto a CLOSED review task
+// never resurfaces it, even from a sender the notifier list does not name.
+// MUTATION: drop the `case in.prNotice` from resurfaces → red.
+func TestResurfaces_APRStateNoticeNeverResurfaces(t *testing.T) {
+	got, reason := resurfaces(resurfaceInput{status: "closed", prNotice: true})
+	if got {
+		t.Errorf("a PR state notice on a closed review task, no other disqualifier: resurfaces = true; SWT-54 D4 " +
+			"says a state notice is logged and nothing else changes")
+	}
+	if !strings.Contains(reason, "PR state notice") || !strings.Contains(reason, "SWT-54") {
+		t.Errorf("the PR-notice reason %q does not name the PR state notice and SWT-54", reason)
 	}
 }
 
@@ -142,6 +161,7 @@ func TestResurfaces_EachDisqualifierNamesItsOwnCause(t *testing.T) {
 		{"the Jira connector's own copy (J3)", resurfaceInput{status: "closed", connectorCopy: true}},
 		{"a notifier (CC4)", resurfaceInput{status: "closed", notifier: true}},
 		{"a blank sender (CC4b)", resurfaceInput{status: "closed", blankSender: true}},
+		{"a GitHub PR state notice (SWT-54 D4)", resurfaceInput{status: "closed", prNotice: true}},
 	}
 	seen := map[string]string{}
 	for _, tc := range cases {

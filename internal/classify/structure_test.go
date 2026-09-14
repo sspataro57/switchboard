@@ -1192,13 +1192,14 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// named by its SPEC's data-model section as 0033_task_working_state.sql.
 		// Its own guard is internal/tools TestMigration0033_TaskWorkingStateShape.
 		// 34 is chat-on-closed-task (SWT-53, 0034_chat_on_closed_task.sql).
+		// 35 is SWT-54's (0035_capture_rules_pr_review; SWT-53 owns 34).
 		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
 		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
 		// asserts only its own file; the numbers nobody owns are caught HERE,
 		// because the migrate runner keys on schema_migrations.version with NO
 		// checksum — a stray or edited file is skipped SILENTLY and the schema
 		// diverges with no error anywhere.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 {
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

@@ -22,11 +22,19 @@ type resurfaceInput struct {
 	connectorCopy bool   // pm.channel == jira.Channel (SWT-45 J3), computed by the caller
 	notifier      bool   // notifierSender(sender, the winner project's notifier list) (CC4)
 	blankSender   bool   // blankSender(sender): the message carries no sender identity (CC4b)
+	// prNotice: the message is GitHub's PR state notice (merged, closed or
+	// reopened) for a pr_review rule's PR, i.e. decideMessage's d.prNotice != ""
+	// (treetop-pr-review-tasks, SWT-54 D4). Cross-ticket rule: a state notice is
+	// logged and NOTHING else changes, so it never resurfaces the review task it
+	// closed (or any closed review task) through the inquiry lane, whatever the
+	// notifier list says. Computed by the caller, so this file stays pure.
+	prNotice bool
 }
 
 // resurfaces is true iff the task is closed AND the match is not activity AND
 // the task has no open dismissal AND the message is not the Jira connector's own
-// copy AND the sender is not a notifier AND the sender is not blank. The string
+// copy AND the message is not a GitHub PR state notice (SWT-54 D4) AND the sender
+// is not a notifier AND the sender is not blank. The string
 // is the reason fragment the decision row records; every false outcome names its
 // own cause, so a smoke read of capture_decisions.reason can tell them apart.
 //
@@ -45,6 +53,8 @@ func resurfaces(in resurfaceInput) (bool, string) {
 		return false, "not resurfaced: the task has an open dismissal, so SWT-36's guarded reopen owns it"
 	case in.connectorCopy:
 		return false, "not resurfaced: the Jira connector's own copy never resurfaces (SWT-45 J3)"
+	case in.prNotice:
+		return false, "not resurfaced: a GitHub PR state notice (merged, closed or reopened) is logged only and never resurfaces a review task (SWT-54 D4)"
 	case in.notifier:
 		return false, "not resurfaced: the sender is on the project's notifier list"
 	case in.blankSender:

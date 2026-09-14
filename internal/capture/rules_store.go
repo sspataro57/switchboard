@@ -28,6 +28,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sspataro57/switchboard/internal/connector/github"
 	"github.com/sspataro57/switchboard/internal/connector/jira"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/textmatch"
@@ -110,6 +111,11 @@ type RulesConfig struct {
 	Limit   int
 	Actor   string
 	All     bool
+	// everything is DryRunRules' reading of the corpus (SWT-54 D10): every
+	// inbound message in the window, gate- and route-resolved ones included,
+	// because the dry run writes nothing that could bury them. Never set by a
+	// pass that writes.
+	everything bool
 }
 
 // RulesStats is one run's counters. Considered == Matched + Unmatched;
@@ -132,6 +138,13 @@ type RulesConfig struct {
 // capture_decisions.resurface=true: a task_log onto a CLOSED task that the
 // inquiry lanes will read. A recorded fact, not an action, so it is counted in
 // both modes (the Deferred/Blind precedent).
+//
+// PRAuthorSkipped (SWT-54 D2) counts messages a pr_review rule would have
+// created a task for but whose PR is his own or its author excluded, so the
+// message was re-decided without that rule (fall-through). The decision is
+// mode-free, so it is counted in both modes. PRClosed (SWT-54 D5) counts review
+// tasks task_close closed on GitHub's merge or close notice; live only (also
+// counted in Appended, whose log rides first).
 type RulesStats struct {
 	Considered      int
 	Matched         int
@@ -144,6 +157,8 @@ type RulesStats struct {
 	Deferred        int
 	Blind           int
 	Resurfaced      int
+	PRAuthorSkipped int
+	PRClosed        int
 }
 
 // RulesMode reads CAPTURE_RULES_MODE. Anything that is not exactly "live" —
@@ -237,6 +252,13 @@ type storedRule struct {
 	// decides whether a match is activity that revives or surfaces.
 	revive    bool
 	addressed bool
+	// prReview and excludePRAuthors are capture_rules.pr_review /
+	// .exclude_pr_authors (SWT-54, migration 0035), read from the COLUMNS with
+	// the rules. A pr_review rule's create branch reads authorship from the
+	// stored raw headers and falls through on his own or an excluded author's
+	// PR; its task_log branch closes the task on a merge or close notice.
+	prReview         bool
+	excludePRAuthors []string
 	// notifiers is projects.notifier_senders (chat-on-closed-task CC4, 0034),
 	// read from the COLUMN with the rules. This is its one reader:
 	// notifierSender matches a sender against it by equality.
@@ -283,10 +305,43 @@ type ruleDecision struct {
 	// blind: the guard decided past OwnActionMaxWait without the freshness it
 	// wanted (the reason says BLIND). Carried for RulesStats.Blind only.
 	blind bool
+
+	// SWT-54, carried, never written as columns (the reason carries them):
+	//   - prRuleID / prKey / prNumber: a pr_review rule was the top-level winner
+	//     and derived this canonical PR key (also set after a fall-through, so
+	//     the dry run can roll the message up under its PR);
+	//   - prVerdict: the D1 verdict, computed on the create branch only;
+	//   - prSkipped: the verdict was own/excluded and the message fell through;
+	//   - prUntrusted: the mail is not a receiving-MX-authenticated GitHub
+	//     notification (D1 amendment 2026-09-14), so it fell through before
+	//     any pr_review action; not counted in PRAuthorSkipped;
+	//   - prNotice: the message is GitHub's merge/close notice for the PR;
+	//   - prClose: a task_log on a not-closed task that the live pass must
+	//     then close through task_close (D5).
+	prRuleID    int64
+	prKey       string
+	prNumber    int
+	prVerdict   *prAuthorVerdict
+	prSkipped   bool
+	prUntrusted bool
+	prNotice    string
+	prClose     bool
+
 	// resurface (chat-on-closed-task CC3): a task_log onto a CLOSED task that
 	// no other path owns, decided by the pure resurfaces(). WRITTEN to
 	// capture_decisions.resurface: the inquiry lanes read it from there.
 	resurface bool
+}
+
+// simulatedRefs is DryRunRules' stand-in for the external_refs rows its own
+// proposed `task` decisions would have written, keyed system+" "+key, so a
+// second mail on the same new PR reads as task_log, as the live pass would log
+// it. nil on every pass that writes.
+type simulatedRefs map[string]refTask
+
+func (s simulatedRefs) lookup(system, key string) (refTask, bool) {
+	rt, ok := s[system+" "+key]
+	return rt, ok
 }
 
 // Actions, spelled exactly as capture_decisions.action's CHECK (SPEC §4).
@@ -355,7 +410,7 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 
 	var stats RulesStats
 	for _, pm := range pending {
-		decision, winner, err := decideMessage(ctx, pool, cfg.Mode, pm, pure, byID)
+		decision, winner, err := decideMessage(ctx, pool, cfg.Mode, pm, pure, byID, nil)
 		if err != nil {
 			return stats, err
 		}
@@ -386,6 +441,9 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 		}
 		if decision.resurface {
 			stats.Resurfaced++
+		}
+		if decision.prSkipped {
+			stats.PRAuthorSkipped++
 		}
 		if decision.action == actionUnmatched {
 			stats.Unmatched++
@@ -446,7 +504,20 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 			// between the two leaves exactly today's behaviour (logged, still
 			// closed). The revive handles an open dismissal itself, so it takes
 			// precedence over SWT-36's guarded reopen.
-			if decision.revive {
+			//
+			// SWT-54 D5: a merge/close notice on a NOT-closed review task closes
+			// it, log first, then task_close. Exclusive with the two reopens,
+			// which only ever act on a closed task.
+			if decision.prClose {
+				closed, err := closeRuleTask(ctx, pool, ex, cfg.Actor, pm, decisionID, *decision.taskID,
+					decision.prNumber, decision.prNotice)
+				if err != nil {
+					return stats, err
+				}
+				if closed {
+					stats.PRClosed++
+				}
+			} else if decision.revive {
 				revived, err := reviveRuleTask(ctx, ex, cfg.Actor, pm, *decision.taskID,
 					*decision.extSystem, *decision.extKey)
 				if err != nil {
@@ -512,7 +583,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		`SELECT r.id, p.slug, p.name, r.criteria_type, r.pattern, r.key_regex, r.priority, r.enabled,
 		        r.project_id, COALESCE(r.subproject,''), COALESCE(r.external_system,''),
 		        COALESCE(r.url_template,''), p.ticket_assignee_gate, r.revive, r.addressed,
-		        p.notifier_senders
+		        r.pr_review, r.exclude_pr_authors, p.notifier_senders
 		   FROM capture_rules r
 		   JOIN projects p ON p.id = r.project_id
 		  WHERE r.enabled
@@ -528,7 +599,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		if err := rows.Scan(&s.rule.ID, &s.rule.Project, &s.projectName, &s.rule.Kind, &s.rule.Pattern,
 			&s.rule.ExternalKeyRegex, &s.rule.Priority, &s.rule.Enabled,
 			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate, &s.gateOn,
-			&s.revive, &s.addressed, &s.notifiers); err != nil {
+			&s.revive, &s.addressed, &s.prReview, &s.excludePRAuthors, &s.notifiers); err != nil {
 			return nil, fmt.Errorf("scan capture rule: %w", err)
 		}
 		// Rule.Source is the evaluator's carrier for `external_system` (Evaluate
@@ -577,10 +648,13 @@ func pendingMessages(ctx context.Context, pool *pgxpool.Pool, cfg RulesConfig) (
 	        LEFT JOIN source_accounts sa ON sa.id = ri.source_account_id
 	        LEFT JOIN normalized_threads nt ON nt.id = m.thread_id
 	       WHERE m.direction = 'inbound'
-	         AND ($1::timestamptz IS NULL OR COALESCE(m.sent_at, m.created_at) >= $1)
+	         AND ($1::timestamptz IS NULL OR COALESCE(m.sent_at, m.created_at) >= $1)`
+	if !cfg.everything {
+		q += `
 	         AND NOT EXISTS (
 	           SELECT 1 FROM capture_decisions g
 	            WHERE g.message_id = m.id AND g.mode IN ('gate', 'route'))`
+	}
 	// SWT-40 D-D2 / B6, the shadow-overwrite guard: a message the gate resolved
 	// or the routing tier routed is excluded in EVERY mode, --all included.
 	// Every latest-decision reader follows ORDER BY id DESC, so a newer shadow
@@ -679,8 +753,11 @@ func parseThreadParticipants(raw []byte) []int64 {
 // It returns the decision and the winning rule (zero storedRule when unmatched).
 // mode only words the reason: a live pass "requests" a revive, a shadow pass
 // says it "would" (SWT-45 criterion 25); the decision itself is mode-free.
+//
+// sim is DryRunRules' simulated refs (nil on every pass that writes): a ref
+// the database does not hold but the dry run "created" earlier in its window.
 func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendingMessage,
-	rules []Rule, byID map[int64]storedRule) (ruleDecision, storedRule, error) {
+	rules []Rule, byID map[int64]storedRule, sim simulatedRefs) (ruleDecision, storedRule, error) {
 	outcome := evaluateAll(pm.msg, rules)
 	d := ruleDecision{action: actionUnmatched, matchedRuleIDs: outcome.matchedIDs, ambiguous: outcome.ambiguous}
 	if !outcome.matched {
@@ -718,7 +795,48 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 	}
 
 	system, key := winner.extSystem, outcome.externalKey
+
+	// SWT-54 D2 point 3: ONE spelling of a GitHub PR key. key_regex returns one
+	// capture group, so a thread-root rule captures the PATH form
+	// `{owner}/{repo}/pull/{N}`; every github-derived key is canonicalized to
+	// the connector's `{owner}/{repo}#{N}`, and one that does not parse (an
+	// issue, a commit) is attribution only, never a ref.
+	var prRef github.PRRef
+	if system == "github" {
+		ref, ok := github.ParsePRRef(key)
+		if !ok {
+			d.reason = fmt.Sprintf("rule %d (%s) attributes to %s; github key %q is not a pull request, so "+
+				"attribution only", winner.rule.ID, winner.rule.Kind, winner.rule.Project, key)
+			return d, winner, nil
+		}
+		prRef, key = ref, github.PRKey(ref)
+	}
 	d.extSystem, d.extKey = &system, &key
+	if winner.prReview && system == "github" {
+		// SWT-54 D1 amendment (2026-09-14): the origin check comes before ANY
+		// pr_review action — create, log, close. A mail anyone could have sent
+		// (GitHub-shaped Message-ID, made-up X-GitHub-* headers) falls through
+		// to the next rule exactly like his own PR's mail, so it keeps today's
+		// decision.
+		trusted, why, err := prMailTrusted(ctx, pool, pm, prRef)
+		if err != nil {
+			return d, winner, err
+		}
+		if !trusted {
+			d.prRuleID, d.prKey, d.prNumber = winner.rule.ID, key, prRef.PR
+			fell, fellWinner, err := prFallThrough(ctx, pool, mode, pm, rules, byID, sim, outcome, d, winner,
+				fmt.Sprintf("rule %d skipped: untrusted GitHub mail for PR %s (%s); ", winner.rule.ID, key, why))
+			if err != nil {
+				return fell, fellWinner, err
+			}
+			fell.prUntrusted = true
+			return fell, fellWinner, nil
+		}
+		d.prRuleID, d.prKey, d.prNumber = winner.rule.ID, key, prRef.PR
+		if state, ok := github.PRStateNotice(pm.msg.BodyText, prRef.PR); ok {
+			d.prNotice = state
+		}
+	}
 
 	// SWT-45 J1: is this match activity that revives a closed task or surfaces
 	// a new one? The flags and the gate are all COLUMNS, loaded with the rules.
@@ -753,9 +871,19 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 		return d, winner, nil
 	}
 
-	existing, found, err := taskForExternalRef(ctx, pool, system, key)
-	if err != nil {
-		return d, winner, err
+	// The dry run's simulated refs win over the database: a ref it "created",
+	// or a task it "closed", earlier in its window.
+	var existing refTask
+	var found bool
+	if sim != nil {
+		existing, found = sim.lookup(system, key)
+	}
+	if !found {
+		var err error
+		existing, found, err = taskForExternalRef(ctx, pool, system, key)
+		if err != nil {
+			return d, winner, err
+		}
 	}
 	if found {
 		taskID := existing.taskID
@@ -763,6 +891,32 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 		d.taskID = &taskID
 		d.reason = fmt.Sprintf("rule %d (%s): %s %s already linked to task %d; append a log",
 			winner.rule.ID, winner.rule.Kind, system, key, taskID)
+		if d.prNotice != "" {
+			// SWT-54 D5 (OQ-2 = a): GitHub's merge/close notice closes the
+			// review task, log first. A closed task (Done or dismissed) is not
+			// closed again, and a PR state notice NEVER reopens a review task
+			// (owner decision 2026-09-14): SWT-36's dismissal reopen below is
+			// suppressed for it, so the notice is logged and nothing else changes.
+			// A "Reopened #N." notice is a state notice too: logged only.
+			d.reason += fmt.Sprintf("; PR #%d %s on GitHub", prRef.PR, d.prNotice)
+			switch {
+			case !github.PRStateEndsPR(d.prNotice):
+				d.reason += "; logged only (a reopened notice never closes a task)"
+			case existing.status == "closed":
+				d.reason += fmt.Sprintf("; task %d is already closed", taskID)
+			default:
+				d.prClose = true
+				if mode != RulesModeLive {
+					d.reason += "; would close"
+				} else {
+					d.reason += "; close requested"
+				}
+			}
+			if existing.dismissalID != 0 {
+				d.reason += fmt.Sprintf("; a PR state notice never reopens a review task (dismissal %d stays open)",
+					existing.dismissalID)
+			}
+		}
 		switch {
 		case activity && existing.status == "closed":
 			// SWT-45 J9: activity on a CLOSED task revives it; the handler
@@ -786,7 +940,7 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 				d.blind = verdict == ownActionBlind
 				d.reason += fmt.Sprintf("; task %d is closed and rule %d is activity; %s", taskID, winner.rule.ID, requested) + note
 			}
-		case existing.dismissalID != 0:
+		case existing.dismissalID != 0 && d.prNotice == "":
 			d.dismissalID = existing.dismissalID
 			d.reason += fmt.Sprintf("; task %d was dismissed (%s); reopen requested against dismissal %d",
 				taskID, existing.dismissalCode, existing.dismissalID)
@@ -803,12 +957,16 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 			connectorCopy: pm.channel == jira.Channel,
 			notifier:      notifierSender(pm.msg.Sender, winner.notifiers),
 			blankSender:   blankSender(pm.msg.Sender),
+			prNotice:      d.prNotice != "",
 		})
 		d.resurface = resurface
 		if existing.status == "closed" {
 			d.reason += "; " + why
 		}
 		return d, winner, nil
+	}
+	if d.prKey != "" {
+		return decidePRReviewCreate(ctx, pool, mode, pm, rules, byID, sim, outcome, d, winner, prRef)
 	}
 	d.action = actionTask
 	d.reason = fmt.Sprintf("rule %d (%s): first message for %s %s on %s; create one task",
@@ -834,6 +992,88 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 		}
 	}
 	return d, winner, nil
+}
+
+// decidePRReviewCreate is a pr_review rule's CREATE branch (SWT-54 D1, D2, D5):
+// no ref exists for the PR yet.
+//
+//   - own / excluded: the message is re-decided WITHOUT that rule (the next rule
+//     in the matched list, else unmatched), so his own PR's mail gets exactly
+//     today's decision. The fallen-to decision keeps matched_rule_ids and
+//     ambiguity from the FULL evaluation, and its reason is prefixed
+//     "rule R skipped: PR {key} authored by him ({evidence}); ".
+//   - a merge/close notice as the first mail seen: attributed, no task (a
+//     review of merged work is not work).
+//   - other / undetermined: one review task (undetermined is fail-open).
+func decidePRReviewCreate(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendingMessage,
+	rules []Rule, byID map[int64]storedRule, sim simulatedRefs, outcome rulesEvaluation,
+	d ruleDecision, winner storedRule, ref github.PRRef) (ruleDecision, storedRule, error) {
+	facts, err := prReviewFacts(ctx, pool, pm, ref)
+	if err != nil {
+		return d, winner, err
+	}
+	v := decidePRAuthor(facts, winner.excludePRAuthors)
+	d.prVerdict = &v
+
+	switch v.verdict {
+	case prAuthorOwn, prAuthorExcluded:
+		prefix := fmt.Sprintf("rule %d skipped: PR %s authored by him (%s: %s); ", winner.rule.ID, d.prKey, v.verdict, v.evidence)
+		if v.verdict == prAuthorExcluded {
+			prefix = fmt.Sprintf("rule %d skipped: PR %s excluded author (%s): %s; ", winner.rule.ID, d.prKey, v.entry, v.evidence)
+		}
+		fell, fellWinner, err := prFallThrough(ctx, pool, mode, pm, rules, byID, sim, outcome, d, winner, prefix)
+		if err != nil {
+			return fell, fellWinner, err
+		}
+		fell.prSkipped = true
+		fell.prVerdict = d.prVerdict
+		if fell.prNotice == "" {
+			fell.prNotice = d.prNotice
+		}
+		return fell, fellWinner, nil
+	}
+
+	var author string
+	switch {
+	case v.verdict == prAuthorUndetermined:
+		author = fmt.Sprintf("author undetermined (%s); created fail-open", v.evidence)
+	case v.author == "":
+		author = fmt.Sprintf("author not named (%s)", v.evidence)
+	default:
+		author = fmt.Sprintf("author %s (%s)", v.author, v.evidence)
+	}
+	// Only a merged/closed notice makes the first mail seen a no-task: a
+	// reopened PR is open again, so its review is work (created like any mail).
+	if github.PRStateEndsPR(d.prNotice) {
+		d.action = actionAttributed
+		d.reason = fmt.Sprintf("rule %d (%s): %s %s on %s: PR #%d %s on GitHub before any review task existed; "+
+			"PR already merged/closed; no review task; %s", winner.rule.ID, winner.rule.Kind, *d.extSystem, d.prKey,
+			winner.rule.Project, ref.PR, d.prNotice, author)
+		return d, winner, nil
+	}
+	d.action = actionTask
+	d.reason = fmt.Sprintf("rule %d (%s): first message for %s %s on %s; create one review task; %s",
+		winner.rule.ID, winner.rule.Kind, *d.extSystem, d.prKey, winner.rule.Project, author)
+	return d, winner, nil
+}
+
+// prFallThrough re-decides pm WITHOUT the pr_review rule that won (SWT-54 D2's
+// fall-through, shared by the own/excluded verdict and the untrusted-mail
+// origin check). The fallen-to decision keeps matched_rule_ids and ambiguity
+// from the FULL evaluation, its reason is prefix + the fallen-to reason, and it
+// carries the PR rule's id, key and number (so the dry run can roll it up).
+func prFallThrough(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendingMessage,
+	rules []Rule, byID map[int64]storedRule, sim simulatedRefs, outcome rulesEvaluation,
+	d ruleDecision, winner storedRule, prefix string) (ruleDecision, storedRule, error) {
+	fell, fellWinner, err := decideMessage(ctx, pool, mode, pm, withoutRule(rules, winner.rule.ID), byID, sim)
+	if err != nil {
+		return fell, fellWinner, err
+	}
+	fell.matchedRuleIDs = outcome.matchedIDs
+	fell.ambiguous = outcome.ambiguous
+	fell.reason = prefix + fell.reason
+	fell.prRuleID, fell.prKey, fell.prNumber = d.prRuleID, d.prKey, d.prNumber
+	return fell, fellWinner, nil
 }
 
 // ownActionGuard runs the own-action guard (SWT-45 J17, ownaction.go) for an
@@ -1154,14 +1394,7 @@ func recordDecisionTask(ctx context.Context, pool *pgxpool.Pool, decisionID, tas
 // human-resolved project wants.
 func createRuleTask(ctx context.Context, ex *executor.Executor, actor string,
 	pm pendingMessage, winner storedRule, system, key string) (int64, error) {
-	args, err := json.Marshal(map[string]any{
-		"project":       winner.rule.Project,
-		"subproject":    winner.subproject,
-		"title":         ruleTaskTitle(key, pm.msg, winner),
-		"body":          ruleTaskBody(pm, winner, system, key),
-		"assignee_type": "human",
-		"priority":      0,
-	})
+	args, err := json.Marshal(ruleCreateTaskArgs(pm, winner, system, key))
 	if err != nil {
 		return 0, fmt.Errorf("marshal create_task args for message %d: %w", pm.msg.ID, err)
 	}
@@ -1181,6 +1414,42 @@ func createRuleTask(ctx context.Context, ex *executor.Executor, actor string,
 	return out.TaskID, nil
 }
 
+// ruleCreateTaskArgs is create_task's argument object for a rule-created task,
+// shared by createRuleTask and DryRunRules' D9 backfill payloads so the pasted
+// call is byte-for-byte what a live pass would have made.
+//
+// A pr_review rule's title is prReviewTitle (SWT-54 D2 point 4); every other
+// rule's is ruleTaskTitle, byte-identical to before.
+func ruleCreateTaskArgs(pm pendingMessage, winner storedRule, system, key string) map[string]any {
+	title := ruleTaskTitle(key, pm.msg, winner)
+	if winner.prReview && system == "github" {
+		if ref, ok := github.ParsePRRef(key); ok {
+			title = prReviewTitle(ref, pm.msg.Subject, pm.msg.BodyText)
+		}
+	}
+	return map[string]any{
+		"project":       winner.rule.Project,
+		"subproject":    winner.subproject,
+		"title":         title,
+		"body":          ruleTaskBody(pm, winner, system, key),
+		"assignee_type": "human",
+		"priority":      0,
+	}
+}
+
+// ruleExternalURL is the ref's URL. A github key's is github.PRURL (SWT-54:
+// url_template is refused for github, because {key} in the canonical key
+// contains '#'); every other system substitutes the rule's url_template.
+func ruleExternalURL(winner storedRule, system, key string) string {
+	if system == "github" {
+		if ref, ok := github.ParsePRRef(key); ok {
+			return github.PRURL(ref)
+		}
+		return ""
+	}
+	return externalURL(winner.urlTemplate, key)
+}
+
 // linkRuleRef writes the external_refs row that IS the dedup key.
 //
 // It fails loudly rather than continuing: without the ref, the next notification
@@ -1195,7 +1464,7 @@ func linkRuleRef(ctx context.Context, ex *executor.Executor, actor string,
 		"task_id":      taskID,
 		"system":       system,
 		"external_key": key,
-		"external_url": externalURL(winner.urlTemplate, key),
+		"external_url": ruleExternalURL(winner, system, key),
 	})
 	if err != nil {
 		return fmt.Errorf("marshal link_external_ref args for task %d: %w", taskID, err)
@@ -1325,6 +1594,47 @@ func reviveRuleTask(ctx context.Context, ex *executor.Executor, actor string,
 		return false, fmt.Errorf("parse task_reopen (revive) result for task %d: %w", taskID, err)
 	}
 	return out.Reopened, nil
+}
+
+// closeActiveWorkRefusal is internal/tools/close.go's ONE refusal phrase for
+// active work (activeWorkRefusal there, pinned by ticketstatus's statusset
+// test). A review task someone is working on is not closed out from under them
+// by a merge notice: that refusal is a non-fatal skip, the ticketstatus
+// precedent. Any other error fails the pass.
+const closeActiveWorkRefusal = "refusing to close active work"
+
+// closeRuleTask is SWT-54 D5's close: task_close through the executor as the
+// configured capture:{connector} actor, AFTER the notice was logged, with the
+// reason "PR #N merged on GitHub (message M)" (or closed). It writes no
+// dismissal label, so it counts as Done. An active-work refusal is skipped: the
+// pass logs it and appends it to the decision's reason (capture_decisions is
+// this package's own log); the task keeps its status. A crash between the log
+// and the close leaves today's behaviour (logged, still open).
+func closeRuleTask(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, actor string,
+	pm pendingMessage, decisionID, taskID int64, prNumber int, state string) (bool, error) {
+	args, err := json.Marshal(map[string]any{
+		"task_id": taskID,
+		"reason":  fmt.Sprintf("PR #%d %s on GitHub (message %d)", prNumber, state, pm.msg.ID),
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal task_close args for task %d: %w", taskID, err)
+	}
+	if _, err := ex.Execute(ctx, executor.Call{
+		Tool: "task_close", Actor: actor, Args: args, TaskID: &taskID,
+	}); err != nil {
+		if strings.Contains(err.Error(), closeActiveWorkRefusal) {
+			log.Printf("capture rules: message %d: PR #%d %s on GitHub, but task %d is active work; close skipped: %v",
+				pm.msg.ID, prNumber, state, taskID, err)
+			note := fmt.Sprintf("; task_close skipped: task %d is active work (%s)", taskID, closeActiveWorkRefusal)
+			if _, uerr := pool.Exec(ctx,
+				`UPDATE capture_decisions SET reason = COALESCE(reason,'') || $1 WHERE id = $2`, note, decisionID); uerr != nil {
+				return false, fmt.Errorf("record close refusal on capture decision %d: %w", decisionID, uerr)
+			}
+			return false, nil
+		}
+		return false, fmt.Errorf("close review task %d on PR #%d %s (message %d): %w", taskID, prNumber, state, pm.msg.ID, err)
+	}
+	return true, nil
 }
 
 // markRuleSurfaced is task_mark_surfaced (SWT-45 J7) through the executor, for

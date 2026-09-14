@@ -78,7 +78,25 @@ func TestSenderAddress_LivesBesideSenderDomainAndIsItsParser(t *testing.T) {
 		t.Errorf("senderDomain does not call senderAddress. CC4: senderDomain is refactored ONTO it, so the two "+
 			"cannot parse the same From two ways.\nbody:\n%s", body)
 	}
-	// And net/mail is imported nowhere else in the package.
+	// And no other file in the package PARSES a From with net/mail.
+	//
+	// AMENDED at the SWT-53/SWT-54 merge, not deleted: this first banned the
+	// net/mail IMPORT outright. SWT-54 (treetop-pr-review-tasks) legitimately
+	// imports it in prreview.go / prreview_store.go for the mail.Header TYPE (the
+	// stored RFC822 header map its origin check reads), which parses no From.
+	// K6's rule is "one Go-side From parser", so the scan now bans the From
+	// parsers themselves (mail.ParseAddress, mail.ParseAddressList,
+	// mail.AddressParser) in any net/mail importer other than senderdomain.go.
+	fromParsers := []string{"mail.ParseAddress", "mail.AddressParser"} // ParseAddress also prefixes ParseAddressList
+	// CONTROL: the token list names what senderdomain.go really calls, so the
+	// scan below cannot pass vacuously on a misspelled token.
+	hit := false
+	for _, tok := range fromParsers {
+		hit = hit || strings.Contains(src, tok)
+	}
+	if !hit {
+		t.Fatalf("CONTROL: senderdomain.go calls none of %v; the From-parser scan below would pass vacuously", fromParsers)
+	}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("read internal/capture: %v", err)
@@ -93,8 +111,15 @@ func TestSenderAddress_LivesBesideSenderDomainAndIsItsParser(t *testing.T) {
 			t.Fatalf("parse %s: %v", n, err)
 		}
 		for _, spec := range f.Imports {
-			if p, _ := strconv.Unquote(spec.Path.Value); p == "net/mail" {
-				t.Errorf("internal/capture/%s imports net/mail. K6: senderdomain.go is the one Go-side From parser", n)
+			if p, _ := strconv.Unquote(spec.Path.Value); p != "net/mail" {
+				continue
+			}
+			fileSrc := mustReadRepoFile(t, "internal/capture/"+n)
+			for _, tok := range fromParsers {
+				if strings.Contains(fileSrc, tok) {
+					t.Errorf("internal/capture/%s calls %s. K6: senderdomain.go is the one Go-side From parser "+
+						"(senderAddress / senderDomain); call those instead", n, tok)
+				}
 			}
 		}
 	}

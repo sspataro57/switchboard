@@ -97,7 +97,7 @@ func main() {
 		// executor path below like create-task. list/run/report are their own
 		// paths: two are reads and `run` needs a deadline the 30s one cannot give.
 		if len(os.Args) < 3 {
-			err = fmt.Errorf("usage: opsctl capture-rules <list|add|run|report|gate> [flags]")
+			err = fmt.Errorf("usage: opsctl capture-rules <list|add|try|run|report|gate> [flags]")
 			break
 		}
 		if os.Args[2] == "add" {
@@ -393,16 +393,34 @@ func runCaptureRules(sub string, argv []string) error {
 	case "gate":
 		// SWT-40 Part D: one capture-time gate pass by hand (gate.go).
 		return runCaptureRulesGate(argv)
+	case "try":
+		// SWT-54 D10: the write-nothing dry run of a candidate rule.
+		return runCaptureRulesTry(argv)
 	default:
-		return fmt.Errorf("unknown capture-rules command %q (want list|add|run|report|gate)", sub)
+		return fmt.Errorf("unknown capture-rules command %q (want list|add|try|run|report|gate)", sub)
 	}
+}
+
+// stringList is a repeatable string flag (--exclude-pr-author a --exclude-pr-author b),
+// order kept.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
 }
 
 // parseCaptureRuleAdd builds the capture_rule_add call. It validates only
 // presence: `pattern` and `key_regex` are compiled by the TOOL (criterion 5), and
 // a second regexp.Compile here would be a second spelling of the same rule that
 // could disagree with the one that actually gates the insert.
-func parseCaptureRuleAdd(argv []string) (string, json.RawMessage, error) {
+//
+// extra lets `capture-rules try` (SWT-54 D10) declare its own flags on the SAME
+// flag set: try takes add's flags, so the rule it proves is the rule `add` would
+// store, parsed by this one function.
+func parseCaptureRuleAdd(argv []string, extra ...func(*flag.FlagSet)) (string, json.RawMessage, error) {
 	fs := flag.NewFlagSet("capture-rules add", flag.ContinueOnError)
 	project := fs.String("project", "", "project slug (required)")
 	criteria := fs.String("type", "", "criteria_type: body_regex|sender|thread_key_prefix|thread_key_contains|source_slack_workspace|person (required)")
@@ -410,13 +428,21 @@ func parseCaptureRuleAdd(argv []string) (string, json.RawMessage, error) {
 	subproject := fs.String("subproject", "", "subproject for tasks this rule creates")
 	externalSystem := fs.String("external-system", "", "jira|github|upwork_crm|slack|gmail; empty means attribution only, no task")
 	keyRegex := fs.String("key-regex", "", "external key extractor; empty reuses --pattern for body_regex, else the thread_key")
-	urlTemplate := fs.String("url-template", "", "external_url builder; must contain {key}")
+	urlTemplate := fs.String("url-template", "", "external_url builder; must contain {key} (refused for github)")
 	priority := fs.Int("priority", 0, "evaluation priority; evaluation order is priority DESC, id ASC and first match wins")
 	note := fs.String("note", "", "why this rule exists")
 	revive := fs.Bool("revive", false, "SWT-45: matches are Jira activity; revive the ticket's closed task or create one, "+
 		"and surface it past the reconciler (needs --external-system jira and --key-regex)")
 	addressed := fs.Bool("addressed", false, "SWT-45: matches are addressed to him and override a gated project's "+
 		"assignee check (implies activity; pass --revive too)")
+	prReview := fs.Bool("pr-review", false, "SWT-54: matches are GitHub PR notification mail; one review task per PR "+
+		"he did not author, closed on a merge/close notice (needs --external-system github and --key-regex)")
+	var excludePRAuthors stringList
+	fs.Var(&excludePRAuthors, "exclude-pr-author", "SWT-54, repeatable: a PR author login treated like his own "+
+		"(exact, case-insensitive) or '*'+suffix, e.g. '*[bot]'; needs --pr-review")
+	for _, declare := range extra {
+		declare(fs)
+	}
 	if err := fs.Parse(argv); err != nil {
 		return "", nil, err
 	}
@@ -448,18 +474,96 @@ func parseCaptureRuleAdd(argv []string) (string, json.RawMessage, error) {
 		}
 	}
 	// Sent only when set; the TOOL enforces J1/J18's rules (revive needs a key
-	// regex and external_system jira; addressed needs revive).
+	// regex and external_system jira; addressed needs revive) and SWT-54's
+	// (pr_review needs github and a key regex; the exclude list needs pr_review).
 	if *revive {
 		payload["revive"] = true
 	}
 	if *addressed {
 		payload["addressed"] = true
 	}
+	if *prReview {
+		payload["pr_review"] = true
+	}
+	if len(excludePRAuthors) > 0 {
+		payload["exclude_pr_authors"] = []string(excludePRAuthors)
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "", nil, fmt.Errorf("marshal args: %w", err)
 	}
 	return "capture_rule_add", raw, nil
+}
+
+// runCaptureRulesTry is `opsctl capture-rules try` (SWT-54 D10): add's flags
+// plus --since and --show. The candidate is validated by capture_rule_add's own
+// validator (the rule proven is one `add` would accept), then decided in memory
+// over the stored corpus by capture.DryRunRules. No executor call, no write, no
+// lock: a read, like `list` and `report`.
+func runCaptureRulesTry(argv []string) error {
+	var since *time.Duration
+	var show *string
+	_, raw, err := parseCaptureRuleAdd(argv, func(fs *flag.FlagSet) {
+		since = fs.Duration("since", 720*time.Hour, "decide inbound messages sent in the last N (Go duration); 0 means all of them")
+		show = fs.String("show", "wins", "all: print every message in the window; wins: only messages the candidate matches")
+	})
+	if err != nil {
+		return err
+	}
+	// Finding B (SWT-54 review): add's flag set carries --revive/--addressed, but
+	// CandidateRule has no activity fields, so try would silently prove a
+	// DIFFERENT rule than the one add would store. Refuse them by name.
+	var activity struct {
+		Revive    bool `json:"revive"`
+		Addressed bool `json:"addressed"`
+	}
+	if err := json.Unmarshal(raw, &activity); err != nil {
+		return fmt.Errorf("read candidate args: %w", err)
+	}
+	if activity.Revive || activity.Addressed {
+		return fmt.Errorf("capture-rules try: --revive/--addressed refused: try does not simulate activity rules " +
+			"(SWT-45); it would decide the candidate as a plain rule, which is not the rule add would store")
+	}
+	if err := tools.ValidateCaptureRuleAdd(raw); err != nil {
+		return fmt.Errorf("capture_rule_add would refuse this rule: %w", err)
+	}
+	// The candidate is read back from the very args `add` would send.
+	var a struct {
+		Project          string   `json:"project"`
+		CriteriaType     string   `json:"criteria_type"`
+		Pattern          string   `json:"pattern"`
+		Subproject       string   `json:"subproject"`
+		ExternalSystem   string   `json:"external_system"`
+		KeyRegex         string   `json:"key_regex"`
+		URLTemplate      string   `json:"url_template"`
+		Priority         int      `json:"priority"`
+		PRReview         bool     `json:"pr_review"`
+		ExcludePRAuthors []string `json:"exclude_pr_authors"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return fmt.Errorf("read candidate args: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), captureRulesRunTimeout)
+	defer cancel()
+	pool, err := store.NewPool(ctx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer pool.Close()
+
+	_, err = capture.DryRunRules(ctx, pool, capture.DryRunConfig{
+		Candidate: capture.CandidateRule{
+			Project: a.Project, CriteriaType: a.CriteriaType, Pattern: a.Pattern, Subproject: a.Subproject,
+			ExternalSystem: a.ExternalSystem, KeyRegex: a.KeyRegex, URLTemplate: a.URLTemplate,
+			Priority: a.Priority, PRReview: a.PRReview, ExcludePRAuthors: a.ExcludePRAuthors,
+		},
+		Since: *since, Show: *show, Out: os.Stdout,
+	})
+	if err != nil {
+		return fmt.Errorf("capture-rules try: %w", err)
+	}
+	return nil
 }
 
 // runCaptureRulesList prints every rule in EVALUATION order (priority DESC, id
@@ -489,7 +593,8 @@ func runCaptureRulesList(argv []string) error {
 	rows, err := pool.Query(ctx,
 		`SELECT r.id, p.slug, COALESCE(r.subproject,''), r.criteria_type, r.pattern,
 		        COALESCE(r.external_system,''), COALESCE(r.key_regex,''), COALESCE(r.url_template,''),
-		        r.priority, r.enabled, COALESCE(r.note,''), r.revive, r.addressed
+		        r.priority, r.enabled, COALESCE(r.note,''), r.revive, r.addressed,
+		        r.pr_review, r.exclude_pr_authors
 		   FROM capture_rules r JOIN projects p ON p.id = r.project_id
 		  ORDER BY r.priority DESC, r.id`)
 	if err != nil {
@@ -502,9 +607,11 @@ func runCaptureRulesList(argv []string) error {
 		var id int64
 		var slug, subproject, criteria, pattern, extSystem, keyRegex, urlTemplate, note string
 		var priority int
-		var enabled, revive, addressed bool
+		var enabled, revive, addressed, prReview bool
+		var excludePRAuthors []string
 		if err := rows.Scan(&id, &slug, &subproject, &criteria, &pattern,
-			&extSystem, &keyRegex, &urlTemplate, &priority, &enabled, &note, &revive, &addressed); err != nil {
+			&extSystem, &keyRegex, &urlTemplate, &priority, &enabled, &note, &revive, &addressed,
+			&prReview, &excludePRAuthors); err != nil {
 			return fmt.Errorf("scan capture_rule: %w", err)
 		}
 		n++
@@ -537,6 +644,11 @@ func runCaptureRulesList(argv []string) error {
 			}
 			if addressed {
 				detail += " addressed"
+			}
+			// SWT-54: the PR-review flag and its exclude list, on the same line
+			// (migration 0035's CHECKs keep both off non-github rules).
+			if prReview {
+				detail += fmt.Sprintf(" pr_review exclude_pr_authors=[%s]", strings.Join(excludePRAuthors, ","))
 			}
 			fmt.Println(detail)
 		}
@@ -587,8 +699,10 @@ func runCaptureRulesRun(argv []string) error {
 	// Printed unconditionally, zeros included, and before the error check: a pass
 	// that matched nothing and a pass that never ran must not look the same.
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
-		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d}\n",
-		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated, stats.Deferred, stats.Blind, stats.Resurfaced)
+		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
+		"\"pr_author_skipped\":%d,\"pr_closed\":%d}\n",
+		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated, stats.Deferred, stats.Blind, stats.Resurfaced,
+		stats.PRAuthorSkipped, stats.PRClosed)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
 	}

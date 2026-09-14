@@ -145,7 +145,12 @@ func TestMigrationLedger_Learns0024(t *testing.T) {
 	// ownership list is the comment ABOVE the sentinel and the predicate is
 	// below it, and a window anchored only forwards would report "0024 is
 	// unowned" while its owner sat three lines up.
-	start := i - 3000
+	//
+	// WIDENED from 3000 to 4000 bytes at the SWT-53/SWT-54 merge: the two new
+	// one-line ownership notes (34: chat-on-closed-task, 35: treetop-pr-review-
+	// tasks) sit above the marker and pushed "SWT-33", 2958 bytes back, out of a
+	// 3000-byte window. The ledger itself still owns 24; only the reach changed.
+	start := i - 4000
 	if start < 0 {
 		start = 0
 	}

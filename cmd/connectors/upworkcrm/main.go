@@ -128,8 +128,10 @@ func run(full, normalizeOnly, all bool, overlap time.Duration) error {
 	// the same reason the reconcile line above is: "matched nothing" and "never
 	// ran" must be different lines in a CronJob log.
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
-		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d}\n",
-		rulesCfg.Mode, rules.Considered, rules.Matched, rules.Unmatched, rules.TasksCreated, rules.Appended, rules.Reopened, rules.Revived, rules.SurfacedCreated, rules.Deferred, rules.Blind, rules.Resurfaced)
+		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
+		"\"pr_author_skipped\":%d,\"pr_closed\":%d}\n",
+		rulesCfg.Mode, rules.Considered, rules.Matched, rules.Unmatched, rules.TasksCreated, rules.Appended, rules.Reopened, rules.Revived, rules.SurfacedCreated, rules.Deferred, rules.Blind, rules.Resurfaced,
+		rules.PRAuthorSkipped, rules.PRClosed)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
 	}
