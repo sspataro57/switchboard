@@ -110,10 +110,15 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 // SWT-44: draft_delivery (gmail only, by pin) and update_delivery (gmail drafts
 // created by the caller's actor — mcp:manual:salvo, any interactive session —
 // by pin), thirteen in all.
+//
+// SWT-52 (board-status-lights) criterion 24: task_signal — a session sets its
+// HUMAN task's state (working | needs_input | clear) so the board's light is
+// truthful; no pin (the handler refuses claude tasks for every caller, D7).
+// Fourteen in all.
 var wantUserProfileTools = []string{
 	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
 	"task_append_log", "task_close", "task_dismiss",
-	"task_get_next", "task_list", "task_mark_delivered", "task_set_priority", "update_delivery",
+	"task_get_next", "task_list", "task_mark_delivered", "task_set_priority", "task_signal", "update_delivery",
 }
 
 func TestReadProfile_ListsExactlyTheQueueReads(t *testing.T) {
@@ -345,6 +350,10 @@ func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 				d.Decision, d.Rule, d.Reason)
 		}
 		checked++
+	}
+	// SWT-52 criterion 24: the control checks fourteen tools.
+	if len(wantUserProfileTools) != 14 {
+		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 14 (SWT-52)", len(wantUserProfileTools))
 	}
 	if checked != len(wantUserProfileTools) {
 		t.Fatalf("POSITIVE CONTROL FAILED: checked %d user-profile tools, want %d", checked, len(wantUserProfileTools))

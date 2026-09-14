@@ -216,6 +216,17 @@ func TestInstructions_TeachTheSwbShorthand(t *testing.T) {
 		// SWT-44 second review: owner decision Same project.
 		{`already filed under the task.s project`, "a session drafts only on a thread already filed under the task's project"},
 		{`a draft is not sent`, "a draft is not sent, so the session never says it was"},
+		// SWT-52 (board-status-lights) criterion 25, D13: the state signal. Write
+		// it with backticks, not double quotes (the pairing loop below).
+		{`task_signal`, "names the verb, so a session without the skill still knows it"},
+		{`swb start <id>.{0,80}task_signal.{0,40}working`, "'swb start <id>' (or starting work on a swb task) → task_signal working"},
+		{`needs_input.{0,120}working.{0,20}again`, "needs_input before waiting on him, working again when he replies"},
+		{`swb stop <id>.{0,40}clear`, "'swb stop <id>' means clear"},
+		{`finishing is .{0,3}task_close.{0,60}clears`, "finishing is task_close, which also clears it"},
+		{`only for a human task`, "only for a human task worked in this conversation"},
+		{`answer.{0,100}console.{0,160}never.{0,60}(switchboard|swb)`, "Salvador answers in the session's console, never through switchboard"},
+		{`only when salvador asks.{0,600}without being asked|without being asked.{0,600}only when salvador asks`,
+			"the amended closing rule: the one exception is signalling the human task it is working on"},
 	} {
 		if !regexp.MustCompile(want.re).MatchString(d) {
 			t.Errorf("mcpserver.Instructions does not match /%s/ — %s. Instructions: %q", want.re, want.why, mcpserver.Instructions)

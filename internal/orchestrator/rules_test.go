@@ -729,6 +729,17 @@ func TestEvaluate_CaptureEventsFireNothing(t *testing.T) {
 		// A log line whose TEXT reads like a lifecycle event is still a note.
 		{"log that reads like a transition", orch.Event{ID: 804, TaskID: 1, Type: "log",
 			Payload: map[string]any{"message": "done_local", "kind": "log", "to": "closed"}, Now: now}},
+		// SWT-52 (board-status-lights) criterion 22: a session's state signal on a
+		// human task is an annotation, not a lifecycle event. Its payload carries a
+		// `to` like status_changed's, so routing it through that branch would be
+		// the drive-by this row catches. GREEN with no production change:
+		// Evaluate's default branch returns nil.
+		{"working_state_changed set", orch.Event{ID: 805, TaskID: 1, Type: "working_state_changed",
+			Payload: map[string]any{"from": "", "to": "working", "worker_id": "manual:salvo"}, Now: now}},
+		{"working_state_changed waiting on Salvador", orch.Event{ID: 806, TaskID: 1, Type: "working_state_changed",
+			Payload: map[string]any{"from": "working", "to": "needs_input", "worker_id": "manual:salvo"}, Now: now}},
+		{"working_state_changed cleared", orch.Event{ID: 807, TaskID: 1, Type: "working_state_changed",
+			Payload: map[string]any{"from": "needs_input", "to": "", "worker_id": "manual:salvo"}, Now: now}},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

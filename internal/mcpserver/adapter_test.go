@@ -156,6 +156,12 @@ var wantAgentTools = []string{
 	// worker console nothing the gate would refuse anyone else.
 	"mail_list_attachments",
 	"mail_read_attachment",
+	// SWT-52 (board-status-lights) criterion 23-24: a session's state signal on
+	// a HUMAN task (working | needs_input | clear), 26 → 27 tools. Listing it
+	// removes the transport allowlist as a refusal for worker consoles, so
+	// policy.humanOnly (rule human_only) is what refuses them; the handler
+	// refuses a claude task for every caller (D7).
+	"task_signal",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.

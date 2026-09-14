@@ -1186,13 +1186,18 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// and source_accounts.route_after), named by its SPEC's data-model
 		// section as 0029_route_tier.sql and renumbered: 0029 went to Part D,
 		// 0030 to SWT-45 and 0031 to Part C.
+		// 33 is SWT-52's (board-status-lights: tasks.working_state and
+		// working_state_at, a Claude session's state signal on a human task, with
+		// the named CHECKs tasks_working_state_check and tasks_working_state_pair),
+		// named by its SPEC's data-model section as 0033_task_working_state.sql.
+		// Its own guard is internal/tools TestMigration0033_TaskWorkingStateShape.
 		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
 		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
 		// asserts only its own file; the numbers nobody owns are caught HERE,
 		// because the migrate runner keys on schema_migrations.version with NO
 		// checksum — a stray or edited file is skipped SILENTLY and the schema
 		// diverges with no error anywhere.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 {
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}
