@@ -2219,3 +2219,30 @@ activity (SWT-45)".
   a gated project would create and surface past the assignee check. The 0030
   CHECK asks only for a system, so capture also treats a non-jira reviving rule
   as inert (`activity := system == "jira" && overrides(...)`).
+
+## Board verbs: Dismiss and Done (SWT-31, SWT-51)
+
+- Each board row has two verbs:
+  - **Dismiss** (`task_dismiss`, humanOnly) writes a `task_dismissals` label: the
+    task should not have existed.
+  - **Done** (`task_close` as `dashboard:{user}`) writes no label: real work,
+    finished.
+
+  Both run as a single `executeTask` call with the task id on the call. The
+  handlers run no SQL.
+- **Every board verb rebuilds the redirect filters through `boardBack(r)`**, the
+  one spelling of the four-key filter rebuild. Never echo `RawQuery`: a
+  structure test bans the word anywhere in board.go, comments included.
+- **Done's human-only rule is enforced by the TEMPLATE, not the executor.** The
+  form sits inside the only `{{if eq .AssigneeType "human"}}`.
+  - `task_close` accepts `pr_open`/`awaiting_*` on worker tasks, whose claims
+    only `mark_done_local` and `task_release` release. So a hand-built or
+    cross-site POST (the dashboard has no CSRF tokens; it is reached by
+    port-forward only) could close one and strand its claim.
+  - A hard gate needs a new `task_close` argument: SPEC Future work.
+  - Adding `task_close` to `humanOnly` breaks the orchestrator: five policy
+    tests pin that.
+- **Done on an "Answer feedback #M" row is the footgun.** It records no answer,
+  so the asker stays `needs_feedback`, R6 claim expiry exempts that status, and
+  the worker never resumes. Recover with `opsctl answer-feedback`: the request
+  stays `open`.

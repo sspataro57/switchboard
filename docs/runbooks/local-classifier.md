@@ -676,7 +676,7 @@ already created stay where they are.
 | outcome | condition |
 |---|---|
 | `false_positive` | first dismissal `not_actionable` or `wrong_kind`: not a real ask |
-| `true_positive` | closed or delivered with no dismissal, or first dismissal `handled_elsewhere` |
+| `true_positive` | closed or delivered with no dismissal (the board's Done button, SWT-51, produces this), or first dismissal `handled_elsewhere` |
 | `mis_click` | a human reopened the first dismissal: a mis-click, not a label |
 | `excluded` | `duplicate`, still open, or an `attached` promotion |
 
