@@ -121,7 +121,10 @@ func TestBoardHandler_RebuildsFiltersRatherThanEchoingRawQuery(t *testing.T) {
 	}
 	// The four keys by name, so a fifth filter added later fails LOUDLY here
 	// rather than silently dropping out of the round trip.
-	for _, k := range []string{`"project"`, `"status"`, `"assignee_type"`, `"subproject"`} {
+	// EXTENDED — deliberately — by SWT-52 criterion 32 (D15): `refresh` is the
+	// fifth key, so a Done or Dismiss made with auto-refresh on lands back on an
+	// auto-refreshing board. The RawQuery ban above is unchanged.
+	for _, k := range []string{`"project"`, `"status"`, `"assignee_type"`, `"subproject"`, `"refresh"`} {
 		if !strings.Contains(s, k) {
 			t.Errorf("board.go never names the filter key %s; the redirect rebuilds from the four known "+
 				"keys and boardQuery reads the same four", k)
@@ -129,19 +132,37 @@ func TestBoardHandler_RebuildsFiltersRatherThanEchoingRawQuery(t *testing.T) {
 	}
 }
 
-// Criterion 18: "A dismissed task is gone from the default board with NO change
-// to boardQuery." The characterization is one line and it is the entire claim —
-// `t.status <> 'closed'` already hides it, and any edit to that predicate is a
-// change to what the board means.
-func TestBoardQuery_ClosedStaysHiddenByDefault(t *testing.T) {
-	src, err := os.ReadFile("board.go")
-	if err != nil {
-		t.Fatalf("read internal/dashboard/board.go: %v", err)
+// Criterion 18 (SWT-31): "A dismissed task is gone from the default board with
+// NO change to boardQuery." It was TestBoardQuery_ClosedStaysHiddenByDefault and
+// asserted the Go literal "t.status <> 'closed'" verbatim.
+//
+// REWRITTEN — not deleted — by SWT-52 (board-status-lights) criterion 16: the
+// default board now keeps tasks closed since local midnight (America/New_York)
+// unless they carry an OPEN dismissal (D5). SWT-31's half survives inside the
+// new predicate: `t.status <> 'closed'` is still the first disjunct, and an open
+// dismissal still hides the row at once (NOT EXISTS … reopened_at IS NULL).
+// Scanned in boardQuery's BODY on purpose: the SPEC forbids hiding the predicate
+// in a const to keep an old test green.
+func TestBoardQuery_DefaultShowsTodaysDoneUntilLocalMidnight(t *testing.T) {
+	body := funcBodySrc(t, "board.go", "boardQuery")
+	if body == "" {
+		t.Fatalf("board.go declares no boardQuery")
 	}
-	if !strings.Contains(string(src), `"t.status <> 'closed'"`) {
-		t.Errorf("boardQuery no longer defaults to `t.status <> 'closed'`. SWT-31 criterion 18 is that " +
-			"the row disappears with NO change here: a dismissal is an ordinary close, and the board " +
-			"lane stays a FILTER (?status=closed), never a table (invariant 2)")
+	flat := regexp.MustCompile(`\s+`).ReplaceAllString(body, " ")
+	for _, want := range []struct{ re, why string }{
+		{`\(\s*t\.status <> 'closed' OR `, "`t.status <> 'closed'` is the FIRST disjunct: every open task still shows (SWT-31 criterion 18)"},
+		{`COALESCE\(t\.closed_at, t\.updated_at\)`, "the close instant, with the documented 0030 fallback (D5)"},
+		{`boardDayStart\(`, "the ONE spelling of local midnight (criterion 10)"},
+		{`task_dismissals`, "an open dismissal hides a closed row at once (D5)"},
+		{`reopened_at IS NULL`, "…an OPEN one: a reopened dismissal is no longer a verdict (the SWT-36 spelling)"},
+		{`"t\.status = \$%d"`, "the status branch is byte-unchanged (criterion 11)"},
+	} {
+		if !regexp.MustCompile(want.re).MatchString(flat) {
+			t.Errorf("boardQuery does not match /%s/ — %s", want.re, want.why)
+		}
+	}
+	if BoardTimeZone != "America/New_York" {
+		t.Errorf("BoardTimeZone = %q, want America/New_York (D5: his day, not the pod's UTC and not AVAIL_TZ)", BoardTimeZone)
 	}
 }
 
@@ -194,7 +215,9 @@ func TestBoardTemplate_DoneFormIsItsOwnPlainPost(t *testing.T) {
 			t.Errorf("the Done form tag %s lacks %s (criterion 1: an inline plain POST, no HTMX — SWT-31 D8)", tag, want)
 		}
 	}
-	for _, k := range []string{"project", "status", "assignee_type", "subproject"} {
+	// EXTENDED — deliberately — by SWT-52 criterion 32 (D15): the fifth hidden
+	// input, refresh.
+	for _, k := range []string{"project", "status", "assignee_type", "subproject", "refresh"} {
 		frag := `name="` + k + `" value="{{index $.Filters "` + k + `"}}"`
 		if !strings.Contains(inner, frag) || !strings.Contains(inner, `type="hidden"`) {
 			t.Errorf("the Done form lacks the hidden filter input %s. Criterion 1 + D5: the redirect lands on the "+
@@ -224,6 +247,14 @@ func TestBoardTemplate_DoneFormIsItsOwnPlainPost(t *testing.T) {
 	}
 	if strings.Contains(dm[1], "Done") || strings.Contains(dm[1], "/close") {
 		t.Errorf("the Dismiss form carries a Done control. D4: a Done must never be sent to /dismiss. Form body:\n%s", dm[1])
+	}
+	// SWT-52 criterion 32 (D15): the Dismiss form carries the same five hidden
+	// inputs, refresh included.
+	for _, k := range []string{"project", "status", "assignee_type", "subproject", "refresh"} {
+		frag := `name="` + k + `" value="{{index $.Filters "` + k + `"}}"`
+		if !strings.Contains(dm[1], frag) {
+			t.Errorf("the Dismiss form lacks the hidden input %s (criterion 32: five keys)", frag)
+		}
 	}
 }
 

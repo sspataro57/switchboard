@@ -16,6 +16,13 @@
     form.filters input, form.filters select { font: inherit; margin-right: .5rem; }
     .muted { color: #777; font-size: .8rem; }
     .orch-bad { background: #fde8e8; border: 1px solid #d66; color: #900; padding: .4rem .8rem; margin-bottom: 1rem; }
+    .light, .legend-light { display: inline-block; box-sizing: border-box; width: .8rem; height: .8rem; border-radius: 50%; margin-right: .35rem; vertical-align: -0.05rem; }
+    .light-done { background: #2e9d48; border: 2px solid #2e9d48; }
+    .light-working { background: #e8b90f; border: 2px solid #e8b90f; }
+    .light-stale { background: transparent; border: 2px solid #e8b90f; }
+    .light-input { background: #d63a2f; border: 2px solid #d63a2f; }
+    .light-next { background: #2f6fd6; border: 2px solid #2f6fd6; }
+    .light-none { background: transparent; border: 2px solid #9a9a9a; }
   </style>
 </head>
 <body>
@@ -34,9 +41,72 @@
     <input type="text" name="status" placeholder="status" value="{{index .Filters "status"}}">
     <input type="text" name="assignee_type" placeholder="assignee_type" value="{{index .Filters "assignee_type"}}">
     <input type="text" name="subproject" placeholder="subproject" value="{{index .Filters "subproject"}}">
+    <input type="hidden" name="refresh" value="{{index .Filters "refresh"}}">
     <button>Filter</button>
   </form>
-  <p class="muted">Queues are filters on the one tasks table. Closed tasks are hidden unless ?status=closed.</p>
+  <p class="muted">Queues are filters on the one tasks table. Tasks closed today stay (green) until midnight America/New_York; dismissed tasks leave at once; ?status=closed shows every closed task.</p>
+  <p class="muted" id="light-legend">Lights:
+    <span class="legend-light light-done"></span>green: done ·
+    <span class="legend-light light-working"></span>yellow: in progress ·
+    <span class="legend-light light-stale"></span>yellow ring: in progress with no recent signal ·
+    <span class="legend-light light-input"></span>red: waiting on your input ·
+    <span class="legend-light light-next"></span>blue: next in queue ·
+    <span class="legend-light light-none"></span>grey ring: not queued (holding, blocked, queued behind another, or dismissed). Hover a light for its reason.</p>
+  {{if .AutoRefresh}}
+  <p id="auto-refresh" class="muted">auto-refresh on (every {{.RefreshSeconds}} s, last refreshed {{.RenderedAt}})</p>
+  <script data-reload="{{.ReloadURL}}" data-interval="{{.RefreshSeconds}}">
+  (function () {
+    // SWT-52 D15: reload the board every data-interval seconds, but never while
+    // the tab is hidden, a form control has focus, or a control holds unsaved
+    // input. A postponed reload is re-armed, never lost.
+    var me = document.currentScript;
+    var target = me.getAttribute("data-reload");
+    var ms = (parseInt(me.getAttribute("data-interval"), 10) || 5) * 1000;
+    var timer = null;
+    function dirty() {
+      var fields = document.querySelectorAll("form input, form textarea");
+      for (var i = 0; i < fields.length; i++) {
+        var f = fields[i];
+        if (f.type === "checkbox" || f.type === "radio") {
+          if (f.checked !== f.defaultChecked) return true;
+        } else if (f.value !== f.defaultValue) {
+          return true;
+        }
+      }
+      // A select is dirty when its selection differs from the one its markup
+      // selects: the last option marked selected, else the first option.
+      var selects = document.querySelectorAll("form select");
+      for (var j = 0; j < selects.length; j++) {
+        var opts = selects[j].options, want = 0;
+        for (var k = 0; k < opts.length; k++) {
+          if (opts[k].defaultSelected) want = k;
+        }
+        for (var m = 0; m < opts.length; m++) {
+          if (opts[m].selected !== (m === want)) return true;
+        }
+      }
+      return false;
+    }
+    function busy() {
+      if (document.hidden) return true;
+      var a = document.activeElement;
+      if (a && a.form && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(a.tagName)) return true;
+      return dirty();
+    }
+    function tick() {
+      if (busy()) { arm(); return; }
+      location.replace(target);
+    }
+    function arm() {
+      clearTimeout(timer);
+      timer = setTimeout(tick, ms);
+    }
+    document.addEventListener("visibilitychange", arm);
+    arm();
+  })();
+  </script>
+  {{end}}
+  <p class="muted"><a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">{{if .AutoRefresh}}auto-refresh: turn off{{else}}auto-refresh: turn on{{end}}</a></p>
 
   {{range .Columns}}
   <h2>{{.Status}} ({{len .Tasks}})</h2>
@@ -44,7 +114,7 @@
     <tr><th>id</th><th>title</th><th>project</th><th>sub</th><th>assignee</th><th>prio</th><th>order</th><th>parent</th><th>updated</th><th></th></tr>
     {{range .Tasks}}
     <tr>
-      <td><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
+      <td><span class="light light-{{.Light.Class}}" role="img" aria-label="{{.Light.Label}}" title="{{.Light.Label}}"></span><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
       <td><a href="/tasks/{{.ID}}">{{.Title}}</a>{{if .ReopenedAfterDismissal}} <span class="muted">reopened after dismissal ({{.ReopenedAfterDismissal}})</span>{{end}}</td>
       <td>{{.Project}}</td>
       <td>{{.Subproject}}</td>
@@ -59,6 +129,7 @@
           <input type="hidden" name="status" value="{{index $.Filters "status"}}">
           <input type="hidden" name="assignee_type" value="{{index $.Filters "assignee_type"}}">
           <input type="hidden" name="subproject" value="{{index $.Filters "subproject"}}">
+          <input type="hidden" name="refresh" value="{{index $.Filters "refresh"}}">
           <select name="reason_code">
             <option value="not_actionable">not actionable</option>
             <option value="wrong_kind">wrong kind</option>
@@ -74,6 +145,7 @@
           <input type="hidden" name="status" value="{{index $.Filters "status"}}">
           <input type="hidden" name="assignee_type" value="{{index $.Filters "assignee_type"}}">
           <input type="hidden" name="subproject" value="{{index $.Filters "subproject"}}">
+          <input type="hidden" name="refresh" value="{{index $.Filters "refresh"}}">
           <input type="text" name="note" placeholder="note (optional)">
           <button>Done</button>
         </form>

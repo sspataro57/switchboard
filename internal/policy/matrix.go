@@ -111,6 +111,11 @@ var humanOnly = map[string]bool{
 	// a project of its choosing. humanOnly, NOT mcpHumanOnly, and not MCP-listed.
 	// Not send-shaped: nothing leaves the system.
 	"route_candidate_add": true, "route_candidate_remove": true,
+	// SWT-52 D7: a session's state signal on a human task (the board's lights).
+	// humanOnly, NOT mcpHumanOnly: no spine caller sets a session state, so every
+	// automated caller — worker consoles and the orchestrator alike — is refused.
+	// Not send-shaped, freeze-gated or snapshot-gated: nothing leaves the system.
+	"task_signal": true,
 }
 
 // mcpHumanOnly tools require a human identity WHEN THEY ARRIVE OVER MCP

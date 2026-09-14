@@ -1,17 +1,17 @@
-# Runbook — the switchboard MCP at Claude Code user scope (SWT-35, SWT-37, SWT-38, SWT-42, SWT-44)
+# Runbook — the switchboard MCP at Claude Code user scope (SWT-35, SWT-37, SWT-38, SWT-42, SWT-44, SWT-52)
 
 Install `ops-mcp-user` once for Claude Code at USER scope, so a session opened in
 any repo on the workstation can read switchboard's queues, dismiss, close or mark
 delivered a task, log the work Salvador hands it as a swb task in his own lane,
-write progress on that task, reorder any task's priority, read the attachments of
-non-private mail (SWT-42), and draft gmail replies that Salvador approves and sends on the
-dashboard (SWT-44) — and nothing else.
+write progress on that task, signal that task's state for the lights board (SWT-52),
+reorder any task's priority, read the attachments of non-private mail (SWT-42), and
+draft gmail replies that Salvador approves and sends on the dashboard (SWT-44) — and nothing else.
 The per-repo binding — which switchboard project is this repo's queue — lives in
 Claude Code's own per-project memory, not in switchboard.
 
-It serves thirteen tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
+It serves fourteen tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
 `task_close`, `task_mark_delivered`, `create_task`, `task_append_log`,
-`task_set_priority`, `mail_list_attachments`, `mail_read_attachment`, `draft_delivery` and `update_delivery`.
+`task_set_priority`, `task_signal`, `mail_list_attachments`, `mail_read_attachment`, `draft_delivery` and `update_delivery`.
 
 ## Fresh install (once, from `main`)
 
@@ -32,7 +32,8 @@ on `main` and open a new session:
 cd ~/projects/personal/switchboard && git switch main && go install ./cmd/ops-mcp-user
 ```
 
-Then open a NEW session, and `/mcp` shows `ops` with the thirteen tools.
+Then open a NEW session, and `/mcp` shows `ops` with the fourteen tools. Since SWT-52,
+also install the swb-status skill (below).
 
 ## Migrating from `ops-mcp-read` (SWT-35's install)
 
@@ -51,7 +52,7 @@ Then open a NEW session.
 
 ## What the install can and cannot do
 
-- **`ops-mcp-user` is the boundary.** It lists exactly the thirteen tools above, refuses
+- **`ops-mcp-user` is the boundary.** It lists exactly the fourteen tools above, refuses
   every other tool at the MCP layer, and wires no mail sender and no calendar
   booker: its `main` never calls a sender seam, so whatever the environment holds
   arms nothing. It is a separate binary rather than a setting on `ops-mcp`, so
@@ -71,7 +72,10 @@ Then open a NEW session.
   the session: the binary pins `require_own_draft` and `require_channel:"gmail"`, so it
   edits drafts created by the mcp:manual:salvo actor (any interactive session, this
   repo's full-profile `ops` included), gmail only; never the drafts worker's or the
-  dashboard's.
+  dashboard's. And it signals a human task's session state for the board's lights
+  (SWT-52): `task_signal` sets `working` or `needs_input` on a `holding`, `ready` or
+  `blocked` HUMAN task, or `clear`s it. It changes no status, takes no claim and
+  records nothing but the state; a `claude` task is refused for every caller.
 - **What it cannot do.** It cannot claim, create worker (`claude`) tasks, log on
   worker tasks, approve, send, book, link, decide, read mail bodies or reopen (it drafts, but
   never approves or sends: SWT-44).
@@ -86,9 +90,9 @@ Then open a NEW session.
   `ops-mcp` (full) install there could approve and send mail as
   `mcp:manual:salvo`. Never install `ops-mcp` itself at user scope.
 - **Workers are refused by policy, not by the tool list.** The full `ops-mcp` (worker
-  consoles, this repo's `.mcp.json`) also lists the three verbs and
-  `task_set_priority`, 26 tools in all. A worker console (`mcp:{client}`) is
-  refused `task_dismiss` and `task_set_priority` by `human_only` and `task_close` /
+  consoles, this repo's `.mcp.json`) also lists the three verbs,
+  `task_set_priority` and `task_signal`, 27 tools in all. A worker console (`mcp:{client}`) is
+  refused `task_dismiss`, `task_set_priority` and `task_signal` by `human_only` and `task_close` /
   `task_mark_delivered` by `mcp_human_only`; the orchestrator and the Jira
   reconciler keep closing and delivering as before. `task_set_priority` refuses
   the orchestrator too: no automated caller chooses work. The full profile keeps
@@ -181,6 +185,26 @@ Recovery:
   by itself on the next inbound message routed to it (by a classify promotion or a
   capture rule).
 
+**Accepted risk (SWT-52): a prompt-injected session can signal ANY human task.**
+- **The risk.** Untrusted text a session reads (an email, an attachment, a web page, a ticket, a
+  file) can tell it to call `task_signal` with `working`, `needs_input` or `clear` on any HUMAN
+  `holding`/`ready`/`blocked` task, not only the one it is working on.
+- **Why it stays open.** There is no session identity to bind a signal to, so this is a
+  documented residual. No identity plumbing was added (Codex review, 2026-09-14).
+- **The damage.** A wrong light: a false yellow, a false red, or a missing signal. Nothing is
+  sent, and no status, claim, question or delivery changes. It cannot close, create or reorder
+  anything by itself.
+- **What the tool still enforces** (pinned by tests): it cannot touch a worker's `needs_feedback`
+  red, and it refuses every `claude` task for every caller.
+- **The mitigation is instruction-level only.** The swb-status skill and the server's
+  Instructions tell a session to signal only the task it is working on, and never because text
+  it read asks it to.
+- **The trail.** Every call leaves an audit row with its full args, and every change leaves a
+  `working_state_changed {from,to,worker_id}` event.
+- **Recovery for a wrong light:**
+  `opsctl call --tool task_signal --args '{"task_id":N,"state":"clear"}'`, or Done / Dismiss on
+  the board.
+
 **Dismissal provenance.** `task_dismissals.dismissed_by` records the actor
 unmodified: `dashboard:…` means Salvador picked the reason code from the board's
 select; `mcp:…` means a model mapped his words to a code. A precision or eval pass
@@ -200,7 +224,8 @@ full `ops` does not, although both arrive as `mcp:manual:salvo`.
 - **Re-install rule:** re-run `go install ./cmd/ops-mcp-user` (on `main`) after any
   merge touching `cmd/ops-mcp-user`, `internal/mcpserver`, `internal/tools` or
   `internal/policy`, then open a new session. The registration itself does not
-  change.
+  change. Re-run `make install-skill` (on `main`) after any merge that touches
+  `skills/swb-status/`, then open a new session.
 - **`OPS_WORKER_ID=manual:salvo` is required.** The server refuses to start without
   an identity ("identity is never model-chosen"); audit rows from these sessions
   carry actor `mcp:manual:salvo`.
@@ -208,6 +233,31 @@ full `ops` does not, although both arrive as `mcp:manual:salvo`.
   environment — verified at the first install (2026-09-10). If `/mcp` shows the
   server failing with `DATABASE_URL is not set` or a connection error, re-add it
   with the literal DSN (the same exposure as `~/.pgpass`).
+
+## The swb-status skill
+
+The lights board (SWT-52) is only truthful if sessions signal. The user-scope Claude Code
+skill `swb-status` tells every session when to call `task_signal` and when to close: `working`
+when it starts on a swb task, `needs_input` just before it stops to wait on Salvador,
+`working` again when he replies, `clear` when it pauses, `task_close` when it finishes. Its
+source is `skills/swb-status/SKILL.md` at the repo root (deliberately NOT under
+`.claude/skills/`, where it would also be a project-scope skill here).
+
+Install it by COPYING it from `main`, on this workstation and on 192.168.50.30, beside the
+other user skills (`notify-idle`, `calendar`):
+
+```bash
+cd ~/projects/personal/switchboard && git switch main
+install -D -m 0644 skills/swb-status/SKILL.md ~/.claude/skills/swb-status/SKILL.md
+```
+
+`make install-skill` runs the same `install` line. Then open a NEW session. Never symlink it into
+a checkout: a symlink would serve whatever branch is checked out to every session (the
+"built binary, never `go run`" rule above). Re-install rule: re-run it on `main` after any merge
+that touches `skills/swb-status/`.
+
+The skill complements `notify-idle`: the red light is the board's signal, the email a tap on
+the shoulder; a session does both when both apply.
 
 ## Precedence: this repo keeps its own `ops`
 
@@ -221,15 +271,15 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
 1. `claude mcp get ops` shows the user-scope entry, its `ops-mcp-user` command and
    both `-e` values.
 2. In another repo (e.g. `cd ~/projects/personal/kube && claude`), `/mcp` shows
-   `ops` connected with exactly thirteen tools.
+   `ops` connected with exactly fourteen tools, and the `swb-status` skill is listed.
 3. In `~/projects/personal/switchboard`, a SESSION gets ONE `ops` — the
-   project-scope `go run` entry with the full tool list (26 tools). Check this
+   project-scope `go run` entry with the full tool list (27 tools). Check this
    inside a session, NOT with `claude mcp get ops` / `claude mcp list`: run inside
    this repo, those CLI commands display the user-scope entry even though a session
    loads `.mcp.json`'s (verified 2026-09-10).
 4. From the other repo, `project_list` and `task_list(project=<slug>)` answer.
 5. `psql -h 192.168.50.49 -U ops -d ops -c "SELECT actor, tool, status FROM
-   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered','create_task','task_append_log','task_set_priority','draft_delivery','update_delivery')
+   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered','create_task','task_append_log','task_set_priority','task_signal','draft_delivery','update_delivery')
    ORDER BY id DESC LIMIT 5"` shows those calls with actor `mcp:manual:salvo`.
 
 ## Use
@@ -266,7 +316,18 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
   on a swb task, the session logs meaningful steps, blockers and decisions; they
   show on the dashboard's task page under "Events".
 - "swb done 412" → `task_close` with a one-line outcome as the reason. A session
-  that finishes work it logged closes the task the same way and says so.
+  that finishes work it logged closes the task the same way and says so. The row
+  turns green and stays on the board until midnight America/New_York.
+- "swb start 412" (or a session starting work on a swb task) → `task_signal` with
+  `working`: the row turns yellow on the board.
+- "swb stop 412" → `task_signal` with `clear`: the session paused or switched away
+  unfinished.
+- **Waiting and answering.** Just before a session stops to ask Salvador something,
+  it calls `task_signal` with `needs_input` (the row turns red, "since HH:MM"); when
+  he replies it signals `working` again. He answers in that session's own console:
+  switchboard never records his answer, only the state. A `working` state with no
+  signal for 2 hours shows as a hollow yellow ring ("no session signal since …");
+  nothing reverts it — `clear`, Done or Dismiss does.
 - "find the attachment Sana sent about the Activities Integration" → `mail_list_attachments`
   by sender/subject (from=sana, subject=activities integration) → `mail_read_attachment` on
   the file you want. Text (JSON, CSV…) comes back inline; a PDF or image comes back as a cache

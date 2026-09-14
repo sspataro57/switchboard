@@ -43,8 +43,10 @@ const (
 	// log on human tasks and set priority. It cannot claim, create or log on
 	// worker (claude) tasks — the profile pins below refuse both — approve,
 	// send, book, link, decide, read mail bodies or reopen; since SWT-42 it reads attachments of non-private mail (O1); since SWT-44 it drafts and edits client replies (draft_delivery,
-	// update_delivery), approving and sending staying on the dashboard. Policy refuses
-	// the verbs and task_set_priority to worker identities.
+	// update_delivery), approving and sending staying on the dashboard; since
+	// SWT-52 it signals its human task's session state (task_signal: working,
+	// needs_input, clear) for the board's lights. Policy refuses the verbs,
+	// task_set_priority and task_signal to worker identities.
 	ProfileUser Profile = "user"
 	// ProfileRead serves the queue reads only. No binary builds it since
 	// SWT-37; it is the named fail-closed floor an unknown profile lands on.
@@ -76,7 +78,12 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// the dashboard, which shows From and To and binds the approve to the words
 	// it rendered. update_delivery is humanOnly: mcp:manual:salvo passes, a
 	// worker-shaped OPS_WORKER_ID is refused by policy.
-	"draft_delivery", "update_delivery")
+	"draft_delivery", "update_delivery",
+	// SWT-52 (Salvador, 2026-09-14): a session sets its HUMAN task's state
+	// (working | needs_input | clear) so the board's light is truthful. No pin:
+	// the handler refuses a claude task for every caller (D7), so a pin could
+	// only narrow what already holds for everyone.
+	"task_signal")
 
 // userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
 // by OVERWRITE, after injectWorkerID. require_assignee_type:"human" makes the

@@ -2246,3 +2246,91 @@ activity (SWT-45)".
   so the asker stays `needs_feedback`, R6 claim expiry exempts that status, and
   the worker never resumes. Recover with `opsctl answer-feedback`: the request
   stays `open`.
+
+## Board lights, auto-refresh and session signals (SWT-52, board-status-lights)
+
+- **The light is Go, not template.** `lightFor(status, lightFacts)` in
+  `internal/dashboard/lights.go` is pure (no pgx, no `time`); the facts come from
+  `boardLightFacts`, a SEPARATE read (the `reopenMarkers` precedent). `boardQuery`'s
+  select list and `TaskExportRow` are pinned for the exports: never add a light
+  column there. The template never branches on `.Status`.
+- **Blue = first ELIGIBLE ready task per queue, over ALL ready tasks.** Queues:
+  the human lane is one per project. The claude lane is ONE per client, whatever
+  the subproject, because `task_get_next(client, "")` treats an empty subproject
+  as no filter and picks one task across all of them (SPEC D2 amendment,
+  2026-09-14). A subproject console may see no blue for its own next task. That
+  under-report is accepted: a missing blue is safer than a false "next".
+  Candidates are ordered by `tools.TaskQueueOrder` (an alias of `taskQueueOrder`,
+  never a second literal). Eligible = `lightFor` with `QueueHead=false` gives
+  `none`. A filter can hide a queue's head, never promote the second task.
+- **Session state is two columns on `tasks` (0033), not a status.** Only three
+  places write `working_state` / `working_state_at` (structure scan, allow-list
+  with minimum counts):
+  - `internal/tools/signal.go` (`task_signal`);
+  - `closeTransition`, which clears them on a real close AND in the reopen UPDATE,
+    for all three `task_reopen` forms;
+  - `task_claim`, which clears them in its `ready → claimed` UPDATE.
+
+  Why the reopen and claim clears exist (D9 amendment, 2026-09-14): an old
+  binary's close leaves the marker, and a reopen would resurrect it; a marker
+  also survived claim → release. The idempotent re-close still touches nothing.
+  `task_signal` is humanOnly and refuses a non-human task for EVERY caller.
+  Staleness (`working` older than `tools.WorkingLease` = 2 h) is computed at READ
+  time; nothing sweeps it. `needs_input` never goes stale, so the fresh labels
+  show a date when the signal predates local midnight (`lightFacts.StateToday`,
+  on the DB clock). Switchboard records only the state, never his answer (owner,
+  2026-09-14: "not now"; SPEC D14 leaves room for it).
+- **Rollout barrier for `task_signal`.** Apply 0033 first: a new image on a
+  pre-0033 db fails every `/tasks` render (`boardLightFacts` selects the
+  columns), close, reopen and claim. Then roll the image to EVERY workload, and
+  only then install `ops-mcp-user` and the skill. Until the install no session
+  can set a marker. After it, a rollback is covered by reopen-clears and
+  claim-clears. See `docs/runbooks/HANDOFF-kube-board-status-lights.md`.
+- **Accepted residual: a prompt-injected session can signal ANY human task.**
+  There is no session identity to bind a signal to, and no identity plumbing was
+  added (Codex review, 2026-09-14). The harm is a wrong light: nothing is sent,
+  and no status or claim changes. The mitigation is instruction-level only: the
+  skill says to signal only the task the session is working on, and never
+  because read text asks. The tool cannot touch a worker's `needs_feedback` red
+  or any claude task (tests pin both).
+- **"Today" is the DB clock in America/New_York.** `boardDayStart(p)` is the one
+  spelling of local midnight; `BoardTimeZone` is bound as a parameter. The close
+  instant is `COALESCE(closed_at, updated_at)`. No Go `time.Now()` feeds visibility,
+  a light or the refresh indicator. Dismissed tasks (an OPEN dismissal,
+  `reopened_at IS NULL`) leave at once; Done lingers until midnight; `delivered`
+  stays until closed.
+- **Five keys, one list.** `boardKeys` = project, status, assignee_type,
+  subproject, refresh. `boardBack` (POST side) and `boardRefreshURLs` (GET side:
+  the toggle and the reload URL) both iterate it; `flash` never rides along, so a
+  verb's flash shows once. Every form on the board carries a hidden `refresh`
+  input. `boardQuery` reads only the four filters.
+- **Auto-refresh is `refresh=on` only, a fixed 5 s const** (`boardRefreshInterval`;
+  never a URL value). One inline script, inside `{{if .AutoRefresh}}`, reloads with
+  `location.replace` and postpones while the tab is hidden, a form control has
+  focus, or a control holds unsaved input. A select counts as dirty only when its
+  selection differs from the one its markup selects (the literal "any option with
+  `selected !== defaultSelected`" is true for every select with no `selected`
+  attribute and would block every reload). The word `onchange` must not appear in
+  the script: the file's one-onchange count covers it.
+- **Load (D15's cost statement, pg-main is shared).** One refresh is exactly one
+  normal board render; there is no refresh-only query. Per visible tab, every 5 s:
+
+  | Statement | Count |
+  |-----------|-------|
+  | `boardQuery` | 1 |
+  | `reopenMarkers` | ≤1 |
+  | `boardLightFacts` | ≤2: row facts plus render time, then the D2 queue-head candidates |
+  | the project list | 1 |
+  | `orchestrator.Health` | a few small catalog and backlog reads, already bounded at 2 s |
+
+  Total: about 6–8 statements every 5 s, roughly 1.5 statements per second per
+  visible tab, all over small tables (`tasks` in the low thousands, the ready set
+  in dozens). The queue-head read is `boardLightFacts`' second statement and runs
+  on every render, refresh or not. Verdict: acceptable — the load is bounded to
+  tabs he is actually looking at (hidden tabs postpone), and off is the default.
+  If it ever shows up in `pg_stat_statements`, lengthen the const or fold the two
+  `boardLightFacts` statements into one.
+- **The skill is copied, never symlinked.** `skills/swb-status/SKILL.md` (repo
+  root, not `.claude/skills/`) is installed to `~/.claude/skills/swb-status/` by
+  `make install-skill` from `main`, on the workstation and on .30. Re-run after
+  any merge touching `skills/swb-status/`.

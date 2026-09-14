@@ -57,6 +57,16 @@ package mcpserver_test
 // before approval, a planted-draft recovery (until SWT-43's Deny), drafting in
 // the accepted risk, both tools in the verify step's audit query, and three
 // sentences that are now false are refused outright.
+//
+// AMENDED — not loosened — for SWT-52 (board-status-lights) criterion 26: the
+// user profile gains task_signal (fourteen tools) and the full profile goes
+// 26 → 27. Two requirements change VALUE (`thirteen` → `fourteen`, `26 tools`
+// → `27 tools`) and the superseded counts join the stale list. New: task_signal
+// in the header list, the `swb start` / `swb stop` use lines and the
+// waiting/answer protocol, the section "The swb-status skill" with its install
+// line and re-install rule, an accepted-risk paragraph, the clear recovery
+// line, and task_signal in the Verify step's audit query. EXPECTED RED until
+// the runbook is rewritten.
 
 import (
 	"os"
@@ -118,6 +128,10 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{`mcp:manual:salvo`, "verification: the audit rows carry the manual actor"},
 		{`claude mcp get ops`, "verification step 4"},
 		{`/mcp`, "verification: `/mcp` shows `ops` connected from another repo, and ONE `ops` in this one"},
+		// SWT-52 criterion 26: the recovery for a wrong light, verbatim.
+		{`opsctl call --tool task_signal --args '{"task_id":N,"state":"clear"}'`, "the recovery for a wrong state (criterion 26)"},
+		// SWT-52 criteria 26 + 28: the skill's install line, the one `make install-skill` runs.
+		{"install -D -m 0644 skills/swb-status/SKILL.md ~/.claude/skills/swb-status/SKILL.md", "the swb-status skill's install line (D12)"},
 	} {
 		if !strings.Contains(doc, want.re) {
 			t.Errorf("%s does not contain %q — %s", rel, want.re, want.why)
@@ -157,7 +171,8 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		// (SWT-38 criterion 22). SWT-42 criterion 24 moves the full profile to 25
 		// with the two attachment tools.
 		// SWT-44: update_delivery joins the full profile (25 → 26).
-		{`\b26 tools\b`, "the full profile's tool count, 25 → 26 (SWT-44)"},
+		// SWT-52: task_signal joins the full profile (26 → 27).
+		{`\b27 tools\b`, "the full profile's tool count, 26 → 27 (SWT-52)"},
 		// SWT-38 criterion 23.
 		{`(?s)(email|web page).{0,600}(creat|priorit).{0,600}task_set_priority`,
 			"the ACCEPTED RISK extended (C9): untrusted text can also create tasks and reorder priority; one task_set_priority puts it back"},
@@ -174,7 +189,21 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		// Was `\bnine tools\b|\b9 tools\b` (SWT-38 criterion 22), then
 		// `\beleven tools\b|\b11 tools\b` (SWT-42 criterion 24). SWT-44:
 		// draft_delivery and update_delivery make it thirteen.
-		{`\bthirteen tools\b|\b13 tools\b`, "the user profile's tool list becomes thirteen (SWT-44)"},
+		// SWT-52: task_signal makes it fourteen.
+		{`\bfourteen tools\b|\b14 tools\b`, "the user profile's tool list becomes fourteen (SWT-52)"},
+		// SWT-52 criterion 26.
+		{`swt-52`, "the title gains SWT-52"},
+		{`(?s)fourteen tools:.{0,700}task_signal`, "task_signal is in the header list"},
+		{`swb start`, "usage: 'swb start <id>' → task_signal working"},
+		{`swb stop`, "usage: 'swb stop <id>' → task_signal clear"},
+		{`(?s)needs_input.{0,500}console|console.{0,500}needs_input`, "the waiting/answer protocol: red while waiting; he answers in the session's own console"},
+		{`(?s)never.{0,80}(record|store)s?.{0,80}answer|answer.{0,200}never.{0,80}(switchboard|swb)`, "switchboard records only the state, never his answer"},
+		{`(?m)^#+ the swb-status skill`, "the section 'The swb-status skill'"},
+		{`(?s)re-?(run|install).{0,300}skills/swb-status/`, "the re-install rule gains the skill"},
+		{`make install-skill`, "the Makefile target that runs the same line (criterion 28)"},
+		{`(?s)(untrusted|email|web page).{0,600}task_signal|task_signal.{0,600}(untrusted|email|web page)`, "the accepted risk: untrusted text can make a session signal (Invariants §3)"},
+		{`wrong light`, "…whose damage is a wrong light"},
+		{`tool in \([^)]*'task_signal'`, "the Verify step's audit query lists task_signal"},
 		{`swt-44`, "the title gains SWT-44"},
 		{`(?s)draft_delivery.{0,400}update_delivery.{0,600}(approve|send).{0,200}dashboard`,
 			"SWT-44: the session drafts and fixes a reply; approving and sending stay on the dashboard"},
@@ -213,10 +242,12 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 	}
 
 	// SWT-42 criterion 24: the superseded counts are false claims now.
-	for _, stale := range []string{`\bnine tools\b`, `\b9 tools\b`, `\b23 tools\b`, `\beleven tools\b`, `\b11 tools\b`, `\b25 tools\b`} {
+	for _, stale := range []string{`\bnine tools\b`, `\b9 tools\b`, `\b23 tools\b`, `\beleven tools\b`, `\b11 tools\b`, `\b25 tools\b`,
+		// SWT-52: thirteen/26 are superseded too.
+		`\bthirteen tools\b`, `\b13 tools\b`, `\b26 tools\b`} {
 		if regexp.MustCompile(stale).MatchString(lower) {
-			t.Errorf("%s still matches /%s/: since SWT-44 the user profile lists thirteen tools and the full "+
-				"profile 26", rel, stale)
+			t.Errorf("%s still matches /%s/: since SWT-52 the user profile lists fourteen tools and the full "+
+				"profile 27", rel, stale)
 		}
 	}
 

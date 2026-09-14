@@ -251,11 +251,13 @@ func TestBoardDone_Integration_ClosesAuditsAndWritesNoLabel(t *testing.T) {
 			"(criterion 10)", auditID, nDec, sawStatic)
 	}
 
-	// ---- criterion 15, after: hidden by default, present under ?status=closed --
+	// ---- criterion 15, after: AMENDED by SWT-52 (board-status-lights) ---------
+	// criterion 16: a task closed today STAYS on the default board, green, until
+	// local midnight (D5); it is also under ?status=closed.
 	_, after := get(t, client, ts.URL+"/tasks?project="+dnSlug)
-	if strings.Contains(after, "DONE ready human task") {
-		t.Errorf("the closed task is still on the default board (criterion 15: `t.status <> 'closed'` hides it)\n%s",
-			snippet(after))
+	if class, label, ok := boardLight(after, task); !ok || class != "done" || label != "done today" {
+		t.Errorf("after Done the task's default-board light = (%q, %q, present %v), want (done, done today, true) "+
+			"(SWT-52 D5 / criterion 16)\n%s", class, label, ok, snippet(after))
 	}
 	_, closed := get(t, client, ts.URL+"/tasks?project="+dnSlug+"&status=closed")
 	if !strings.Contains(closed, "DONE ready human task") {

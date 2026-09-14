@@ -132,6 +132,11 @@ var allToolNames = []string{
 	// (rule human_only) and deliberately NOT MCP-listed (D9) — asserted in
 	// internal/mcpserver/adapter_test.go spineTools.
 	"reject_delivery",
+	// SWT-52 (board-status-lights) criterion 18: a Claude session's state signal
+	// on a HUMAN task (working | needs_input | clear). humanOnly (rule
+	// human_only); MCP-listed in both profiles. EXPECTED RED until
+	// tools.Register wires it.
+	"task_signal",
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -242,6 +247,10 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		// in reject_delivery_test.go, which calls validateRejectDelivery directly
 		// for the nil-pool reason given above for task_dismiss.
 		"reject_delivery",
+		// SWT-52 criterion 18: task_signal needs task_id AND state; {} is illegal.
+		// The accept half lives in signal_test.go, which calls validateSignal
+		// directly for the nil-pool reason given above for task_dismiss.
+		"task_signal",
 	}
 
 	for _, name := range toolsUnderTest {

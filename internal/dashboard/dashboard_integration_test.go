@@ -148,10 +148,23 @@ func seedDash(t *testing.T, ctx context.Context, pool *pgxpool.Pool) dashSeed {
 		s.rootTaskID, `{"child_task_id":`+strconv.FormatInt(s.childTaskID, 10)+`}`); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
+	// AMENDED by SWT-52 (board-status-lights) criterion 16: since SWT-52 the
+	// default board keeps tasks closed since local midnight (America/New_York),
+	// so "an old close is hidden" needs a close that is OLD — closed_at = day
+	// start − 1 h. updated_at is left at now() on purpose: a predicate reading
+	// t.updated_at instead of COALESCE(t.closed_at, t.updated_at) would show it.
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO tasks (project_id, title, assignee_type, status)
-		 VALUES ($1,'DASH closed task','claude','closed') RETURNING id`, s.projectID).Scan(&s.closedTaskID); err != nil {
+		`INSERT INTO tasks (project_id, title, assignee_type, status, closed_at)
+		 VALUES ($1,'DASH closed task','claude','closed',
+		         (date_trunc('day', now() AT TIME ZONE 'America/New_York') AT TIME ZONE 'America/New_York') - interval '1 hour')
+		 RETURNING id`, s.projectID).Scan(&s.closedTaskID); err != nil {
 		t.Fatalf("seed closed task: %v", err)
+	}
+	// SWT-52 criterion 16: a task closed TODAY stays on the default board.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO tasks (project_id, title, assignee_type, status, closed_at)
+		 VALUES ($1,'DASH closed today task','human','closed', now())`, s.projectID); err != nil {
+		t.Fatalf("seed closed-today task: %v", err)
 	}
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO tasks (project_id, title, body, assignee_type, status)
@@ -284,14 +297,18 @@ func TestDashboard_Integration_BoardPlansBriefsExports(t *testing.T) {
 		t.Errorf("/tasks missing seeded tasks")
 	}
 	if strings.Contains(body, "DASH closed task") {
-		t.Errorf("/tasks default view shows a closed task; closed must be hidden by default")
+		t.Errorf("/tasks default view shows a task closed YESTERDAY; since SWT-52 only today's closes stay (D5)")
+	}
+	if !strings.Contains(body, "DASH closed today task") {
+		t.Errorf("/tasks default view hides a task closed today; SWT-52 D5 keeps it until local midnight")
 	}
 	if strings.Contains(body, "DASH other-project task") {
 		t.Errorf("/tasks?project=%s leaked a task from another project", dashSlug)
 	}
 	// ?status=closed reveals closed.
-	if _, b := get(t, client, ts.URL+"/tasks?project="+dashSlug+"&status=closed"); !strings.Contains(b, "DASH closed task") {
-		t.Errorf("/tasks?status=closed did not show the closed task")
+	if _, b := get(t, client, ts.URL+"/tasks?project="+dashSlug+"&status=closed"); !strings.Contains(b, "DASH closed task") ||
+		!strings.Contains(b, "DASH closed today task") {
+		t.Errorf("/tasks?status=closed did not show both closed tasks (every close, any date)")
 	}
 	// assignee_type filter.
 	if _, b := get(t, client, ts.URL+"/tasks?project="+dashSlug+"&assignee_type=human"); !strings.Contains(b, "DASH human child") || strings.Contains(b, "DASH ready root") {
