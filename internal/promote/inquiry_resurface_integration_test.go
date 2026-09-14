@@ -24,7 +24,7 @@ package promote_test
 //
 // ---- IMPOSED SURFACE ------------------------------------------------------------
 //
-//	promote.Verdict.LoggedOnTaskID (latest.task_id for a task_log latest
+//	promote.Verdict.LoggedOnTaskID (the latest LIVE decision's task_id for a resurface-branch
 //	decision); the inquiry body's LAST line `logged_on_closed_task: N`; the
 //	promotion reason part "capture logged the message onto closed task N;
 //	resurfaced (chat-on-closed-task)". InquiryGate, Decide, threadTask and
@@ -132,7 +132,7 @@ func (s *iqpSuite) rsTaskRow(t *testing.T, ctx context.Context, task int64) (sta
 // ---- criterion 13: inquiryInbox, one fixture per clause -----------------------------
 
 // MUTATIONS: drop the `EXISTS … lt.status = 'closed'` → reopened promotes;
-// drop `latest.resurface` → noflag and ontheopen promote; drop p.ai_inquiry →
+// drop `live.resurface` → noflag and ontheopen promote; drop p.ai_inquiry →
 // unarmed promotes; leave `ON latest.action = 'attributed'` → admitted does
 // not promote.
 func TestPromoteInquiryResurface_Integration_InboxOneFixturePerClause(t *testing.T) {
@@ -193,6 +193,147 @@ func TestPromoteInquiryResurface_Integration_InboxOneFixturePerClause(t *testing
 	}
 	if got := s.status(t, ctx, closed); got != "closed" {
 		t.Errorf("the closed task is %q after promotion; CC2: it stays closed", got)
+	}
+}
+
+// CC5b: a SHADOW decision never promotes through the resurface branch. The
+// live row is task_log with resurface=false; a newer shadow re-evaluation writes
+// task_log with resurface=true and the message carries a needs_reply verdict.
+// Nothing may promote it, so no live Holding task comes from a shadow row. The
+// live resurfaced ask beside it is the positive control.
+// MUTATION: drop `AND lcd.mode = 'live'` from InquiryLiveDecisionJoinSQL →
+// the shadow row becomes the `live` row, the shadowed ask promotes, red.
+func TestPromoteInquiryResurface_Integration_AShadowResurfacePromotesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newIQPSuite(t, ctx)
+	rsRequire0034(t, ctx, s)
+	closed := s.rsTask(t, ctx, iqpArmed, "closed shadow")
+	s.rsClose(t, ctx, closed)
+	tasksBefore := s.armedTasks(t, ctx)
+
+	control := s.rsAsk(t, ctx, "rs-live-control", gmailKey("rs-live-control"), "gmail", "thread", s.ago(2*time.Hour),
+		s.armed, closed, true)
+
+	m, r := s.message(t, ctx, iqpMsg{label: "rs-shadowed", key: gmailKey("rs-shadowed"), channel: "gmail",
+		sentAt: s.ago(2 * time.Hour)})
+	s.rsDecision(t, ctx, m, s.armed, closed, false)
+	s.exec(t, ctx, `INSERT INTO capture_decisions (message_id, mode, action, project_id, external_system, external_key,
+	                                               task_id, resurface, reason)
+	                VALUES ($1,'shadow','task_log',$2,'jira','IQW',$3,true,'itest-inqp shadow re-evaluation')`,
+		m, s.armed, closed)
+	s.verdict(t, ctx, m, r, iqpV{scope: "thread", project: s.armed})
+
+	st := s.run(t, ctx, promote.Config{})
+
+	if p, ok := s.promotion(t, ctx, control); !ok || p.action != "review" {
+		t.Fatalf("POSITIVE CONTROL: the LIVE resurfaced ask: promotion %+v (found=%v), want review", p, ok)
+	}
+	if p, ok := s.promotion(t, ctx, m); ok {
+		t.Errorf("a message whose live decision is task_log resurface=false, under a NEWER shadow task_log "+
+			"resurface=true, promoted (%+v). CC5b: only a LIVE decision admits through the resurface branch; a "+
+			"shadow re-evaluation must never create a live Holding task", p)
+	}
+	if st.Review != 1 || s.armedTasks(t, ctx) != tasksBefore+1 {
+		t.Errorf("stats %+v, %d armed tasks (was %d); want exactly one review task, the control's",
+			st, s.armedTasks(t, ctx), tasksBefore)
+	}
+	if n := gatedTotal(st); n != 0 {
+		t.Errorf("Gated = %v; the shadowed message is kept out by the INBOX, never gated", st.Gated)
+	}
+}
+
+// CC5b, the reverse: shadow decisions never REMOVE a resurfaced message. The
+// live decision is task_log resurface=true onto a closed task; a newer shadow
+// `unmatched` row (no project) sits on top. The ask still promotes, under the
+// live row's project, and the body and reason still name the closed task.
+// MUTATIONS: read the resurface fact from the any-mode `latest` row, or join
+// projects on latest.project_id → nothing promotes, red.
+func TestPromoteInquiryResurface_Integration_ANewerShadowRowRemovesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newIQPSuite(t, ctx)
+	rsRequire0034(t, ctx, s)
+	closed := s.rsTask(t, ctx, iqpArmed, "closed reverse")
+	s.rsClose(t, ctx, closed)
+
+	m := s.rsAsk(t, ctx, "rs-reverse", gmailKey("rs-reverse"), "gmail", "thread", s.ago(2*time.Hour),
+		s.armed, closed, true)
+	s.exec(t, ctx, `INSERT INTO capture_decisions (message_id, mode, action, reason)
+	                VALUES ($1,'shadow','unmatched','itest-inqp shadow unmatched')`, m)
+
+	st := s.run(t, ctx, promote.Config{})
+
+	p, ok := s.promotion(t, ctx, m)
+	if !ok || p.action != "review" || p.taskID == nil || *p.taskID == closed {
+		t.Fatalf("a live resurfaced ask under a NEWER shadow `unmatched` row: promotion %+v (found=%v), want a NEW "+
+			"review task. CC5b: the resurface branch reads only live decisions, so a non-attributed shadow row "+
+			"must not remove it", p, ok)
+	}
+	if p.project != s.armed {
+		t.Errorf("promotion project = %v, want the live row's %d", p.project, s.armed)
+	}
+	_, body, _ := s.rsTaskRow(t, ctx, *p.taskID)
+	if want := "logged_on_closed_task: " + strconv.FormatInt(closed, 10) + "\n"; !strings.HasSuffix(body, want) {
+		t.Errorf("task body does not END with %q (LoggedOnTaskID comes from the LIVE row):\n%s", want, body)
+	}
+	if !strings.Contains(p.reason, rsPart(closed)) {
+		t.Errorf("promotion reason %q does not contain %q", p.reason, rsPart(closed))
+	}
+	if st.Review != 1 {
+		t.Errorf("stats %+v, want Review 1", st)
+	}
+}
+
+// CC5b's ACCEPTED corner (owner-session decision 2026-09-14): a NEWER shadow
+// `attributed` row takes precedence under the Part A re-point contract. The
+// live decision is task_log resurface=true onto a closed task in the armed
+// project; a newer shadow row attributes the message to a SECOND armed
+// project. The attributed branch admits it under the SHADOW row's project,
+// with LoggedOnTaskID = 0: no logged_on_closed_task line, no resurface reason.
+func TestPromoteInquiryResurface_Integration_ANewerShadowAttributedRowTakesPrecedence(t *testing.T) {
+	ctx := context.Background()
+	s := newIQPSuite(t, ctx)
+	rsRequire0034(t, ctx, s)
+	armed2 := s.id(t, ctx, `INSERT INTO projects (name, slug, client, execution, delivery, ai_locality, ai_classify,
+	                                              ai_inquiry, inquiry_promote_after)
+	                        VALUES ($1,$1,'LlamaSite','manual','dashboard','any',false,true, now() - interval '1 hour')
+	                        RETURNING id`, iqpArmed+"2")
+	closed := s.rsTask(t, ctx, iqpArmed, "closed shadow-attributed")
+	s.rsClose(t, ctx, closed)
+
+	m := s.rsAsk(t, ctx, "rs-shadow-attr", gmailKey("rs-shadow-attr"), "gmail", "thread", s.ago(2*time.Hour),
+		s.armed, closed, true)
+	s.decision(t, ctx, m, "shadow", "attributed", armed2)
+
+	st := s.run(t, ctx, promote.Config{})
+
+	p, ok := s.promotion(t, ctx, m)
+	if !ok || p.action != "review" || p.taskID == nil || *p.taskID == closed {
+		t.Fatalf("live resurfaced task_log under a NEWER shadow `attributed` row: promotion %+v (found=%v), want a "+
+			"NEW review task (the attributed branch admits it; Part A: attribution moves)", p, ok)
+	}
+	if p.project != armed2 {
+		t.Errorf("promotion project = %d, want the SHADOW row's %d (the newer attributed row takes precedence), "+
+			"not the live row's %d", p.project, armed2, s.armed)
+	}
+	var taskProject int64
+	if err := s.pool.QueryRow(ctx, `SELECT project_id FROM tasks WHERE id=$1`, *p.taskID).Scan(&taskProject); err != nil {
+		t.Fatalf("read the new task's project: %v", err)
+	}
+	if taskProject != armed2 {
+		t.Errorf("the new task is in project %d, want the shadow row's %d", taskProject, armed2)
+	}
+	_, body, _ := s.rsTaskRow(t, ctx, *p.taskID)
+	if strings.Contains(body, "logged_on_closed_task:") {
+		t.Errorf("the body carries a logged_on_closed_task line; an attributed admission has LoggedOnTaskID = 0:\n%s", body)
+	}
+	if strings.Contains(p.reason, rsPart(closed)) {
+		t.Errorf("promotion reason %q names the closed task; an attributed admission has LoggedOnTaskID = 0", p.reason)
+	}
+	if st.Review != 1 {
+		t.Errorf("stats %+v, want Review 1", st)
+	}
+	if got := s.status(t, ctx, closed); got != "closed" {
+		t.Errorf("the closed task is %q; it stays closed", got)
 	}
 }
 

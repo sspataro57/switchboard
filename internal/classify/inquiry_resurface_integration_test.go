@@ -169,7 +169,7 @@ func (s *rsqSuite) taskLog(t *testing.T, ctx context.Context, msg, project, task
 // MUTATIONS (each turns exactly one assertion red):
 //   - drop the `EXISTS … lt.status = 'closed'` from InquiryEligibleLatestSQL →
 //     the reopened fixture is admitted;
-//   - drop `latest.resurface` → the resurface=false fixture is admitted;
+//   - drop `live.resurface` → the resurface=false fixture is admitted;
 //   - drop `p.ai_inquiry` → the unarmed fixture is admitted;
 //   - leave the inbox at `latest.action = 'attributed'` → the headline fixture
 //     is not admitted (today's behaviour: the message disappears).
@@ -235,6 +235,103 @@ func TestClassifyInquiryResurface_Integration_InboxAdmitsAResurfacedTaskLogWhile
 	for why, id := range excluded {
 		if _, ok := got[id]; ok {
 			t.Errorf("%s: message %d is in the inquiry inbox; criterion 12 excludes it", why, id)
+		}
+	}
+}
+
+// CC5b: a SHADOW decision never admits through the resurface branch. The live
+// row says task_log with resurface=false (a notifier, say); a newer shadow
+// re-evaluation writes task_log with resurface=true. The latest row is the
+// shadow one, and it must not make the lane classify the message. The live
+// resurfaced message beside it is the positive control.
+// MUTATION: drop `AND lcd.mode = 'live'` from InquiryLiveDecisionJoinSQL →
+// the shadow row becomes the `live` row, the message is admitted, red.
+func TestClassifyInquiryResurface_Integration_AShadowResurfaceAdmitsNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newRSQSuite(t, ctx)
+	closed := s.task(t, ctx, s.armed, "closed bucket shadow", "closed")
+
+	control := s.message(t, ctx, "live-control")
+	s.taskLog(t, ctx, control, s.armed, closed, true)
+
+	shadowed := s.message(t, ctx, "shadowed")
+	s.taskLog(t, ctx, shadowed, s.armed, closed, false)
+	s.exec(t, ctx, `INSERT INTO capture_decisions (message_id, mode, action, project_id, external_system, external_key,
+	                                               task_id, resurface, reason)
+	                VALUES ($1,'shadow','task_log',$2,'jira','CCQ',$3,true,'itest-ccq shadow re-evaluation')`,
+		shadowed, s.armed, closed)
+
+	rows, err := classify.NewStore(s.pool).PendingMessages(ctx,
+		classify.Config{Lane: classify.LaneInquiry, Since: 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("PendingMessages(inquiry): %v", err)
+	}
+	got := map[int64]bool{}
+	for _, r := range rows {
+		got[r.MessageID] = true
+	}
+	if !got[control] {
+		t.Fatalf("POSITIVE CONTROL: a LIVE task_log with resurface=true onto a closed task is not in the inquiry inbox")
+	}
+	if got[shadowed] {
+		t.Errorf("message %d — live task_log resurface=false, then a NEWER shadow task_log resurface=true — is in the "+
+			"inquiry inbox. CC5b: only a LIVE decision admits through the resurface branch; a shadow row is a "+
+			"what-if and must never start the inquiry lane", shadowed)
+	}
+}
+
+// CC5b, the reverse: shadow decisions never REMOVE a resurfaced message
+// either. Each message's live decision is task_log with resurface=true onto a
+// closed task; a newer shadow row of another action sits on top. The message
+// stays in the inbox, under the LIVE row's project.
+// MUTATIONS: read the resurface fact from the any-mode `latest` row → both are
+// dropped, red; join projects on latest.project_id → the `unmatched` one (no
+// project) is dropped, red.
+func TestClassifyInquiryResurface_Integration_ANewerShadowRowRemovesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newRSQSuite(t, ctx)
+	closed := s.task(t, ctx, s.armed, "closed bucket reverse", "closed")
+
+	shadowRows := map[string]string{
+		"unmatched (no project)": `INSERT INTO capture_decisions (message_id, mode, action, reason)
+		                           VALUES ($1,'shadow','unmatched','itest-ccq shadow unmatched')`,
+		"task_log resurface=false": `INSERT INTO capture_decisions (message_id, mode, action, project_id, external_system,
+		                               external_key, task_id, resurface, reason)
+		                             VALUES ($1,'shadow','task_log',$2,'jira','CCQ',$3,false,'itest-ccq shadow task_log')`,
+	}
+	msgs := map[string]int64{}
+	i := 0
+	for label, q := range shadowRows {
+		i++
+		m := s.message(t, ctx, "reverse"+strings.Repeat("x", i))
+		s.taskLog(t, ctx, m, s.armed, closed, true)
+		if strings.Contains(q, "$3") {
+			s.exec(t, ctx, q, m, s.armed, closed)
+		} else {
+			s.exec(t, ctx, q, m)
+		}
+		msgs[label] = m
+	}
+
+	rows, err := classify.NewStore(s.pool).PendingMessages(ctx,
+		classify.Config{Lane: classify.LaneInquiry, Since: 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("PendingMessages(inquiry): %v", err)
+	}
+	got := map[int64]classify.PendingMessage{}
+	for _, r := range rows {
+		got[r.MessageID] = r
+	}
+	for label, m := range msgs {
+		row, ok := got[m]
+		if !ok {
+			t.Errorf("message %d — live task_log resurface=true onto a closed task, under a NEWER shadow %s row — is "+
+				"NOT in the inquiry inbox. CC5b: the resurface branch reads only live decisions, so a shadow pass must "+
+				"not remove it", m, label)
+			continue
+		}
+		if row.ProjectID != s.armed {
+			t.Errorf("%s: admitted under project %d, want the live row's %d", label, row.ProjectID, s.armed)
 		}
 	}
 }

@@ -229,6 +229,11 @@ func inquiryBody(v Verdict) string {
 	} {
 		fmt.Fprintf(&b, "%s: %s\n", kv[0], orNone(kv[1]))
 	}
+	// chat-on-closed-task CC6: one line, LAST, only when set, so every other
+	// body stays byte-identical.
+	if v.LoggedOnTaskID != 0 {
+		fmt.Fprintf(&b, "logged_on_closed_task: %d\n", v.LoggedOnTaskID)
+	}
 	return b.String()
 }
 
@@ -343,9 +348,15 @@ func runInquiry(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, 
 //   - an ok classify_inquiry verdict whose fields say needs_reply;
 //   - on an INBOUND message;
 //   - whose LATEST capture decision, in ANY mode (live, shadow, gate, route),
-//     is `attributed`: task/task_log already produced a task, held is still
-//     pending its gate, unmatched names no project. No mode predicate: a gate
-//     resolution or a route row IS the message's current attribution;
+//     passes replyfold.InquiryEligibleLatestSQL: `attributed`, or the latest
+//     LIVE decision is a task_log capture recorded with resurface=true onto a
+//     task that is STILL closed (chat-on-closed-task CC5; that branch reads
+//     only live decisions, CC5b; the project then comes from that live
+//     row, replyfold.InquiryProjectIDSQL). Any other
+//     task/task_log already produced a task or logs on an open one, held is
+//     still pending its gate, unmatched names no project. No mode predicate on
+//     WHICH row is latest: a gate resolution or a route row IS the message's
+//     current attribution;
 //   - to a project with ai_inquiry AND inquiry_promote_after set AND the
 //     verdict recorded at or after it (forward-only on the verdict clock);
 //   - sent within the age fence (InquiryMaxAge, or a dry-run's --max-age);
@@ -357,7 +368,8 @@ func inquiryInbox(ctx context.Context, pool *pgxpool.Pool, maxAge time.Duration)
 	SELECT e.id, e.raw_source_item_id, e.fields,
 	       nm.id, nm.thread_id, nm.sent_at, r.created_at,
 	       p.id, p.slug,
-	       ` + replyfold.RepliedSinceCol + `, ` + replyfold.PriorParticipationCol + `
+	       ` + replyfold.RepliedSinceCol + `, ` + replyfold.PriorParticipationCol + `,
+	       ` + replyfold.InquiryLoggedOnTaskSQL + `
 	  FROM ai_extractions e
 	  JOIN ai_runs r ON r.id = e.ai_run_id
 	       AND r.worker_type = 'classify_inquiry' AND r.status = 'ok'
@@ -365,12 +377,13 @@ func inquiryInbox(ctx context.Context, pool *pgxpool.Pool, maxAge time.Duration)
 	       AND nm.direction = 'inbound'
 	  JOIN LATERAL (SELECT cd.action, cd.project_id FROM capture_decisions cd
 	                 WHERE cd.message_id = nm.id
-	                 ORDER BY cd.id DESC LIMIT 1) latest ON latest.action = 'attributed'
-	  JOIN projects p ON p.id = latest.project_id
+	                 ORDER BY cd.id DESC LIMIT 1) latest ON true` + replyfold.InquiryLiveDecisionJoinSQL + `
+	  JOIN projects p ON p.id = ` + replyfold.InquiryProjectIDSQL + `
 	       AND p.ai_inquiry
 	       AND p.inquiry_promote_after IS NOT NULL
 	       AND r.created_at >= p.inquiry_promote_after` + replyfold.JoinSQL + `
 	 WHERE e.fields->>'needs_reply' = 'true'
+	   AND ` + replyfold.InquiryEligibleLatestSQL + `
 	   AND nm.sent_at >= now() - make_interval(secs => $1)
 	   AND NOT EXISTS (SELECT 1 FROM classify_promotions cp
 	                    WHERE cp.normalized_message_id = nm.id)
@@ -395,7 +408,7 @@ func inquiryInbox(ctx context.Context, pool *pgxpool.Pool, maxAge time.Duration)
 		)
 		if err := rows.Scan(&v.ExtractionID, &rawItem, &raw,
 			&v.MessageID, &currentThread, &sentAt, &v.RunAt,
-			&v.ProjectID, &v.ProjectSlug, &replied, &prior); err != nil {
+			&v.ProjectID, &v.ProjectSlug, &replied, &prior, &v.LoggedOnTaskID); err != nil {
 			return nil, fmt.Errorf("promote: scan inquiry inbox row: %w", err)
 		}
 		var f struct {

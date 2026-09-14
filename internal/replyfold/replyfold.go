@@ -95,6 +95,62 @@ const JoinSQL = `
 	                  GROUP BY thread_id) lo
 	             ON lo.thread_id = NULLIF(e.fields->>'thread_id', '')::bigint`
 
+// InquiryEligibleLatestSQL is the ONE spelling of "the message's latest capture
+// decision makes it eligible for the inquiry lane" (chat-on-closed-task, SWT-53
+// CC5). Both inquiry inboxes, classify's inboxWhereInquiry and promote's
+// inquiryInbox, splice it in, together with InquiryLiveDecisionJoinSQL and
+// InquiryProjectIDSQL. It reads two per-message rows:
+//
+//   - `latest`: the inbox's own LATERAL, the newest decision in ANY mode, which
+//     selects cd.action and cd.project_id (unchanged since before SWT-53);
+//   - `live`: InquiryLiveDecisionJoinSQL, the newest LIVE decision.
+//
+// The branches:
+//
+//   - `latest.action = 'attributed'`: the existing admission, byte-identical, in
+//     ANY mode (C2: a gate resolution, a route row or a shadow re-point is the
+//     message's current attribution);
+//   - or the latest LIVE decision is a `task_log` that capture RECORDED as
+//     resurfacing (the lanes only read the fact, CC3), onto a task that is STILL
+//     closed. "Still closed" is re-read here at both stages, so a task reopened
+//     since takes the message back out: its log line is on the board again (T7).
+//
+// CC5b: the resurface branch reads only `live`, so a shadow row never ADDS a
+// message through it (a shadow task_log with resurface=true over a live
+// resurface=false), and a newer shadow row of any other action never REMOVES a
+// live resurfaced message. The one ACCEPTED exception (owner-session decision
+// 2026-09-14, the Part A re-point contract): a NEWER shadow `attributed` row
+// takes precedence. The message is then admitted by the attributed branch
+// under the shadow row's project, with LoggedOnTaskID = 0 and no
+// logged_on_closed_task line, or dropped if that project is not armed.
+// Parenthesised as one expression, because it is AND-ed into WHERE clauses.
+const InquiryEligibleLatestSQL = `
+	  (latest.action = 'attributed'
+	   OR (live.action = 'task_log' AND live.resurface
+	       AND EXISTS (SELECT 1 FROM tasks lt WHERE lt.id = live.task_id AND lt.status = 'closed')))`
+
+// InquiryLiveDecisionJoinSQL is the message's newest LIVE capture decision,
+// aliased `live`: the only row the resurface branch of InquiryEligibleLatestSQL
+// reads (CC5b). A LEFT JOIN, because a message may have no live row at all.
+// Requires the alias `nm` for normalized_messages, and must be joined BEFORE
+// any ON clause that splices InquiryEligibleLatestSQL.
+const InquiryLiveDecisionJoinSQL = `
+	  LEFT JOIN LATERAL (SELECT lcd.action, lcd.project_id, lcd.resurface, lcd.task_id
+	                       FROM capture_decisions lcd
+	                      WHERE lcd.message_id = nm.id AND lcd.mode = 'live'
+	                      ORDER BY lcd.id DESC LIMIT 1) live ON true`
+
+// InquiryProjectIDSQL is the project the admission names: the latest
+// decision's for an `attributed` admission (unchanged), otherwise the latest
+// LIVE decision's, so a newer shadow row (an `unmatched` one has no project)
+// cannot drop a resurfaced message from the project join.
+const InquiryProjectIDSQL = `CASE WHEN latest.action = 'attributed' THEN latest.project_id ELSE live.project_id END`
+
+// InquiryLoggedOnTaskSQL is promote's Verdict.LoggedOnTaskID (CC6): the closed
+// task the live task_log names when the message was admitted by the resurface
+// branch, and 0 for an `attributed` admission.
+const InquiryLoggedOnTaskSQL = `CASE WHEN latest.action = 'attributed' THEN 0 ELSE COALESCE(live.task_id, 0) END`
+
 // RepliedSinceCol is true when the verdict's thread carries an outbound message
 // sent STRICTLY after the classified one. Ties read OPEN (SWT-33 note 9): a
 // reply stamped in the same instant as the question does not answer it, and an

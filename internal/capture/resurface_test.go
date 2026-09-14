@@ -58,8 +58,9 @@ import (
 // ---- criterion 3: resurfaces' truth table -------------------------------------
 
 // Every combination of {closed, ready, delivered, in_progress} x activity x
-// dismissed x connectorCopy x notifier: 64 rows, true in exactly four of them
-// (closed and nothing else set), and never true for a non-closed status.
+// dismissed x connectorCopy x notifier x blankSender: 128 rows, true in exactly
+// one of them (closed and nothing else set), and never true for a non-closed
+// status.
 func TestResurfaces_TruthTable(t *testing.T) {
 	statuses := []string{"closed", "ready", "delivered", "in_progress"}
 	bools := []bool{false, true}
@@ -69,23 +70,26 @@ func TestResurfaces_TruthTable(t *testing.T) {
 			for _, dismissed := range bools {
 				for _, conn := range bools {
 					for _, notifier := range bools {
-						in := resurfaceInput{status: status, activity: activity, dismissed: dismissed,
-							connectorCopy: conn, notifier: notifier}
-						want := status == "closed" && !activity && !dismissed && !conn && !notifier
-						got, reason := resurfaces(in)
-						if got != want {
-							t.Errorf("resurfaces(%+v) = %v, want %v. CC3: true iff the linked task is CLOSED, "+
-								"the winner is not an activity match (SWT-45), the task has no open dismissal "+
-								"(SWT-36), the message is not the Jira connector's own copy (J3), and the sender "+
-								"is not on the project's notifier list (CC4)", in, got, want)
-						}
-						if got {
-							trues++
-						}
-						if !got && strings.TrimSpace(reason) == "" {
-							t.Errorf("resurfaces(%+v) = false with an EMPTY reason. Criterion 3: each false row "+
-								"returns a reason fragment, because the decision row is the only place a "+
-								"'why did this chat not resurface' question can be answered", in)
+						for _, blank := range bools {
+							in := resurfaceInput{status: status, activity: activity, dismissed: dismissed,
+								connectorCopy: conn, notifier: notifier, blankSender: blank}
+							want := status == "closed" && !activity && !dismissed && !conn && !notifier && !blank
+							got, reason := resurfaces(in)
+							if got != want {
+								t.Errorf("resurfaces(%+v) = %v, want %v. CC3: true iff the linked task is CLOSED, "+
+									"the winner is not an activity match (SWT-45), the task has no open dismissal "+
+									"(SWT-36), the message is not the Jira connector's own copy (J3), the sender "+
+									"is not on the project's notifier list (CC4), and the sender is not blank "+
+									"(CC4b, fail closed)", in, got, want)
+							}
+							if got {
+								trues++
+							}
+							if !got && strings.TrimSpace(reason) == "" {
+								t.Errorf("resurfaces(%+v) = false with an EMPTY reason. Criterion 3: each false row "+
+									"returns a reason fragment, because the decision row is the only place a "+
+									"'why did this chat not resurface' question can be answered", in)
+							}
 						}
 					}
 				}
@@ -94,8 +98,33 @@ func TestResurfaces_TruthTable(t *testing.T) {
 	}
 	// With four statuses and no other input, only (closed, all false) is true.
 	if trues != 1 {
-		t.Errorf("resurfaces was true in %d of 64 rows, want exactly 1 (closed, no activity, no dismissal, "+
-			"not the connector copy, not a notifier)", trues)
+		t.Errorf("resurfaces was true in %d of 128 rows, want exactly 1 (closed, no activity, no dismissal, "+
+			"not the connector copy, not a notifier, not a blank sender)", trues)
+	}
+}
+
+// CC4b: a blank sender FAILS CLOSED. notifierSender is an equality match, so
+// no list entry can equal an empty sender; without its own disqualifier a
+// message with no identity would resurface into the inquiry model by default.
+// MUTATION: drop the `case in.blankSender` from resurfaces → red.
+func TestResurfaces_ABlankSenderFailsClosed(t *testing.T) {
+	for _, sender := range []string{"", " ", "\t", " \t \n"} {
+		if !blankSender(sender) {
+			t.Errorf("blankSender(%q) = false; an empty or whitespace sender carries no identity", sender)
+		}
+		got, reason := resurfaces(resurfaceInput{status: "closed", blankSender: blankSender(sender)})
+		if got {
+			t.Errorf("a closed task, no other disqualifier, sender %q: resurfaces = true; a message with no sender "+
+				"identity is logged silently and never resurfaced (CC4b)", sender)
+		}
+		if !strings.Contains(strings.ToLower(reason), "no sender identity") {
+			t.Errorf("the blank-sender reason %q does not say the message has no sender identity", reason)
+		}
+	}
+	for _, sender := range []string{"asunda45", "Jira", " x ", `"Katie Evans (JIRA)" <jira@treetopllc.jira.com>`} {
+		if blankSender(sender) {
+			t.Errorf("blankSender(%q) = true; a named sender is not blank", sender)
+		}
 	}
 }
 
@@ -112,6 +141,7 @@ func TestResurfaces_EachDisqualifierNamesItsOwnCause(t *testing.T) {
 		{"open dismissal (SWT-36's)", resurfaceInput{status: "closed", dismissed: true}},
 		{"the Jira connector's own copy (J3)", resurfaceInput{status: "closed", connectorCopy: true}},
 		{"a notifier (CC4)", resurfaceInput{status: "closed", notifier: true}},
+		{"a blank sender (CC4b)", resurfaceInput{status: "closed", blankSender: true}},
 	}
 	seen := map[string]string{}
 	for _, tc := range cases {
@@ -206,6 +236,10 @@ func TestSenderAddress_ParsesTheFromHeaderInGo(t *testing.T) {
 			"Jira's own From shape: the address, never the display name"},
 		{"=?UTF-8?Q?Caf=C3=A9_Nextdoor?= <digest@nextdoor.com>", "digest@nextdoor.com", "an RFC 2047 display name"},
 		{"JIRA@TreetopLLC.jira.com", "jira@treetopllc.jira.com", "case is not significant to the match"},
+		{"foo@ bar.com", "foo@bar.com", "net/mail folds the whitespace after the '@' itself"},
+		{"Broken <foo@ bar.com", "foo@bar.com",
+			"the FALLBACK path (net/mail refuses the unclosed angle-addr): whitespace right after the '@' is " +
+				"trimmed before the cut, as the pre-refactor senderDomain did (it returned bar.com for this sender)"},
 		{"Jira", "", "a Slack display name carries no address"},
 		{"gil vazquez", "", "an Upwork / Slack display name carries no address"},
 		{"", "", "empty"},
@@ -232,6 +266,8 @@ func TestSenderDomain_IsTheHostOfSenderAddress(t *testing.T) {
 		`"Katie Evans (JIRA)" <jira@treetopllc.jira.com>`,
 		"Motorola <NEWS@Motorola.COM>",
 		"news@medium.com",
+		"foo@ bar.com",
+		"Broken <foo@ bar.com", // the fallback path: the host is bar.com, never the raw string
 	} {
 		addr := senderAddress(sender)
 		at := strings.LastIndexByte(addr, '@')

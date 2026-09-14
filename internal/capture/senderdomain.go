@@ -31,23 +31,52 @@ func senderDomain(sender string) string {
 	if s == "" {
 		return ""
 	}
-	if addr, err := mail.ParseAddress(s); err == nil {
-		if at := strings.LastIndexByte(addr.Address, '@'); at >= 0 && at+1 < len(addr.Address) {
-			return strings.ToLower(addr.Address[at+1:])
-		}
-	}
-	// Unparseable but addressed (multiple addresses, broken quoting): take the
-	// host after the last '@', trimmed of the angle-bracket the split_part trap
-	// leaves behind.
-	if at := strings.LastIndexByte(s, '@'); at >= 0 && at+1 < len(s) {
-		host := strings.TrimRight(strings.TrimSpace(s[at+1:]), ">")
-		if i := strings.IndexAny(host, " \t"); i >= 0 {
-			host = host[:i]
-		}
-		if host != "" {
-			return strings.ToLower(host)
-		}
+	if addr := senderAddress(s); addr != "" {
+		return strings.ToLower(addr[strings.LastIndexByte(addr, '@')+1:])
 	}
 	// No address at all: the raw string IS the key.
 	return s
+}
+
+// senderAddress returns the addr-spec of the From header, or "" when the sender
+// carries no address (a Slack or Upwork display name, an empty string). It is
+// the ONE net/mail spelling in this package: senderDomain takes the host of it,
+// and notifierSender (chat-on-closed-task CC4) compares the whole address.
+//
+// A non-empty result always holds an '@' followed by a non-empty host, and never
+// an angle bracket or a space (the split_part trap above). Its case is kept as
+// written; callers fold it.
+func senderAddress(sender string) string {
+	s := strings.TrimSpace(sender)
+	if s == "" {
+		return ""
+	}
+	if addr, err := mail.ParseAddress(s); err == nil {
+		if at := strings.LastIndexByte(addr.Address, '@'); at >= 0 && at+1 < len(addr.Address) &&
+			!strings.ContainsAny(addr.Address, "<> \t") {
+			return addr.Address
+		}
+	}
+	// Unparseable but addressed (multiple addresses, broken quoting): take the
+	// token around the last '@', cut at the angle brackets, quotes, commas and
+	// whitespace the split_part trap would otherwise keep.
+	at := strings.LastIndexByte(s, '@')
+	if at < 0 {
+		return ""
+	}
+	// Leading whitespace after the '@' is trimmed BEFORE the cut, as the
+	// pre-refactor senderDomain did: `foo@ bar.com` keeps host bar.com rather
+	// than cutting to an empty host and falling back to the raw string.
+	host := strings.TrimLeft(s[at+1:], " \t")
+	if i := strings.IndexAny(host, " \t<>,\""); i >= 0 {
+		host = host[:i]
+	}
+	if host == "" {
+		return ""
+	}
+	local := s[:at]
+	if i := strings.LastIndexAny(local, " \t<>,\""); i >= 0 {
+		local = local[i+1:]
+	}
+	return local + "@" + host
 }

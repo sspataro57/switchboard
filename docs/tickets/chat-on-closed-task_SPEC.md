@@ -153,7 +153,8 @@ Numbered **CC1…** so they never collide with SWT-45's J, SWT-40's C-D/D-D/B-D,
   - it is not the Jira connector's own copy (`pm.channel == jira.Channel`, computed in `rules_store.go`
     and passed in as a bool so the pure file imports no connector). This is SWT-45 J3: the poller reads
     whole projects, and the email copy is the only Treetop trigger;
-  - the sender is not on the winner project's notifier list (CC4).
+  - the sender is not on the winner project's notifier list (CC4);
+  - the sender is not blank (CC4b, review fix 2026-09-14): a message with no sender identity fails closed.
 - **Why record it rather than recompute it in SQL:**
   - Status-at-log-time is a fact that only capture sees. A later close of an OPEN task must not make
     already-seen logs look like "logged onto a closed task" (a clock comparison would need SWT-45's
@@ -186,6 +187,20 @@ Numbered **CC1…** so they never collide with SWT-45's J, SWT-40's C-D/D-D/B-D,
 - **Not the Slack author id.** It is not a normalized column (K6). Reading `raw_json` from capture would
   be a second raw reader. See Future work.
 - The seed values are data chosen from Verification 0b, not frozen here.
+- **Owner decision 2026-09-14: keep GitHub notification mail silent.** `notifications@github.com` stays in
+  the proposed collaboratory seed, although it also carries human PR comments (173 in 30 days onto buckets
+  56/57). GitHub PR tasks are SWT-54's. The runbook and the handoff carry the identical seed statement.
+
+**CC4b: a blank sender FAILS CLOSED (review fix, 2026-09-14).**
+- `notifierSender` is an equality match, so no list entry can ever equal an empty sender. Without its own
+  disqualifier, a message with no sender identity would resurface into the inquiry model by default.
+- `resurfaces()` therefore has a sixth disqualifier: `blankSender`, true when the stored sender is empty or
+  whitespace (`blankSender(sender)`, pure, in `resurface.go`). Its reason is distinct: `not resurfaced:
+  the message has no sender identity (blank sender), so it is logged silently`. The log line is still
+  appended.
+- Risk was low, fixed anyway. Since the Slack connector fix at 17:00Z on 2026-09-14, 0 new inbound Slack
+  messages have had an empty sender (prod, read-only: 7 new messages, all named). The 741 historical
+  blank-sender rows in 0a were decided before 0034, carry `resurface=false`, and are never re-decided.
 
 **CC5: both inquiry inboxes widen by ONE shared predicate.**
 - `internal/replyfold` gains an exported SQL constant, `InquiryEligibleLatestSQL`. replyfold is already
@@ -194,17 +209,47 @@ Numbered **CC1…** so they never collide with SWT-45's J, SWT-40's C-D/D-D/B-D,
 
   ```
   (latest.action = 'attributed'
-   OR (latest.action = 'task_log' AND latest.resurface
-       AND EXISTS (SELECT 1 FROM tasks lt WHERE lt.id = latest.task_id AND lt.status = 'closed')))
+   OR (live.action = 'task_log' AND live.resurface
+       AND EXISTS (SELECT 1 FROM tasks lt WHERE lt.id = live.task_id AND lt.status = 'closed')))
   ```
 
-- Each inbox's `LATERAL` selects `cd.resurface, cd.task_id` beside `action, project_id`. The latest
-  decision in ANY mode still decides (C2; no mode predicate).
+- `latest` is each inbox's own LATERAL, unchanged since before this ticket (`cd.action, cd.project_id`,
+  newest row in ANY mode, C2). `live` is a second shared constant, `InquiryLiveDecisionJoinSQL`: a
+  `LEFT JOIN LATERAL` over `capture_decisions` restricted to `mode = 'live'`, `ORDER BY id DESC LIMIT 1`
+  (CC5b). The project join is `InquiryProjectIDSQL` (`latest.project_id` for an attributed admission,
+  else `live.project_id`), and promote's `LoggedOnTaskID` is `InquiryLoggedOnTaskSQL`.
 - **"Still closed" is re-read at both stages.** If something reopened the task in the meantime (a human,
   a revive, SWT-36), the log line is back on the board and the message leaves both inboxes.
 - `inboxWhereInquiry` keeps `p.ai_inquiry` and its deliberate absence of an `ai_locality` clause.
   `promote.inquiryInbox` keeps `ai_inquiry`, `inquiry_promote_after`, the verdict clock, the 72h fence and
   the `classify_promotions` NOT EXISTS.
+
+**CC5b: the resurface branch reads only LIVE decisions (review fix, 2026-09-14).**
+- The hole: as first written, the predicate read the resurface fact from the latest decision in ANY mode.
+  A shadow pass (or a `--all` re-point) that writes `task_log` + `resurface=true` would make both inboxes
+  admit the message, and promote could then create a live Holding task from a what-if row. A regular
+  shadow pass is enough: it re-decides every message in its window that has no shadow row yet, and a
+  message whose live decision was `task` now finds its ref and becomes a `task_log`, which resurfaces if
+  the task has since closed. Symmetrically, a newer shadow row would have REMOVED a live resurfaced
+  message.
+- The fix: the resurface branch reads only the message's latest LIVE decision (`InquiryLiveDecisionJoinSQL`,
+  alias `live`), and a resurfaced message takes its project and `LoggedOnTaskID` from that row. A shadow
+  row never adds a message through the resurface branch, and a newer shadow row of any action other than
+  `attributed` never removes one. **Accepted corner (owner-session decision 2026-09-14):** a NEWER shadow
+  `attributed` row takes precedence under the Part A re-point contract. The message is then admitted by
+  the attributed branch under the shadow row's project, with `LoggedOnTaskID = 0` and no
+  `logged_on_closed_task` line, or dropped if that project is not armed (T19, pinned by
+  `TestPromoteInquiryResurface_Integration_ANewerShadowAttributedRowTakesPrecedence`). An EXISTS over the
+  live row alone would not do: the
+  project join would still read `latest.project_id`, which a newer shadow `unmatched` row sets to NULL.
+- **Finding, NOT changed: the existing attributed branch has the analogous exposure.** It admits a latest
+  `attributed` row in any mode, shadow included. A shadow pass that writes a newer `attributed` over a live
+  `unmatched` (after a rule change, or a `--all` re-point) makes the message eligible, and promote can
+  create a Holding task from it. That is the documented re-point contract, not an accident: the runbook's
+  "Re-pointing already-decided messages" says every latest-decision reader follows the newest row in any
+  mode, so attribution moves (Part A), and C2 pins the any-mode read for gate and route rows. It is
+  intended and out of scope here. The attributed branch is byte-identical, and
+  `TestPromoteInquiryInbox_LatestDecisionHasNoModePredicate` passes unmodified.
 
 **CC6: promote changes only what it copies.**
 - `Verdict` gains `LoggedOnTaskID int64`, which is `latest.task_id` when the latest action is
@@ -229,8 +274,8 @@ Numbered **CC1…** so they never collide with SWT-45's J, SWT-40's C-D/D-D/B-D,
 - Route rows are `attributed` by CHECK and already reach the lane.
 
 **CC9: no backfill.** The four human messages were decided before 0034, so their rows carry
-`resurface=false`, and they are past the 72h fence anyway. Re-deciding them would take a shadow `--all`
-re-pointing pass (the runbook's sanctioned tool, Verification 6, optional).
+`resurface=false`, and they are past the 72h fence anyway. A shadow `--all` re-point cannot re-decide
+them into the resurface branch: that branch reads only live decisions (CC5b). There is no backfill tool.
 
 **CC10: deploy order is a landmine and is written into the handoff.**
 - New capture binaries select `p.notifier_senders` and write `resurface`, so **0034 must be applied
@@ -238,6 +283,13 @@ re-pointing pass (the runbook's sanctioned tool, Verification 6, optional).
   connector. This is the 0029/0030 precedent.
 - Seed the notifier list after 0034 and BEFORE rolling the images. Old binaries ignore the column, so the
   first new pass already excludes the Jira app.
+- **The mixed-version window loses resurfacing (review fix, 2026-09-14).** An old capture binary on a 0034
+  db writes the default `resurface=false`. The live decision is unique per message and never re-decided,
+  and a shadow re-point cannot recover it (CC5b). So roll ONE tag to ALL capture writers (every connector
+  CronJob, google's watch loop) and the inquiry readers (pipelined, classify-*) in ONE apply, right after
+  0034 and the seed. Any hand-run `opsctl` capture pass must be rebuilt from main first.
+- **Recorded residual:** messages captured by an old writer during the minutes-long roll window are logged
+  but never resurfaced.
 
 ## Traces
 
@@ -258,6 +310,10 @@ re-pointing pass (the runbook's sanctioned tool, Verification 6, optional).
 | T13 | Jose Garcia, Avviato DM naming `API-…`, rule 10 → collaboratory bucket 56 closed | per Q1's default: resurfaces under collaboratory like T1 |
 | T14 | the thread's existing task is `assignee_type=claude` | gate `claude_task` (C-D13) unchanged |
 | T15 | his own Slack message naming a key | outbound (`AuthorID == OwnUserID`), never captured; unchanged |
+| T16 | a Slack message with an empty or whitespace sender naming a key, onto a closed bucket | log on the bucket; `resurface=false`, reason `no sender identity` (CC4b, fail closed) |
+| T17 | live `task_log` `resurface=false`, then a newer shadow `task_log` `resurface=true` | neither inbox admits it; no Holding task (CC5b) |
+| T18 | live `task_log` `resurface=true` onto a closed task, then a newer shadow row of any action EXCEPT `attributed` (e.g. `unmatched`, `task_log` `resurface=false`) | both inboxes still admit it, under the live row's project; the body names the closed task (CC5b) |
+| T19 | live `task_log` `resurface=true` onto a closed task, then a newer shadow `attributed` row | ACCEPTED (owner-session decision 2026-09-14, Part A re-point contract): the shadow row takes precedence. Admitted by the attributed branch under the shadow row's project, `LoggedOnTaskID = 0`, no `logged_on_closed_task` line; dropped if that project is not armed |
 
 ## Acceptance criteria
 
@@ -277,8 +333,11 @@ re-pointing pass (the runbook's sanctioned tool, Verification 6, optional).
 
 3. `resurfaces` is pure: `resurface.go` is scanned for I/O tokens by the `rules_structure_test.go` shape.
    Table test over `{status: closed|ready|delivered|in_progress} × activity × dismissed × connectorCopy
-   × notifier`: true only for closed ∧ ¬activity ∧ ¬dismissed ∧ ¬connectorCopy ∧ ¬notifier. Each false row
-   returns a distinct reason fragment.
+   × notifier × blankSender`: true only for closed ∧ ¬activity ∧ ¬dismissed ∧ ¬connectorCopy ∧ ¬notifier ∧
+   ¬blankSender. Each false row returns a distinct reason fragment. CC4b adds an integration case: an empty
+   and a whitespace sender with human-looking bodies on a closed bucket write `resurface=false` with the
+   `no sender identity` reason, beside a named control that resurfaces. Mutation: drop the `blankSender`
+   case → red.
 4. `notifierSender` table test:
    - `Jira` matches `Jira`, ` jira `, `JIRA`;
    - `Jira` does NOT match `Jiraiya Tanaka` or `"Katie Evans (JIRA)" <jira@x>`;
@@ -329,8 +388,13 @@ re-pointing pass (the runbook's sanctioned tool, Verification 6, optional).
     - Mutation: drop the `EXISTS … status = 'closed'` → the reopened fixture goes red.
     - The existing `inquiry_structure_test.go` pins (`p.ai_inquiry`, no `ai_locality`, the comment) hold.
 13. **Promote inbox, integration.** The same four clauses on `inquiryInbox`, plus the existing C2 cases
-    unchanged. `TestPromoteInquiryInbox_LatestDecisionHasNoModePredicate` passes unmodified (no mode
-    predicate).
+    unchanged. `TestPromoteInquiryInbox_LatestDecisionHasNoModePredicate` passes unmodified (the LATERAL
+    that picks the latest row has no mode predicate). CC5b adds two cases to each inbox: a live `task_log`
+    with `resurface=false` plus a newer shadow `task_log` with `resurface=true` admits nothing (beside a
+    live resurfaced control); and the reverse, a live `task_log` with `resurface=true` plus a newer shadow
+    row of another action (`unmatched`, and `task_log` `resurface=false`) is still admitted, under the
+    live row's project. Mutations: drop `lcd.mode = 'live'` → the first goes red; join projects on
+    `latest.project_id` → the reverse goes red.
 14. **Promotion, integration through real rows.** Capture pass (rule-10-shaped rule, closed task, human
     Slack DM) → a seeded `classify_inquiry` verdict (the existing promote fixture shape) → `promote.Run`
     with `LaneInquiry` after the grace. The result:
@@ -536,11 +600,17 @@ pipe tests into a commit).
 - drop the `status = 'closed'` EXISTS (12);
 - substring instead of equality in `notifierSender` (4);
 - drop the CHECK (2);
-- drop `"resurfaced"` from one main (9).
+- drop `"resurfaced"` from one main (9);
+- drop the `blankSender` case from `resurfaces`, and a literal `false` for `blankSender` in `decideMessage`
+  (CC4b);
+- drop `lcd.mode = 'live'` from `InquiryLiveDecisionJoinSQL`, and join projects on `latest.project_id`
+  (CC5b).
 
 **3. Rollout (handoff; the kube session applies the manifests).** Apply 0034 → seed with
-`UPDATE projects SET notifier_senders = ARRAY[...] WHERE slug = 'collaboratory';` using 0b's values → roll
-one image tag to every connector CronJob and pipelined → reinstall opsctl.
+`UPDATE projects SET notifier_senders = ARRAY[...] WHERE slug = 'collaboratory';` using 0b's values (owner
+decision 2026-09-14: `notifications@github.com` stays in) → roll ONE image tag to every capture writer and
+every inquiry reader in ONE apply (CC10: an old writer's decisions stay `resurface=false` for good) →
+reinstall opsctl before any hand-run capture pass.
 
 **4. Smoke (read-only, within 24h of the roll):**
 
@@ -561,10 +631,10 @@ SELECT cd.id, cd.created_at, nm.channel, nm.sender, cd.task_id, cd.resurface, cd
 Holding column shows the `{asker}: {ask}` task with `logged_on_closed_task: N`, and task N is still
 closed.
 
-**6. Optional, owner-approved only.** To demonstrate on history: a shadow re-point
-(`opsctl capture-rules run --since 72h --all`, with `CAPTURE_RULES_MODE` unset). It writes a newer shadow
-row for every inbound message in the window (runbook "Re-pointing already-decided messages"). Run it only
-if he wants recent misses picked up.
+**6. Withdrawn by CC5b.** The original step (a shadow re-point, `opsctl capture-rules run --since 72h
+--all`, to pick up recent misses) is not valid with this predicate: the resurface branch reads only live
+decisions, so a shadow re-point cannot add a resurfaced message. There is no history
+demonstration; step 5 is the usable-alone check.
 
 **Rollback.** Revert the pipelined image; the lanes stop reading `resurface`. Capture's flag is then inert
 data. `UPDATE projects SET notifier_senders = '{}'` only widens resurfacing, so it is not a rollback. The

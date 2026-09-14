@@ -447,6 +447,45 @@ func TestCaptureResurface_Integration_AHumanOnAClosedTaskResurfaces(t *testing.T
 	}
 }
 
+// CC4b: a BLANK sender fails closed. The list is left at its DEFAULT '{}'
+// (prod's shape before the seed), and each body reads like a human's ask. No
+// entry can equal an empty sender, so without the disqualifier these would
+// resurface. The named human in the same pass is the positive control.
+// MUTATIONS: drop `case in.blankSender` from resurfaces, or pass a literal
+// false for blankSender in decideMessage → the blank rows resurface, red.
+func TestCaptureResurface_Integration_ABlankSenderIsLoggedSilently(t *testing.T) {
+	ctx := context.Background()
+	s := newRSFSuite(t, ctx)
+	b := s.bucket(t, ctx, "CCW")
+	s.closeTask(t, ctx, b)
+	before := s.logs(t, ctx, b)
+
+	empty := s.human(t, ctx, "blank-empty", "", "can you check CCW-10355?")
+	spaces := s.human(t, ctx, "blank-spaces", " \t ", "hey, any news on CCW-10400?")
+	control := s.human(t, ctx, "blank-control", "asunda45", "can you check CCW-10401?")
+	st := s.pass(t, ctx, capture.RulesModeLive)
+
+	for label, m := range map[string]int64{"empty": empty, "whitespace": spaces} {
+		d := s.logged(t, ctx, m, capture.RulesModeLive, b, false,
+			"a "+label+" sender carries no identity: the message is logged silently and never resurfaced (CC4b, "+
+				"fail closed)")
+		if !strings.Contains(strings.ToLower(d.reason), "no sender identity") {
+			t.Errorf("%s sender: decision reason %q does not say the message has no sender identity", label, d.reason)
+		}
+	}
+	s.logged(t, ctx, control, capture.RulesModeLive, b, true,
+		"POSITIVE CONTROL: a named human in the same pass onto the same closed bucket resurfaces")
+	if got := s.logs(t, ctx, b); got != before+3 {
+		t.Errorf("log events on the bucket went %d -> %d, want +3: every message still logs", before, got)
+	}
+	if got := s.status(t, ctx, b); got != "closed" {
+		t.Errorf("the bucket is %q; nothing reopens it", got)
+	}
+	if st.Resurfaced != 1 || st.Appended != 3 {
+		t.Errorf("RulesStats = %+v, want Resurfaced 1 (the control only), Appended 3", st)
+	}
+}
+
 // ---- criterion 6: everything another path owns writes false and still logs -----------
 
 // T6/T11: a ready, an in_progress and a delivered task.
@@ -588,8 +627,12 @@ func TestCaptureResurface_Integration_ShadowRecordsTheSameFlagAndCallsNothing(t 
 
 	s.logged(t, ctx, m, capture.RulesModeShadow, b, true,
 		"criterion 7: the decision is mode-free; shadow records the same resurface value")
-	if st.Resurfaced != 1 {
-		t.Errorf("RulesStats.Resurfaced in SHADOW = %d, want 1 (CC7: counted in both modes, a recorded fact)", st.Resurfaced)
+	// 2, not 1: the shadow pass skips only messages that already carry a SHADOW
+	// row, so it also decides the bucket's setup message (live row only), which
+	// is a human message naming the key and now logs onto the closed bucket too.
+	if st.Resurfaced != 2 {
+		t.Errorf("RulesStats.Resurfaced in SHADOW = %d, want 2 — this message and the bucket's setup message, "+
+			"which has only a live row (CC7: counted in both modes, a recorded fact)", st.Resurfaced)
 	}
 	if n := s.count(t, ctx, `SELECT count(*) FROM audit_events WHERE actor=$1`, rsfActor); n != auditBefore {
 		t.Errorf("a SHADOW pass made %d executor call(s); shadow calls nothing", n-auditBefore)
