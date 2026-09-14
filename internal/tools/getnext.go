@@ -35,6 +35,12 @@ func validateGetNext(args []byte) error {
 // edited. Pinned by getnext_ordering_integration_test.go.
 const taskQueueOrder = `t.priority DESC, t.plan_order ASC NULLS LAST, t.created_at ASC, t.id ASC`
 
+// TaskQueueOrder is the exported alias of taskQueueOrder (SWT-52 criterion 6):
+// the dashboard's "next in queue" light orders its candidates by it, so the
+// blue light and task_get_next agree. An alias, never a second literal. The
+// SQL aliases tasks as t.
+const TaskQueueOrder = taskQueueOrder
+
 type nextTask struct {
 	ID         int64  `json:"id"`
 	Project    string `json:"project"`

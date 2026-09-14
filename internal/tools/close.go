@@ -106,10 +106,22 @@ func closeTransition(ctx context.Context, tx pgx.Tx, taskID int64, to, reason st
 	// closed_at and the status it was closed FROM; a reopen clears both. The
 	// idempotent close above returns before this point, so a replay never moves
 	// the instant the revive guard compares against.
-	update := `UPDATE tasks SET status=$2, updated_at=now(), closed_at=NULL, closed_from_status=NULL WHERE id=$1`
+	//
+	// SWT-52 D9: a real close also clears the session state marker (task_signal),
+	// so a closed row is never red and every close path — Done, Dismiss,
+	// task_close, the Jira reconciler, the orchestrator — clears it.
+	//
+	// SWT-52 D9 amendment (2026-09-14, Codex review): the REOPEN clears it too, in
+	// the same UPDATE that moves the task out of closed. A binary built before
+	// 0033 closes without clearing (a rollback, or a workload not yet rolled), and
+	// a later reopen would resurrect that stale red or yellow. Every reopen form —
+	// plain, guarded, revive — reaches this one UPDATE, so none can.
+	update := `UPDATE tasks SET status=$2, updated_at=now(), closed_at=NULL, closed_from_status=NULL,
+	                          working_state = NULL, working_state_at = NULL WHERE id=$1`
 	args := []any{taskID, to}
 	if to == "closed" {
-		update = `UPDATE tasks SET status=$2, updated_at=now(), closed_at=now(), closed_from_status=$3 WHERE id=$1`
+		update = `UPDATE tasks SET status=$2, updated_at=now(), closed_at=now(), closed_from_status=$3,
+		                          working_state = NULL, working_state_at = NULL WHERE id=$1`
 		args = append(args, status)
 	}
 	if _, err := tx.Exec(ctx, update, args...); err != nil {

@@ -189,6 +189,22 @@ var agentTools = []Tool{
 			"Human sessions only: a worker console is refused by policy.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"priority":{"type":"integer","minimum":0,"maximum":3,"description":"0 normal, 1 elevated, 2 high, 3 urgent"},"reason":{"type":"string","description":"optional: why, in Salvador's words"}},"required":["task_id","priority"]}`),
 	},
+	// SWT-52 (board-status-lights) D7/D13: a session's state signal on a HUMAN
+	// task, so the board's light is truthful. Listing it removes the transport
+	// allowlist as a refusal for worker consoles, so policy.humanOnly (rule
+	// human_only) keeps them out, and the handler refuses a claude task for every
+	// caller. No pin, so no hidden argument. The state enum must equal
+	// tools.SignalStates() (TestTaskSignalSchema).
+	{
+		Name: "task_signal",
+		Description: "Set this session's state on a swb task so Salvador's lights board is truthful: working (you are on it), " +
+			"needs_input (call it just before you stop to wait on his answer), clear (you paused or switched away unfinished). " +
+			"Human tasks only; working and needs_input only on holding, ready or blocked tasks. It changes no status, takes no " +
+			"claim, sends nothing and records nothing but the state: Salvador answers in this session's console, never through " +
+			"switchboard. To finish, call task_close, which also clears the state. The same state again only refreshes its time. " +
+			"Human sessions only: a worker console is refused by policy.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"state":{"type":"string","enum":["working","needs_input","clear"],"description":"working, needs_input (waiting on Salvador), or clear"}},"required":["task_id","state"]}`),
+	},
 }
 
 var agentToolNames = func() map[string]bool {

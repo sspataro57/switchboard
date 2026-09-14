@@ -295,6 +295,20 @@ func TestBoardLights_Integration_EndToEnd(t *testing.T) {
 		t.Errorf("needs_input label %q does not say since", l)
 	}
 	bIsNext("needs_input", body)
+	// D1 amendment (2026-09-14): a red signalled today shows HH:MM only; one
+	// signalled before today's local midnight shows its date too, because
+	// needs_input never goes stale and yesterday's red must not read as today's.
+	if _, l, _ := boardLight(body, a); !regexp.MustCompile(`since \d{2}:\d{2}\)$`).MatchString(l) {
+		t.Errorf("today's needs_input label %q, want `since HH:MM)` with no date", l)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET working_state_at = `+lsDayStart+` - interval '1 hour' WHERE id=$1`, a); err != nil {
+		t.Fatalf("move the red to yesterday: %v", err)
+	}
+	body = board("")
+	assertBoardLight(t, "needs_input from yesterday (A)", body, a, "input", "waiting on your input (a session, since ")
+	if _, l, _ := boardLight(body, a); !regexp.MustCompile(`since \d{4}-\d{2}-\d{2} \d{2}:\d{2}\)$`).MatchString(l) {
+		t.Errorf("yesterday's needs_input label %q, want `since YYYY-MM-DD HH:MM)` (D1 amendment)", l)
+	}
 
 	lsSignal(t, ctx, ex, a, "working")
 	body = board("")

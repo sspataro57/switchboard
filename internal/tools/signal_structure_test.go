@@ -190,7 +190,19 @@ func literalTexts(t *testing.T, path string) []string {
 }
 
 func TestWorkingState_OnlySignalAndCloseWriteIt(t *testing.T) {
-	allowed := map[string]bool{"internal/tools/signal.go": true, "internal/tools/close.go": true}
+	// The allow-list, extended DELIBERATELY by the SWT-52 D9 amendment
+	// (2026-09-14): task_signal (signal.go) sets and clears; closeTransition
+	// (close.go) clears on a real close AND on every reopen — the reopen clear is
+	// a second writing literal in close.go (Codex: an old binary's close leaves
+	// the marker, and a reopen would resurrect it); task_claim (claim.go) clears
+	// on a claim (go-reviewer: a marker survived a claim/release cycle). Each
+	// entry carries a minimum writer-literal count, so dropping one of the clears
+	// fails the positive controls below as well as the integration tests.
+	allowed := map[string]bool{
+		"internal/tools/signal.go": true,
+		"internal/tools/close.go":  true,
+		"internal/tools/claim.go":  true,
+	}
 	writers := map[string]int{}
 	for _, root := range []string{"internal", "cmd"} {
 		base := filepath.Join("..", "..", root)
@@ -208,8 +220,8 @@ func TestWorkingState_OnlySignalAndCloseWriteIt(t *testing.T) {
 					writers[rel]++
 					if !allowed[rel] {
 						t.Errorf("%s WRITES working_state/working_state_at (%q). Criterion 19: only task_signal "+
-							"(internal/tools/signal.go) and closeTransition (internal/tools/close.go) write them; the "+
-							"dashboard only READS for the lights (invariant 3)", rel, m)
+							"(internal/tools/signal.go), closeTransition (internal/tools/close.go) and task_claim "+
+							"(internal/tools/claim.go) write them; the dashboard only READS for the lights (invariant 3)", rel, m)
 					}
 				}
 			}
@@ -229,8 +241,13 @@ func TestWorkingState_OnlySignalAndCloseWriteIt(t *testing.T) {
 			"task_signal sets and clears it (D10); a scan that finds no writer cannot tell 'one writer' from "+
 			"'the pattern is wrong'", seen)
 	}
-	if writers["internal/tools/close.go"] == 0 {
-		t.Errorf("POSITIVE CONTROL FAILED: internal/tools/close.go writes no working_state. D9: closeTransition's "+
-			"transitioning UPDATE clears both columns on a real close (writers seen: %v)", seen)
+	if n := writers["internal/tools/close.go"]; n < 2 {
+		t.Errorf("POSITIVE CONTROL FAILED: internal/tools/close.go has %d working_state-writing literal(s), want 2. "+
+			"D9 and its 2026-09-14 amendment: closeTransition clears both columns on a real close AND in the reopen "+
+			"UPDATE (writers seen: %v)", n, seen)
+	}
+	if writers["internal/tools/claim.go"] == 0 {
+		t.Errorf("POSITIVE CONTROL FAILED: internal/tools/claim.go writes no working_state. D9 amendment "+
+			"(2026-09-14): task_claim's ready → claimed UPDATE clears both columns (writers seen: %v)", seen)
 	}
 }

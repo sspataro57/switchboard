@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sspataro57/switchboard/internal/orchestrator"
+	"github.com/sspataro57/switchboard/internal/tools"
 )
 
 // ---- /tasks board -------------------------------------------------------------
@@ -37,6 +38,9 @@ type taskRow struct {
 	// when the task is not closed and its NEWEST dismissal was overtaken by
 	// an inbound message. Board-only — never an export column.
 	ReopenedAfterDismissal string
+	// Light is the row's status light (SWT-52 D1), computed in Go by lightFor
+	// from the status and boardLightFacts' separate read. Board-only.
+	Light light
 }
 
 type statusColumn struct {
@@ -53,6 +57,40 @@ type boardData struct {
 	// D5): the board is where Salvador looks, /funnel is where he investigates.
 	// A failing health query leaves it nil — the board never breaks on health.
 	OrchAlert *orchestrator.HealthState
+	// SWT-52 D15, the opt-in auto-refresh. AutoRefresh is set iff the query
+	// carries refresh=on; RefreshSeconds comes from boardRefreshInterval, never
+	// from the request. RefreshToggleURL and ReloadURL are rebuilt from
+	// boardKeys (never flash); RenderedAt is the DB clock's HH:MM:SS in
+	// BoardTimeZone, returned by boardLightFacts' first statement.
+	AutoRefresh      bool
+	RefreshSeconds   int
+	RefreshToggleURL string
+	ReloadURL        string
+	RenderedAt       string
+}
+
+// BoardTimeZone is Salvador's day for the board (SWT-52 D5): a task closed
+// since local midnight here stays on the default board. Bound as a parameter,
+// evaluated on the Postgres clock — the pods run UTC (the SWT-48 lesson) — and
+// deliberately not AVAIL_TZ, which is availability's knob.
+const BoardTimeZone = "America/New_York"
+
+// boardRefreshInterval is the auto-refresh period (D15), fixed here and never a
+// URL value: a caller-chosen refresh=0.1 would turn one tab into a query flood
+// against the shared pg-main.
+const boardRefreshInterval = 5 * time.Second
+
+// boardKeys is the ONE list of board URL keys (D15, criterion 30): the four
+// filters plus refresh. boardBack rebuilds a verb's redirect from the POSTed
+// form over it, and boardRefreshURLs rebuilds the toggle and reload URLs from
+// the query over it, so a key cannot survive one round trip and not another.
+// boardQuery still reads only the four filters: refresh never reaches SQL.
+var boardKeys = []string{"project", "status", "assignee_type", "subproject", "refresh"}
+
+// boardDayStart is the ONE spelling of today's local midnight on the DB clock
+// (criterion 10): p is the bind parameter holding BoardTimeZone.
+func boardDayStart(p string) string {
+	return "date_trunc('day', now() AT TIME ZONE " + p + ") AT TIME ZONE " + p
 }
 
 // boardStatusOrder pins the column order to the status machine.
@@ -62,7 +100,11 @@ var boardStatusOrder = []string{
 }
 
 // boardQuery builds the filtered board select (shared by /tasks and the
-// exports — same filters, id ASC).
+// exports — same filters, id ASC). With no status filter it shows every open
+// task plus the tasks closed since today's local midnight that carry no OPEN
+// dismissal (SWT-52 D5): a dismissal leaves at once, a Done lingers until
+// midnight. The close instant is COALESCE(closed_at, updated_at), the 0030
+// fallback. Its select list — the exports' columns — is unchanged.
 func boardQuery(r *http.Request) (string, []any) {
 	q := `SELECT t.id, COALESCE(p.slug,''), COALESCE(t.subproject,''), t.parent_id,
 	             t.title, t.status, t.assignee_type, COALESCE(t.worker_type,''),
@@ -81,7 +123,11 @@ func boardQuery(r *http.Request) (string, []any) {
 	if v := r.URL.Query().Get("status"); v != "" {
 		add("t.status = $%d", v)
 	} else {
-		conds = append(conds, "t.status <> 'closed'") // closed hidden by default
+		args = append(args, BoardTimeZone)
+		conds = append(conds, `(t.status <> 'closed'
+		 OR (COALESCE(t.closed_at, t.updated_at) >= `+boardDayStart(fmt.Sprintf("$%d", len(args)))+`
+		     AND NOT EXISTS (SELECT 1 FROM task_dismissals d
+		                      WHERE d.task_id = t.id AND d.reopened_at IS NULL)))`)
 	}
 	if v := r.URL.Query().Get("assignee_type"); v != "" {
 		add("t.assignee_type = $%d", v)
@@ -127,6 +173,14 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// SWT-52: the lights' own read (D3), which also returns the render time the
+	// auto-refresh indicator shows (D15). One refresh render is exactly one
+	// ordinary render: the same statements, whatever the refresh key says.
+	facts, renderedAt, err := s.boardLightFacts(r.Context(), rows)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	byStatus := map[string][]taskRow{}
 	for _, t := range rows {
@@ -135,6 +189,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			Title: t.Title, Status: t.Status, AssigneeType: t.AssigneeType,
 			WorkerType: t.WorkerType, Priority: t.Priority, UpdatedAt: t.UpdatedAt,
 			ReopenedAfterDismissal: markers[t.ID],
+			Light:                  lightFor(t.Status, facts[t.ID]),
 		}
 		if t.ParentID != nil {
 			tr.ParentID = fmt.Sprintf("%d", *t.ParentID)
@@ -144,12 +199,26 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		byStatus[t.Status] = append(byStatus[t.Status], tr)
 	}
+	// D15: only refresh=on turns auto-refresh on; the interval is the const.
+	autoRefresh := r.URL.Query().Get("refresh") == "on"
+	refreshKey := ""
+	if autoRefresh {
+		refreshKey = "on" // the verb forms' and the filter form's hidden refresh input
+	}
+	toggle, reload := boardRefreshURLs(r.URL.Query())
 	data := boardData{Flash: r.URL.Query().Get("flash"), Filters: map[string]string{
 		"project":       r.URL.Query().Get("project"),
 		"status":        r.URL.Query().Get("status"),
 		"assignee_type": r.URL.Query().Get("assignee_type"),
 		"subproject":    r.URL.Query().Get("subproject"),
-	}}
+		"refresh":       refreshKey,
+	},
+		AutoRefresh:      autoRefresh,
+		RefreshSeconds:   int(boardRefreshInterval / time.Second),
+		RefreshToggleURL: toggle,
+		ReloadURL:        reload,
+		RenderedAt:       renderedAt,
+	}
 	for _, st := range boardStatusOrder {
 		if len(byStatus[st]) > 0 {
 			data.Columns = append(data.Columns, statusColumn{Status: st, Tasks: byStatus[st]})
@@ -221,6 +290,122 @@ func (s *Server) reopenMarkers(r *http.Request, rows []TaskExportRow) (map[int64
 		out[id] = code
 	}
 	return out, q.Err()
+}
+
+// boardLightFacts is the lights' SEPARATE read (SWT-52 D3, criterion 5) — the
+// reopenMarkers precedent: boardQuery feeds the exports, whose header is
+// pinned, so none of these columns enters TaskExportRow. At most two
+// statements per render (D15's cost statement):
+//
+//  1. the row facts, for the union of the displayed ids and every ready task,
+//     plus the render time for the auto-refresh indicator (one row even when no
+//     task matches: the facts are LEFT JOINed onto a one-row select). The
+//     session state and its time; staleness against tools.WorkingLease; and,
+//     for closed rows, the newest OPEN dismissal's code and whether the close
+//     instant is since today's local midnight. All on the DB clock, in
+//     BoardTimeZone.
+//  2. the queue-head candidates: every ready task in the database, in
+//     tools.TaskQueueOrder (D2) — never only the displayed rows, so a filter
+//     can hide a queue's first task but never make the second one blue. Skipped
+//     when no task is ready.
+//
+// A candidate is eligible iff lightFor with QueueHead=false gives it the
+// neutral light: a red or yellow task is not "next". It reads neither
+// feedback_requests nor task_events.
+func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map[int64]lightFacts, string, error) {
+	ids := make([]int64, 0, len(rows))
+	for _, t := range rows {
+		ids = append(ids, t.ID)
+	}
+	facts := map[int64]lightFacts{}
+	statusOf := map[int64]string{}
+	var renderedAt string
+	q, err := s.pool.Query(ctx,
+		`SELECT to_char(now() AT TIME ZONE $2, 'HH24:MI:SS'),
+		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today
+		   FROM (SELECT 1) one
+		   LEFT JOIN (
+		     SELECT t.id, t.status,
+		            COALESCE(t.working_state, '') AS state,
+		            COALESCE(to_char(t.working_state_at AT TIME ZONE $2, 'YYYY-MM-DD HH24:MI'), '') AS state_at,
+		            COALESCE(t.working_state_at >= `+boardDayStart("$2")+`, false) AS state_today,
+		            COALESCE(t.working_state = 'working'
+		                     AND t.working_state_at < now() - make_interval(secs => $3), false) AS stale,
+		            CASE WHEN t.status = 'closed' THEN
+		                 COALESCE((SELECT d.reason_code FROM task_dismissals d
+		                            WHERE d.task_id = t.id AND d.reopened_at IS NULL
+		                            ORDER BY d.id DESC LIMIT 1), '')
+		                 ELSE '' END AS dismissal,
+		            (t.status = 'closed' AND COALESCE(t.closed_at, t.updated_at) >= `+boardDayStart("$2")+`) AS closed_today
+		       FROM tasks t
+		      WHERE t.id = ANY($1) OR t.status = 'ready') f ON true`,
+		ids, BoardTimeZone, tools.WorkingLease.Seconds())
+	if err != nil {
+		return nil, "", fmt.Errorf("select light facts: %w", err)
+	}
+	defer q.Close()
+	var ready []int64
+	for q.Next() {
+		var id *int64
+		var status, state, stateAt, dismissal *string
+		var stateToday, stale, closedToday *bool
+		if err := q.Scan(&renderedAt, &id, &status, &state, &stateAt, &stateToday, &stale, &dismissal, &closedToday); err != nil {
+			return nil, "", fmt.Errorf("scan light facts: %w", err)
+		}
+		if id == nil {
+			continue // the one row of an empty match: render time only
+		}
+		facts[*id] = lightFacts{
+			OpenDismissalCode: *dismissal, ClosedToday: *closedToday,
+			State: *state, StateAt: *stateAt, StateToday: *stateToday, Stale: *stale,
+		}
+		statusOf[*id] = *status
+		if *status == "ready" {
+			ready = append(ready, *id)
+		}
+	}
+	if err := q.Err(); err != nil {
+		return nil, "", fmt.Errorf("read light facts: %w", err)
+	}
+	q.Close()
+	if len(ready) == 0 {
+		return facts, renderedAt, nil
+	}
+
+	c, err := s.pool.Query(ctx,
+		`SELECT t.id, t.assignee_type, t.project_id, COALESCE(p.slug,''), COALESCE(p.client,''), COALESCE(t.subproject,'')
+		   FROM tasks t JOIN projects p ON p.id = t.project_id
+		  WHERE t.status = 'ready'
+		  ORDER BY `+tools.TaskQueueOrder)
+	if err != nil {
+		return nil, "", fmt.Errorf("select queue candidates: %w", err)
+	}
+	defer c.Close()
+	var cands []headCandidate
+	for c.Next() {
+		var h headCandidate
+		if err := c.Scan(&h.ID, &h.AssigneeType, &h.ProjectID, &h.ProjectSlug, &h.Client, &h.Subproject); err != nil {
+			return nil, "", fmt.Errorf("scan queue candidate: %w", err)
+		}
+		cands = append(cands, h)
+	}
+	if err := c.Err(); err != nil {
+		return nil, "", fmt.Errorf("read queue candidates: %w", err)
+	}
+	eligible := func(id int64) bool {
+		if statusOf[id] != "ready" {
+			return false // became ready between the two statements: no facts, not a head
+		}
+		f := facts[id]
+		f.QueueHead = false
+		return lightFor("ready", f).Class == "none"
+	}
+	for id, lane := range pickQueueHeads(cands, eligible) {
+		f := facts[id]
+		f.QueueHead, f.Lane = true, lane
+		facts[id] = f
+	}
+	return facts, renderedAt, nil
 }
 
 // ---- /tasks/{id} detail ---------------------------------------------------------
@@ -585,19 +770,51 @@ func (s *Server) closeTaskAction(w http.ResponseWriter, r *http.Request) {
 	s.executeTask(w, r, "task_close", string(raw), taskID, boardBack(r))
 }
 
-// boardBack is D5's one spelling of the board redirect's filters: the four
-// known keys, re-encoded from the POSTED form via url.Values, empty ones
-// omitted — never echoed from the request's query string or any other
-// caller-supplied string (the safeNext lesson in auth.go). Every board verb calls it, so a
-// fifth filter cannot survive one verb's redirect and not another's.
+// boardBack is D5's one spelling of the board redirect's keys: boardKeys (the
+// four filters plus SWT-52's refresh, so a Done or Dismiss made with
+// auto-refresh on lands back on an auto-refreshing board), re-encoded from the
+// POSTED form via url.Values, empty ones omitted — never echoed from the
+// request's query string or any other caller-supplied string (the safeNext
+// lesson in auth.go). Every board verb calls it, so a key cannot survive one
+// verb's redirect and not another's.
 func boardBack(r *http.Request) url.Values {
 	back := url.Values{}
-	for _, k := range []string{"project", "status", "assignee_type", "subproject"} {
+	for _, k := range boardKeys {
 		if v := r.PostFormValue(k); v != "" {
 			back.Set(k, v)
 		}
 	}
 	return back
+}
+
+// boardRefreshURLs is the GET side of boardKeys (SWT-52 D15, criterion 30): it
+// re-encodes the non-empty boardKeys values of the board's query via
+// url.Values. toggle flips refresh (on → absent, anything else → on); reload
+// keeps refresh=on. Neither carries flash (a verb's flash shows once) or any
+// key outside boardKeys. Pure.
+func boardRefreshURLs(q url.Values) (toggle, reload string) {
+	tv, rv := url.Values{}, url.Values{}
+	for _, k := range boardKeys {
+		if k == "refresh" {
+			if q.Get(k) != "on" {
+				tv.Set(k, "on")
+			}
+			rv.Set(k, "on")
+			continue
+		}
+		if v := q.Get(k); v != "" {
+			tv.Set(k, v)
+			rv.Set(k, v)
+		}
+	}
+	return boardURL(tv), boardURL(rv)
+}
+
+func boardURL(v url.Values) string {
+	if len(v) == 0 {
+		return "/tasks"
+	}
+	return "/tasks?" + v.Encode()
 }
 
 // planAction runs approve/reject_plan_import through the executor with the

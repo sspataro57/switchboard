@@ -13,6 +13,7 @@ package dashboard
 //	    OpenDismissalCode string
 //	    ClosedToday       bool
 //	    State, StateAt    string // StateAt is "YYYY-MM-DD HH:MM" in BoardTimeZone
+//	    StateToday        bool   // D1 amendment 2026-09-14: signal since local midnight
 //	    Stale, QueueHead  bool
 //	    Lane              string
 //	}
@@ -174,21 +175,39 @@ func TestLightFor_EveryStatusAcrossFactCombinations(t *testing.T) {
 	}
 }
 
-// The time parts of the session labels (D1 row 5, D6): HH:MM for the fresh
-// labels, the full date and time for the stale ring.
+// The time parts of the session labels (D1 row 5, D6, and the D1 amendment of
+// 2026-09-14): the fresh labels show HH:MM for a signal since today's local
+// midnight (StateToday) and the full date and time for an earlier day's — a
+// needs_input never goes stale, so yesterday's red must not read as today's.
+// The stale ring always shows the full date and time.
+//
+// AMENDED — not deleted — 2026-09-14: the two fresh-label rows used to pass
+// with no StateToday fact and expect HH:MM; they now set StateToday, and the
+// earlier-day rows are new.
 func TestLightFor_SessionLabelsCarryTheSignalTime(t *testing.T) {
+	const earlier = "2026-09-13 22:40"
 	for _, st := range []string{"holding", "ready", "blocked"} {
-		in := lightFor(st, lightFacts{State: "needs_input", StateAt: stateAt})
-		if in.Label != "waiting on your input (a session, since 10:05)" {
-			t.Errorf("%s + needs_input label = %q, want %q", st, in.Label, "waiting on your input (a session, since 10:05)")
-		}
-		w := lightFor(st, lightFacts{State: "working", StateAt: stateAt})
-		if w.Label != "in progress (a session, last signal 10:05)" {
-			t.Errorf("%s + working label = %q, want %q", st, w.Label, "in progress (a session, last signal 10:05)")
-		}
-		s := lightFor(st, lightFacts{State: "working", StateAt: stateAt, Stale: true})
-		if s.Label != "in progress? no session signal since 2026-09-14 10:05" {
-			t.Errorf("%s + stale working label = %q, want %q", st, s.Label, "in progress? no session signal since 2026-09-14 10:05")
+		for _, tc := range []struct {
+			name string
+			f    lightFacts
+			want string
+		}{
+			{"needs_input today", lightFacts{State: "needs_input", StateAt: stateAt, StateToday: true},
+				"waiting on your input (a session, since 10:05)"},
+			{"needs_input on an earlier day", lightFacts{State: "needs_input", StateAt: earlier},
+				"waiting on your input (a session, since 2026-09-13 22:40)"},
+			{"working today", lightFacts{State: "working", StateAt: stateAt, StateToday: true},
+				"in progress (a session, last signal 10:05)"},
+			{"working (fresh) on an earlier day", lightFacts{State: "working", StateAt: earlier},
+				"in progress (a session, last signal 2026-09-13 22:40)"},
+			{"stale working today", lightFacts{State: "working", StateAt: stateAt, StateToday: true, Stale: true},
+				"in progress? no session signal since 2026-09-14 10:05"},
+			{"stale working on an earlier day", lightFacts{State: "working", StateAt: earlier, Stale: true},
+				"in progress? no session signal since 2026-09-13 22:40"},
+		} {
+			if got := lightFor(st, tc.f).Label; got != tc.want {
+				t.Errorf("%s + %s label = %q, want %q", st, tc.name, got, tc.want)
+			}
 		}
 	}
 }
@@ -222,8 +241,10 @@ func TestLightFor_NamedPrecedenceCases(t *testing.T) {
 		t.Errorf("in_progress + needs_input label = %q, want exactly `in progress`: outside holding/ready/blocked "+
 			"the session marker is ignored (criterion 3)", got.Label)
 	}
-	if got := lightFor("ready", lightFacts{QueueHead: true, Lane: "acme.web console"}); got.Label != "next in queue (acme.web console)" {
-		t.Errorf("ready queue head label = %q, want `next in queue (acme.web console)`", got.Label)
+	// Amended 2026-09-14 (D2 amendment): lane names no longer carry a
+	// subproject, so the example lane is the client's console.
+	if got := lightFor("ready", lightFacts{QueueHead: true, Lane: "acme console"}); got.Label != "next in queue (acme console)" {
+		t.Errorf("ready queue head label = %q, want `next in queue (acme console)`", got.Label)
 	}
 }
 
@@ -276,14 +297,36 @@ func TestPickQueueHeads(t *testing.T) {
 		got := pickQueueHeads([]headCandidate{human(1, 7, "saka"), claude(2, 7, "saka", "acme", ""), human(3, 7, "saka")}, allEligible)
 		assertHeads(t, "two lanes", got, map[int64]string{1: "saka", 2: "acme console"})
 	})
-	t.Run("two subprojects of one client give two heads", func(t *testing.T) {
+	// REWRITTEN — not deleted — by the D2 amendment (2026-09-14, Codex review).
+	// This case used to be "two subprojects of one client give two heads"
+	// ({1: acme.web console, 2: acme.api console}). But task_get_next(client, "")
+	// treats an empty subproject as NO filter and picks ONE task across all the
+	// client's subprojects, so two blues claimed two "next" tasks where the
+	// client-wide console has one. The claude lane is now one per client.
+	t.Run("two subprojects of one client share ONE claude lane", func(t *testing.T) {
 		got := pickQueueHeads([]headCandidate{
 			claude(1, 7, "saka", "acme", "web"), claude(2, 7, "saka", "acme", "api"), claude(3, 7, "saka", "acme", "web"),
 		}, allEligible)
-		assertHeads(t, "two subprojects", got, map[int64]string{1: "acme.web console", 2: "acme.api console"})
+		assertHeads(t, "two subprojects", got, map[int64]string{1: "acme console"})
 	})
-	// The claude lane is per (client, subproject), NOT per project:
-	// task_get_next(client) draws across the client's projects.
+	// The head is the first in queue order WHATEVER its subproject — what
+	// task_get_next(client) returns. A subproject console (task_get_next(acme,
+	// api)) would take task 2 next, and task 2 shows no blue: the accepted
+	// under-report (a missing blue is safer than a false "next").
+	t.Run("the client lane's head ignores subprojects, as task_get_next(client) does", func(t *testing.T) {
+		got := pickQueueHeads([]headCandidate{
+			claude(1, 7, "saka", "acme", "web"), claude(2, 7, "saka", "acme", "api"), claude(3, 7, "saka", "acme", ""),
+		}, allEligible)
+		assertHeads(t, "client lane over subprojects", got, map[int64]string{1: "acme console"})
+	})
+	t.Run("two clients give two claude heads", func(t *testing.T) {
+		got := pickQueueHeads([]headCandidate{
+			claude(1, 7, "saka", "acme", "web"), claude(2, 9, "zeta", "zeta-co", "web"),
+		}, allEligible)
+		assertHeads(t, "two clients", got, map[int64]string{1: "acme console", 2: "zeta-co console"})
+	})
+	// The claude lane is per client, NOT per project: task_get_next(client)
+	// draws across the client's projects.
 	t.Run("one claude lane spans a client's projects", func(t *testing.T) {
 		got := pickQueueHeads([]headCandidate{claude(1, 7, "saka", "acme", ""), claude(2, 8, "saka-two", "acme", "")}, allEligible)
 		assertHeads(t, "claude lane per client", got, map[int64]string{1: "acme console"})

@@ -131,6 +131,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// human_only): no spine caller writes priority after creation, so every
 		// automated caller is refused. MCP-listed in both profiles. See priority.go.
 		{"task_set_priority", validateSetPriority, setPriority},
+		// SWT-52 (board-status-lights) D7/D10: a Claude session's state signal on
+		// a HUMAN task (working | needs_input | clear) for the board's lights.
+		// humanOnly (rule human_only); the handler refuses a non-human task for
+		// every caller. MCP-listed in both profiles. See signal.go.
+		{"task_signal", validateSignal, signalTask},
 		// SWT-41 D1: the one audited way to move the orchestrator cursor forward
 		// (start-from-now). humanOnly and deliberately NOT in
 		// internal/mcpserver/schemas.go. See orchestratorcursor.go.
