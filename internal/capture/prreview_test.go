@@ -360,6 +360,26 @@ func TestTrustedGitHubNotification_TopmostGmailDKIMPassForGitHubOnly(t *testing.
 			`Authentication-Results: mx.google.com; dkim=pass header.i="x header.d=github.com "@evil.example header.s=s1` + "\r\n", false},
 		{"any quote in a dkim result, even beside a real github pass",
 			`Authentication-Results: mx.google.com; dkim=pass header.d=github.com header.s="pf2023"` + "\r\n", false},
+		// Prod 2026-09-14: Gmail quotes header.b when the signature prefix holds
+		// '/' or '+' (msgs 105676, 112853, 140518, 158555 were wrongly untrusted).
+		// MUTATIONS: dropping the quoted-header.b exception turns the two genuine
+		// rows false; widening its character class to [^"]* turns "a quoted
+		// header.b holding whitespace and a header.d token" true; treating \" as an
+		// escaped quote inside header.b ((?:[^"\\]|\\.)*) turns the quoted-pair row true.
+		{"genuine: Gmail quotes a header.b holding '/'",
+			`Authentication-Results: mx.google.com; dkim=pass header.i=@github.com header.s=pf2023 header.b="FVP32/f4"; spf=pass smtp.mailfrom=noreply@github.com` + "\r\n", true},
+		{"genuine: quoted header.b with '+' and '='",
+			`Authentication-Results: mx.google.com; dkim=pass header.i=@github.com header.s=pf2023 header.b="a+b/c=="` + "\r\n", true},
+		{"a quoted header.b smuggling header.d=github.com",
+			`Authentication-Results: mx.google.com; dkim=pass header.i=@evil.example header.b="x header.d=github.com"` + "\r\n", false},
+		{"a quoted header.b holding whitespace and a header.d token",
+			`Authentication-Results: mx.google.com; dkim=pass header.i=@evil.example header.b="x header.d=github.com "` + "\r\n", false},
+		{"a quoted header.b beside a quoted header.i smuggle",
+			`Authentication-Results: mx.google.com; dkim=pass header.b="ab/c" header.i="x header.d=github.com "@evil.example` + "\r\n", false},
+		{"a quoted header.b with a quoted-pair",
+			`Authentication-Results: mx.google.com; dkim=pass header.d=github.com header.b="ab\"c"` + "\r\n", false},
+		{"a quoted header.b does not lift a pass for another domain",
+			`Authentication-Results: mx.google.com; dkim=pass header.i=@evil.example header.b="ab/c"` + "\r\n", false},
 		{"a pass only inside a comment", "Authentication-Results: mx.google.com; dkim=fail (dkim=pass header.d=github.com) header.d=evil.example\r\n", false},
 		{"spf/dmarc pass for github but no dkim", "Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=notifications@github.com; dmarc=pass header.from=github.com\r\n", false},
 		{"dkim=pass naming no domain", "Authentication-Results: mx.google.com; dkim=pass\r\n", false},
