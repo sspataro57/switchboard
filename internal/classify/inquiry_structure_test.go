@@ -145,7 +145,12 @@ func TestMigrationLedger_Learns0024(t *testing.T) {
 	// ownership list is the comment ABOVE the sentinel and the predicate is
 	// below it, and a window anchored only forwards would report "0024 is
 	// unowned" while its owner sat three lines up.
-	start := i - 3000
+	//
+	// WIDENED from 3000 to 4000 bytes at the SWT-53/SWT-54 merge: the two new
+	// one-line ownership notes (34: chat-on-closed-task, 35: treetop-pr-review-
+	// tasks) sit above the marker and pushed "SWT-33", 2958 bytes back, out of a
+	// 3000-byte window. The ledger itself still owns 24; only the reach changed.
+	start := i - 4000
 	if start < 0 {
 		start = 0
 	}
@@ -343,16 +348,20 @@ func TestInquiryFilter_HasNoLocalityClauseAndTheReasonIsInTheComment(t *testing.
 	if decl < 0 {
 		t.Fatalf("%s mentions inboxWhereInquiry but never declares `const inboxWhereInquiry`", rel)
 	}
-	open := strings.Index(src[decl:], "`")
-	if open < 0 {
+	// AMENDED 2026-09-14 (SWT-53 review fix): the clause is judged on the WHOLE
+	// declaration, up to the next blank line (the replyfold/inquiryeligible_test.go
+	// region shape). This check used to read only the FIRST raw literal, which
+	// stops at the first `+ replyfold...` splice; since chat-on-closed-task the
+	// WHERE clause lives in later literals, so an ai_locality clause added there
+	// would have passed and silently emptied the lane.
+	if !strings.Contains(src[decl:], "`") {
 		t.Fatalf("%s's inboxWhereInquiry is not a raw string literal", rel)
 	}
-	litStart := decl + open + 1
-	closing := strings.Index(src[litStart:], "`")
-	if closing < 0 {
-		t.Fatalf("%s's inboxWhereInquiry literal is unterminated", rel)
+	end := strings.Index(src[decl:], "\n\n")
+	if end < 0 {
+		t.Fatalf("%s's inboxWhereInquiry declaration is not followed by a blank line", rel)
 	}
-	literal := src[litStart : litStart+closing]
+	literal := src[decl : decl+end]
 	comment := src[i:decl]
 
 	if !strings.Contains(literal, "ai_inquiry") {

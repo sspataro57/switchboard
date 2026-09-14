@@ -61,13 +61,16 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		if v == 33 {
 			n33 = append(n33, e.Name())
 		}
-		// REWRITTEN by SWT-54 (treetop-pr-review-tasks), never deleted: 0035 is
-		// that ticket's (capture_rules.pr_review / exclude_pr_authors), owned in
-		// the ledger in internal/classify/structure_test.go and guarded by
-		// internal/capture TestMigration0035_CaptureRulesPRReviewShape. Any other
-		// number above 33 is still flagged here.
-		if v > 33 && v != 35 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists", e.Name())
+		// AMENDED by chat-on-closed-task (SWT-53) and treetop-pr-review-tasks
+		// (SWT-54), never deleted: 0034 is SWT-53's (projects.notifier_senders,
+		// capture_decisions.resurface) and 0035 is SWT-54's (capture_rules.pr_review
+		// / exclude_pr_authors, guarded by internal/capture
+		// TestMigration0035_CaptureRulesPRReviewShape). A number above 33 that
+		// another ticket owns is accounted for by the living ledger in
+		// internal/classify/structure_test.go; this guard exempts it by number, and
+		// any other number above 33 is still flagged here.
+		if v > 33 && v != 34 && v != 35 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {

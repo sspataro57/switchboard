@@ -2452,3 +2452,78 @@ did not author, from the GitHub notification mail he already receives. Runbook:
     SWT-50.
   - two receiving accounts (0f), and the thread-side read covers one of them;
   - `X-GitHub-Reason: author` has never been observed on prod (0a).
+
+## Closed-task chats resurface (SWT-53, chat-on-closed-task)
+
+- **`resurface` is capture's RECORDED fact, and the lanes only read it.**
+  `capture_decisions.resurface` (0034) is written by `insertDecision` from the pure
+  `resurfaces()` (`internal/capture/resurface.go`). It is true for a `task_log`
+  onto a task CLOSED at log time, when the match is not activity (SWT-45), there
+  is no open dismissal (SWT-36), the message is not the jira connector copy (J3),
+  the sender is not a notifier, and the sender is not blank. Status at log time is
+  a fact only capture sees, so never recompute it from `closed_at` in SQL. Both
+  inquiry inboxes read `replyfold.InquiryEligibleLatestSQL`, the ONE spelling (a
+  structure scan bans `latest.resurface` in any other classify/promote literal).
+  It re-reads "still closed", so a reopened task takes the message back out.
+- **The resurface branch reads only LIVE decisions (CC5b).** It reads the
+  message's latest LIVE decision (`replyfold.InquiryLiveDecisionJoinSQL`, alias
+  `live`), and a resurfaced message takes its project from that row
+  (`InquiryProjectIDSQL`). A shadow row never adds a message through it, and a
+  newer shadow row of any other action never removes one. The attributed branch
+  still reads the latest row in any mode, by design (the re-point contract;
+  recorded as a finding in the SPEC). So the one accepted corner (owner-session
+  decision 2026-09-14): a NEWER shadow `attributed` row takes precedence. The
+  message is admitted under the shadow row's project with `LoggedOnTaskID = 0`
+  and no `logged_on_closed_task` line, or dropped if that project is not armed.
+- **Notifier matching is EQUALITY, never substring.** `projects.notifier_senders`
+  entries are compared (trim + case-fold) to the whole `sender` or to
+  `senderAddress(sender)`. The `sender` capture criterion is a substring match.
+  Reusing it would swallow humans whose names contain `Jira`, and that is the
+  exact failure the ticket fixes. Only `loadRules` reads the column (scan). Empty
+  entries never match, and no entry can equal an empty sender, so a BLANK sender
+  has its own disqualifier and FAILS CLOSED: logged silently, reason `no sender
+  identity`, never resurfaced. The 741 historical blank-sender Jira-app Slack rows
+  (30 days on prod) were decided before 0034 and are never re-decided, so they
+  never resurface either. Since the Slack connector fix (17:00Z 2026-09-14), 0 new
+  inbound Slack messages have had an empty sender.
+- **Owner decision 2026-09-14: GitHub notification mail stays silent.**
+  `notifications@github.com` is in the collaboratory seed, although it also
+  carries human PR comments. GitHub PR tasks are SWT-54's.
+- **Cross-ticket rule (SWT-54 D4, added at the SWT-53/SWT-54 merge): a GitHub PR
+  state notice never resurfaces.** `resurfaceInput.prNotice` (set from
+  `decideMessage`'s `d.prNotice`, i.e. a TRUSTED merged/closed/reopened notice on
+  a pr_review rule's PR) is its own disqualifier with its own reason (`PR state
+  notice ... SWT-54 D4`). It holds even with an empty notifier list, so the
+  notice that closed a review task can never bring it back through the inquiry
+  lane. An ordinary comment on a CLOSED review task is a `task_log` that the
+  GitHub seed (`notifications@github.com`) keeps silent; with an empty list it
+  resurfaces like any human message. An UNTRUSTED notice falls through before any
+  pr_review action (no notice flag) to rule 6 (attributed) or rule 10's bucket,
+  where the same seed keeps it silent. Residual: his OWN PR's notice falls
+  through to rule 10 and is re-decided without the flag, so on a closed bucket
+  only the seed keeps it silent.
+- **K6 is about From PARSERS, not the `net/mail` import.** SWT-54's
+  `prreview.go` / `prreview_store.go` use `mail.Header` (the stored RFC822 header
+  map) and are allowed; `mail.ParseAddress` / `mail.AddressParser` live only in
+  `senderdomain.go` (`TestSenderAddress_LivesBesideSenderDomainAndIsItsParser`).
+- **Landmine: 0034 before the image.** New capture binaries select
+  `p.notifier_senders` and write `resurface`. On a db without 0034, every capture
+  pass fails and stalls every connector (the 0029/0030 precedent). Order: 0034,
+  then seed the notifier list, then roll ONE tag to every capture writer and
+  every inquiry reader in ONE apply, then reinstall opsctl before any hand-run
+  capture pass.
+- **Landmine: an old capture writer on a 0034 db loses resurfacing for good.**
+  It writes the default `resurface=false`. The live decision is unique per
+  message and never re-decided, and a shadow re-point cannot recover it
+  (the resurface branch reads only live decisions, CC5b).
+  Recorded residual: messages captured by an old writer during the minutes-long
+  roll window are logged but never resurfaced. Never hand-run capture from an
+  opsctl built before this branch.
+- **The gate residual (CC8).** The gate and route writers never write
+  `resurface` (default false). A gate-path `task_log` onto a closed task only
+  logs. That is fine while gated projects (reengine) are not inquiry-armed.
+- **Why nothing reopens the closed task.** Rule 10 has no `key_regex`, so it keys
+  by PREFIX (`WEB`/`API`/`OPS`, K3/K4) onto bucket tasks 56/57/60. A reopen would
+  resurrect a catch-all, and the reconciler would bounce it. The resurfaced ask
+  becomes a Holding task on the message's OWN conversation (body line
+  `logged_on_closed_task: N`), and the bucket stays closed.

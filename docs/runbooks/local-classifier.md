@@ -632,8 +632,17 @@ byte-identical to before.
 **What promotes.** An ok `classify_inquiry` verdict with `needs_reply`, on an
 inbound message whose LATEST capture decision (any mode) is `attributed` to a
 project with `ai_inquiry` and `inquiry_promote_after` set, recorded at or after
-that cutover, sent within 72h, and not already promoted. Then a deterministic
-gate, which reports the first failing reason:
+that cutover, sent within 72h, and not already promoted. Since
+chat-on-closed-task (SWT-53), a message whose latest LIVE decision is a
+`task_log` that capture recorded with `resurface=true` qualifies too, while the
+task it logged onto is STILL closed. That path reads only live decisions; a
+NEWER shadow `attributed` row still takes precedence (the re-point contract), so
+the message is then promoted as an attributed one, with no
+`logged_on_closed_task` line.
+That is a human message logged onto a closed task
+(`docs/runbooks/capture-rules.md`, "Closed-task chats resurface"). Both inboxes
+read the one predicate `replyfold.InquiryEligibleLatestSQL`. Then a
+deterministic gate, which reports the first failing reason:
 
 | reason | means |
 |---|---|
@@ -649,6 +658,13 @@ A gated verdict writes nothing and is counted in the stats line's `gated`
 block. A pending one promotes on the first pass after its hour. A passing
 verdict attaches to the thread's open task, reopens a dismissed one (SWT-36),
 or creates a new `holding` task titled `{asker}: {ask}`.
+
+**A resurfaced message** goes through the same gate and `Decide`. It becomes
+(or attaches to) a task on the message's OWN conversation, never the closed task
+capture logged it onto. That task stays closed. Its body gets one extra LAST
+line, `logged_on_closed_task: N`, and the promotion row's reason says `capture
+logged the message onto closed task N; resurfaced (chat-on-closed-task)`. Every
+other body is byte-identical to before.
 
 **Arming it.** Off until a human sets the lane's own cutover, after task #110
 has its provenance (C-D11):

@@ -425,8 +425,16 @@ func threadTask(ctx context.Context, pool *pgxpool.Pool, threadID *int64, projec
 // adds a third: an attach onto a DISMISSED task names the task, its reason
 // code and the dismissal the reopen was requested against — the typed outcome
 // lives in task_dismissals.reopened_by_message_id, never in this prose.
+//
+// chat-on-closed-task CC6 adds a fourth: a message capture logged onto a
+// CLOSED task and recorded as resurfacing names that task, because the new
+// task (or the attach) exists for it.
 func decisionReason(v Verdict, d Decision, existing, finished *ExistingTask) string {
 	var parts []string
+	if v.LoggedOnTaskID != 0 {
+		parts = append(parts, fmt.Sprintf(
+			"capture logged the message onto closed task %d; resurfaced (chat-on-closed-task)", v.LoggedOnTaskID))
+	}
 	if v.StoredProjectID != 0 && v.StoredProjectID != v.ProjectID {
 		parts = append(parts, fmt.Sprintf(
 			"re-attributed after classification: verdict stored project_id %d, current attribution %d",

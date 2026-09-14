@@ -134,6 +134,11 @@ type RulesConfig struct {
 // OwnActionMaxWait, so the pass decided as if clear (fail-open, SPEC J17).
 // Each is also Considered and its reason says BLIND. Counted in both modes.
 //
+// Resurfaced (chat-on-closed-task, CC7) counts decisions written with
+// capture_decisions.resurface=true: a task_log onto a CLOSED task that the
+// inquiry lanes will read. A recorded fact, not an action, so it is counted in
+// both modes (the Deferred/Blind precedent).
+//
 // PRAuthorSkipped (SWT-54 D2) counts messages a pr_review rule would have
 // created a task for but whose PR is his own or its author excluded, so the
 // message was re-decided without that rule (fall-through). The decision is
@@ -151,6 +156,7 @@ type RulesStats struct {
 	SurfacedCreated int
 	Deferred        int
 	Blind           int
+	Resurfaced      int
 	PRAuthorSkipped int
 	PRClosed        int
 }
@@ -253,6 +259,10 @@ type storedRule struct {
 	// PR; its task_log branch closes the task on a merge or close notice.
 	prReview         bool
 	excludePRAuthors []string
+	// notifiers is projects.notifier_senders (chat-on-closed-task CC4, 0034),
+	// read from the COLUMN with the rules. This is its one reader:
+	// notifierSender matches a sender against it by equality.
+	notifiers []string
 }
 
 // pendingMessage is one inbound message the pass must decide about.
@@ -316,6 +326,11 @@ type ruleDecision struct {
 	prUntrusted bool
 	prNotice    string
 	prClose     bool
+
+	// resurface (chat-on-closed-task CC3): a task_log onto a CLOSED task that
+	// no other path owns, decided by the pure resurfaces(). WRITTEN to
+	// capture_decisions.resurface: the inquiry lanes read it from there.
+	resurface bool
 }
 
 // simulatedRefs is DryRunRules' stand-in for the external_refs rows its own
@@ -423,6 +438,9 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 		stats.Considered++
 		if decision.blind {
 			stats.Blind++
+		}
+		if decision.resurface {
+			stats.Resurfaced++
 		}
 		if decision.prSkipped {
 			stats.PRAuthorSkipped++
@@ -565,7 +583,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		`SELECT r.id, p.slug, p.name, r.criteria_type, r.pattern, r.key_regex, r.priority, r.enabled,
 		        r.project_id, COALESCE(r.subproject,''), COALESCE(r.external_system,''),
 		        COALESCE(r.url_template,''), p.ticket_assignee_gate, r.revive, r.addressed,
-		        r.pr_review, r.exclude_pr_authors
+		        r.pr_review, r.exclude_pr_authors, p.notifier_senders
 		   FROM capture_rules r
 		   JOIN projects p ON p.id = r.project_id
 		  WHERE r.enabled
@@ -581,7 +599,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		if err := rows.Scan(&s.rule.ID, &s.rule.Project, &s.projectName, &s.rule.Kind, &s.rule.Pattern,
 			&s.rule.ExternalKeyRegex, &s.rule.Priority, &s.rule.Enabled,
 			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate, &s.gateOn,
-			&s.revive, &s.addressed, &s.prReview, &s.excludePRAuthors); err != nil {
+			&s.revive, &s.addressed, &s.prReview, &s.excludePRAuthors, &s.notifiers); err != nil {
 			return nil, fmt.Errorf("scan capture rule: %w", err)
 		}
 		// Rule.Source is the evaluator's carrier for `external_system` (Evaluate
@@ -926,6 +944,24 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 			d.dismissalID = existing.dismissalID
 			d.reason += fmt.Sprintf("; task %d was dismissed (%s); reopen requested against dismissal %d",
 				taskID, existing.dismissalCode, existing.dismissalID)
+		}
+		// chat-on-closed-task CC3: does this log onto a CLOSED task resurface
+		// the message through the inquiry lane? Decided here, where the status,
+		// the activity flag and the dismissal are already known, and RECORDED on
+		// the decision row. The reason fragment is added only for a closed task,
+		// so every open-task reason reads exactly as before.
+		resurface, why := resurfaces(resurfaceInput{
+			status:        existing.status,
+			activity:      activity,
+			dismissed:     existing.dismissalID != 0,
+			connectorCopy: pm.channel == jira.Channel,
+			notifier:      notifierSender(pm.msg.Sender, winner.notifiers),
+			blankSender:   blankSender(pm.msg.Sender),
+			prNotice:      d.prNotice != "",
+		})
+		d.resurface = resurface
+		if existing.status == "closed" {
+			d.reason += "; " + why
 		}
 		return d, winner, nil
 	}
@@ -1319,13 +1355,13 @@ func insertDecision(ctx context.Context, pool *pgxpool.Pool, mode string,
 		`INSERT INTO capture_decisions
 		   (message_id, raw_source_item_id, mode, matched_rule_id, project_id,
 		    matched_rule_ids, ambiguous, action, external_system, external_key,
-		    task_id, reason)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		    task_id, reason, resurface)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		 ON CONFLICT (message_id) WHERE mode = 'live' DO NOTHING
 		 RETURNING id`,
 		pm.msg.ID, pm.rawItemID, mode, d.matchedRuleID, d.projectID,
 		d.matchedRuleIDs, d.ambiguous, d.action, d.extSystem, d.extKey,
-		d.taskID, ruleNullIfEmpty(d.reason)).Scan(&id)
+		d.taskID, ruleNullIfEmpty(d.reason), d.resurface).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}

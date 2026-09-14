@@ -106,16 +106,20 @@ func runCaptureRulesGate(argv []string) error {
 // count the own-action guard, which runs only on the revive/surface path, and
 // the gate stage takes neither.
 //
+// resurfaced (chat-on-closed-task CC7/CC8) is ALWAYS 0 here: the gate's
+// task_log onto a closed task only logs and writes resurface=false, the
+// recorded residual (gated projects are not inquiry-armed).
+//
 // pr_author_skipped and pr_closed (SWT-54 criterion 15) are ALWAYS 0 here too:
 // the gate stage resolves jira holds only, and a pr_review rule is a github
 // rule, never held.
 func printGateStats(mode string, st capture.GateStats) {
-	const revived, surfacedCreated, deferred, blind, prAuthorSkipped, prClosed = 0, 0, 0, 0, 0, 0
+	const revived, surfacedCreated, deferred, blind, resurfaced, prAuthorSkipped, prClosed = 0, 0, 0, 0, 0, 0, 0
 	fmt.Printf("capture_gate: {\"mode\":%q,\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,"+
-		"\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,"+
+		"\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
 		"\"pr_author_skipped\":%d,\"pr_closed\":%d,"+
 		"\"attributed\":%d,\"pending_lookup\":%d,\"budget_skipped\":%d,\"resolved\":%d}\n",
-		mode, st.TasksCreated, st.Appended, st.Reopened, revived, surfacedCreated, deferred, blind,
+		mode, st.TasksCreated, st.Appended, st.Reopened, revived, surfacedCreated, deferred, blind, resurfaced,
 		prAuthorSkipped, prClosed,
 		st.Attributed, st.PendingLookup, st.BudgetSkipped, st.Resolved)
 }

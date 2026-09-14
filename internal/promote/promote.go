@@ -73,6 +73,14 @@ type Verdict struct {
 	ThreadScope       string
 	StoredThreadID    int64
 	ExternalMessageID string
+
+	// LoggedOnTaskID (chat-on-closed-task CC6) is the task_id of the message's
+	// latest LIVE capture decision when the resurface branch admitted it, i.e.
+	// a message capture logged onto a CLOSED task and recorded as resurfacing;
+	// 0 for an `attributed` admission (replyfold.InquiryLoggedOnTaskSQL). It is
+	// copied into the body and the promotion reason only. Decide never reads it,
+	// and nothing acts on that task.
+	LoggedOnTaskID int64
 }
 
 // ExistingTask is the thread's oldest task that is NOT closed/delivered, or —
