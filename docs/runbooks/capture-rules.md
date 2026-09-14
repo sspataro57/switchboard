@@ -289,6 +289,33 @@ reason code reopens (owner's decision). Plain `task_close`d tasks never do.
 Shadow reopens nothing. To keep a task down for good after it came back,
 dismiss it again: that writes a second, open row.
 
+## Done vs Dismiss on the board (SWT-51)
+
+The board has two verbs per row, and they answer different questions:
+
+- **Dismiss** means "this task should never have existed". Its reasons are
+  `not_actionable`, `wrong_kind`, `duplicate` and `handled_elsewhere`. It writes
+  a `task_dismissals` label.
+- **Done** means "this was real work and it is finished". It calls the existing
+  `task_close` as `dashboard:{user}`, with the reason `done on the board` or
+  `done on the board: <note>`, and writes NO label. A promoted inquiry closed
+  this way counts as `true_positive`.
+
+Done renders only on `assignee_type='human'` rows. The template enforces this,
+not the executor. `task_close` still accepts `pr_open`/`awaiting_*` on worker
+tasks, so a hand-built POST, which has the same power as `opsctl call
+task_close`, could strand a worker's claim. On `claimed`, `in_progress` or
+`needs_feedback`, `task_close` refuses, and the refusal shows as the board
+flash.
+
+**Never press Done on an "Answer feedback #M" task.** Closing it records no
+answer: the asking task stays in `needs_feedback`, nothing times it out, and
+the worker never resumes. Answer it with `opsctl answer-feedback` instead.
+That still works after an accidental Done, because the feedback request stays
+`open`.
+
+Undo a mis-clicked Done with `task_reopen`.
+
 ## Project-name rules (SWT-40 Part A)
 
 A message whose SUBJECT LINE names a project is attributed to it by a data rule,

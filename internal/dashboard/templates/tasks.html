@@ -68,6 +68,16 @@
           <input type="text" name="note" placeholder="note (optional)">
           <button>Dismiss</button>
         </form>
+        {{if eq .AssigneeType "human"}}
+        <form class="inline" method="post" action="/tasks/{{.ID}}/close">
+          <input type="hidden" name="project" value="{{index $.Filters "project"}}">
+          <input type="hidden" name="status" value="{{index $.Filters "status"}}">
+          <input type="hidden" name="assignee_type" value="{{index $.Filters "assignee_type"}}">
+          <input type="hidden" name="subproject" value="{{index $.Filters "subproject"}}">
+          <input type="text" name="note" placeholder="note (optional)">
+          <button>Done</button>
+        </form>
+        {{end}}
       </td>
     </tr>
     {{end}}

@@ -554,13 +554,50 @@ func (s *Server) dismissTaskAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.executeTask(w, r, "task_dismiss", string(raw), taskID, boardBack(r))
+}
+
+// closeTaskAction is POST /tasks/{id}/close (SWT-51): the board's Done verb.
+// One executor call (the existing task_close, as dashboard:{user}), no SQL of
+// its own (invariant 3), and no dismissal label — a finished task is not a
+// labelled negative. The optional note folds into task_close's required
+// reason (D1). The template renders the button on human rows only (D2); the
+// executor's closeTransition owns the refusable status set (D3).
+func (s *Server) closeTaskAction(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	taskID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || taskID <= 0 {
+		http.Error(w, "bad task id", http.StatusBadRequest)
+		return
+	}
+	reason := "done on the board"
+	if note := strings.TrimSpace(r.PostFormValue("note")); note != "" {
+		reason += ": " + note
+	}
+	raw, err := json.Marshal(map[string]any{"task_id": taskID, "reason": reason})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.executeTask(w, r, "task_close", string(raw), taskID, boardBack(r))
+}
+
+// boardBack is D5's one spelling of the board redirect's filters: the four
+// known keys, re-encoded from the POSTED form via url.Values, empty ones
+// omitted — never echoed from the request's query string or any other
+// caller-supplied string (the safeNext lesson in auth.go). Every board verb calls it, so a
+// fifth filter cannot survive one verb's redirect and not another's.
+func boardBack(r *http.Request) url.Values {
 	back := url.Values{}
 	for _, k := range []string{"project", "status", "assignee_type", "subproject"} {
 		if v := r.PostFormValue(k); v != "" {
 			back.Set(k, v)
 		}
 	}
-	s.executeTask(w, r, "task_dismiss", string(raw), taskID, back)
+	return back
 }
 
 // planAction runs approve/reject_plan_import through the executor with the
