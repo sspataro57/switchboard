@@ -1169,30 +1169,34 @@ func TestCaptureRevive_Integration_APre0030CloseFallsBackToUpdatedAt(t *testing.
 func TestCaptureRevive_Integration_ANonJiraRevivingRuleIsInert(t *testing.T) {
 	ctx := context.Background()
 	s := newCRVSuite(t, ctx)
+	// SWT-54: the non-jira stand-in was 'github'; a github key that is not a PR
+	// reference is now attribution only (criterion 6), so a CRG-n key can no
+	// longer create through a github rule. upwork_crm is the same J18 case: a
+	// legal, non-jira external_system.
 	rule := s.id(t, ctx,
 		`INSERT INTO capture_rules (project_id, criteria_type, pattern, external_system, key_regex, url_template,
 		                            priority, enabled, note, revive, addressed)
-		 VALUES ($1,'sender',$2,'github',$3,'https://github.test/{key}',92,true,'itest-caprev',false,false) RETURNING id`,
+		 VALUES ($1,'sender',$2,'upwork_crm',$3,'https://upwork.test/{key}',92,true,'itest-caprev',false,false) RETURNING id`,
 		s.gated, crvGatedFrom, `^[^\n]*?\b(CRG-[0-9]+)\b`)
-	githubTask := func(key string) (int64, bool) {
+	upworkTask := func(key string) (int64, bool) {
 		var id int64
 		err := s.pool.QueryRow(ctx, `SELECT r.task_id FROM external_refs r JOIN tasks t ON t.id = r.task_id
-		                              WHERE r.system='github' AND r.external_key=$1 AND t.project_id=$2`, key, s.gated).Scan(&id)
+		                              WHERE r.system='upwork_crm' AND r.external_key=$1 AND t.project_id=$2`, key, s.gated).Scan(&id)
 		return id, err == nil
 	}
 
-	// A github-linked task for CRG-41, created while the rule is plain, then closed.
+	// An upwork_crm-linked task for CRG-41, created while the rule is plain, then closed.
 	start := s.dbNow(t, ctx).Add(-30 * time.Minute)
 	s.mailMsg(t, ctx, crvGatedFrom, "inbound", "Katie Evans mentioned you on CRG-41", "", start, start)
 	s.pass(t, ctx, capture.RulesModeLive)
-	task, ok := githubTask("CRG-41")
+	task, ok := upworkTask("CRG-41")
 	if !ok {
-		t.Fatalf("fixture: no github-linked task for CRG-41 after the plain rule's pass")
+		t.Fatalf("fixture: no upwork_crm-linked task for CRG-41 after the plain rule's pass")
 	}
 	s.humanClose(t, ctx, task)
 	closedAt := s.dbNow(t, ctx)
 
-	// Stored around capture_rule_add: revive + addressed on a github rule.
+	// Stored around capture_rule_add: revive + addressed on a non-jira (upwork_crm) rule.
 	s.exec(t, ctx, `UPDATE capture_rules SET revive = true, addressed = true WHERE id = $1`, rule)
 	m := s.mailMsg(t, ctx, crvGatedFrom, "inbound", "Katie Evans mentioned you on CRG-41", "", closedAt.Add(time.Second), closedAt)
 	s.mailMsg(t, ctx, crvGatedFrom, "inbound", "Katie Evans mentioned you on CRG-42", "", closedAt.Add(time.Second), closedAt)
@@ -1200,14 +1204,14 @@ func TestCaptureRevive_Integration_ANonJiraRevivingRuleIsInert(t *testing.T) {
 	stats := s.pass(t, ctx, capture.RulesModeLive)
 
 	if got := s.status(t, ctx, task); got != "closed" {
-		t.Errorf("CRG-41's github-linked task is %q, want closed: a reviving rule on a non-jira system is inert (J18)", got)
+		t.Errorf("CRG-41's upwork_crm-linked task is %q, want closed: a reviving rule on a non-jira system is inert (J18)", got)
 	}
 	if reason, _ := s.decisionReason(t, ctx, m, capture.RulesModeLive); strings.Contains(reason, "revive") {
 		t.Errorf("CRG-41's reason = %q, want no revive wording", reason)
 	}
-	created, found := githubTask("CRG-42")
+	created, found := upworkTask("CRG-42")
 	if !found {
-		t.Fatalf("no github-linked task for CRG-42: the rule still creates, it just is not activity")
+		t.Fatalf("no upwork_crm-linked task for CRG-42: the rule still creates, it just is not activity")
 	}
 	if at, _ := s.surfaced(t, ctx, created); at != nil {
 		t.Errorf("CRG-42's task was surfaced (%v) by a non-jira rule on a gated project (J18)", at)

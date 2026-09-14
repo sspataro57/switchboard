@@ -174,7 +174,11 @@ func TestPRStateNotice_FirstLineShapes(t *testing.T) {
 		{"a different N does not close", "Closed #3145.", 3146, "", false},
 		{"a longer number sharing the prefix", "Closed #31450.", 3145, "", false},
 		{"Merged, different N", "Merged #3180 into main.", 3179, "", false},
-		{"Reopened is SWT-53's, never a close", "Reopened #3145.", 3145, "", false},
+		// Owner decision 2026-09-14: "Reopened #N." is a state notice too (it
+		// never closes and never reopens a dismissed task; PRStateEndsPR is false).
+		{"Reopened is a state notice, not a close", "Reopened #3145.", 3145, github.PRStateReopened, true},
+		{"Reopened, different N", "Reopened #3146.", 3145, "", false},
+		{"Reopened mid-body", "LGTM\nReopened #3145.", 3145, "", false},
 		// 0d: merged prose inside a PR description must NOT match.
 		{"0d: 'merged in #3202' prose", "This builds on the fix merged in #3202 last week.", 3202, "", false},
 		{"prose at line start is not the notice", "Merged in #3202 was the old fix; this replaces it.", 3202, "", false},
@@ -194,6 +198,12 @@ func TestPRStateNotice_FirstLineShapes(t *testing.T) {
 	if github.PRStateMerged != "merged" || github.PRStateClosed != "closed" {
 		t.Errorf("PRStateMerged/PRStateClosed = %q/%q, want merged/closed — the close reason reads "+
 			"\"PR #N merged on GitHub\" / \"PR #N closed on GitHub\" (OQ-2 = a)", github.PRStateMerged, github.PRStateClosed)
+	}
+	for state, ends := range map[string]bool{github.PRStateMerged: true, github.PRStateClosed: true,
+		github.PRStateReopened: false, "": false} {
+		if got := github.PRStateEndsPR(state); got != ends {
+			t.Errorf("PRStateEndsPR(%q) = %v, want %v (only merged/closed close a review task)", state, got, ends)
+		}
 	}
 }
 

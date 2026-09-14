@@ -111,7 +111,7 @@ func NewPGTaskResolver(pool *pgxpool.Pool, ex Dispatcher, actor string) *PGTaskR
 var branchTaskRe = regexp.MustCompile(`^task-(\d+)(-|$)`)
 
 func (r *PGTaskResolver) Resolve(ctx context.Context, ref PRRef) (int64, bool, error) {
-	key := fmt.Sprintf("%s#%d", ref.Repo, ref.PR)
+	key := PRKey(ref) // the ONE spelling (SWT-54 criterion 6), shared with capture
 	var taskID int64
 	err := r.pool.QueryRow(ctx,
 		`SELECT task_id FROM external_refs

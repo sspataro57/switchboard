@@ -45,6 +45,7 @@ package capture
 
 import (
 	"fmt"
+	"net/mail"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -235,6 +236,12 @@ func TestDecidePRAuthor_D1TableRowByRow(t *testing.T) {
 			prAuthorUndetermined, "", nil},
 		{"row 6: commit/push mail contributes empty reasons", prAuthorFacts{reasons: []string{"", ""}}, nil,
 			prAuthorUndetermined, "", nil},
+		// ACCEPTED BY DESIGN (SPEC D1 residual, 2026-09-14): his OWN PR whose first
+		// mail he receives says reason `mention` (or whose `author` mail went to the
+		// other account) is undetermined, so a task IS created. Fail-open: a wrong
+		// task costs one Done; a missed review is invisible.
+		{"row 6: a mention-only first mail on HIS OWN PR is undetermined (a task, by design)",
+			prAuthorFacts{reasons: []string{"mention"}}, nil, prAuthorUndetermined, "", nil},
 		{"two EMPTY logins are not his", opening("", ""), nil, prAuthorUndetermined, "", nil},
 	}
 	for _, c := range cases {
@@ -283,6 +290,173 @@ func TestMatchExcludedAuthor_EqualityOrStarSuffix(t *testing.T) {
 		entry, ok := matchExcludedAuthor(c.login, c.exclude)
 		if ok != c.ok || entry != c.entry {
 			t.Errorf("matchExcludedAuthor(%q, %q) = (%q, %v), want (%q, %v)", c.login, c.exclude, entry, ok, c.entry, c.ok)
+		}
+	}
+}
+
+// ---- D1 amendment 2026-09-14: the origin check -----------------------------------
+
+// prGenuineAuth is the shape Gmail prepends to every GitHub notification on prod
+// (121 of 121 Treetop PR-thread mails, both receiving accounts, 2026-09-14).
+const prGenuineAuth = "Authentication-Results: mx.google.com;\r\n" +
+	"       dkim=pass header.i=@github.com header.s=pf2023 header.b=AbCdEf12;\r\n" +
+	"       spf=pass (google.com: domain of notifications@github.com designates 192.30.252.201 as permitted sender) smtp.mailfrom=notifications@github.com;\r\n" +
+	"       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=github.com\r\n"
+
+// prEvilAuth is what Gmail genuinely prepends to an attacker's own mail: a real
+// mx.google.com header, dkim=pass — for the attacker's domain.
+const prEvilAuth = "Authentication-Results: mx.google.com;\r\n" +
+	"       dkim=pass header.i=@evil.example header.s=s1 header.b=Zz;\r\n" +
+	"       spf=pass (google.com: domain of bounce@evil.example designates 203.0.113.9 as permitted sender) smtp.mailfrom=bounce@evil.example\r\n"
+
+// prForgedGitHubAuth is an attacker-supplied header claiming GitHub's pass. It
+// travels INSIDE the message, so it always sits below the receiving MX's.
+const prForgedGitHubAuth = "Authentication-Results: mx.google.com; dkim=pass header.d=github.com header.i=@github.com\r\n"
+
+// prHeaders parses a real header block (net/mail keeps the order of repeated
+// headers, which is the property under test), so no map is built by hand.
+func prHeaders(t *testing.T, block string) mail.Header {
+	t.Helper()
+	m, err := mail.ReadMessage(strings.NewReader(block +
+		"From: GitHub <notifications@github.com>\r\nX-GitHub-Reason: author\r\n\r\nbody\r\n"))
+	if err != nil {
+		t.Fatalf("parse header block: %v", err)
+	}
+	return m.Header
+}
+
+// MUTATIONS this table is built to catch:
+//   - reading ANY Authentication-Results instead of the topmost: the two
+//     "forged below" rows turn true;
+//   - dropping the authserv-id comparison: the "wrong authserv-id" rows turn true.
+func TestTrustedGitHubNotification_TopmostGmailDKIMPassForGitHubOnly(t *testing.T) {
+	cases := []struct {
+		name  string
+		block string
+		want  bool
+	}{
+		{"genuine: Gmail's header, dkim=pass header.i=@github.com", prGenuineAuth, true},
+		{"genuine: header.d=github.com", "Authentication-Results: mx.google.com; dkim=pass header.d=github.com header.s=pf2023\r\n", true},
+		{"genuine with a harmless forged one below", prGenuineAuth + "Authentication-Results: mx.google.com; dkim=fail header.d=github.com\r\n", true},
+		{"authserv-id with a version", "Authentication-Results: mx.google.com 1; dkim=pass header.d=github.com\r\n", true},
+		{"method, result and domain are case-insensitive", "Authentication-Results: mx.google.com; DKIM=Pass header.d=GitHub.COM\r\n", true},
+		{"CFWS around '='", "Authentication-Results: mx.google.com; dkim = pass header.d = github.com\r\n", true},
+		{"a second dkim result for github passes", "Authentication-Results: mx.google.com; dkim=pass header.i=@amazonses.com; dkim=pass header.i=@github.com\r\n", true},
+
+		{"forged github pass BELOW Gmail's genuine header for the attacker's domain", prEvilAuth + prForgedGitHubAuth, false},
+		{"forged github pass BELOW a genuine dkim=fail", "Authentication-Results: mx.google.com; dkim=fail header.i=@github.com\r\n" + prForgedGitHubAuth, false},
+		{"forged topmost with a wrong authserv-id", "Authentication-Results: mx.evil.example; dkim=pass header.d=github.com\r\n", false},
+		{"forged topmost with a wrong authserv-id above Gmail's", "Authentication-Results: mx.evil.example; dkim=pass header.d=github.com\r\n" + prEvilAuth, false},
+		{"authserv-id that only starts with mx.google.com", "Authentication-Results: mx.google.com.evil.example; dkim=pass header.d=github.com\r\n", false},
+		{"dkim=fail for github", "Authentication-Results: mx.google.com; dkim=fail header.i=@github.com header.d=github.com\r\n", false},
+		{"dkim=neutral for github", "Authentication-Results: mx.google.com; dkim=neutral header.d=github.com\r\n", false},
+		{"dkim=pass for another domain", prEvilAuth, false},
+		{"header.d=github.com.evil.example", "Authentication-Results: mx.google.com; dkim=pass header.d=github.com.evil.example\r\n", false},
+		{"header.i=@github.com.evil.example", "Authentication-Results: mx.google.com; dkim=pass header.i=@github.com.evil.example\r\n", false},
+		{"header.i=@notgithub.com", "Authentication-Results: mx.google.com; dkim=pass header.i=@notgithub.com\r\n", false},
+		// go-reviewer delta 2026-09-14: a quoted header.i smuggling a header.d token.
+		// MUTATION: dropping the any-quote-in-a-dkim-result rule turns these true.
+		{"a quoted header.i smuggling header.d=github.com",
+			`Authentication-Results: mx.google.com; dkim=pass header.i="x header.d=github.com "@evil.example header.s=s1` + "\r\n", false},
+		{"any quote in a dkim result, even beside a real github pass",
+			`Authentication-Results: mx.google.com; dkim=pass header.d=github.com header.s="pf2023"` + "\r\n", false},
+		{"a pass only inside a comment", "Authentication-Results: mx.google.com; dkim=fail (dkim=pass header.d=github.com) header.d=evil.example\r\n", false},
+		{"spf/dmarc pass for github but no dkim", "Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=notifications@github.com; dmarc=pass header.from=github.com\r\n", false},
+		{"dkim=pass naming no domain", "Authentication-Results: mx.google.com; dkim=pass\r\n", false},
+		{"no results at all", "Authentication-Results: mx.google.com; none\r\n", false},
+		{"ARC-Authentication-Results is not Authentication-Results", "ARC-Authentication-Results: i=1; mx.google.com; dkim=pass header.i=@github.com\r\n", false},
+		{"missing header", "", false},
+	}
+	for _, c := range cases {
+		if got := trustedGitHubNotification(prHeaders(t, c.block)); got != c.want {
+			t.Errorf("%s: trustedGitHubNotification = %v, want %v\nblock:\n%s", c.name, got, c.want, c.block)
+		}
+	}
+	// Prepended duplicates of action-driving headers (Codex re-review 2026-09-14).
+	// prHeaders' base already carries ONE X-GitHub-Reason. MUTATION: disabling
+	// duplicatedGitHubHeader turns every "duplicated" row true.
+	single := prGenuineAuth +
+		"Message-ID: <treetopllc/collaboratory-www/pull/3179/c1@github.com>\r\n" +
+		"References: <treetopllc/collaboratory-www/pull/3179@github.com>\r\n" +
+		"In-Reply-To: <treetopllc/collaboratory-www/pull/3179@github.com>\r\n" +
+		"X-GitHub-Sender: joseg-avviato\r\nX-GitHub-Recipient: sspataro57\r\n"
+	for _, c := range []struct {
+		name, extra, dup string
+	}{
+		{"a single instance of each stays trusted", "", ""},
+		{"duplicated Message-ID", "Message-ID: <treetopllc/collaboratory-www/pull/9999@github.com>\r\n", "Message-ID"},
+		{"duplicated Message-ID, other case", "message-id: <treetopllc/collaboratory-www/pull/9999@github.com>\r\n", "Message-ID"},
+		{"duplicated References", "References: <treetopllc/collaboratory-www/pull/9999@github.com>\r\n", "References"},
+		{"duplicated In-Reply-To", "In-Reply-To: <treetopllc/collaboratory-www/pull/9999@github.com>\r\n", "In-Reply-To"},
+		{"duplicated X-GitHub-Reason", "X-GitHub-Reason: author\r\n", "X-GitHub-Reason"},
+		{"duplicated X-GitHub-Sender", "X-GitHub-Sender: sspataro57\r\n", "X-GitHub-Sender"},
+		{"duplicated X-GitHub-Recipient", "X-GitHub-Recipient: joseg-avviato\r\n", "X-GitHub-Recipient"},
+	} {
+		// The attacker's copies sit BELOW Gmail's header and ABOVE the signed originals.
+		block := prGenuineAuth + c.extra + strings.TrimPrefix(single, prGenuineAuth)
+		h := prHeaders(t, block)
+		if got := duplicatedGitHubHeader(h); got != c.dup {
+			t.Errorf("%s: duplicatedGitHubHeader = %q, want %q", c.name, got, c.dup)
+		}
+		if got, want := trustedGitHubNotification(h), c.dup == ""; got != want {
+			t.Errorf("%s: trustedGitHubNotification = %v, want %v", c.name, got, want)
+		}
+	}
+
+	if prTrustedAuthServID != "mx.google.com" || prTrustedDKIMDomain != "github.com" {
+		t.Errorf("trust constants = %q / %q, want mx.google.com / github.com (prod evidence, 2026-09-14)",
+			prTrustedAuthServID, prTrustedDKIMDomain)
+	}
+}
+
+// ---- 2026-09-14: the PR identity is bound to SIGNED headers ------------------------
+
+// prProdEncodedSubject is the one prod Subject (of 123, 90 days) that does not
+// end "(PR #N)" until RFC 2047-decoded — verbatim, collaboratory-www#3218.
+const prProdEncodedSubject = "=?UTF-8?Q?[treetopllc/collaboratory-www]_WEB-8680_Remove_unused?= " +
+	"=?UTF-8?Q?_OrganizationsUsers/GroupsUsers/OpportunitiesUs=E2=80=A6_=28PR?= =?UTF-8?Q?_#3218=29?="
+
+// MUTATIONS: making either binding always pass turns its failure rows green-as-"".
+func TestPRMailBinding_ListIDAndSubjectNameThePR(t *testing.T) {
+	ref := github.PRRef{Repo: "treetopllc/collaboratory-www", PR: 3218}
+	const goodList = "List-ID: treetopllc/collaboratory-www <collaboratory-www.treetopllc.github.com>\r\n"
+	const goodSubj = "Subject: Re: [treetopllc/collaboratory-www] Ranking widget (PR #3218)\r\n"
+	cases := []struct {
+		name, block, want string // want: "" = bound, else a fragment of the failure
+	}{
+		{"List-ID and Subject name the PR (prod form)", goodList + goodSubj, ""},
+		{"an opening's subject (no Re:)", goodList + "Subject: [treetopllc/collaboratory-www] Ranking widget (PR #3218)\r\n", ""},
+		{"the prod RFC 2047-encoded subject decodes and binds", goodList + "Subject: " + prProdEncodedSubject + "\r\n", ""},
+		{"List-ID compared case-insensitively", "List-ID: TreetopLLC/Collaboratory-WWW <Collaboratory-WWW.TreetopLLC.github.com>\r\n" + goodSubj, ""},
+
+		{"a List-ID for another repo", "List-ID: treetopllc/gonoble <gonoble.treetopllc.github.com>\r\n" + goodSubj, "List-ID binding failed"},
+		{"a List-ID for another owner", "List-ID: attacker-org/collaboratory-www <collaboratory-www.attacker-org.github.com>\r\n" + goodSubj, "List-ID binding failed"},
+		{"a List-ID with a suffix", "List-ID: x <collaboratory-www.treetopllc.github.com.evil.example>\r\n" + goodSubj, "List-ID binding failed"},
+		{"the right name only in the display part", "List-ID: treetopllc/collaboratory-www <evil-repo.attacker-org.github.com>\r\n" + goodSubj, "List-ID binding failed"},
+		{"a missing List-ID", goodSubj, "no List-ID"},
+		{"a Subject with a different PR number", goodList + "Subject: [treetopllc/collaboratory-www] Other (PR #3219)\r\n", "Subject binding failed"},
+		{"a Subject naming the PR only mid-title", goodList + "Subject: [treetopllc/collaboratory-www] Revert (PR #3218) (PR #7)\r\n", "Subject binding failed"},
+		{"a Subject whose number only starts with N", goodList + "Subject: [treetopllc/collaboratory-www] Other (PR #32180)\r\n", "Subject binding failed"},
+		{"a missing Subject", goodList, "Subject binding failed"},
+	}
+	for _, c := range cases {
+		h := prHeaders(t, prGenuineAuth+c.block)
+		got := prMailBindingFailure(h, ref)
+		if (c.want == "" && got != "") || (c.want != "" && !strings.Contains(got, c.want)) {
+			t.Errorf("%s: prMailBindingFailure = %q, want %q", c.name, got, c.want)
+		}
+		if full := prUntrustedReason(h, ref); full != got {
+			t.Errorf("%s: prUntrustedReason = %q, want the binding verdict %q (auth and headers are otherwise genuine)", c.name, full, got)
+		}
+	}
+	for _, dup := range []string{"List-ID", "Subject"} {
+		extra := goodList
+		if dup == "Subject" {
+			extra = goodSubj
+		}
+		h := prHeaders(t, prGenuineAuth+extra+goodList+goodSubj)
+		if got := prUntrustedReason(h, ref); !strings.Contains(got, "header "+dup+" appears more than once") {
+			t.Errorf("duplicated %s: prUntrustedReason = %q, want the duplicate named", dup, got)
 		}
 	}
 }

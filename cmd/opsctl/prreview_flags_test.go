@@ -15,6 +15,7 @@ package main
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +67,20 @@ func TestParseCaptureRuleAdd_TheSeededCommandCarriesNoExcludeList(t *testing.T) 
 	}
 	if ex, ok := p["exclude_pr_authors"]; ok && !reflect.DeepEqual(ex, []any{}) {
 		t.Errorf("exclude_pr_authors = %#v, want absent or empty — OQ-1 = (b): no *[bot] and no second login", ex)
+	}
+}
+
+// Finding B (SWT-54 review): add's flag set carries --revive/--addressed, but
+// try cannot simulate activity rules; it must refuse them by name, before any
+// database is reached.
+func TestRunCaptureRulesTry_RefusesActivityFlags(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://refused@127.0.0.1:1/none?sslmode=disable&connect_timeout=1")
+	base := []string{"--project", "collaboratory", "--type", "body_regex", "--pattern", `CRG-[0-9]+`,
+		"--external-system", "jira", "--key-regex", `(CRG-[0-9]+)`, "--priority", "90"}
+	for _, flags := range [][]string{{"--revive"}, {"--addressed"}, {"--revive", "--addressed"}} {
+		err := runCaptureRulesTry(append(append([]string{}, base...), flags...))
+		if err == nil || !strings.Contains(err.Error(), "try does not simulate activity rules") {
+			t.Errorf("try %v: err = %v, want the refusal naming \"try does not simulate activity rules\"", flags, err)
+		}
 	}
 }

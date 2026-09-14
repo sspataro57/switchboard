@@ -85,7 +85,14 @@ func TestOpsctlTry_Integration_PrintsTheRollupAndWritesNothing(t *testing.T) {
 	thread := scalar(`INSERT INTO normalized_threads (thread_key, subject, participants) VALUES ($1,$1,'[]') RETURNING id`,
 		"gmail:"+otAccount+":"+root)
 	subject := "[" + otRepo + "] Ranking widget (PR #9951)"
-	rfc := "From: joseg-avviato <notifications@github.com>\r\n" +
+	// SWT-54 D1 amendment (2026-09-14): a pr_review rule acts only on mail whose
+	// TOPMOST Authentication-Results is Gmail's dkim=pass for github.com — the
+	// prod shape (121/121). Without it the candidate falls through as untrusted.
+	rfc := "Authentication-Results: mx.google.com;\r\n" +
+		"       dkim=pass header.i=@github.com header.s=pf2023 header.b=AbCdEf12;\r\n" +
+		"       spf=pass smtp.mailfrom=notifications@github.com;\r\n" +
+		"       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=github.com\r\n" +
+		"From: joseg-avviato <notifications@github.com>\r\n" +
 		"To: " + otRepo + " <itest-opstry-www@noreply.github.com>\r\n" +
 		"Subject: " + subject + "\r\n" +
 		"Message-ID: " + root + "\r\n" +
@@ -93,6 +100,7 @@ func TestOpsctlTry_Integration_PrintsTheRollupAndWritesNothing(t *testing.T) {
 		"X-GitHub-Reason: subscribed\r\n" +
 		"X-GitHub-Sender: joseg-avviato\r\n" +
 		"X-GitHub-Recipient: sspataro57\r\n" +
+		"List-ID: " + otRepo + " <itest-opstry-www.treetopllc.github.com>\r\n" +
 		"Content-Type: text/plain; charset=UTF-8\r\n\r\n" +
 		"joseg-avviato opened this pull request.\r\n"
 	env, err := json.Marshal(map[string]any{

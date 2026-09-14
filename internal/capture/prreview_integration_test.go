@@ -289,7 +289,11 @@ func (s *prrSuite) exec(t *testing.T, ctx context.Context, q string, args ...any
 
 func (s *prrSuite) call(t *testing.T, ctx context.Context, tool string, taskID int64, args string) {
 	t.Helper()
-	if _, err := s.ex.Execute(ctx, executor.Call{Tool: tool, Actor: prrHuman, Args: []byte(args), TaskID: &taskID}); err != nil {
+	var tid *int64 // 0 = a call about no task (capture_rule_set_enabled): audit_events.task_id stays NULL
+	if taskID != 0 {
+		tid = &taskID
+	}
+	if _, err := s.ex.Execute(ctx, executor.Call{Tool: tool, Actor: prrHuman, Args: []byte(args), TaskID: tid}); err != nil {
 		t.Fatalf("%s(%s) as %s: %v", tool, args, prrHuman, err)
 	}
 }
@@ -331,7 +335,36 @@ type ghMail struct {
 	direction string // "" = inbound
 	rawJSON   string // non-empty: store this raw_json verbatim (a gmail:-shaped row)
 	minsAgo   int
+	// auth is the Authentication-Results block at the TOP of the header (D1
+	// amendment 2026-09-14): "" = Gmail's genuine header for github.com, the prod
+	// shape (121/121); prrNoAuth = none at all; anything else verbatim.
+	auth string
+	// prepend: attacker header lines placed BELOW the auth block and ABOVE the
+	// relayed original's headers (Codex re-review 2026-09-14). signedMID /
+	// signedRoot, when set, are the relayed ORIGINAL's own Message-ID /
+	// In-Reply-To+References in the RFC822; the normalized row still carries the
+	// spoofed mid/root, as the normalizer would read the first instance.
+	prepend, signedMID, signedRoot string
+	// listID, when set, replaces the List-ID line (the relayed original's SIGNED
+	// List-ID; default "{owner}/{repo} <{repo}.{owner}.github.com>", the prod form).
+	listID string
 }
+
+const (
+	prrNoAuth = "none"
+	// prrGenuineAuth: what mx.google.com prepends to a real GitHub notification.
+	prrGenuineAuth = "Authentication-Results: mx.google.com;\r\n" +
+		"       dkim=pass header.i=@github.com header.s=pf2023 header.b=AbCdEf12;\r\n" +
+		"       spf=pass (google.com: domain of notifications@github.com designates 192.30.252.201 as permitted sender) smtp.mailfrom=notifications@github.com;\r\n" +
+		"       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=github.com\r\n"
+	// prrForgedAuth: a forger's mail as Gmail stores it — Gmail's GENUINE header
+	// on top (dkim=pass, but for the forger's own domain), and the forger's own
+	// github.com "pass" below it, where every attacker-supplied header sits.
+	prrForgedAuth = "Authentication-Results: mx.google.com;\r\n" +
+		"       dkim=pass header.i=@evil.example header.s=s1 header.b=Zz;\r\n" +
+		"       spf=pass (google.com: domain of bounce@evil.example designates 203.0.113.9 as permitted sender) smtp.mailfrom=bounce@evil.example\r\n" +
+		"Authentication-Results: mx.google.com; dkim=pass header.d=github.com header.i=@github.com\r\n"
+)
 
 type prrMsg struct {
 	id, raw, thread int64
@@ -355,6 +388,20 @@ func prrRFC822(m ghMail, mid, root string) string {
 	}
 	owner, name, _ := strings.Cut(m.repo, "/")
 	var b strings.Builder
+	switch m.auth {
+	case "":
+		b.WriteString(prrGenuineAuth)
+	case prrNoAuth:
+	default:
+		b.WriteString(m.auth)
+	}
+	b.WriteString(m.prepend)
+	if m.signedMID != "" {
+		mid = m.signedMID
+	}
+	if m.signedRoot != "" {
+		root = m.signedRoot
+	}
 	fmt.Fprintf(&b, "From: %s <notifications@github.com>\r\n", from)
 	fmt.Fprintf(&b, "To: %s <%s@noreply.github.com>\r\n", m.repo, name)
 	fmt.Fprintf(&b, "Subject: %s\r\n", m.subject)
@@ -372,7 +419,11 @@ func prrRFC822(m ghMail, mid, root string) string {
 	if m.recipient != "" {
 		fmt.Fprintf(&b, "X-GitHub-Recipient: %s\r\n", m.recipient)
 	}
-	fmt.Fprintf(&b, "List-ID: %s <%s.%s.github.com>\r\n", m.repo, name, owner)
+	if m.listID != "" {
+		fmt.Fprintf(&b, "List-ID: %s\r\n", m.listID)
+	} else {
+		fmt.Fprintf(&b, "List-ID: %s <%s.%s.github.com>\r\n", m.repo, name, owner)
+	}
 	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
 	b.WriteString(strings.ReplaceAll(m.body, "\n", "\r\n"))
 	b.WriteString("\r\n")
@@ -601,12 +652,13 @@ func TestCapturePRReview_Integration_Migration0035ChecksAndDefaults(t *testing.T
 		{"pr_review with no key_regex",
 			`INSERT INTO capture_rules (project_id, criteria_type, pattern, external_system, pr_review, note)
 			 VALUES ($1,'thread_key_contains','<itest-prr-c2/','github',true,'itest-prr')`, "capture_rules_pr_review_github"},
-		// NOT here: pr_review on an ATTRIBUTION-ONLY rule (external_system NULL).
-		// The SPEC's CHECK, verbatim, does not refuse it: NULL = 'github' is
-		// NULL, the AND is NULL, `false OR NULL` is NULL, and a CHECK passes on
-		// NULL. capture_rule_add refuses it (criterion 2, capturerules_prreview_test.go)
-		// and loadRules would read it as attribution-only. Flagged to the main
-		// thread rather than pinned either way.
+		// SPEC amendment 2026-09-14: pr_review on an ATTRIBUTION-ONLY rule
+		// (external_system NULL). The original CHECK let it through (NULL =
+		// 'github' is NULL, the AND is NULL, `false OR NULL` is NULL, and a CHECK
+		// passes on NULL); the amended CHECK requires external_system IS NOT NULL.
+		{"pr_review on an attribution-only rule (external_system NULL)",
+			`INSERT INTO capture_rules (project_id, criteria_type, pattern, key_regex, pr_review, note)
+			 VALUES ($1,'thread_key_contains','<itest-prr-c3/','x',true,'itest-prr')`, "capture_rules_pr_review_github"},
 		{"pr_review with revive",
 			`INSERT INTO capture_rules (project_id, criteria_type, pattern, external_system, key_regex, revive, pr_review, note)
 			 VALUES ($1,'thread_key_contains','<itest-prr-c4/','github','x',true,true,'itest-prr')`, "capture_rules_pr_review_github"},
@@ -903,16 +955,24 @@ func TestCapturePRReview_Integration_UndeterminedAndReviewRequestedCreate(t *tes
 		subject: "Re: [treetopllc/itest-prr-third] Bump sanitize-html (PR #9451)", body: "rebased", minsAgo: 20})
 	rr := s.mail(t, ctx, ghMail{repo: prrThird, pr: 9452, reason: "review_requested", sender: "joseg-avviato", recipient: prrLogin,
 		subject: "Re: [treetopllc/itest-prr-third] Cache warmup (PR #9452)", body: "review please", minsAgo: 19})
-	// A gmail:-shaped raw row ('{}'): contributes nothing, and never fails the pass.
+	// A gmail:-shaped raw row ('{}'): never fails the pass. SWT-54 D1 amendment
+	// (2026-09-14): a row with no RFC822 header cannot prove it came from GitHub,
+	// so it is UNTRUSTED and falls through (prrThird has no lower rule: unmatched)
+	// instead of creating an undetermined task. Prod has no such row: all 16,490
+	// google raw items are IMAP envelopes.
 	g := s.mail(t, ctx, ghMail{repo: prrThird, pr: 9453, rawJSON: `{}`, sender: "joseg-avviato",
 		subject: "Re: [treetopllc/itest-prr-third] Retry budget (PR #9453)", body: "hm", minsAgo: 18})
 
 	s.pass(t, ctx, "live")
+	if d := s.must(t, ctx, g, "live"); d.action != "unmatched" || !strings.Contains(d.reason, "untrusted GitHub mail") {
+		t.Errorf("PR 9453 ({} raw row): decision (%s, %q), want unmatched with \"untrusted GitHub mail\"", d.action, d.reason)
+	}
+	s.noRef(t, ctx, prrKey(prrThird, 9453), "a row that cannot prove GitHub origin creates nothing")
 	for _, c := range []struct {
 		m    prrMsg
 		n    int
 		frag string
-	}{{u, 9451, "author undetermined"}, {rr, 9452, "author not named"}, {g, 9453, "author undetermined"}} {
+	}{{u, 9451, "author undetermined"}, {rr, 9452, "author not named"}} {
 		d := s.must(t, ctx, c.m, "live")
 		if d.action != "task" || !strings.Contains(d.reason, c.frag) {
 			t.Errorf("PR %d: decision (%s, %q), want task with %q (criterion 10; D1 fail-open)", c.n, d.action, d.reason, c.frag)
@@ -1196,9 +1256,9 @@ func TestCapturePRReview_Integration_AnExcludedAuthorFallsThrough(t *testing.T) 
 	if d.action != "attributed" || d.ruleID == nil || *d.ruleID != s.rule6 {
 		t.Errorf("excluded bot PR: decision (%s, rule %v), want rule 6's attribution (D1 row 3 falls through)", d.action, d.ruleID)
 	}
-	if prefix := fmt.Sprintf("rule %d skipped: PR %s", s.prRule, prrKey(prrWWW, 9711)); !strings.HasPrefix(d.reason, prefix) ||
-		!strings.Contains(d.reason, "dependabot[bot]") {
-		t.Errorf("reason %q, want it to begin %q and name dependabot[bot]", d.reason, prefix)
+	if prefix := fmt.Sprintf("rule %d skipped: PR %s excluded author (*[bot])", s.prRule, prrKey(prrWWW, 9711)); !strings.HasPrefix(d.reason, prefix) ||
+		!strings.Contains(d.reason, "dependabot[bot]") || strings.Contains(d.reason, "authored by him") {
+		t.Errorf("reason %q, want it to begin %q, name dependabot[bot], and never say \"authored by him\"", d.reason, prefix)
 	}
 	s.noRef(t, ctx, prrKey(prrWWW, 9711), "an excluded author creates no task")
 	if dc := s.must(t, ctx, colleague, "live"); dc.action != "task" {
@@ -1245,5 +1305,303 @@ func TestCapturePRReview_Integration_BothRuleColumnsAreColumnFed(t *testing.T) {
 	}
 	if n := s.n(t, ctx, `SELECT count(*) FROM external_refs WHERE system='github' AND external_key LIKE '%/pull/%'`); n != 0 {
 		t.Errorf("%d path-spelled github refs (criterion 6)", n)
+	}
+}
+
+// ---- D1 amendment 2026-09-14: forged GitHub-shaped mail acts on nothing ------------
+//
+// Every forged mail below is what Gmail would store for a forger: its genuine
+// mx.google.com Authentication-Results on TOP (dkim=pass for the forger's own
+// domain), the forger's github.com "pass" below it (prrForgedAuth), or no header
+// at all. MUTATIONS: trusting ANY Authentication-Results instead of the topmost,
+// or dropping the origin check from decideMessage / prReviewFacts, turns these red.
+func TestCapturePRReview_Integration_ForgedGitHubMailActsOnNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newPRRSuite(t, ctx, prrOpts{})
+	untrusted := func(key string) string {
+		return fmt.Sprintf("rule %d skipped: untrusted GitHub mail for PR %s (", s.prRule, key)
+	}
+
+	// (1) A forged PR ROOT: a GitHub-shaped Message-ID and X-GitHub-* headers
+	// naming a colleague. Without the origin check it would create a task.
+	root := s.mail(t, ctx, ghMail{repo: prrWWW, pr: 9851, opening: true, reason: "review_requested", sender: "joseg-avviato",
+		recipient: prrLogin, subject: "[treetopllc/itest-prr-www] Please review (PR #9851)", body: "urgent", minsAgo: 40,
+		auth: prrForgedAuth})
+	bare := s.mail(t, ctx, ghMail{repo: prrThird, pr: 9852, opening: true, reason: "review_requested", sender: "joseg-avviato",
+		recipient: prrLogin, subject: "[treetopllc/itest-prr-third] Please review (PR #9852)", body: "urgent", minsAgo: 39,
+		auth: prrNoAuth})
+
+	// (2) A forged `X-GitHub-Reason: author` on the thread of a colleague's PR,
+	// meant to make the genuine mail read as his own PR and suppress its task.
+	s.mail(t, ctx, ghMail{repo: prrThird, pr: 9853, reason: "author", sender: "joseg-avviato", recipient: prrLogin,
+		subject: "Re: [treetopllc/itest-prr-third] Queue sharding (PR #9853)", body: "x", minsAgo: 30, auth: prrForgedAuth})
+	genuine := s.mail(t, ctx, ghMail{repo: prrThird, pr: 9853, reason: "subscribed", sender: "joseg-avviato", recipient: prrLogin,
+		subject: "Re: [treetopllc/itest-prr-third] Queue sharding (PR #9853)", body: "pushed a fix", minsAgo: 20})
+
+	// (3) A genuine colleague PR whose task a forged close notice will try to close.
+	s.colleague(t, ctx, prrWWW, 9854, "ananthsekar007", "Billing export", 15)
+
+	st := s.pass(t, ctx, "live")
+
+	dr := s.must(t, ctx, root, "live")
+	if dr.action != "attributed" || dr.ruleID == nil || *dr.ruleID != s.rule6 || !strings.HasPrefix(dr.reason, untrusted(prrKey(prrWWW, 9851))) {
+		t.Errorf("forged PR root: decision (%s, rule %v, %q), want rule 6's attribution after %q", dr.action, dr.ruleID,
+			dr.reason, untrusted(prrKey(prrWWW, 9851)))
+	}
+	if !prrHas(dr.ruleIDs, s.prRule) {
+		t.Errorf("forged PR root: matched_rule_ids %v lacks the PR rule (they come from the FULL evaluation)", dr.ruleIDs)
+	}
+	s.noRef(t, ctx, prrKey(prrWWW, 9851), "a forged PR root creates no task")
+	if db := s.must(t, ctx, bare, "live"); db.action != "unmatched" || !strings.HasPrefix(db.reason, untrusted(prrKey(prrThird, 9852))) {
+		t.Errorf("forged root with no Authentication-Results: decision (%s, %q), want unmatched, untrusted", db.action, db.reason)
+	}
+	s.noRef(t, ctx, prrKey(prrThird, 9852), "no Authentication-Results, no task")
+
+	dg := s.must(t, ctx, genuine, "live")
+	if dg.action != "task" || !strings.Contains(dg.reason, "author undetermined") {
+		t.Errorf("genuine mail after a forged `author` on its thread: decision (%s, %q), want task, author undetermined — "+
+			"authorship evidence counts only from trusted mail", dg.action, dg.reason)
+	}
+	s.mustRef(t, ctx, prrKey(prrThird, 9853))
+	if st.PRAuthorSkipped != 0 {
+		t.Errorf("PRAuthorSkipped = %d, want 0: an untrusted fall-through is not an authorship skip", st.PRAuthorSkipped)
+	}
+
+	// (3) The forged close notice.
+	task := s.mustRef(t, ctx, prrKey(prrWWW, 9854))
+	logs := s.events(t, ctx, task, "log")
+	forgedClose := s.mail(t, ctx, ghMail{repo: prrWWW, pr: 9854, reason: "state_change", sender: "ananthsekar007",
+		recipient: prrLogin, subject: "Re: [treetopllc/itest-prr-www] Billing export (PR #9854)", body: "Closed #9854.",
+		minsAgo: 5, auth: prrForgedAuth})
+	st2 := s.pass(t, ctx, "live")
+	if got := s.status(t, ctx, task); got != "ready" {
+		t.Errorf("a forged Closed #9854. notice moved the review task to %q, want ready", got)
+	}
+	if n := s.n(t, ctx, `SELECT count(*) FROM audit_events WHERE tool='task_close' AND (args->>'task_id')::bigint=$1`, task); n != 0 {
+		t.Errorf("task_close audit rows for task %d = %d, want 0", task, n)
+	}
+	if got := s.events(t, ctx, task, "log") - logs; got != 0 {
+		t.Errorf("the forged notice logged onto the review task (+%d); it falls through before any pr_review action", got)
+	}
+	if d := s.must(t, ctx, forgedClose, "live"); d.action != "attributed" || !strings.HasPrefix(d.reason, untrusted(prrKey(prrWWW, 9854))) {
+		t.Errorf("forged close notice: decision (%s, %q), want rule 6's attribution, untrusted", d.action, d.reason)
+	}
+	if st2.PRClosed != 0 {
+		t.Errorf("PRClosed = %d, want 0", st2.PRClosed)
+	}
+}
+
+// ---- owner decision 2026-09-14: a PR state notice never reopens a review task ------
+//
+// MUTATION: drop `&& d.prNotice == ""` from decideMessage's dismissal case ->
+// red (each dismissed task reopens, Reopened = 3, task_reopen rows appear).
+func TestCapturePRReview_Integration_AStateNoticeNeverReopensADismissedReviewTask(t *testing.T) {
+	ctx := context.Background()
+	s := newPRRSuite(t, ctx, prrOpts{})
+	for i, n := range []int{9861, 9862, 9863, 9864} {
+		s.colleague(t, ctx, prrWWW, n, "joseg-avviato", fmt.Sprintf("Change %d", n), 60-i)
+	}
+	s.pass(t, ctx, "live")
+	tasks := map[int]int64{}
+	for _, n := range []int{9861, 9862, 9863, 9864} {
+		tasks[n] = s.mustRef(t, ctx, prrKey(prrWWW, n))
+	}
+	for _, n := range []int{9861, 9862, 9863} {
+		s.call(t, ctx, "task_dismiss", tasks[n], fmt.Sprintf(`{"task_id":%d,"reason_code":"wrong_kind"}`, tasks[n]))
+	}
+	logs := map[int]int{}
+	for n, id := range tasks {
+		logs[n] = s.events(t, ctx, id, "log")
+	}
+	notice := func(n int, body string, mins int) prrMsg {
+		return s.mail(t, ctx, ghMail{repo: prrWWW, pr: n, reason: "state_change", sender: "joseg-avviato", recipient: prrLogin,
+			subject: fmt.Sprintf("Re: [treetopllc/itest-prr-www] Change %d (PR #%d)", n, n), body: body, minsAgo: mins})
+	}
+	msgs := map[int]prrMsg{
+		9861: notice(9861, "Merged #9861 into main.", 9),
+		9862: notice(9862, "Closed #9862.", 8),
+		9863: notice(9863, "Reopened #9863.", 7),
+		9864: notice(9864, "Reopened #9864.", 6), // an OPEN task: logged, never closed
+	}
+	first := notice(9865, "Reopened #9865.", 5) // the first mail seen for PR 9865: the PR is open, so a task
+
+	// Shadow first: the decision is mode-free, so shadow and live must agree.
+	s.pass(t, ctx, "shadow")
+	st := s.pass(t, ctx, "live")
+
+	for _, n := range []int{9861, 9862, 9863} {
+		id := tasks[n]
+		live, shadow := s.must(t, ctx, msgs[n], "live"), s.must(t, ctx, msgs[n], "shadow")
+		for mode, d := range map[string]prrDecision{"live": live, "shadow": shadow} {
+			if d.action != "task_log" || d.taskID == nil || *d.taskID != id || !strings.Contains(d.reason, "never reopens a review task") {
+				t.Errorf("PR %d %s: decision (%s, task %v, %q), want task_log onto %d saying \"never reopens a review task\"",
+					n, mode, d.action, d.taskID, d.reason, id)
+			}
+		}
+		if got := s.status(t, ctx, id); got != "closed" {
+			t.Errorf("PR %d: dismissed review task is %q after its state notice, want closed", n, got)
+		}
+		if k := s.n(t, ctx, `SELECT count(*) FROM task_dismissals WHERE task_id=$1 AND reopened_at IS NULL`, id); k != 1 {
+			t.Errorf("PR %d: open (reopened_at NULL) dismissals = %d, want 1", n, k)
+		}
+		if k := s.n(t, ctx, `SELECT count(*) FROM audit_events WHERE tool='task_reopen' AND task_id=$1`, id); k != 0 {
+			t.Errorf("PR %d: task_reopen audit rows = %d, want 0", n, k)
+		}
+		if got := s.events(t, ctx, id, "log") - logs[n]; got != 1 {
+			t.Errorf("PR %d: logs +%d, want +1 (the notice is logged)", n, got)
+		}
+	}
+	if st.Reopened != 0 || st.PRClosed != 0 {
+		t.Errorf("live stats Reopened=%d PRClosed=%d, want 0/0", st.Reopened, st.PRClosed)
+	}
+
+	open := tasks[9864]
+	if got := s.status(t, ctx, open); got != "ready" {
+		t.Errorf("a Reopened notice on an OPEN review task moved it to %q, want ready (logged only)", got)
+	}
+	if got := s.events(t, ctx, open, "log") - logs[9864]; got != 1 {
+		t.Errorf("reopened notice on an open task: logs +%d, want +1", got)
+	}
+	if d := s.must(t, ctx, msgs[9864], "live"); d.action != "task_log" || !strings.Contains(d.reason, "logged only") {
+		t.Errorf("reopened notice on an open task: decision (%s, %q), want task_log \"logged only\"", d.action, d.reason)
+	}
+	if d := s.must(t, ctx, first, "live"); d.action != "task" {
+		t.Errorf("Reopened #9865. as the first mail seen: action %q, want task (the PR is open; only merged/closed "+
+			"make a first mail a no-task)", d.action)
+	}
+	s.mustRef(t, ctx, prrKey(prrWWW, 9865))
+}
+
+// ---- SPEC D1 residual (accepted by design): his own PR, mention-only ---------------
+//
+// His own PR whose first mail he receives carries reason `mention` (not
+// `author`), with no opening stored, reads undetermined: a review task IS
+// created. Fail-open by design — the fix that sticks is Done (task_close): a
+// Dismiss is reopened by SWT-36 on the PR's next trusted mail that is not a merged, closed or reopened notice.
+func TestCapturePRReview_Integration_AMentionOnlyMailOnHisOwnPRIsUndeterminedAndCreates(t *testing.T) {
+	ctx := context.Background()
+	s := newPRRSuite(t, ctx, prrOpts{})
+	m := s.mail(t, ctx, ghMail{repo: prrThird, pr: 9871, reason: "mention", sender: "joseg-avviato", recipient: prrLogin,
+		subject: "Re: [treetopllc/itest-prr-third] His own change (PR #9871)", body: "@sspataro57 can you rebase?", minsAgo: 5})
+	s.pass(t, ctx, "live")
+	if d := s.must(t, ctx, m, "live"); d.action != "task" || !strings.Contains(d.reason, "author undetermined") {
+		t.Errorf("mention-only mail on his own PR: decision (%s, %q), want task with \"author undetermined\" "+
+			"(accepted residual: fail-open)", d.action, d.reason)
+	}
+	s.mustRef(t, ctx, prrKey(prrThird, 9871))
+}
+
+// ---- Codex re-review 2026-09-14: prepended duplicate headers on a genuine relay ----
+//
+// Each mail below carries Gmail's GENUINE dkim=pass for github.com (the relayed
+// original is really GitHub's), plus unsigned copies of action-driving headers
+// PREPENDED by the relayer. mail.Header.Get would read the relayer's copy.
+// MUTATION: disabling duplicatedGitHubHeader turns this red (a task is created
+// on the spoofed root, the colleague's task is suppressed, the task closes).
+func TestCapturePRReview_Integration_PrependedDuplicateHeadersActOnNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newPRRSuite(t, ctx, prrOpts{})
+	untrusted := func(key, header string) (string, string) {
+		return fmt.Sprintf("rule %d skipped: untrusted GitHub mail for PR %s (", s.prRule, key),
+			fmt.Sprintf("header %s appears more than once", header)
+	}
+
+	// (1) CREATE: the attacker's own genuine PR-opened mail, with a prepended
+	// Message-ID naming a treetopllc root (the normalizer reads the first one).
+	spoofRoot := s.mail(t, ctx, ghMail{repo: prrThird, pr: 9881, opening: true, reason: "subscribed", sender: "joseg-avviato",
+		recipient: prrLogin, subject: "[treetopllc/itest-prr-third] Looks legit (PR #9881)", body: "opened", minsAgo: 40,
+		prepend:   "Message-ID: <treetopllc/itest-prr-third/pull/9881@github.com>\r\n",
+		signedMID: "<attacker-org/evil-repo/pull/5@github.com>"})
+
+	// (2) SUPPRESS: a relayed genuine mail on a colleague's PR with a prepended
+	// `X-GitHub-Reason: author`; then the colleague's genuine mail.
+	s.mail(t, ctx, ghMail{repo: prrThird, pr: 9882, reason: "subscribed", sender: "joseg-avviato", recipient: prrLogin,
+		subject: "Re: [treetopllc/itest-prr-third] Rate limiter (PR #9882)", body: "x", minsAgo: 30,
+		prepend: "X-GitHub-Reason: author\r\n"})
+	genuine := s.mail(t, ctx, ghMail{repo: prrThird, pr: 9882, reason: "subscribed", sender: "joseg-avviato", recipient: prrLogin,
+		subject: "Re: [treetopllc/itest-prr-third] Rate limiter (PR #9882)", body: "pushed", minsAgo: 20})
+
+	// (3) CLOSE: a colleague's PR with a task, then a genuine close notice from
+	// the attacker's own repo retargeted by a prepended References.
+	s.colleague(t, ctx, prrWWW, 9883, "ananthsekar007", "Audit log", 15)
+	st := s.pass(t, ctx, "live")
+
+	d1 := s.must(t, ctx, spoofRoot, "live")
+	p, why := untrusted(prrKey(prrThird, 9881), "Message-ID")
+	if d1.action != "unmatched" || !strings.HasPrefix(d1.reason, p) || !strings.Contains(d1.reason, why) {
+		t.Errorf("prepended Message-ID: decision (%s, %q), want unmatched, reason %q… naming %q", d1.action, d1.reason, p, why)
+	}
+	s.noRef(t, ctx, prrKey(prrThird, 9881), "a prepended Message-ID on a relayed genuine mail creates nothing")
+
+	if d := s.must(t, ctx, genuine, "live"); d.action != "task" || !strings.Contains(d.reason, "author undetermined") {
+		t.Errorf("genuine mail after a relay with a prepended `author`: decision (%s, %q), want task, author undetermined",
+			d.action, d.reason)
+	}
+	s.mustRef(t, ctx, prrKey(prrThird, 9882))
+	if st.PRAuthorSkipped != 0 {
+		t.Errorf("PRAuthorSkipped = %d, want 0", st.PRAuthorSkipped)
+	}
+
+	task := s.mustRef(t, ctx, prrKey(prrWWW, 9883))
+	logs := s.events(t, ctx, task, "log")
+	closeMsg := s.mail(t, ctx, ghMail{repo: prrWWW, pr: 9883, reason: "state_change", sender: "ananthsekar007",
+		recipient: prrLogin, subject: "Re: [treetopllc/itest-prr-www] Audit log (PR #9883)", body: "Closed #9883.", minsAgo: 5,
+		prepend:    "References: <treetopllc/itest-prr-www/pull/9883@github.com>\r\n",
+		signedRoot: "<attacker-org/evil-repo/pull/9883@github.com>"})
+	st2 := s.pass(t, ctx, "live")
+	if got := s.status(t, ctx, task); got != "ready" {
+		t.Errorf("a close notice with a prepended References moved the review task to %q, want ready", got)
+	}
+	if n := s.n(t, ctx, `SELECT count(*) FROM audit_events WHERE tool='task_close' AND (args->>'task_id')::bigint=$1`, task); n != 0 {
+		t.Errorf("task_close audit rows for task %d = %d, want 0", task, n)
+	}
+	if got := s.events(t, ctx, task, "log") - logs; got != 0 {
+		t.Errorf("the retargeted notice logged onto the review task (+%d)", got)
+	}
+	p, why = untrusted(prrKey(prrWWW, 9883), "References")
+	if d := s.must(t, ctx, closeMsg, "live"); !strings.HasPrefix(d.reason, p) || !strings.Contains(d.reason, why) {
+		t.Errorf("retargeted close notice: reason %q, want %q… naming %q", d.reason, p, why)
+	}
+	if st2.PRClosed != 0 {
+		t.Errorf("PRClosed = %d, want 0", st2.PRClosed)
+	}
+}
+
+// ---- 2026-09-14: the PR identity is bound to SIGNED headers ----------------------
+//
+// Prod h= lists: Message-ID and every X-GitHub-* header are UNSIGNED; List-ID
+// and Subject are signed. Both mails below carry Gmail's genuine dkim=pass for
+// github.com and NO duplicated header — only a replaced, single Message-ID.
+// MUTATIONS: disabling the List-ID binding turns (1) red; disabling the
+// Subject binding turns (2) red.
+func TestCapturePRReview_Integration_ARetargetedGenuineOpeningCreatesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := newPRRSuite(t, ctx, prrOpts{})
+
+	// (1) A relayed genuine opening of attacker-org/evil-repo PR 7, its unsigned
+	// Message-ID replaced by a treetopllc root (the thread key derives from it).
+	evil := s.mail(t, ctx, ghMail{repo: prrThird, pr: 9891, opening: true, reason: "subscribed", sender: "joseg-avviato",
+		recipient: prrLogin, subject: "[attacker-org/evil-repo] Innocent change (PR #7)", body: "opened", minsAgo: 20,
+		listID: "attacker-org/evil-repo <evil-repo.attacker-org.github.com>"})
+	// (2) The same trick with a genuine mail of ANOTHER PR in the right repo: the
+	// List-ID binds, the signed Subject names PR #7, not #9892.
+	other := s.mail(t, ctx, ghMail{repo: prrThird, pr: 9892, opening: true, reason: "subscribed", sender: "joseg-avviato",
+		recipient: prrLogin, subject: "[treetopllc/itest-prr-third] Some other PR (PR #7)", body: "opened", minsAgo: 19})
+	st := s.pass(t, ctx, "live")
+
+	for _, c := range []struct {
+		m       prrMsg
+		n       int
+		binding string
+	}{{evil, 9891, "List-ID binding failed"}, {other, 9892, "Subject binding failed"}} {
+		d := s.must(t, ctx, c.m, "live")
+		prefix := fmt.Sprintf("rule %d skipped: untrusted GitHub mail for PR %s (", s.prRule, prrKey(prrThird, c.n))
+		if d.action != "unmatched" || !strings.HasPrefix(d.reason, prefix) || !strings.Contains(d.reason, c.binding) {
+			t.Errorf("PR %d: decision (%s, %q), want unmatched, reason %q… naming %q", c.n, d.action, d.reason, prefix, c.binding)
+		}
+		s.noRef(t, ctx, prrKey(prrThird, c.n), "a retargeted genuine opening creates nothing")
+	}
+	if st.TasksCreated != 0 {
+		t.Errorf("TasksCreated = %d, want 0", st.TasksCreated)
 	}
 }

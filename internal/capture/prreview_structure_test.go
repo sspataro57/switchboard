@@ -371,7 +371,10 @@ func TestMigration0035_CaptureRulesPRReviewShape(t *testing.T) {
 		{`alter table capture_rules`, "two CONFIGURATION columns on capture_rules (invariant 2: no new table)"},
 		{`add column pr_review boolean not null default false`, "criterion 1"},
 		{`add column exclude_pr_authors text ?\[\] not null default '\{\}'`, "criterion 1"},
-		{`add constraint capture_rules_pr_review_github check \( ?not pr_review or \( ?external_system = 'github' and key_regex is not null and not revive ?\) ?\)`,
+		// SPEC amendment 2026-09-14: fail-closed on a NULL external_system (the
+		// original `external_system = 'github'` alone is NULL, and a CHECK passes
+		// on NULL).
+		{`add constraint capture_rules_pr_review_github check \( ?not pr_review or \( ?external_system is not null and external_system = 'github' and key_regex is not null and not revive ?\) ?\)`,
 			"criterion 1: a review rule is a github rule with a key_regex and never revives (revive stays jira-only)"},
 		{`add constraint capture_rules_exclude_needs_pr_review check \( ?cardinality ?\( ?exclude_pr_authors ?\) = 0 or pr_review ?\)`,
 			"criterion 1: an exclude list means nothing without pr_review"},

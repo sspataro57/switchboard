@@ -155,7 +155,102 @@ measures this (expected: one account).
 
 **When authorship is checked.** Only on the CREATE branch, when no ref exists yet. Once a task
 exists, every later mail logs to it whatever the verdict would say. A task created as undetermined
-is not retracted by later `own` evidence: he dismisses it.
+is not retracted by later `own` evidence. He closes it as Done (`task_close`); a Dismiss does not
+stick, because SWT-36 reopens a dismissed task on the PR's next trusted mail that is not a merged, closed or reopened notice (see "Accepted
+residuals").
+
+**Amended 2026-09-14 (review fix; Codex CRITICAL): the origin check, and the threat model.**
+
+- **Threat.** Every input the rule reads is sender-controlled. Any inbound mail can carry a
+  GitHub-shaped `Message-ID` / `References`, which becomes the thread key the rule matches, and any
+  `X-GitHub-*` header it likes. Without an origin check, a forged mail could:
+  - CREATE a review task (a forged PR root);
+  - SUPPRESS one (a forged `X-GitHub-Reason: author` on a colleague's PR thread);
+  - CLOSE one (a forged `Closed #N.` notice).
+- **Evidence.** Prod, read-only, 2026-09-14: 121 of 121 Treetop PR-thread mails over 90 days carry a
+  Google-added `Authentication-Results` header. Its authserv-id is `mx.google.com`, and it shows
+  `dkim=pass` with `header.i=@github.com` / `header.d=github.com`. This holds on both receiving
+  accounts (1003 and 1009).
+- **Rule.** `trustedGitHubNotification(mail.Header) bool` is pure and lives in `prreview.go`.
+  - It reads ONLY the FIRST (topmost) `Authentication-Results` header. The receiving MX prepends its
+    own, so every header below it travelled with the message and may be forged.
+  - The authserv-id must be exactly `prTrustedAuthServID` (`mx.google.com`, a named constant: data,
+    not scattered literals).
+  - It needs a `dkim=pass` result whose `header.d` is `github.com` or whose `header.i` ends in
+    `@github.com`.
+  - Comments are removed before parsing, so a `(dkim=pass …)` comment is not a result.
+  - **Single-instance headers (Codex re-review, 2026-09-14).** An attacker can relay a GENUINE
+    GitHub-signed notification and PREPEND unsigned copies of action-driving headers. DKIM verifies
+    the signed instance, so Gmail still stamps dkim=pass for github.com, but `mail.Header.Get`
+    returns the attacker's first instance, which could point a genuine create or close at a
+    treetopllc PR root. So the mail is UNTRUSTED when any of `Message-ID`, `References`,
+    `In-Reply-To`, `X-GitHub-Reason`, `X-GitHub-Sender` or `X-GitHub-Recipient` appears more than
+    once (`duplicatedGitHubHeader`, pure). Genuine GitHub mail never duplicates them. The reason
+    names the header: `header References appears more than once; …`.
+  - **What we rely on:** Gmail's dkim=pass, single-instance headers, and the PR bound to the SIGNED
+    `List-ID` and `Subject` (below). The body close notice is covered by DKIM's body hash (GitHub does
+    not sign with `l=`). We do not re-verify signatures ourselves.
+- **Where it applies: before ANY pr_review action.**
+  - The pending mail itself (`prMailTrusted`, read from its own raw row). An untrusted mail on a
+    pr_review rule FALLS THROUGH to the next rule, exactly like the own-PR fall-through, so today's
+    behaviour is preserved.
+    - Its reason begins `rule R skipped: untrusted GitHub mail for PR {key} (…); `.
+    - It creates, logs and closes nothing through the PR rule.
+    - It is not counted in `pr_author_skipped`.
+  - Authorship evidence. Thread-side reasons and the opening lookup count only trusted mails, so a
+    create happens only when the matching mail is trusted, and a merged/closed notice closes only
+    when trusted.
+- **Consequences.**
+  - A row with no RFC822 header (a gmail:-shaped `{}` row) cannot prove where it came from, so it
+    falls through. Prod has no such row: all 16,490 google raw items are IMAP envelopes.
+  - If the receiving accounts ever move off Gmail, the constant changes, in one place. If
+    `MAIL_SOURCE` moves off `imap` (bridge, gmail_api), every PR mail becomes untrusted (residual c).
+- **Outside the threat model:** Gmail itself, and a compromised github.com DKIM key.
+- **Residuals of the origin check:**
+  - An UNMODIFIED relay of an attacker's own GitHub mail is harmless. It is genuinely GitHub's, but
+    its thread root names their repo, not `treetopllc/`, so the rule never matches it.
+  - **GitHub's DKIM `h=` lists, checked on prod 2026-09-14** (read-only, 90 days, Treetop PR mail):
+    - follow-ups (71 mails): `date:from:reply-to:to:cc:in-reply-to:references:subject:list-id:list-archive:list-post:list-unsubscribe:list-unsubscribe-post:from`;
+    - openings (52 mails): `date:from:reply-to:to:cc:subject:list-id:list-archive:list-post:list-unsubscribe:list-unsubscribe-post:from`.
+
+    So **`Message-ID` and every `X-GitHub-*` header are NOT signed**, and `In-Reply-To` /
+    `References` are signed on follow-ups only. Single-instance enforcement alone does not stop a
+    REPLACED unsigned header. The attack it leaves: relay a genuine GitHub OPENING of the attacker's
+    own PR and replace its single, unsigned `Message-ID` with `<treetopllc/{repo}/pull/{N}@github.com>`.
+    The thread key derives from `Message-ID` when there are no `References`, and DKIM still passes.
+  - **Binding the PR to SIGNED headers (2026-09-14).** A mail is trusted for pr_review only if
+    `prMailBindingFailure(h, ref)` is empty:
+    - **List-ID.** Its angle part equals `{repo}.{owner}.github.com` for the thread key's PR,
+      case-insensitively. Prod: 123 of 123 Treetop PR-thread mails carry exactly one List-ID, and
+      all 123 are exactly `{owner}/{repo} <{repo}.{owner}.github.com>`, e.g.
+      `treetopllc/collaboratory-www <collaboratory-www.treetopllc.github.com>`.
+    - **Subject.** RFC 2047-decoded, it ENDS with `(PR #N)` for the thread key's N. Prod: 122 of 123
+      raw; the one exception (`collaboratory-www#3218`) is an encoded-word Subject that ends
+      `(PR #3218)` once decoded; it is pinned verbatim as a unit fixture. Replies read
+      `Re: [owner/repo] Title (PR #N)`, openings `[owner/repo] Title (PR #N)`.
+
+    A mismatch is untrusted, and the reason names the binding (`List-ID binding failed: …` /
+    `Subject binding failed: …`). `List-ID` and `Subject` join the single-instance list. Retargeting
+    now needs a change to a signed header, which breaks DKIM.
+  - **Remaining after the binding (accepted, residual b):** the unsigned `X-GitHub-Reason`,
+    `X-GitHub-Sender` and `X-GitHub-Recipient` stay spoofable, whether added or replaced, but only
+    by someone relaying GENUINE treetopllc PR mail. They already receive the repo's notifications.
+    Impact: at most one review task suppressed (for example a replaced `X-GitHub-Reason: author`).
+  - **(a) Outside the threat model: a delivery path where Gmail does NOT prepend its own
+    `Authentication-Results`** (for example intra-Workspace mail). A forged header would then be
+    topmost. The check assumes Gmail always stamps its own.
+  - **(b) Insider relay, accepted.** Someone who already receives genuine treetopllc PR mail could
+    relay it with an ADDED X-GitHub-* header the original lacked. GitHub probably does not DKIM-sign
+    those headers, and the duplicate guard only catches a second copy. Impact: at most one review
+    task suppressed.
+  - **(c) `MAIL_SOURCE`.** Switching from `imap` to `bridge` or `gmail_api` stores no RFC822, so
+    EVERY PR mail becomes untrusted and the rule stops creating tasks. Moving off Gmail changes the
+    one constant; changing `MAIL_SOURCE` needs the header read re-sourced.
+  - **(d) A future github-keyed rule WITHOUT `pr_review` on the same threads** would compute the
+    same canonical key. On an untrusted fall-through its notice flag is empty, so it could reopen a
+    dismissed review task through SWT-36. Nothing does this today; do not add such a rule.
+  - **Quotes.** A `"` anywhere in a dkim result makes the mail untrusted (Gmail's real header has
+    none): a quoted `header.i` could otherwise smuggle a `header.d=github.com` token.
 
 ### D2. Data for the match, code for the author filter, the PR key and the title
 
@@ -239,7 +334,10 @@ This is already true with no new code, and it becomes a pinned criterion. `taskF
 the ref whatever the task's status, so a later mail on the PR:
 - is a `task_log` onto the same task, never a second task (`external_refs` UNIQUE);
 - lands in the closed task's history if the task is closed (it does not vanish);
-- runs SWT-36's guarded reopen if the task was DISMISSED, unchanged.
+- runs SWT-36's guarded reopen if the task was DISMISSED. **Amended 2026-09-14 (owner decision):**
+  a PR state notice (merged, closed or reopened) NEVER reopens a review task. `decideMessage`'s
+  found branch never sets the dismissal for a notice, so live, shadow and the dry run agree. The
+  notice is logged and nothing else changes.
 
 **What this ticket does NOT do: bring a plain-closed (Done) PR task back on new activity.** That is
 **SWT-53 (chat-on-closed-task)**, specced in parallel at `/home/salvo/projects/personal/wt/chatclosed`;
@@ -247,7 +345,7 @@ its SPEC file did not exist when this was written.
 
 The boundary, so the two designs do not overlap:
 - This ticket leaves the `task_log` branch of `decideMessage` byte-identical for github refs,
-  except for the D5 close call.
+  except for the D5 close call and the state-notice guard on SWT-36's reopen (above).
 - SWT-53 owns any reopen or resurface on that branch, for every system.
 - This ticket exports two pure predicates SWT-53 may call:
   - `github.PRStateNotice(body, n)`. SWT-53 should not resurface a task on the very notice that
@@ -277,20 +375,28 @@ writes no dismissal label, so it counts as Done.
 creates no task. It is `attributed`, reason `PR already merged/closed; no review task`: a review of
 merged work is not work.
 
-**Other modes:** shadow closes nothing and says `would close`. "Reopened #N" notices only log; they
-belong to SWT-53.
+**Other modes:** shadow closes nothing and says `would close`.
+
+**Amended 2026-09-14 (owner decision): `Reopened #N.` is a PR state notice too.**
+- `github.PRStateNotice` answers a third state, `PRStateReopened`, and `PRStateEndsPR` is false
+  for it.
+- It never closes a task, and it never reopens a dismissed one: it is logged, nothing more.
+- As the first mail seen for a PR, it creates the review task like any mail, because the PR is
+  open.
+- No state notice reopens a dismissed review task (D4).
 
 **Why close rather than annotate:**
 - The board is his to-do list, and a merged PR's review is moot.
 - Annotating means opening the task to learn it merged.
 - The close is reversible (`task_reopen`), audited, and makes no model call.
 
-### D6. Bot PRs create no task (recommended default; OQ-1)
+### D6. Bot PRs get review tasks (OQ-1 = b; the status block is the authority)
 
-The seeded rule lists `*[bot]` in `exclude_pr_authors`, so a PR opened by `dependabot[bot]`, for
-example "Bump sanitize-html …", falls through (D1 row 3). It is data, so flipping it is a rule
-change. It is not code. Residual: a bot PR whose opening notification is missing from the store is
-`undetermined` and gets a task.
+The seeded rule's `exclude_pr_authors` is EMPTY. A PR opened by `dependabot[bot]`, for example
+"Bump sanitize-html …", is a colleague's PR (D1 row 4) and gets a review task. The exclusion
+mechanism stays as data: a rule that lists `*[bot]` makes bot PRs fall through (D1 row 3), and the
+reason reads `excluded author (*[bot])`. Flipping it is a rule change, not code. (The recommended
+default this section first proposed, `*[bot]` seeded, was superseded by the owner's answer.)
 
 ### D7. Every treetopllc repo attributes to collaboratory
 
@@ -363,11 +469,18 @@ key_regex is proven in Go on the real corpus before insert.
 
 **Migration and rule tool**
 
-1. Migration 0034 (or the next free number, see D4) adds to `capture_rules`:
+1. Migration 0035 (SWT-53 owns 0034; see the status block) adds to `capture_rules`:
    - `pr_review BOOLEAN NOT NULL DEFAULT false`;
    - `exclude_pr_authors TEXT[] NOT NULL DEFAULT '{}'`;
-   - CHECK `NOT pr_review OR (external_system = 'github' AND key_regex IS NOT NULL AND NOT revive)`;
+   - CHECK `NOT pr_review OR (external_system IS NOT NULL AND external_system = 'github' AND key_regex IS NOT
+     NULL AND NOT revive)`;
    - CHECK `cardinality(exclude_pr_authors) = 0 OR pr_review`.
+
+   **Amended 2026-09-14 (main session).** The CHECK first read `NOT pr_review OR (external_system = 'github'
+   AND …)`. That lets `pr_review=true` with a NULL `external_system` through: `NULL = 'github'` is NULL, the
+   AND is NULL, `false OR NULL` is NULL, and a CHECK passes on NULL. The CHECK now requires
+   `external_system IS NOT NULL` explicitly, so it fails closed. `TestMigration0035_CaptureRulesPRReviewShape`'s
+   regex was updated to match, and the migration integration test gained the NULL case.
 2. `capture_rule_add` accepts `pr_review` and `exclude_pr_authors`, and refuses, naming the field:
    - `pr_review` without `external_system=github` or without `key_regex`;
    - `pr_review` with `revive`;
@@ -404,7 +517,9 @@ key_regex is proven in Go on the real corpus before insert.
    message without that rule. The decision row:
    - records the fallen-to rule's action and project;
    - keeps `matched_rule_ids` from the full evaluation;
-   - carries a reason that begins `rule R skipped: PR {key} authored by him ({evidence}); `.
+   - carries a reason that begins `rule R skipped: PR {key} authored by him ({evidence}); ` for `own`,
+     and `rule R skipped: PR {key} excluded author ({entry}): {evidence}; ` for `excluded`
+     (amended 2026-09-14: an excluded bot is not "him").
 
    Integration cases:
    - (a) a mail titled `WEB-12 …` on his own PR `task_log`s onto the rule-10 fixture's bucket task,
@@ -438,7 +553,9 @@ key_regex is proven in Go on the real corpus before insert.
 13. A second and third mail on the same PR each write a `task_log` onto the same task. When the task
     is `closed` (plain Done), the log is appended, the status stays `closed`, and no second task or
     ref appears. When the task is DISMISSED, SWT-36's guarded reopen fires exactly as for any other
-    ref.
+    ref, EXCEPT on a PR state notice. **Amended 2026-09-14:** a merged, closed or reopened notice on a
+    dismissed review task stays a `task_log`. The task stays `closed`, the dismissal's `reopened_at`
+    stays NULL, no `task_reopen` runs, and `Reopened` is 0, in live, shadow and the dry run alike.
 14. (D5, subject to OQ-2.) A `Merged #N into main.` or `Closed #N.` notice on an open review task
     appends the log, then closes the task through `task_close` as `capture:{connector}`. The audit
     row and the `status_changed` event name the reason.
@@ -446,6 +563,10 @@ key_regex is proven in Go on the real corpus before insert.
     - Shadow closes nothing.
     - A notice with a different N, or `#N` mentioned mid-body, does not close.
     - A notice that would create gives `attributed`, and no task.
+    - (Amended 2026-09-14.) A `Reopened #N.` notice only logs. It never closes a task, and as the
+      first mail seen it creates the task like any mail.
+    - (Amended 2026-09-14.) An UNTRUSTED mail (D1 amendment) never creates, logs or closes through
+      the PR rule. It falls through, and its reason says `untrusted GitHub mail`.
 
 **Bots, counters, modes and the dry run**
 
@@ -469,14 +590,15 @@ key_regex is proven in Go on the real corpus before insert.
 
 ## Data model changes
 
-Migration **0034_capture_rules_pr_review.sql** (forward-only; renumber if SWT-53 lands first):
+Migration **0035_capture_rules_pr_review.sql** (forward-only; SWT-53 owns 0034):
 
 ```sql
 ALTER TABLE capture_rules
   ADD COLUMN pr_review          BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN exclude_pr_authors TEXT[]  NOT NULL DEFAULT '{}',
-  ADD CONSTRAINT capture_rules_pr_review_github
-    CHECK (NOT pr_review OR (external_system = 'github' AND key_regex IS NOT NULL AND NOT revive)),
+  ADD CONSTRAINT capture_rules_pr_review_github   -- amended 2026-09-14: fail-closed on NULL (criterion 1)
+    CHECK (NOT pr_review OR (external_system IS NOT NULL AND external_system = 'github'
+                             AND key_regex IS NOT NULL AND NOT revive)),
   ADD CONSTRAINT capture_rules_exclude_needs_pr_review
     CHECK (cardinality(exclude_pr_authors) = 0 OR pr_review);
 ```
@@ -486,8 +608,8 @@ are reused as is. No `capture_decisions.action` change: fall-through writes the 
 action, and D5's close rides on an ordinary `task_log` row, the SWT-45 revive precedent. The
 typed outcome is the task's `status_changed` event and audit row.
 
-**LANDMINE (deploy order): 0034 BEFORE any image built from this branch.** `loadRules` selects the
-new columns on every capture pass, so a new image on a pre-0034 db fails capture for every connector.
+**LANDMINE (deploy order): 0035 BEFORE any image built from this branch.** `loadRules` selects the
+new columns on every capture pass, so a new image on a pre-0035 db fails capture for every connector.
 
 ## API / MCP tool changes
 
@@ -510,7 +632,7 @@ unchanged.
 
 ## Files likely to touch
 
-- `migrations/0034_capture_rules_pr_review.sql`: new.
+- `migrations/0035_capture_rules_pr_review.sql`: new.
 - `internal/connector/github/prref.go`: new, pure:
   - `ParsePRRef`, `PRKey`, `PRURL`, `PRRootMessageID`, `PRStateNotice`;
   - the header-name consts `X-GitHub-Reason`, `X-GitHub-Sender` and `X-GitHub-Recipient`;
@@ -541,7 +663,7 @@ unchanged.
   `prreview_integration_test.go`, `dryrun_integration_test.go`, `internal/tools/capturerules_test.go`
   (extend).
 - Docs: `docs/runbooks/capture-rules.md` (new "PR review rules" section: the seed command, the dry
-  run, the backfill, rollback); `docs/runbooks/HANDOFF-kube-treetop-pr-review-tasks.md` (0034
+  run, the backfill, rollback); `docs/runbooks/HANDOFF-kube-treetop-pr-review-tasks.md` (0035
   migrate Job, image roll to every capture workload); the IK entry at delivery.
 
 ## In scope
@@ -733,10 +855,13 @@ SELECT ... FROM gh ...;
 - `/ticket-review` with a codex pass: capture, close path.
 
 **2. Deploy order** (kube session; `HANDOFF-kube-treetop-pr-review-tasks.md`):
-1. 0034 via the migrate Job, checked with `SELECT max(version) FROM schema_migrations`.
+1. 0035 via the migrate Job, checked with `SELECT version FROM schema_migrations WHERE version = '0035'`.
 2. One image tag to EVERY capture workload: every connector CronJob, the google IMAP watcher, and
    pipelined.
-3. `go install ./cmd/opsctl` here.
+3. **Barrier (procedural; accepted residual b).** The switchboard session verifies with
+   `kubectl -n ops get cronjob,deploy -o wide` that EVERY capture workload shows the new image tag.
+   Only then is the rule seeded.
+4. `go install ./cmd/opsctl` here.
 
 **Seed nothing before step 2 completes.** An old capture binary ignores `pr_review` and would take
 the rule as a plain github rule. It would create path-spelled refs and tasks for his own PRs, with
@@ -748,14 +873,17 @@ ugly titles, and a later new binary would then create SECOND tasks under the can
 DATABASE_URL="$OPS_DATABASE_URL" go run ./cmd/opsctl capture-rules try --project collaboratory \
   --type thread_key_contains --pattern '<treetopllc/' --external-system github \
   --key-regex '<(treetopllc/[A-Za-z0-9._-]+/pull/[0-9]+)@github\.com>$' --priority 91 \
-  --pr-review --exclude-pr-author '*[bot]' [--exclude-pr-author <second login from 0b>] \
-  --since 720h --show wins
+  --pr-review --since 720h --show wins | tee ~/swt54-try-pre-add.txt
 ```
+
+(No `--exclude-pr-author`: OQ-1 = b, and 0b found no second login.) SAVE the output. Its "D9 backfill
+payloads" section is the backfill source (step 5): once the rule is added, `try` with the same
+flags refuses (Finding A).
 
 Expect about 17 PRs. For each one, check the verdict against the PR's author on github.com:
 - his PRs `own`, falling through to rule 10 or 6/7;
 - colleagues' PRs `other` or `undetermined`;
-- Dependabot `excluded`;
+- Dependabot `other` (OQ-1 = b);
 - WEB-/API-titled PRs won by the candidate;
 - no candidate loss except to an LHH key.
 
@@ -768,8 +896,8 @@ test.
 `--note "treetop-pr-review-tasks: one review task per treetopllc PR he did not author"`). Then
 `opsctl capture-rules list` must show the flags.
 
-**5. Backfill (D9)** from step 3's payloads, for open PRs with mail in the last 30 days. Record the
-task ids.
+**5. Backfill (D9)** from the payloads SAVED in step 3 (`~/swt54-try-pre-add.txt`), for open PRs with mail
+in the last 30 days. Record the task ids. Do not rerun `try` after the add: it refuses.
 
 **6. Watch.**
 - The next google ticks' `capture_rules:` lines, for `pr_author_skipped` and `pr_closed`.
@@ -781,7 +909,31 @@ task ids.
 
 **7. Rollback.** `opsctl call --tool capture_rule_set_enabled --args '{"rule_id":<id>,"enabled":false}'`.
 PR mail returns to rules 10/6/7 on the next NEW message. Created tasks stay (real PRs); dismiss by
-hand. 0034 stays (forward-only, and inert with no `pr_review` rule enabled).
+hand. 0035 stays (forward-only, and inert with no `pr_review` rule enabled). Never roll an image
+back past this ticket while a pr_review rule is enabled: disable the rule first.
+
+## Accepted residuals (2026-09-14, review fixes)
+
+- **(a) Undetermined authorship stays fail-open, and this can occasionally create a task for his
+  OWN PR.** This was a deliberate choice (D1): a wrong task costs one close, while a missed review
+  is invisible.
+  - Prod: 2 of 55 PRs in 90 days were undetermined, and both were someone else's. He had no Treetop
+    PR activity in the window.
+  - A false own-PR task appears when, for example, his first mail on his own PR arrives with reason
+    `mention` (pinned by
+    `TestCapturePRReview_Integration_AMentionOnlyMailOnHisOwnPRIsUndeterminedAndCreates` and a D1
+    table row), or when the `author` mail went to the other receiving account.
+  - **A Dismiss does not stick.** SWT-36 reopens a dismissed task on the PR's next trusted mail that is not a merged, closed or reopened notice.
+    Closing it as Done (`task_close`) is the fix that sticks.
+- **(b) The mixed-version barrier is procedural.** An old capture binary would take the pr_review
+  rule as a plain github rule. The switchboard session seeds the rule ONLY after verifying with
+  `kubectl -n ops get cronjob,deploy -o wide` that every capture workload runs the new image
+  (HANDOFF step 3). A later image rollback past this ticket must disable the rule first.
+- **(c) A transient `link_external_ref` failure after `create_task` can yield a second task.** The
+  pass fails loudly, but the created task has no ref, so a later notification creates another. This
+  is the general capture claim/partial-write weakness, tracked in follow-up **SWT-50**.
+- Two receiving accounts (0f): the thread-side read covers one of them.
+- `X-GitHub-Reason: author` has never been observed on prod (0a).
 
 ## Decisions made unilaterally
 

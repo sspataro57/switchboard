@@ -81,7 +81,23 @@ type captureRuleAddArgs struct {
 	// addressed to Salvador and so override a gated project's assignee check.
 	Revive    bool `json:"revive,omitempty"`
 	Addressed bool `json:"addressed,omitempty"`
+	// SWT-54: pr_review = this rule's matches are GitHub PR notification mail,
+	// and capture reads authorship from the stored raw headers before creating
+	// a task (his own PRs fall through). exclude_pr_authors = logins treated
+	// like his own: an exact login (case-insensitive) or '*'+suffix.
+	PRReview         bool     `json:"pr_review,omitempty"`
+	ExcludePRAuthors []string `json:"exclude_pr_authors,omitempty"`
 }
+
+// excludePRAuthorRe / excludeBotSuffixRe are criterion 2's two shapes of an
+// exclude_pr_authors entry: a GitHub login (App bots carry a "[bot]" suffix),
+// optionally with a leading '*' for a suffix match, or the bare "*[bot]" that
+// covers every GitHub App bot. Anything else is refused: capture_rules cannot
+// be edited (IK F8), so a bad entry would be permanent.
+var (
+	excludePRAuthorRe  = regexp.MustCompile(`^\*?[A-Za-z0-9][A-Za-z0-9-]*(\[bot\])?$`)
+	excludeBotSuffixRe = regexp.MustCompile(`^\*\[bot\]$`)
+)
 
 // parseCaptureRuleAdd unmarshals and applies every check that needs no
 // database, so validate and the handler share ONE spelling of the rules
@@ -141,6 +157,35 @@ func parseCaptureRuleAdd(args []byte) (captureRuleAddArgs, error) {
 		return a, fmt.Errorf("url_template %q must contain the {key} placeholder", a.URLTemplate)
 	}
 
+	// SWT-54 criterion 2, migration 0035's CHECKs plus what a CHECK cannot
+	// see, refused here first so the error names the field. Ahead of the J1
+	// block so `pr_review` + `revive` names both fields. The github
+	// url_template refusal sits AFTER the J1 block, so a reviving github rule
+	// is still refused by name for its revive (SWT-45's review fix).
+	if a.PRReview {
+		if a.ExternalSystem != "github" {
+			return a, fmt.Errorf("pr_review requires external_system github (got %q): a PR review rule keys one task "+
+				"per GitHub PR", a.ExternalSystem)
+		}
+		if a.KeyRegex == "" {
+			return a, errors.New("pr_review requires a key_regex that captures the PR path ({owner}/{repo}/pull/{N}) " +
+				"out of the thread key")
+		}
+		if a.Revive {
+			return a, errors.New("pr_review with revive is refused: revive is Jira activity only")
+		}
+	}
+	if len(a.ExcludePRAuthors) > 0 && !a.PRReview {
+		return a, errors.New("exclude_pr_authors requires pr_review: the list names PR authors whose PRs fall " +
+			"through, and only a pr_review rule reads authorship")
+	}
+	for _, e := range a.ExcludePRAuthors {
+		if !excludePRAuthorRe.MatchString(e) && !excludeBotSuffixRe.MatchString(e) {
+			return a, fmt.Errorf("exclude_pr_authors entry %q: must be a GitHub login (letters, digits, '-', "+
+				"optionally ending \"[bot]\"), a '*' + login suffix, or \"*[bot]\"", e)
+		}
+	}
+
 	// SWT-45 J1, the same two rules as migration 0030's CHECKs, refused here
 	// first so the error names the field rather than a constraint.
 	if a.Addressed && !a.Revive {
@@ -164,6 +209,13 @@ func parseCaptureRuleAdd(args []byte) (captureRuleAddArgs, error) {
 				"without one the key is the pattern's first group (rule 10 keys by prefix)")
 		}
 	}
+	if a.ExternalSystem == "github" && a.URLTemplate != "" {
+		// SWT-54 criterion 2: the canonical key is `{owner}/{repo}#{N}`, and its
+		// '#' would become a URL fragment under {key}. Capture builds the URL
+		// with github.PRURL instead.
+		return a, fmt.Errorf("url_template %q is refused for external_system github: the PR key contains '#', "+
+			"and capture builds the PR link itself (https://github.com/{owner}/{repo}/pull/{N})", a.URLTemplate)
+	}
 	return a, nil
 }
 
@@ -171,6 +223,12 @@ func validateCaptureRuleAdd(args []byte) error {
 	_, err := parseCaptureRuleAdd(args)
 	return err
 }
+
+// ValidateCaptureRuleAdd is capture_rule_add's Validate, exported for
+// `opsctl capture-rules try` (SWT-54 D10): the dry run proves a candidate rule
+// that `add` would accept, so it validates with the ONE spelling of the rules
+// rather than a second copy that could disagree.
+func ValidateCaptureRuleAdd(args []byte) error { return validateCaptureRuleAdd(args) }
 
 // captureRuleAdd inserts one capture_rules row. Rules are seeded by runbook
 // rather than by a data migration (SPEC "Decisions made unilaterally" 5), so
@@ -194,16 +252,21 @@ func captureRuleAdd(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 	if a.Priority != nil {
 		priority = *a.Priority
 	}
+	exclude := a.ExcludePRAuthors
+	if exclude == nil {
+		exclude = []string{} // the column is NOT NULL DEFAULT '{}'
+	}
 
 	var ruleID int64
 	err = pool.QueryRow(ctx,
 		`INSERT INTO capture_rules
 		   (project_id, subproject, criteria_type, pattern, external_system, key_regex, url_template, priority, note,
-		    revive, addressed)
-		 VALUES ($1, NULLIF($2,''), $3, $4, NULLIF($5,''), NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,''), $10, $11)
+		    revive, addressed, pr_review, exclude_pr_authors)
+		 VALUES ($1, NULLIF($2,''), $3, $4, NULLIF($5,''), NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,''), $10, $11,
+		         $12, $13)
 		 RETURNING id`,
 		projectID, a.Subproject, a.CriteriaType, a.Pattern, a.ExternalSystem,
-		a.KeyRegex, a.URLTemplate, priority, a.Note, a.Revive, a.Addressed).Scan(&ruleID)
+		a.KeyRegex, a.URLTemplate, priority, a.Note, a.Revive, a.Addressed, a.PRReview, exclude).Scan(&ruleID)
 	if err != nil {
 		return nil, fmt.Errorf("insert capture rule (one rule per project+criteria_type+pattern — "+
 			"disable the existing one with capture_rule_set_enabled instead of re-adding?): %w", err)

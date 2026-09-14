@@ -150,3 +150,32 @@ func TestCaptureDryRun_Integration_TryWritesNothingAndRollsUpEveryPR(t *testing.
 		}
 	}
 }
+
+// Finding A (SWT-54 review): once the rule is stored, a `try` with the same
+// (project, type, pattern) can never win a match, so it would print an EMPTY
+// backfill. It must refuse, by name, and point at the pre-add run.
+func TestCaptureDryRun_Integration_TryRefusesARuleAlreadyStored(t *testing.T) {
+	ctx := context.Background()
+	s := newPRRSuite(t, ctx, prrOpts{}) // the PR rule IS stored
+	s.colleague(t, ctx, prrWWW, 9911, "joseg-avviato", "Ranking widget", 50)
+
+	var out bytes.Buffer
+	_, err := capture.DryRunRules(ctx, s.pool, capture.DryRunConfig{
+		Candidate: capture.CandidateRule{
+			Project: prrCollab, CriteriaType: "thread_key_contains", Pattern: prrPattern,
+			ExternalSystem: "github", KeyRegex: prrKeyRegex, Priority: 91, PRReview: true,
+		},
+		Since: 720 * time.Hour, Show: "wins", Out: &out,
+	})
+	if err == nil {
+		t.Fatalf("DryRunRules succeeded with the candidate already stored as rule %d; want a refusal\noutput:\n%s", s.prRule, out.String())
+	}
+	for _, frag := range []string{fmt.Sprintf("enabled rule %d already stores this rule", s.prRule), "BEFORE the add", "EMPTY backfill"} {
+		if !strings.Contains(err.Error(), frag) {
+			t.Errorf("refusal %q does not contain %q", err, frag)
+		}
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refused try printed output:\n%s", out.String())
+	}
+}
