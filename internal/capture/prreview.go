@@ -71,12 +71,16 @@ func trustedGitHubNotification(h mail.Header) bool {
 	if len(id) == 0 || id[0] != prTrustedAuthServID {
 		return false
 	}
-	// A quote anywhere in a dkim result makes the whole mail untrusted: Gmail's
-	// real header has none, and a quoted property value can smuggle a second
-	// "header.d=github.com" token past whitespace tokenization
-	// (header.i="x header.d=github.com "@evil.example).
+	// A quote anywhere in a dkim result makes the whole mail untrusted: a quoted
+	// property value can smuggle a second "header.d=github.com" token past
+	// whitespace tokenization (header.i="x header.d=github.com "@evil.example).
+	// The one exception is Gmail's own quoting of header.b when the signature
+	// prefix holds a '/' or '+' (prod, 2026-09-14: 4 of the 150 PR mails a 30-day dry run matched, e.g.
+	// header.b="FVP32/f4"). A quoted string of base64 characters only has no
+	// whitespace, ';', '(' or '\', so it can neither hide a token boundary, split
+	// a part, open a comment nor shift the quote pairing.
 	for _, resinfo := range parts[1:] {
-		if authResultIsDKIM(resinfo) && strings.Contains(resinfo, `"`) {
+		if authResultIsDKIM(resinfo) && strings.Contains(authResultsQuotedSigRe.ReplaceAllString(resinfo, "header.b=q"), `"`) {
 			return false
 		}
 	}
@@ -213,6 +217,14 @@ func authResultIsGitHubDKIMPass(resinfo string) bool {
 
 // authResultsEqRe folds "method = result" (CFWS is legal around '=') to "method=result".
 var authResultsEqRe = regexp.MustCompile(`\s*=\s*`)
+
+// authResultsQuotedSigRe matches "header.b=" followed by a quoted string of
+// base64 characters only — the one quoted value Gmail writes in a dkim result.
+// It also matches such a span inside another value (after '.', '=' or '@'),
+// which is harmless: with the span's quotes removed, the resinfo tokenizes the
+// same, so nothing the pre-fix rule rejected can pass. See
+// trustedGitHubNotification.
+var authResultsQuotedSigRe = regexp.MustCompile(`(?i)\bheader\.b\s*=\s*"[A-Za-z0-9+/=]*"`)
 
 // authResultsParts removes RFC 5322 comments (nested, with quoted-pairs) from an
 // Authentication-Results value and splits it on the ';' that are outside quoted

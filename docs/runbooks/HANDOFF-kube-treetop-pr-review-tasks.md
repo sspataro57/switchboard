@@ -59,6 +59,15 @@ new binary before step 3, not just connector-google.
 
 No new env var, no new route, no new port.
 
+**Amendment 2026-09-14: roll 0.7.22 before step 3.** 0.7.21's trust gate rejected
+genuine GitHub mail whose Gmail `Authentication-Results` quotes `header.b` (the
+signature prefix holds `/` or `+`, e.g. `header.b="FVP32/f4"`). The step-3a dry run
+flagged 4 such messages as untrusted. 0.7.22 exempts a quoted base64-only `header.b`
+and nothing else (SPEC D1, "Quotes"). No migration and no manifest change beyond
+the tag: roll 0.7.22 to the same workloads as above, together, and step 3 waits
+for the same barrier on 0.7.22. The follow-up for the tokenizer's whitespace
+handling is SWT-55.
+
 ## 3. Seed the rule (switchboard session, from `main`, only after step 2)
 
 **3-0. Verify the barrier yourself, first.** It is procedural: nothing in code

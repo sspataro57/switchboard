@@ -249,8 +249,13 @@ residuals").
   - **(d) A future github-keyed rule WITHOUT `pr_review` on the same threads** would compute the
     same canonical key. On an untrusted fall-through its notice flag is empty, so it could reopen a
     dismissed review task through SWT-36. Nothing does this today; do not add such a rule.
-  - **Quotes.** A `"` anywhere in a dkim result makes the mail untrusted (Gmail's real header has
-    none): a quoted `header.i` could otherwise smuggle a `header.d=github.com` token.
+  - **Quotes.** A `"` anywhere in a dkim result makes the mail untrusted: a quoted `header.i` could
+    otherwise smuggle a `header.d=github.com` token. One exception (amended 2026-09-14): Gmail
+    quotes `header.b` when the signature prefix holds `/` or `+` (`header.b="FVP32/f4"`; the 30-day step-3a dry
+    run wrongly marked 4 of its 150 matched PR mails untrusted). A `header.b="…"` whose content is base64
+    characters only (`[A-Za-z0-9+/=]`) is exempt; it holds no whitespace, `;`, `(` or `\`, so it
+    cannot hide a token, split a part, open a comment or shift the quote pairing. Any other quote
+    still makes the mail untrusted.
 
 ### D2. Data for the match, code for the author filter, the PR key and the title
 
