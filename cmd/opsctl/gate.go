@@ -105,11 +105,15 @@ func runCaptureRulesGate(argv []string) error {
 // deferred and blind (SWT-45 J17) are ALWAYS 0 here for the same reason: they
 // count the own-action guard, which runs only on the revive/surface path, and
 // the gate stage takes neither.
+//
+// resurfaced (chat-on-closed-task CC7/CC8) is ALWAYS 0 here: the gate's
+// task_log onto a closed task only logs and writes resurface=false, the
+// recorded residual (gated projects are not inquiry-armed).
 func printGateStats(mode string, st capture.GateStats) {
-	const revived, surfacedCreated, deferred, blind = 0, 0, 0, 0
+	const revived, surfacedCreated, deferred, blind, resurfaced = 0, 0, 0, 0, 0
 	fmt.Printf("capture_gate: {\"mode\":%q,\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,"+
-		"\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,"+
+		"\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
 		"\"attributed\":%d,\"pending_lookup\":%d,\"budget_skipped\":%d,\"resolved\":%d}\n",
-		mode, st.TasksCreated, st.Appended, st.Reopened, revived, surfacedCreated, deferred, blind,
+		mode, st.TasksCreated, st.Appended, st.Reopened, revived, surfacedCreated, deferred, blind, resurfaced,
 		st.Attributed, st.PendingLookup, st.BudgetSkipped, st.Resolved)
 }

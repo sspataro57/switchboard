@@ -343,16 +343,20 @@ func TestInquiryFilter_HasNoLocalityClauseAndTheReasonIsInTheComment(t *testing.
 	if decl < 0 {
 		t.Fatalf("%s mentions inboxWhereInquiry but never declares `const inboxWhereInquiry`", rel)
 	}
-	open := strings.Index(src[decl:], "`")
-	if open < 0 {
+	// AMENDED 2026-09-14 (SWT-53 review fix): the clause is judged on the WHOLE
+	// declaration, up to the next blank line (the replyfold/inquiryeligible_test.go
+	// region shape). This check used to read only the FIRST raw literal, which
+	// stops at the first `+ replyfold...` splice; since chat-on-closed-task the
+	// WHERE clause lives in later literals, so an ai_locality clause added there
+	// would have passed and silently emptied the lane.
+	if !strings.Contains(src[decl:], "`") {
 		t.Fatalf("%s's inboxWhereInquiry is not a raw string literal", rel)
 	}
-	litStart := decl + open + 1
-	closing := strings.Index(src[litStart:], "`")
-	if closing < 0 {
-		t.Fatalf("%s's inboxWhereInquiry literal is unterminated", rel)
+	end := strings.Index(src[decl:], "\n\n")
+	if end < 0 {
+		t.Fatalf("%s's inboxWhereInquiry declaration is not followed by a blank line", rel)
 	}
-	literal := src[litStart : litStart+closing]
+	literal := src[decl : decl+end]
 	comment := src[i:decl]
 
 	if !strings.Contains(literal, "ai_inquiry") {

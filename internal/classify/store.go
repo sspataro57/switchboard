@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sspataro57/switchboard/internal/provider"
+	"github.com/sspataro57/switchboard/internal/replyfold"
 )
 
 // PGStore is the Postgres side. It reads capture decisions and writes ai_runs /
@@ -112,9 +113,16 @@ const inboxWhereResidue = `
 //     discriminate on its own, for the reason inboxWhere records: the capture
 //     engine only ever decides inbound messages (invariant 5), so our own sends
 //     are kept out by the decision join, never by this line.
-//   - `latest.action = 'attributed'` on the LATEST decision, spelled as the
-//     positive: 'task' and 'task_log' NAME a project and so survive the join,
-//     and those messages already produced a task.
+//   - replyfold.InquiryEligibleLatestSQL, spelled as the positive: the LATEST
+//     decision (any mode) is `attributed`, or (chat-on-closed-task CC5) the
+//     latest LIVE decision (replyfold.InquiryLiveDecisionJoinSQL) is a
+//     `task_log` capture recorded with resurface=true onto a task that is STILL
+//     closed. That branch reads only live decisions (CC5b; a newer shadow
+//     `attributed` row still wins through the attributed branch), and the project
+//     is replyfold.InquiryProjectIDSQL: the live row's for a resurface. Every other
+//     'task' or 'task_log' NAMES a project and so survives the join, but that
+//     message already produced a task, or its log line is on an open one. The
+//     predicate is shared with promote's inquiryInbox, so the two cannot drift.
 //   - `p.ai_inquiry` (0024). THE WORKLOAD FLAG, and the only clause that keeps an
 //     unarmed project's client conversation out of this lane — the integration
 //     suite's identical-but-unarmed project is what goes red when it is dropped.
@@ -136,14 +144,14 @@ const inboxWhereInquiry = `
 	                  FROM capture_decisions cd
 	                 WHERE cd.message_id = nm.id
 	                 ORDER BY cd.id DESC LIMIT 1) latest ON true
-	  JOIN projects p ON p.id = latest.project_id
+	  JOIN projects p ON p.ai_inquiry` + replyfold.InquiryLiveDecisionJoinSQL + `
 	 WHERE nm.direction = 'inbound'
-	   AND latest.action = 'attributed'
-	   AND p.ai_inquiry
+	   AND p.id = ` + replyfold.InquiryProjectIDSQL + `
 	   AND NOT EXISTS (
 	         SELECT 1 FROM ai_extractions e
 	           JOIN ai_runs r ON r.id = e.ai_run_id AND r.worker_type = 'classify_inquiry'
-	          WHERE e.raw_source_item_id = nm.raw_source_item_id)`
+	          WHERE e.raw_source_item_id = nm.raw_source_item_id)
+	   AND ` + replyfold.InquiryEligibleLatestSQL
 
 // routeAccountJoin is B-D9's NAMED CARVE-OUT (SWT-40 Part B), and the only
 // place internal/classify touches the raw item table: the route inbox has to

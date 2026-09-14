@@ -544,3 +544,120 @@ because the gate never revives or surfaces.
 **Rollback.** `opsctl call --tool capture_rule_set_enabled --args
 '{"rule_id":<id>,"enabled":false}'` for each activity rule. Tasks already
 surfaced stay held until closed by hand, and a hand close sticks.
+
+## Closed-task chats resurface (chat-on-closed-task)
+
+SWT-53, `docs/tickets/chat-on-closed-task_SPEC.md`, migration 0034.
+
+**The gap it closes.** Rule 10 (`(WEB|API|OPS)-[0-9]+`) keys by PREFIX, so a
+human message naming a Treetop ticket is a `task_log` onto one of the bucket
+tasks 56/57/60. When that task is CLOSED, the log line lands where nobody looks,
+and the inquiry lane read only `attributed` messages, so the message
+disappeared. Reopening the bucket would resurrect a catch-all (SWT-45 J1), so
+nothing reopens it.
+
+**The rule (CC3).** On every `task_log`, capture decides `resurface` with a
+pure function (`internal/capture/resurface.go`) and records it on the decision
+row, `capture_decisions.resurface`. It is true only when ALL of these hold:
+
+- the linked task is `closed` at log time (a `ready`, `in_progress` or
+  `delivered` task already shows the log line);
+- the winning rule is not activity: a revive, own_action or blind outcome stays
+  SWT-45's ("Activity rules" above);
+- the task has no open dismissal: SWT-36's guarded reopen owns it;
+- the message is not the Jira connector's own copy (channel `jira`, SWT-45 J3);
+- the sender is not on the winner project's notifier list;
+- the sender is not blank. A message with an empty or whitespace sender has no
+  identity, so it fails closed: it is logged silently and its reason says `the
+  message has no sender identity`.
+
+The action stays `task_log` and the log line is still appended, exactly as
+before. Capture creates nothing else and makes no new executor call. Shadow
+records the same value. The inquiry lanes only READ the fact: classify's inquiry
+inbox and `classify promote --lane inquiry` admit a message whose latest LIVE
+decision is a `task_log` with `resurface=true` onto a task that is STILL
+closed, exactly like an `attributed` message. A shadow row never adds a message
+through this path, and a newer shadow row of any other action never removes
+one. The one accepted exception (owner decision 2026-09-14, the re-point
+contract): a NEWER shadow `attributed` row takes precedence, so the message is
+admitted as an attributed message under that row's project, with no
+`logged_on_closed_task` line, or dropped if that project is not armed. If it passes the model and the gate, it becomes a Holding task on the
+message's own conversation, with a body line `logged_on_closed_task: N`
+(`docs/runbooks/local-classifier.md`, "Inquiry promotion"). The closed task
+stays closed. Each decision's reason says why it did or did not resurface.
+
+**The notifier list (CC4).** `projects.notifier_senders` (TEXT[], default
+`'{}'`) holds bot and notification identities per project: a Slack display name
+(`Jira`) or a mail ADDRESS (`jira@treetopllc.jira.com`). A sender matches when
+an entry, trimmed and case-folded, is EQUAL to the whole stored sender or to the
+address parsed from a mail From. It is never a substring match. The `sender`
+capture criterion IS a substring match, and that difference is the point: an
+entry `Jira` must not swallow a human called `Jiraiya`. A display name such as
+`"Katie Evans (JIRA)" <jira@treetopllc.jira.com>` matches only through its
+address. Empty entries match nothing. Only capture's `loadRules` reads the
+column.
+
+Blank senders: no entry can equal an empty sender, so a blank sender has its
+own disqualifier and fails closed (above): it never resurfaces. Slack web used
+to omit the author on grouped Jira-app continuation messages, so 0a found 741
+such rows in 30 days. Those were decided before 0034 and are never re-decided,
+so they never resurface either. Since the connector fix at 17:00Z on
+2026-09-14, no new inbound Slack message has had an empty sender (prod,
+read-only: 7 new messages, all named).
+
+Read it:
+
+```sql
+SELECT slug, notifier_senders FROM projects WHERE notifier_senders <> '{}';
+```
+
+Seed it (hand-run, the `inquiry_promote_after` precedent; values from the
+SPEC's Verification 0b). **Owner decision 2026-09-14: keep GitHub notification
+mail silent**, so `notifications@github.com` stays in, although it also carries
+human PR comments. This is the same statement as the handoff's seed step:
+
+```sql
+UPDATE projects SET notifier_senders = ARRAY['Jira','jira@treetopllc.jira.com',
+  'notifications@github.com','noreply@github.com','no-reply@github.com','no-reply@builds.circleci.com']
+ WHERE slug = 'collaboratory';
+```
+
+Disarm it: `UPDATE projects SET notifier_senders = '{}' WHERE slug =
+'collaboratory';`. That is NOT a rollback. An empty list only WIDENS
+resurfacing: bot messages then resurface too. The rollback is reverting the
+pipelined image, after which the lanes stop reading `resurface` and the flag is
+inert data.
+
+What each decision recorded, last 24h:
+
+```sql
+SELECT cd.id, cd.created_at, nm.channel, nm.sender, cd.task_id, cd.resurface, cd.reason
+  FROM capture_decisions cd JOIN normalized_messages nm ON nm.id = cd.message_id
+ WHERE cd.action = 'task_log' AND cd.created_at > now() - interval '24 hours'
+ ORDER BY cd.id DESC;
+```
+
+**Deploy order (CC10).** Apply 0034 BEFORE any image built from this branch
+runs. A new capture binary selects `p.notifier_senders` and writes `resurface`
+on every pass, so on a db without 0034 every connector's capture pass fails.
+Then seed the list, BEFORE rolling the images, so the first new pass already
+excludes the Jira app. Then roll ONE image tag to every capture writer and
+every inquiry reader in ONE apply
+(`docs/runbooks/HANDOFF-kube-chat-on-closed-task.md`). An old capture binary on
+a 0034 db records `resurface=false`, and a live decision is never re-decided,
+so messages captured by an old writer during the roll window are logged but
+never resurfaced (the recorded residual). Rebuild opsctl from main before any
+hand-run capture pass.
+
+**Counters.** Every `capture_rules:` line prints `"resurfaced"`, zeros
+included, in both modes. The `capture_gate:` line prints it as 0 always.
+
+**The gate residual (CC8).** The pipelined gate stage and the route stage
+never write `resurface` (default false). A gate `task_log` onto a closed task on
+a gated project (reengine) only logs, as before. Gated projects are not
+inquiry-armed today, so nothing is lost. A gate-path resurface is future work.
+
+**No backfill (CC9).** Decisions written before 0034 carry `resurface=false`,
+and there is no tool to pick up those misses. A shadow re-point
+("Re-pointing already-decided messages" above) does not help here, because
+the resurface path reads only live decisions.
