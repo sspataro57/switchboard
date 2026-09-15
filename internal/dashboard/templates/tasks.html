@@ -12,7 +12,11 @@
     th, td { border: 1px solid #ddd; padding: .4rem .6rem; text-align: left; font-size: .88rem; }
     th { background: #f5f5f5; }
     nav a { margin-right: .8rem; }
-    .topbar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .9rem; margin: .6rem 0 .8rem; }
+    .headbar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1.2rem; margin-bottom: .4rem; }
+    .topbar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .9rem; margin: 0; }
+    .titlebar { display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem 1rem; }
+    .titlebar h1 { margin: .3rem 0 .5rem; }
+    .titlebar p { margin: 0; }
     .topbar p { margin: 0; }
     form.filters { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: 0; }
     form.filters input, form.filters select { font: inherit; margin-right: .5rem; }
@@ -38,12 +42,9 @@
   </style>
 </head>
 <body>
+  <div class="headbar">
   <nav><a href="/tasks">Board</a> <a href="/plans">Plans</a> <a href="/briefs">Briefs</a> <a href="/deliveries">Deliveries</a> <a href="/sources">Sources</a> <a href="/funnel">Funnel</a>
     <a href="/export/tasks.csv">CSV</a> <a href="/export/tasks.json">JSON</a></nav>
-  <h1>Board</h1>
-  {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
-  {{with .OrchAlert}}<p id="orchestrator-health" class="orch-bad">orchestrator {{.Verdict}}: backlog {{.Backlog}}, cursor {{.Cursor}} of {{.Head}} — {{if eq .Verdict "stalled"}}it is running but not draining events{{else}}lifecycle rules (Deliver tasks, unblocking, claim expiry) are not running{{end}}. <a href="/funnel">funnel</a></p>{{end}}
-
   <div class="topbar">
   <form class="filters" method="get" action="/tasks">
     <select name="project" onchange="this.form.submit()">
@@ -60,6 +61,10 @@
     </div></details>
   </form>
   {{if .AdvancedFilters}}<a id="advanced-clear" href="{{.ClearAdvancedURL}}">clear advanced</a>{{end}}
+  </div>
+  </div>
+  <div class="titlebar">
+  <h1>Board</h1>
   <p class="muted"><a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">{{if not .AutoRefresh}}auto-refresh: turn on{{else}}auto-refresh: turn off{{end}}</a></p>
   {{if .AutoRefresh}}
   <p id="auto-refresh" class="muted">auto-refresh on (every {{.RefreshSeconds}} s, last refreshed {{.RenderedAt}})</p>
@@ -119,6 +124,8 @@
   </script>
   {{end}}
   </div>
+  {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+  {{with .OrchAlert}}<p id="orchestrator-health" class="orch-bad">orchestrator {{.Verdict}}: backlog {{.Backlog}}, cursor {{.Cursor}} of {{.Head}} — {{if eq .Verdict "stalled"}}it is running but not draining events{{else}}lifecycle rules (Deliver tasks, unblocking, claim expiry) are not running{{end}}. <a href="/funnel">funnel</a></p>{{end}}
 
   {{range .Sections}}
   <h2 id="section-{{.Key}}">{{.Title}} ({{len .Tasks}})</h2>
