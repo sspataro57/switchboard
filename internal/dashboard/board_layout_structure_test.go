@@ -259,15 +259,24 @@ func TestTasksTemplate_FirstLineIsTheTopbar(t *testing.T) {
 	s := tasksHTML(t)
 	const topOpen = `<div class="topbar">`
 	prev := -1
-	for _, m := range []string{"<nav>", "<h1>", "{{if .Flash}}", "{{with .OrchAlert}}", topOpen} {
+	// AMENDED deliberately (owner, 2026-09-15: "the filter I want it next to JSON
+	// link"): the topbar now shares the nav's line, inside one .headbar row, so it
+	// follows <nav> directly and the <h1>, flash and orchestrator alert come after.
+	for _, m := range []string{"<nav>", topOpen, "<h1>", "{{if .Flash}}", "{{with .OrchAlert}}"} {
 		i := strings.Index(s, m)
 		if i < 0 {
-			t.Fatalf("tasks.html has no %s (criterion 9: nav, <h1>, flash, orchestrator alert, then the topbar)", m)
+			t.Fatalf("tasks.html has no %s (criterion 9: nav, the topbar, then <h1>, flash, orchestrator alert)", m)
 		}
 		if i <= prev {
-			t.Errorf("%s is out of document order (criterion 9: nav, <h1>, flash, orchestrator alert, topbar)", m)
+			t.Errorf("%s is out of document order (criterion 9: nav, topbar, <h1>, flash, orchestrator alert)", m)
 		}
 		prev = i
+	}
+	hb := strings.Index(s, `<div class="headbar">`)
+	if hb < 0 || hb > strings.Index(s, "<nav>") {
+		t.Errorf(`the nav and the topbar are not wrapped in one <div class="headbar"> row opening before <nav> (the filter sits next to the JSON link)`)
+	} else if he, ok := elementEnd(s, hb, "div"); !ok || he < strings.Index(s, topOpen) {
+		t.Errorf("the .headbar row does not contain the topbar")
 	}
 	if n := strings.Count(s, topOpen); n != 1 {
 		t.Fatalf("tasks.html has %d %s, want exactly 1", n, topOpen)
@@ -284,27 +293,44 @@ func TestTasksTemplate_FirstLineIsTheTopbar(t *testing.T) {
 		t.Fatalf("the topbar does not hold the filter form (criterion 9)")
 	}
 	fe := fi + strings.Index(top[fi:], "</form>")
+	// AMENDED deliberately (owner, 2026-09-15: "the filter I want it next to JSON
+	// link"): the topbar on the nav's line holds ONLY the filter form and the
+	// clear link, so it fits beside JSON on the tablet; the auto-refresh toggle
+	// and block moved to the .titlebar row beside <h1>Board</h1>.
 	ci := strings.Index(top, `id="advanced-clear"`)
-	gi := strings.Index(top, `<a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">`)
-	ai := strings.Index(top, "{{if .AutoRefresh}}")
-	for _, p := range []struct {
-		name string
-		i    int
-	}{{"the clear advanced link", ci}, {"the auto-refresh toggle (byte-unchanged)", gi}, {"the {{if .AutoRefresh}} block", ai}} {
-		if p.i < 0 {
-			t.Errorf("the topbar does not hold %s (criterion 9)", p.name)
+	if ci < 0 {
+		t.Errorf("the topbar does not hold the clear advanced link (criterion 9)")
+	} else if !(fe < ci) {
+		t.Errorf("the topbar's order is not: filter form, clear link (criterion 9)")
+	}
+	for _, m := range []string{`id="auto-refresh-toggle"`, "{{if .AutoRefresh}}"} {
+		if strings.Contains(top, m) {
+			t.Errorf("the topbar holds %s; it moved to the .titlebar row so the filter fits next to the JSON link", m)
 		}
 	}
-	if ci >= 0 && gi >= 0 && ai >= 0 && !(fe < ci && ci < gi && gi < ai) {
-		t.Errorf("the topbar's order is not: filter form, clear link, toggle, {{if .AutoRefresh}} block (criterion 9)")
+	const titleOpen = `<div class="titlebar">`
+	tb := strings.Index(s, titleOpen)
+	if tb < 0 || tb < te {
+		t.Fatalf("tasks.html has no %s after the topbar", titleOpen)
+	}
+	tbe, ok := elementEnd(s, tb, "div")
+	if !ok {
+		t.Fatalf("the titlebar <div> is never closed")
+	}
+	title := s[tb:tbe]
+	hi := strings.Index(title, "<h1>Board</h1>")
+	gi := strings.Index(title, `<a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">`)
+	ai := strings.Index(title, "{{if .AutoRefresh}}")
+	if hi < 0 || gi < 0 || ai < 0 || !(hi < gi && gi < ai) {
+		t.Errorf("the titlebar's order is not: <h1>Board</h1>, the byte-unchanged toggle, the {{if .AutoRefresh}} block")
 	}
 	if ai >= 0 {
-		blk, ok := templateBlockAfter(top[ai:], "{{if .AutoRefresh}}")
+		blk, ok := templateBlockAfter(title[ai:], "{{if .AutoRefresh}}")
 		if !ok {
-			t.Errorf("the {{if .AutoRefresh}} block does not close inside the topbar (criterion 9)")
+			t.Errorf("the {{if .AutoRefresh}} block does not close inside the titlebar (criterion 9)")
 		} else if !strings.Contains(blk, `<p id="auto-refresh" class="muted">auto-refresh on (every {{.RefreshSeconds}} s, last refreshed {{.RenderedAt}})</p>`) ||
 			!strings.Contains(blk, "<script") {
-			t.Errorf("the topbar's {{if .AutoRefresh}} block lacks the byte-unchanged indicator or the script (criterion 9)")
+			t.Errorf("the titlebar's {{if .AutoRefresh}} block lacks the byte-unchanged indicator or the script (criterion 9)")
 		}
 	}
 
