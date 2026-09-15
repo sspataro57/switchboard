@@ -14,7 +14,10 @@ import (
 
 // light is one row's light: Class is one of done, working, stale, input, next,
 // none (the six CSS classes); Label is the accessible text (aria-label, title).
-type light struct{ Class, Label string }
+// Session (SWT-56 S8) is the visible tag at the start of the title cell: set
+// ONLY on the three session rows (input, working, stale), to the stored name or
+// "session unknown"; "" everywhere else, so the template renders no tag.
+type light struct{ Class, Label, Session string }
 
 // lightFacts are what boardLightFacts reads beside the status.
 type lightFacts struct {
@@ -31,6 +34,9 @@ type lightFacts struct {
 	// (boardDayStart, the DB clock). The fresh labels show HH:MM only then; an
 	// earlier day's signal shows the full date (D1 amendment, 2026-09-14).
 	StateToday bool
+	// Session is the name of the session that set State (SWT-56), "" for a
+	// marker set before 0036. lightFor reads it only in the session rows.
+	Session string
 	// Stale: a working state older than tools.WorkingLease. QueueHead: the first
 	// eligible ready task of its queue, whose name is Lane (D2).
 	Stale, QueueHead bool
@@ -44,48 +50,54 @@ func lightFor(status string, f lightFacts) light {
 	switch status {
 	case "closed":
 		if f.OpenDismissalCode != "" {
-			return light{"none", "dismissed (" + f.OpenDismissalCode + ")"}
+			return light{Class: "none", Label: "dismissed (" + f.OpenDismissalCode + ")"}
 		}
 		if f.ClosedToday {
-			return light{"done", "done today"}
+			return light{Class: "done", Label: "done today"}
 		}
-		return light{"done", "done"}
+		return light{Class: "done", Label: "done"}
 	case "needs_feedback":
-		return light{"input", "waiting on your input: worker parked on a question"}
+		return light{Class: "input", Label: "waiting on your input: worker parked on a question"}
 	case "done_locally":
-		return light{"done", "done locally; delivery pending"}
+		return light{Class: "done", Label: "done locally; delivery pending"}
 	case "delivered":
-		return light{"done", "delivered"}
+		return light{Class: "done", Label: "delivered"}
 	case "claimed":
-		return light{"working", "in progress (claimed)"}
+		return light{Class: "working", Label: "in progress (claimed)"}
 	case "in_progress":
-		return light{"working", "in progress"}
+		return light{Class: "working", Label: "in progress"}
 	case "pr_open":
-		return light{"working", "in progress: PR open"}
+		return light{Class: "working", Label: "in progress: PR open"}
 	case "awaiting_ci":
-		return light{"working", "in progress: awaiting CI"}
+		return light{Class: "working", Label: "in progress: awaiting CI"}
 	case "awaiting_merge":
-		return light{"working", "in progress: awaiting merge"}
+		return light{Class: "working", Label: "in progress: awaiting merge"}
 	case "holding", "ready", "blocked":
+		// SWT-56 S8/S9: the session rows name their session — the stored name,
+		// or "unknown" for a marker set before 0036.
+		name, tag := f.Session, f.Session
+		if name == "" {
+			name, tag = "unknown", "session unknown"
+		}
 		switch {
 		case f.State == "needs_input": // never stale: a waiting session cannot re-signal
-			return light{"input", "waiting on your input (a session, since " + signalStamp(f) + ")"}
+			return light{"input", "waiting on your input (session " + name + ", since " + signalStamp(f) + ")", tag}
 		case f.State == "working" && f.Stale:
-			return light{"stale", "in progress? no session signal since " + f.StateAt}
+			return light{"stale", "in progress? no session signal since " + f.StateAt + " (session " + name + ")", tag}
 		case f.State == "working":
-			return light{"working", "in progress (a session, last signal " + signalStamp(f) + ")"}
+			return light{"working", "in progress (session " + name + ", last signal " + signalStamp(f) + ")", tag}
 		}
 		switch {
 		case status == "ready" && f.QueueHead:
-			return light{"next", "next in queue (" + f.Lane + ")"}
+			return light{Class: "next", Label: "next in queue (" + f.Lane + ")"}
 		case status == "holding":
-			return light{"none", "holding (review lane; not queued)"}
+			return light{Class: "none", Label: "holding (review lane; not queued)"}
 		case status == "blocked":
-			return light{"none", "blocked on a dependency"}
+			return light{Class: "none", Label: "blocked on a dependency"}
 		}
-		return light{"none", "ready, queued"}
+		return light{Class: "none", Label: "ready, queued"}
 	}
-	return light{"none", status}
+	return light{Class: "none", Label: status}
 }
 
 // signalStamp is the time a fresh session label shows (D1 amendment,

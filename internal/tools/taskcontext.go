@@ -14,10 +14,16 @@ import (
 // when worker_id matches the task's active claim AND status is claimed or
 // needs_feedback, the status flips to in_progress (fetching context IS the
 // moment work (re)starts — no separate task_start tool). Pure read otherwise.
+//
+// SWT-56 S12: require_read_only:"true" skips that transition whatever
+// worker_id says. The user profile pins it (with worker_id:""), so a session in
+// any repo reads a task in full without ever starting it; the flag survives a
+// later refactor that might fall back to the actor when worker_id is empty.
 
 type contextArgs struct {
-	TaskID   int64  `json:"task_id"`
-	WorkerID string `json:"worker_id,omitempty"`
+	TaskID          int64  `json:"task_id"`
+	WorkerID        string `json:"worker_id,omitempty"`
+	RequireReadOnly string `json:"require_read_only,omitempty"`
 }
 
 func validateContext(args []byte) error {
@@ -27,6 +33,9 @@ func validateContext(args []byte) error {
 	}
 	if a.TaskID == 0 {
 		return errors.New("missing task_id")
+	}
+	if a.RequireReadOnly != "" && a.RequireReadOnly != "true" {
+		return fmt.Errorf("require_read_only %q: must be \"true\" or omitted", a.RequireReadOnly)
 	}
 	return nil
 }
@@ -49,16 +58,22 @@ func taskContext(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, 
 		pName, pSlug, pClient                  string
 		pRepoPath                              *string
 		pExecution, pDelivery                  string
+		workState, workStateAt, workSession    string
 	)
+	// SWT-56 S13: the session marker rides along; its name only while a state is
+	// set (S4 read gating), so an old binary's dangling name is invisible.
 	err := pool.QueryRow(ctx,
 		`SELECT t.project_id, t.subproject, t.parent_id, t.title, t.body, t.assignee_type,
 		        t.worker_type, t.status, t.autonomy, t.priority,
-		        p.name, p.slug, p.client, p.repo_path, p.execution, p.delivery
+		        p.name, p.slug, COALESCE(p.client, ''), p.repo_path, p.execution, p.delivery,
+		        COALESCE(t.working_state, ''), COALESCE(t.working_state_at::text, ''),
+		        COALESCE(CASE WHEN t.working_state IS NOT NULL THEN t.working_session END, '')
 		 FROM tasks t JOIN projects p ON p.id = t.project_id
 		 WHERE t.id = $1`, a.TaskID).Scan(
 		&projectID, &subproject, &parentID, &title, &body, &assigneeType,
 		&workerType, &status, &autonomy, &priority,
-		&pName, &pSlug, &pClient, &pRepoPath, &pExecution, &pDelivery)
+		&pName, &pSlug, &pClient, &pRepoPath, &pExecution, &pDelivery,
+		&workState, &workStateAt, &workSession)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("task %d not found", a.TaskID)
 	}
@@ -69,7 +84,7 @@ func taskContext(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, 
 	// holder transition: claimed|needs_feedback -> in_progress. The check and
 	// the flip share one tx with the task row locked, so a concurrent release
 	// or double-fetch cannot interleave.
-	if a.WorkerID != "" && (status == "claimed" || status == "needs_feedback") {
+	if a.RequireReadOnly != "true" && a.WorkerID != "" && (status == "claimed" || status == "needs_feedback") {
 		err := inTx(ctx, pool, func(tx pgx.Tx) error {
 			var cur string
 			if err := tx.QueryRow(ctx,
@@ -103,6 +118,7 @@ func taskContext(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, 
 		"subproject": deref(subproject), "assignee_type": assigneeType,
 		"worker_type": deref(workerType), "autonomy": deref(autonomy),
 		"priority": priority, "parent_id": parentID,
+		"working_state": workState, "working_state_at": workStateAt, "working_session": workSession,
 	}
 	doc["project"] = map[string]any{
 		"name": pName, "slug": pSlug, "client": pClient,

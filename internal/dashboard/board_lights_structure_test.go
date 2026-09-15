@@ -224,6 +224,9 @@ func TestBoardLightFacts_IsASeparateRead(t *testing.T) {
 	for _, want := range []struct{ tok, why string }{
 		{"working_state", "the session state (red vs yellow)"},
 		{"working_state_at", "the signal time, for the labels and for staleness"},
+		// SWT-56 (signal-session-name) criterion 17: the session name, read in the
+		// same first statement (no new query; D15's count is unchanged).
+		{"working_session", "the Claude session's name for the tag (S8)"},
 		{"to_char(", "the time is formatted IN SQL, in BoardTimeZone"},
 		{"make_interval(secs", "staleness on the DB clock: working_state_at < now() - make_interval(secs => $lease)"},
 		{"WorkingLease", "the lease is tools.WorkingLease, spelled once"},
@@ -415,5 +418,141 @@ func TestTasksTemplate_VerbFormsByteUnchanged(t *testing.T) {
 		if rest := refreshLine.ReplaceAllString(form, ""); rest != tc.golden {
 			t.Errorf("the %s form, minus its refresh input, is not byte-identical to SWT-51's (criterion 9):\n%s", tc.name, rest)
 		}
+	}
+}
+
+// ---- SWT-56 (signal-session-name) criteria 17-19 --------------------------------
+
+// Criterion 17: the name is selected in boardLightFacts' FIRST statement — the
+// one that also returns the render time — so no query is added.
+func TestBoardLightFacts_FirstStatementSelectsTheSession(t *testing.T) {
+	body := funcBodySrc(t, "board.go", "boardLightFacts")
+	if body == "" {
+		t.Fatalf("board.go declares no boardLightFacts")
+	}
+	first := strings.Index(body, "s.pool.Query(")
+	if first < 0 {
+		t.Fatalf("boardLightFacts runs no s.pool.Query")
+	}
+	stmt := body[first:]
+	if second := strings.Index(stmt[len("s.pool.Query("):], "s.pool.Query("); second >= 0 {
+		stmt = stmt[:len("s.pool.Query(")+second]
+	}
+	if !strings.Contains(stmt, "HH24:MI:SS") {
+		t.Fatalf("CONTROL: the first statement does not carry the render time; the scan is not reading statement 1")
+	}
+	if !regexp.MustCompile(`COALESCE\(t\.working_session,\s*''\)`).MatchString(stmt) {
+		t.Errorf("boardLightFacts' first statement does not select COALESCE(t.working_session, '') (criterion 17)")
+	}
+}
+
+// Criterion 18: the tag is the first thing in the TITLE cell, inside
+// {{if .Light.Session}}, and references only .Light.Session/.Class/.Label.
+func TestTasksTemplate_SessionTagFirstInTitleCell(t *testing.T) {
+	s := tasksHTML(t)
+	block, ok := templateBlockAfter(s, "{{range .Tasks}}")
+	if !ok {
+		t.Fatalf("tasks.html has no {{range .Tasks}} … {{end}} block")
+	}
+	tag := regexp.MustCompile(`<td>\{\{if \.Light\.Session\}\}<span class="session-tag session-\{\{\.Light\.Class\}\}" ` +
+		`title="\{\{\.Light\.Label\}\}">\{\{\.Light\.Session\}\}</span>\s*\{\{end\}\}<a href="/tasks/\{\{\.ID\}\}">\{\{\.Title\}\}</a>`)
+	m := tag.FindString(block)
+	if m == "" {
+		t.Fatalf("the per-task range has no S8 session tag first in the title cell, before the title link, inside "+
+			"{{if .Light.Session}} (criterion 18). Block:\n%s", block)
+	}
+	for _, a := range regexp.MustCompile(`\{\{([^}]*)\}\}`).FindAllStringSubmatch(m, -1) {
+		switch strings.TrimSpace(a[1]) {
+		case "if .Light.Session", "end", ".Light.Session", ".Light.Class", ".Light.Label", ".ID", ".Title":
+		default:
+			t.Errorf("the session tag references %q; only .Light.Session, .Light.Class and .Light.Label (criterion 18)", a[1])
+		}
+	}
+	if n := strings.Count(s, `class="session-tag `); n != 1 {
+		t.Errorf("tasks.html has %d session tags, want exactly 1 (in the per-task range)", n)
+	}
+	if n := strings.Count(s, `class="light `); n != 1 {
+		t.Errorf("tasks.html has %d light spans, want still exactly 1: the tag's class is session-tag", n)
+	}
+	if strings.Contains(s, "eq .Status") || strings.Contains(s, "eq .Light") {
+		t.Errorf("tasks.html branches on the status or the light (the class comes from .Light.Class)")
+	}
+
+	lower := strings.ToLower(s)
+	st, se := strings.Index(lower, "<style>"), strings.Index(lower, "</style>")
+	if st < 0 || se < st {
+		t.Fatalf("tasks.html has no <style> block")
+	}
+	style := s[st:se]
+	rule := regexp.MustCompile(`\.session-tag\s*\{([^}]*)\}`).FindStringSubmatch(style)
+	if rule == nil {
+		t.Errorf("the <style> block has no .session-tag rule (criterion 18)")
+	} else {
+		if !regexp.MustCompile(`text-overflow:\s*ellipsis`).MatchString(rule[1]) || !strings.Contains(rule[1], "max-width") {
+			t.Errorf(".session-tag {%s} lacks text-overflow: ellipsis and a max-width: truncation is visual only (S8)", rule[1])
+		}
+	}
+	if !regexp.MustCompile(`\.session-input\s*\{`).MatchString(style) {
+		t.Errorf("the <style> block has no .session-input rule (criterion 18)")
+	}
+	const legend = "A red or yellow light shows its Claude session's name at the start of the title: reply in that session."
+	if !strings.Contains(regexp.MustCompile(`\s+`).ReplaceAllString(s, " "), legend) {
+		t.Errorf("tasks.html's legend does not carry the S8 sentence %q (criterion 18)", legend)
+	}
+}
+
+// Criterion 19: nothing on the name's path turns it into trusted HTML, so
+// html/template escapes it in the text node and in the title attribute.
+func TestDashboard_NoRawHTMLOnTheSessionPath(t *testing.T) {
+	ps := parseDashboardSource(t)
+	var srcs []string
+	for _, root := range []string{"lightFor", "boardLightFacts"} {
+		if _, ok := ps.text[root]; !ok {
+			t.Fatalf("internal/dashboard declares no %s", root)
+		}
+		src, _ := ps.reach(root)
+		srcs = append(srcs, src)
+	}
+	for _, f := range []string{"lights.go", "board.go"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		srcs = append(srcs, string(b))
+	}
+	for _, src := range srcs {
+		for _, banned := range []string{"template.HTML(", "template.HTMLAttr(", "safeHTML"} {
+			if strings.Contains(src, banned) {
+				t.Errorf("the session name's path uses %s (criterion 19): the name is self-reported text and must reach "+
+					"the page through html/template's contextual escaping", banned)
+			}
+		}
+	}
+	// The tag's field is a plain string (a template.HTML field would bypass escaping).
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "lights.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse lights.go: %v", err)
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok || ts.Name.Name != "light" {
+			return true
+		}
+		for _, fl := range ts.Type.(*ast.StructType).Fields.List {
+			for _, nm := range fl.Names {
+				if nm.Name == "Session" {
+					found = true
+					if id, ok := fl.Type.(*ast.Ident); !ok || id.Name != "string" {
+						t.Errorf("light.Session is not a plain string (criterion 19)")
+					}
+				}
+			}
+		}
+		return false
+	})
+	if !found {
+		t.Errorf("lights.go's light has no Session field (S8)")
 	}
 }

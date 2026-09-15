@@ -116,12 +116,14 @@ func closeTransition(ctx context.Context, tx pgx.Tx, taskID int64, to, reason st
 	// 0033 closes without clearing (a rollback, or a workload not yet rolled), and
 	// a later reopen would resurrect that stale red or yellow. Every reopen form —
 	// plain, guarded, revive — reaches this one UPDATE, so none can.
+	//
+	// SWT-56 S7: the marker's session name travels with it, in the same statement.
 	update := `UPDATE tasks SET status=$2, updated_at=now(), closed_at=NULL, closed_from_status=NULL,
-	                          working_state = NULL, working_state_at = NULL WHERE id=$1`
+	                          working_state = NULL, working_state_at = NULL, working_session = NULL WHERE id=$1`
 	args := []any{taskID, to}
 	if to == "closed" {
 		update = `UPDATE tasks SET status=$2, updated_at=now(), closed_at=now(), closed_from_status=$3,
-		                          working_state = NULL, working_state_at = NULL WHERE id=$1`
+		                          working_state = NULL, working_state_at = NULL, working_session = NULL WHERE id=$1`
 		args = append(args, status)
 	}
 	if _, err := tx.Exec(ctx, update, args...); err != nil {

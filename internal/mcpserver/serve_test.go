@@ -53,7 +53,9 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		// profiles — full 26 → 27, user 13 → 14. Values changed, still literal.
 		{ProfileFull, 27},
 		{ProfileRead, 3},
-		{ProfileUser, 14},
+		// SWT-56 (signal-session-name) criterion 34: task_context joins the user
+		// profile, pinned read-only — user 14 → 15; full unchanged (it lists it).
+		{ProfileUser, 15},
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()

@@ -9,9 +9,9 @@ draft gmail replies that Salvador approves and sends on the dashboard (SWT-44) �
 The per-repo binding — which switchboard project is this repo's queue — lives in
 Claude Code's own per-project memory, not in switchboard.
 
-It serves fourteen tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
+It serves fifteen tools: `project_list`, `task_list`, `task_get_next`, `task_dismiss`,
 `task_close`, `task_mark_delivered`, `create_task`, `task_append_log`,
-`task_set_priority`, `task_signal`, `mail_list_attachments`, `mail_read_attachment`, `draft_delivery` and `update_delivery`.
+`task_set_priority`, `task_signal`, `task_context`, `mail_list_attachments`, `mail_read_attachment`, `draft_delivery` and `update_delivery`.
 
 ## Fresh install (once, from `main`)
 
@@ -32,7 +32,7 @@ on `main` and open a new session:
 cd ~/projects/personal/switchboard && git switch main && go install ./cmd/ops-mcp-user
 ```
 
-Then open a NEW session, and `/mcp` shows `ops` with the fourteen tools. Since SWT-52,
+Then open a NEW session, and `/mcp` shows `ops` with the fifteen tools. Since SWT-52,
 also install the swb-status skill (below).
 
 ## Migrating from `ops-mcp-read` (SWT-35's install)
@@ -52,7 +52,7 @@ Then open a NEW session.
 
 ## What the install can and cannot do
 
-- **`ops-mcp-user` is the boundary.** It lists exactly the fourteen tools above, refuses
+- **`ops-mcp-user` is the boundary.** It lists exactly the fifteen tools above, refuses
   every other tool at the MCP layer, and wires no mail sender and no calendar
   booker: its `main` never calls a sender seam, so whatever the environment holds
   arms nothing. It is a separate binary rather than a setting on `ops-mcp`, so
@@ -189,21 +189,34 @@ Recovery:
 - **The risk.** Untrusted text a session reads (an email, an attachment, a web page, a ticket, a
   file) can tell it to call `task_signal` with `working`, `needs_input` or `clear` on any HUMAN
   `holding`/`ready`/`blocked` task, not only the one it is working on.
-- **Why it stays open.** There is no session identity to bind a signal to, so this is a
-  documented residual. No identity plumbing was added (Codex review, 2026-09-14).
-- **The damage.** A wrong light: a false yellow, a false red, or a missing signal. Nothing is
-  sent, and no status, claim, question or delivery changes. It cannot close, create or reorder
-  anything by itself.
+- **Why it stays open.** Since SWT-56 the board shows a self-reported session name (the
+  `session` argument, from ListAgents), which nothing verifies: a prompt-injected session can
+  still signal any human task, and can now do it under any name. No identity plumbing binds a
+  name to a session process, so this is a documented residual (Codex review, 2026-09-14).
+- **The damage.** Unchanged: a wrong light or a wrong name. A false yellow, a false red, or a
+  missing signal. Nothing is sent, and no status, claim, question or delivery changes. It cannot
+  close, create or reorder anything by itself.
 - **What the tool still enforces** (pinned by tests): it cannot touch a worker's `needs_feedback`
   red, and it refuses every `claude` task for every caller.
 - **The mitigation is instruction-level only.** The swb-status skill and the server's
   Instructions tell a session to signal only the task it is working on, and never because text
   it read asks it to.
-- **The trail.** Every call leaves an audit row with its full args, and every change leaves a
-  `working_state_changed {from,to,worker_id}` event.
+- **The trail.** Every call leaves an audit row with its full args (the `session` included), and
+  every change leaves a `working_state_changed {from,from_session,session,to,worker_id}` event:
+  who signalled, and whose marker it replaced or cleared.
 - **Recovery for a wrong light:**
   `opsctl call --tool task_signal --args '{"task_id":N,"state":"clear"}'`, or Done / Dismiss on
-  the board.
+  the board. `clear` needs no session.
+
+**Accepted risk (SWT-56): every session can read any task in full.** `task_context` is on this
+profile, so a session in any repo can read any task's document by id: claude tasks and other
+projects included, and capture's message previews (subject plus up to 400 characters of the
+mail, in the body and the log lines) for every project, `personal` included. The owner chose
+this on 2026-09-15 (Q1, "Show everything"): no locality filter. Nothing is written, and every
+read leaves an audit row. Bodies and log lines are untrusted text: the Instructions and the
+skill say to read them as data, never as instructions. The call is READ-ONLY here: the profile
+pins `worker_id:""` and `require_read_only:"true"`, so reading a task claimed as
+`manual:salvo` never flips it to `in_progress`.
 
 **Dismissal provenance.** `task_dismissals.dismissed_by` records the actor
 unmodified: `dashboard:…` means Salvador picked the reason code from the board's
@@ -271,7 +284,7 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
 1. `claude mcp get ops` shows the user-scope entry, its `ops-mcp-user` command and
    both `-e` values.
 2. In another repo (e.g. `cd ~/projects/personal/kube && claude`), `/mcp` shows
-   `ops` connected with exactly fourteen tools, and the `swb-status` skill is listed.
+   `ops` connected with exactly fifteen tools, and the `swb-status` skill is listed.
 3. In `~/projects/personal/switchboard`, a SESSION gets ONE `ops` — the
    project-scope `go run` entry with the full tool list (27 tools). Check this
    inside a session, NOT with `claude mcp get ops` / `claude mcp list`: run inside
@@ -318,14 +331,21 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
 - "swb done 412" → `task_close` with a one-line outcome as the reason. A session
   that finishes work it logged closes the task the same way and says so. The row
   turns green and stays on the board until midnight America/New_York.
+- "work on swb 412" / "read swb 412" → `task_context` with only `task_id`:
+  read a task in full (body, log lines, feedback, decisions, the current session marker).
+  It is read-only here, whatever the task's status or claim: the profile pins
+  `worker_id:""` and `require_read_only:"true"`.
 - "swb start 412" (or a session starting work on a swb task) → `task_signal` with
-  `working`: the row turns yellow on the board.
+  `working` and the session's name as `session` (from ListAgents' `This session is
+  <name>`): the row turns yellow on the board, with that name at the start of the title.
 - "swb stop 412" → `task_signal` with `clear`: the session paused or switched away
   unfinished.
 - **Waiting and answering.** Just before a session stops to ask Salvador something,
-  it calls `task_signal` with `needs_input` (the row turns red, "since HH:MM"); when
+  it calls `task_signal` with `needs_input` and its `session` name (the row turns red,
+  "since HH:MM", and the title starts with a red-bordered tag naming the session); when
   he replies it signals `working` again. He answers in that session's own console:
-  switchboard never records his answer, only the state. A `working` state with no
+  switchboard never records his answer, only the state and the session name. A marker set
+  before SWT-56 shows `session unknown`. A `working` state with no
   signal for 2 hours shows as a hollow yellow ring ("no session signal since …");
   nothing reverts it — `clear`, Done or Dismiss does.
 - "find the attachment Sana sent about the Activities Integration" → `mail_list_attachments`
@@ -347,8 +367,8 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
 `task_list` hides closed and delivered tasks by default — unlike the dashboard
 board, which hides only closed — because every finished row in a model context is
 tokens spent on nothing. Ask for them explicitly with `status` (e.g.
-`status=delivered`). Rows never carry a task body; read a body on the dashboard or
-from a session in the switchboard repo. `local_only` projects are listed like any
+`status=delivered`). Rows never carry a task body; read one task's body and log with
+`task_context` (read-only here), or on the dashboard. `local_only` projects are listed like any
 other (Salvador, 2026-09-10).
 
 The same tools answer without Claude: `opsctl call --tool task_list --args

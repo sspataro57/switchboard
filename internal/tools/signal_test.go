@@ -75,16 +75,30 @@ func TestValidateSignal_RefusesUnknownStateByName(t *testing.T) {
 	}
 }
 
+// AMENDED — not deleted — by SWT-56 (signal-session-name) criterion 3: working and
+// needs_input now carry "session":"kube-c7" (S2: required on the two setting
+// states); clear still needs none. The new case below pins the refusal.
 func TestValidateSignal_AcceptsTheThreeStates(t *testing.T) {
 	for _, st := range []string{"working", "needs_input", "clear"} {
+		sess := `,"session":"kube-c7"`
+		if st == "clear" {
+			sess = ""
+		}
 		for _, args := range []string{
-			`{"task_id":412,"state":"` + st + `"}`,
+			`{"task_id":412,"state":"` + st + `"` + sess + `}`,
 			// what the MCP adapter forwards: worker_id injected, never authority
-			`{"task_id":412,"state":"` + st + `","worker_id":"manual:salvo"}`,
+			`{"task_id":412,"state":"` + st + `","worker_id":"manual:salvo"` + sess + `}`,
 		} {
 			if err := validateSignal([]byte(args)); err != nil {
 				t.Errorf("validateSignal(%s) = %v, want nil", args, err)
 			}
+		}
+	}
+	// SWT-56 criterion 3: the missing-session refusal.
+	for _, st := range []string{"working", "needs_input"} {
+		args := `{"task_id":412,"state":"` + st + `","worker_id":"manual:salvo"}`
+		if err := validateSignal([]byte(args)); err == nil || !strings.Contains(err.Error(), "missing session") {
+			t.Errorf("validateSignal(%s) = %v, want the S3 missing-session refusal", args, err)
 		}
 	}
 }

@@ -266,6 +266,28 @@ func TestUserProfile_PinsHumanAssignee(t *testing.T) {
 		})
 	}
 
+	// SWT-56 (signal-session-name) criterion 34: the pin map learns task_context —
+	// exactly the two keys of criterion 27 (worker_id "", require_read_only "true"),
+	// on ProfileUser only, and never require_assignee_type.
+	t.Run("user/task_context gains exactly the read-only pins", func(t *testing.T) {
+		srv, fx := user()
+		args := forwardCall(t, srv, fx, "task_context", `{"task_id":412}`)
+		if got := keyList(args); got != "require_read_only,task_id,worker_id" {
+			t.Errorf("task_context forwarded keys = %s, want require_read_only,task_id,worker_id. Args: %s", got, fx.lastCall.Args)
+		}
+		if string(args["require_read_only"]) != `"true"` || string(args["worker_id"]) != `""` {
+			t.Errorf("task_context pins = require_read_only %s, worker_id %s; want \"true\" and \"\" (criterion 27)",
+				args["require_read_only"], args["worker_id"])
+		}
+	})
+	t.Run("full/task_context carries no pin", func(t *testing.T) {
+		fx := &fakeExec{result: executor.Result{Output: json.RawMessage(`{}`)}}
+		args := forwardCall(t, mcpserver.New(fx, "acme"), fx, "task_context", `{"task_id":412}`)
+		if got := keyList(args); got != "task_id,worker_id" {
+			t.Errorf("full-profile task_context forwarded keys = %s, want task_id,worker_id (no pin)", got)
+		}
+	})
+
 	// The full profile has NO pins: worker consoles and this repo's session keep
 	// creating claude tasks and logging on them (C1). A model-supplied value
 	// passes through unchanged — it can only narrow its own call.

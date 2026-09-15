@@ -23,6 +23,10 @@
     .light-input { background: #d63a2f; border: 2px solid #d63a2f; }
     .light-next { background: #2f6fd6; border: 2px solid #2f6fd6; }
     .light-none { background: transparent; border: 2px solid #9a9a9a; }
+    .session-tag { display: inline-block; max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; font-family: monospace; font-size: .8rem; padding: 0 .35rem; margin-right: .2rem; border: 1px solid #9a9a9a; border-radius: .6rem; }
+    .session-input { border-color: #d63a2f; color: #d63a2f; font-weight: bold; }
+    .session-stale { border-style: dashed; border-color: #e8b90f; }
+    .session-working { border-color: #e8b90f; }
   </style>
 </head>
 <body>
@@ -51,7 +55,8 @@
     <span class="legend-light light-stale"></span>yellow ring: in progress with no recent signal ·
     <span class="legend-light light-input"></span>red: waiting on your input ·
     <span class="legend-light light-next"></span>blue: next in queue ·
-    <span class="legend-light light-none"></span>grey ring: not queued (holding, blocked, queued behind another, or dismissed). Hover a light for its reason.</p>
+    <span class="legend-light light-none"></span>grey ring: not queued (holding, blocked, queued behind another, or dismissed). Hover a light for its reason.
+    A red or yellow light shows its Claude session's name at the start of the title: reply in that session.</p>
   {{if .AutoRefresh}}
   <p id="auto-refresh" class="muted">auto-refresh on (every {{.RefreshSeconds}} s, last refreshed {{.RenderedAt}})</p>
   <script data-reload="{{.ReloadURL}}" data-interval="{{.RefreshSeconds}}">
@@ -115,7 +120,7 @@
     {{range .Tasks}}
     <tr>
       <td><span class="light light-{{.Light.Class}}" role="img" aria-label="{{.Light.Label}}" title="{{.Light.Label}}"></span><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
-      <td><a href="/tasks/{{.ID}}">{{.Title}}</a>{{if .ReopenedAfterDismissal}} <span class="muted">reopened after dismissal ({{.ReopenedAfterDismissal}})</span>{{end}}</td>
+      <td>{{if .Light.Session}}<span class="session-tag session-{{.Light.Class}}" title="{{.Light.Label}}">{{.Light.Session}}</span> {{end}}<a href="/tasks/{{.ID}}">{{.Title}}</a>{{if .ReopenedAfterDismissal}} <span class="muted">reopened after dismissal ({{.ReopenedAfterDismissal}})</span>{{end}}</td>
       <td>{{.Project}}</td>
       <td>{{.Subproject}}</td>
       <td>{{.AssigneeType}}{{if .WorkerType}} / {{.WorkerType}}{{end}}</td>

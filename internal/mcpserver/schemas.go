@@ -28,8 +28,11 @@ var agentTools = []Tool{
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"}},"required":["task_id"]}`),
 	},
 	{
-		Name:        "task_context",
-		Description: "Fetch the full context document for a task (task, project, decisions, parent/children, dependencies, feedback, recent events). As the claim holder this marks work started.",
+		Name: "task_context",
+		Description: "Fetch one task's full context document: the task (with its body and current session marker), project, " +
+			"decisions, parent/children, dependencies, feedback, and its last 50 events (log lines included). Pass only " +
+			"task_id. From a user-scope session this is always read-only. When a worker console fetches a task it has " +
+			"claimed, it marks work started.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"}},"required":["task_id"]}`),
 	},
 	{
@@ -199,11 +202,13 @@ var agentTools = []Tool{
 		Name: "task_signal",
 		Description: "Set this session's state on a swb task so Salvador's lights board is truthful: working (you are on it), " +
 			"needs_input (call it just before you stop to wait on his answer), clear (you paused or switched away unfinished). " +
+			"Always pass session (your name from ListAgents) with working and needs_input: the board shows it so Salvador " +
+			"knows which session to reply in. " +
 			"Human tasks only; working and needs_input only on holding, ready or blocked tasks. It changes no status, takes no " +
-			"claim, sends nothing and records nothing but the state: Salvador answers in this session's console, never through " +
-			"switchboard. To finish, call task_close, which also clears the state. The same state again only refreshes its time. " +
-			"Human sessions only: a worker console is refused by policy.",
-		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"state":{"type":"string","enum":["working","needs_input","clear"],"description":"working, needs_input (waiting on Salvador), or clear"}},"required":["task_id","state"]}`),
+			"claim, sends nothing and records nothing but the state and your session name: Salvador answers in this " +
+			"session's console, never through switchboard. To finish, call task_close, which also clears the state. The same " +
+			"state again only refreshes its time. Human sessions only: a worker console is refused by policy.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"state":{"type":"string","enum":["working","needs_input","clear"],"description":"working, needs_input (waiting on Salvador), or clear"},"session":{"type":"string","maxLength":200,"description":"This session's name from the first line of ListAgents, This session is <name> [ref]: the name only, not the [ref]; required for working and needs_input, optional for clear."}},"required":["task_id","state"]}`),
 	},
 }
 
