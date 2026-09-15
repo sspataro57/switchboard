@@ -316,23 +316,37 @@ func TestTasksTemplate_LightSpanBeforeTheID(t *testing.T) {
 	}
 }
 
+// AMENDED — not deleted — by board-layout-compact (SWT-57), the SPEC's one
+// deliberate amendment: the legend used to be the text between the filter
+// form's </form> and {{range .Columns}}. Both anchors moved (the range is now
+// {{range .Sections}}, and the legend sits below it), so the legend is now the
+// <p … id="light-legend"> … </p> element itself, and it must start after the end
+// of the {{range .Sections}} block. The six word pairs, the <style> ring
+// assertions and the HTMX ban are unchanged.
 func TestTasksTemplate_LegendAndRingStyles(t *testing.T) {
 	s := tasksHTML(t)
 	lower := strings.ToLower(s)
-	f := strings.Index(s, `<form class="filters"`)
-	r := strings.Index(s, "{{range .Columns}}")
-	if f < 0 || r < 0 {
-		t.Fatalf("tasks.html lost its filter form or its column range")
+	const sectionsOpen = "{{range .Sections}}"
+	loc := regexp.MustCompile(`(?s)<p[^>]*id="light-legend"[^>]*>.*?</p>`).FindStringIndex(s)
+	r := strings.Index(s, sectionsOpen)
+	if loc == nil || r < 0 {
+		t.Fatalf("tasks.html lost its legend <p id=\"light-legend\"> or its {{range .Sections}}")
 	}
-	end := strings.Index(s[f:], "</form>")
-	legend := strings.ToLower(s[f+end : r])
+	block, ok := templateBlockAfter(s, sectionsOpen)
+	if !ok {
+		t.Fatalf("tasks.html's {{range .Sections}} is never closed")
+	}
+	if end := r + len(sectionsOpen) + len(block) + len("{{end}}"); loc[0] < end {
+		t.Errorf("the legend starts before the end of the {{range .Sections}} block (board-layout-compact L9: the legend is at the bottom)")
+	}
+	legend := strings.ToLower(s[loc[0]:loc[1]])
 	for _, words := range [][]string{
 		{"green", "done"}, {"yellow", "in progress"}, {"yellow ring", "no recent signal"},
 		{"red", "waiting on your input"}, {"blue", "next in queue"}, {"grey ring", "not queued"},
 	} {
 		for _, w := range words {
 			if !strings.Contains(legend, w) {
-				t.Errorf("the legend under the filter form does not say %q (criterion 7: each light named in words: %v)", w, words)
+				t.Errorf("the legend does not say %q (criterion 7: each light named in words: %v)", w, words)
 			}
 		}
 	}

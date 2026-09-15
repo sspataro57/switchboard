@@ -41,18 +41,24 @@ type taskRow struct {
 	// Light is the row's status light (SWT-52 D1), computed in Go by lightFor
 	// from the status and boardLightFacts' separate read. Board-only.
 	Light light
-}
-
-type statusColumn struct {
-	Status string
-	Tasks  []taskRow
+	// QueueRank orders the queue section (SWT-57 L2) and Updated is the short
+	// updated stamp the row shows (L8); both come from boardLightFacts.
+	// Board-only — never export columns.
+	QueueRank int
+	Updated   string
 }
 
 type boardData struct {
-	Columns  []statusColumn
-	Projects []string
-	Filters  map[string]string
-	Flash    string
+	// Sections are the rows grouped by their light (SWT-57 L1), in
+	// boardSectionOrder, empty ones omitted.
+	Sections []boardSection
+	// AdvancedFilters are the active non-project filters, shown on the first
+	// line (L5); ClearAdvancedURL drops them, keeping project and refresh.
+	AdvancedFilters  []boardFilter
+	ClearAdvancedURL string
+	Projects         []string
+	Filters          map[string]string
+	Flash            string
 	// OrchAlert is set only when the orchestrator verdict is not ok (SWT-41
 	// D5): the board is where Salvador looks, /funnel is where he investigates.
 	// A failing health query leaves it nil — the board never breaks on health.
@@ -93,7 +99,9 @@ func boardDayStart(p string) string {
 	return "date_trunc('day', now() AT TIME ZONE " + p + ") AT TIME ZONE " + p
 }
 
-// boardStatusOrder pins the column order to the status machine.
+// boardStatusOrder is the status machine's order. Since SWT-57 it no longer
+// orders the board (the light-derived sections do); it is the within-section
+// tiebreak, so in-flight rows read along the pipeline (L2, L10).
 var boardStatusOrder = []string{
 	"holding", "ready", "blocked", "claimed", "in_progress", "needs_feedback",
 	"pr_open", "awaiting_ci", "awaiting_merge", "done_locally", "delivered", "closed",
@@ -182,14 +190,20 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	byStatus := map[string][]taskRow{}
+	trs := make([]taskRow, 0, len(rows))
 	for _, t := range rows {
+		f := facts[t.ID]
 		tr := taskRow{
 			ID: t.ID, Project: t.Project, Subproject: t.Subproject,
 			Title: t.Title, Status: t.Status, AssigneeType: t.AssigneeType,
 			WorkerType: t.WorkerType, Priority: t.Priority, UpdatedAt: t.UpdatedAt,
 			ReopenedAfterDismissal: markers[t.ID],
-			Light:                  lightFor(t.Status, facts[t.ID]),
+			Light:                  lightFor(t.Status, f),
+			QueueRank:              f.QueueRank,
+			Updated:                f.UpdatedStamp,
+		}
+		if tr.Updated == "" {
+			tr.Updated = t.UpdatedAt // never a blank cell for a row that has a value
 		}
 		if t.ParentID != nil {
 			tr.ParentID = fmt.Sprintf("%d", *t.ParentID)
@@ -197,7 +211,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		if t.PlanOrder != nil {
 			tr.PlanOrder = fmt.Sprintf("%d", *t.PlanOrder)
 		}
-		byStatus[t.Status] = append(byStatus[t.Status], tr)
+		trs = append(trs, tr)
 	}
 	// D15: only refresh=on turns auto-refresh on; the interval is the const.
 	autoRefresh := r.URL.Query().Get("refresh") == "on"
@@ -219,15 +233,10 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		ReloadURL:        reload,
 		RenderedAt:       renderedAt,
 	}
-	for _, st := range boardStatusOrder {
-		if len(byStatus[st]) > 0 {
-			data.Columns = append(data.Columns, statusColumn{Status: st, Tasks: byStatus[st]})
-			delete(byStatus, st)
-		}
-	}
-	for st, ts := range byStatus { // unknown statuses still render
-		data.Columns = append(data.Columns, statusColumn{Status: st, Tasks: ts})
-	}
+	// SWT-57: the rows grouped by their light (unknown statuses land in
+	// "other"), and the first line's advanced-filter marker.
+	data.Sections = boardSections(trs)
+	data.AdvancedFilters, data.ClearAdvancedURL = boardAdvanced(r.URL.Query())
 
 	prows, err := s.pool.Query(r.Context(), `SELECT slug FROM projects ORDER BY slug`)
 	if err == nil {
@@ -322,12 +331,16 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	var renderedAt string
 	q, err := s.pool.Query(ctx,
 		`SELECT to_char(now() AT TIME ZONE $2, 'HH24:MI:SS'),
-		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today, f.session
+		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today, f.session,
+		        f.updated
 		   FROM (SELECT 1) one
 		   LEFT JOIN (
 		     SELECT t.id, t.status,
 		            COALESCE(t.working_state, '') AS state,
 		            COALESCE(t.working_session, '') AS session,
+		            COALESCE(CASE WHEN t.updated_at >= `+boardDayStart("$2")+`
+		                          THEN to_char(t.updated_at AT TIME ZONE $2, 'HH24:MI')
+		                          ELSE to_char(t.updated_at AT TIME ZONE $2, 'YYYY-MM-DD') END, '') AS updated,
 		            COALESCE(to_char(t.working_state_at AT TIME ZONE $2, 'YYYY-MM-DD HH24:MI'), '') AS state_at,
 		            COALESCE(t.working_state_at >= `+boardDayStart("$2")+`, false) AS state_today,
 		            COALESCE(t.working_state = 'working'
@@ -348,10 +361,10 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	var ready []int64
 	for q.Next() {
 		var id *int64
-		var status, state, stateAt, dismissal, session *string
+		var status, state, stateAt, dismissal, session, updated *string
 		var stateToday, stale, closedToday *bool
 		if err := q.Scan(&renderedAt, &id, &status, &state, &stateAt, &stateToday, &stale, &dismissal, &closedToday,
-			&session); err != nil {
+			&session, &updated); err != nil {
 			return nil, "", fmt.Errorf("scan light facts: %w", err)
 		}
 		if id == nil {
@@ -360,7 +373,7 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		facts[*id] = lightFacts{
 			OpenDismissalCode: *dismissal, ClosedToday: *closedToday,
 			State: *state, StateAt: *stateAt, StateToday: *stateToday, Stale: *stale,
-			Session: *session,
+			Session: *session, UpdatedStamp: *updated,
 		}
 		statusOf[*id] = *status
 		if *status == "ready" {
@@ -407,6 +420,17 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		f := facts[id]
 		f.QueueHead, f.Lane = true, lane
 		facts[id] = f
+	}
+	// SWT-57 L2: the queue section's order is this statement's order
+	// (tools.TaskQueueOrder, never a second spelling): each ready task's 1-based
+	// position among the candidates.
+	for i, h := range cands {
+		if statusOf[h.ID] != "ready" {
+			continue // became ready between the two statements: no facts, unranked
+		}
+		f := facts[h.ID]
+		f.QueueRank = i + 1
+		facts[h.ID] = f
 	}
 	return facts, renderedAt, nil
 }
@@ -811,6 +835,40 @@ func boardRefreshURLs(q url.Values) (toggle, reload string) {
 		}
 	}
 	return boardURL(tv), boardURL(rv)
+}
+
+// boardFilter is one active advanced filter, shown on the board's first line.
+type boardFilter struct{ Key, Value string }
+
+// boardAdvanced is the first line's advanced-filter marker (SWT-57 L5), a third
+// iterator of boardKeys beside boardBack and boardRefreshURLs: every key but
+// project and refresh is advanced, so a filter key added to boardKeys later is
+// advanced automatically. active lists the non-empty ones in boardKeys order;
+// clearURL drops them, keeping project and refresh=on (only when on). Neither
+// carries flash or any key outside boardKeys. Pure.
+func boardAdvanced(q url.Values) (active []boardFilter, clearURL string) {
+	keep := url.Values{}
+	for _, k := range boardKeys {
+		v := q.Get(k)
+		switch k {
+		case "project":
+			if v != "" {
+				keep.Set(k, v)
+			}
+		case "refresh":
+			if v == "on" {
+				keep.Set(k, v)
+			}
+		default:
+			if v != "" {
+				active = append(active, boardFilter{Key: k, Value: v})
+			}
+		}
+	}
+	if len(active) == 0 {
+		return nil, ""
+	}
+	return active, boardURL(keep)
 }
 
 func boardURL(v url.Values) string {
