@@ -44,6 +44,13 @@ type lightFacts struct {
 	// midnight, else YYYY-MM-DD, in BoardTimeZone on the DB clock.
 	QueueRank    int
 	UpdatedStamp string
+	// FromMessage and PRReview are display-only provenance facts (SWT-59,
+	// board-incoming-first): lightFor never reads them. FromMessage: the
+	// promoter created the task from an inbound email or Slack message (a
+	// classify_promotions row with action task or review). PRReview: a human
+	// task carrying a github PR ref. Either puts the row in the board's
+	// incoming section.
+	FromMessage, PRReview bool
 	// Stale: a working state older than tools.WorkingLease. QueueHead: the first
 	// eligible ready task of its queue, whose name is Lane (D2).
 	Stale, QueueHead bool

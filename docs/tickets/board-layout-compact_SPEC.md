@@ -111,6 +111,12 @@ consequences:
 A status-only grouping would have put a yellow `ready` row in the queue. That is
 the contradiction this avoids.
 
+**Amended 2026-09-15 by SWT-59 (`docs/tickets/board-incoming-first_SPEC.md`):** a
+new FIRST section, `incoming`, holds tasks the promoter created from an email or
+Slack message and PR review tasks, whatever their light except green. It is one
+provenance fact outranking every light but done; the light itself is unchanged,
+and the queue's blue head may now sit in incoming.
+
 **Why six sections, not five.** The brief allowed "done today and anything
 else" as one section. It is split because a dismissed row is grey and a green
 section would misstate it. An unknown status is neither done nor queued. The
@@ -120,7 +126,10 @@ board.
 ### L2 — Section order, and the order within a section
 
 - **Section order:** `blocked`, `in flight`, `queue`, `holding`, `done`,
-  `other`. Empty sections are not rendered, as today.
+  `other`. Empty sections are not rendered, as today. Amended 2026-09-15 by
+  SWT-59: `incoming` comes first, ordered by light rank, then messages before
+  PRs, then newest first; the queue's blue head may sit in incoming, so QUEUE can
+  start with a grey row.
 - **Within `queue`: `tools.TaskQueueOrder`, never a second spelling.**
   - `boardLightFacts`' second statement already reads every ready task
     `ORDER BY tools.TaskQueueOrder` (the D2 queue-head candidates). It now also

@@ -2367,7 +2367,7 @@ activity (SWT-45)".
   |-----------|-------|
   | `boardQuery` | 1 |
   | `reopenMarkers` | ≤1 |
-  | `boardLightFacts` | ≤2: row facts plus render time, then the D2 queue-head candidates |
+  | `boardLightFacts` | ≤2: row facts plus render time (since SWT-59 also two uncorrelated `IN (subquery)` facts, each run once: `classify_promotions` and github `external_refs`; prod 2026-09-15 0.60 ms vs 0.48 ms), then the D2 queue-head candidates |
   | the project list | 1 |
   | `orchestrator.Health` | a few small catalog and backlog reads, already bounded at 2 s |
 
@@ -2417,6 +2417,16 @@ activity (SWT-45)".
   from the SPEC's original "nav, h1, …, topbar": do not "fix" it back.
 - **Dismiss and Done sit in a per-row `actions` `<details>`**, their forms
   byte-identical (the VerbFormsByteUnchanged regex pins inner indentation).
+- **INCOMING is the first section (SWT-59, board-incoming-first).** A task the
+  promoter CREATED from an email or Slack message (`classify_promotions` row,
+  action `task`/`review`) or a human task with a github PR ref goes there,
+  whatever its light except green; the row keeps its light (`boardSectionOf`,
+  one pure function; `sectionFor` unchanged). NOT `tasks.source_thread_id`:
+  capture sets it on every Jira and PR task, so it would pull in every Jira
+  ticket. NOT `surfaced_by_message_id` (SWT-45's Jira revive). The facts are
+  NULL-safe: `COALESCE(t.id IN (SELECT … WHERE cp.task_id IS NOT NULL …), false)`
+  — a crash-artifact promotion with a NULL task_id would otherwise make the IN
+  NULL and break every render. Board-only: `tasks.priority` is untouched.
 
 ## PR review tasks from GitHub mail (SWT-54, treetop-pr-review-tasks)
 

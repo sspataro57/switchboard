@@ -46,6 +46,10 @@ type taskRow struct {
 	// Board-only — never export columns.
 	QueueRank int
 	Updated   string
+	// Incoming is the row's incoming kind (SWT-59): "message", "pr_review" or
+	// "". It decides the board's first section. Board-only — never an export
+	// column.
+	Incoming string
 }
 
 type boardData struct {
@@ -201,6 +205,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			Light:                  lightFor(t.Status, f),
 			QueueRank:              f.QueueRank,
 			Updated:                f.UpdatedStamp,
+			Incoming:               incomingKind(f.FromMessage, f.PRReview),
 		}
 		if tr.Updated == "" {
 			tr.Updated = t.UpdatedAt // never a blank cell for a row that has a value
@@ -234,7 +239,8 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		RenderedAt:       renderedAt,
 	}
 	// SWT-57: the rows grouped by their light (unknown statuses land in
-	// "other"), and the first line's advanced-filter marker.
+	// "other"), with SWT-59's incoming section first; and the first line's
+	// advanced-filter marker.
 	data.Sections = boardSections(trs)
 	data.AdvancedFilters, data.ClearAdvancedURL = boardAdvanced(r.URL.Query())
 
@@ -312,7 +318,10 @@ func (s *Server) reopenMarkers(r *http.Request, rows []TaskExportRow) (map[int64
 //     session state and its time; staleness against tools.WorkingLease; and,
 //     for closed rows, the newest OPEN dismissal's code and whether the close
 //     instant is since today's local midnight. All on the DB clock, in
-//     BoardTimeZone.
+//     BoardTimeZone. SWT-59 adds two display-only provenance facts, each an
+//     uncorrelated, NULL-safe COALESCE(… IN (subquery), false) that Postgres
+//     runs once: from_message (a classify_promotions task/review row) and
+//     pr_review (a human task with a github external ref).
 //  2. the queue-head candidates: every ready task in the database, in
 //     tools.TaskQueueOrder (D2) — never only the displayed rows, so a filter
 //     can hide a queue's first task but never make the second one blue. Skipped
@@ -332,10 +341,14 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	q, err := s.pool.Query(ctx,
 		`SELECT to_char(now() AT TIME ZONE $2, 'HH24:MI:SS'),
 		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today, f.session,
-		        f.updated
+		        f.updated, f.from_message, f.pr_review
 		   FROM (SELECT 1) one
 		   LEFT JOIN (
 		     SELECT t.id, t.status,
+		            COALESCE(t.id IN (SELECT cp.task_id FROM classify_promotions cp
+		                               WHERE cp.task_id IS NOT NULL AND cp.action IN ('task','review')), false) AS from_message,
+		            COALESCE(t.assignee_type = 'human'
+		                     AND t.id IN (SELECT er.task_id FROM external_refs er WHERE er.system = 'github'), false) AS pr_review,
 		            COALESCE(t.working_state, '') AS state,
 		            COALESCE(t.working_session, '') AS session,
 		            COALESCE(CASE WHEN t.updated_at >= `+boardDayStart("$2")+`
@@ -362,9 +375,9 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	for q.Next() {
 		var id *int64
 		var status, state, stateAt, dismissal, session, updated *string
-		var stateToday, stale, closedToday *bool
+		var stateToday, stale, closedToday, fromMessage, prReview *bool
 		if err := q.Scan(&renderedAt, &id, &status, &state, &stateAt, &stateToday, &stale, &dismissal, &closedToday,
-			&session, &updated); err != nil {
+			&session, &updated, &fromMessage, &prReview); err != nil {
 			return nil, "", fmt.Errorf("scan light facts: %w", err)
 		}
 		if id == nil {
@@ -374,6 +387,7 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 			OpenDismissalCode: *dismissal, ClosedToday: *closedToday,
 			State: *state, StateAt: *stateAt, StateToday: *stateToday, Stale: *stale,
 			Session: *session, UpdatedStamp: *updated,
+			FromMessage: *fromMessage, PRReview: *prReview,
 		}
 		statusOf[*id] = *status
 		if *status == "ready" {
