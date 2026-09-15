@@ -121,6 +121,13 @@ type RouteStats struct {
 	Written  int            // mode='route' rows inserted
 	ByStep   map[string]int // thread | single | model | default
 	Unrouted map[string]int // pending_verdict | no_default | verdict_before_arming | candidate_revoked
+	// Unarmed counts messages that WOULD be in the inbox but for an unarmed
+	// receiving account (route_after NULL), and UnarmedAccounts names those
+	// accounts (SWT-58). routeInbox drops them in SQL, so without this count an
+	// unarmed account's pass is indistinguishable from an empty inbox. It is a
+	// report only: it never feeds Written, so the stage never re-runs over them.
+	Unarmed         int
+	UnarmedAccounts []string
 }
 
 // routeRow is one route_apply inbox row.
@@ -161,6 +168,11 @@ func RunRouteApply(ctx context.Context, pool *pgxpool.Pool, cfg RouteApplyConfig
 
 	inbox, err := routeInbox(ctx, pool, cfg.Since, limit)
 	if err != nil {
+		return stats, err
+	}
+	// SWT-58: report what an unarmed account is holding back, every pass. A
+	// report only — arming stays a hand-run UPDATE (B-D7).
+	if stats.Unarmed, stats.UnarmedAccounts, err = routeUnarmedWaiting(ctx, pool, cfg.Since); err != nil {
 		return stats, err
 	}
 	// The candidate set is cached per account for the pass; it may go stale
@@ -214,6 +226,41 @@ func applyRoute(ctx context.Context, pool *pgxpool.Pool, r routeRow, cands []Rou
 	return nil
 }
 
+// routeInboxFilter is the ONE spelling of route_apply's inbox filter without its
+// arming clause (SWT-58 review): routeInbox appends `AND sa.route_after IS NOT
+// NULL` and routeUnarmedWaiting `AND sa.route_after IS NULL`, so the unarmed
+// count can never drift from what arming would release. $1 is the pass window.
+// Each clause is explained on routeInbox.
+const routeInboxFilter = `
+		  FROM normalized_messages nm
+		  JOIN raw_source_items ri ON ri.id = nm.raw_source_item_id
+		  JOIN source_accounts sa ON sa.id = ri.source_account_id
+		  JOIN LATERAL (SELECT cd.action FROM capture_decisions cd
+		                 WHERE cd.message_id = nm.id ORDER BY cd.id DESC LIMIT 1) latest ON true
+		 WHERE nm.direction = 'inbound'
+		   AND latest.action = 'unmatched'
+		   AND EXISTS (SELECT 1 FROM capture_decisions lv
+		                WHERE lv.message_id = nm.id AND lv.mode = 'live' AND lv.action = 'unmatched')
+		   AND EXISTS (SELECT 1 FROM source_account_projects sap WHERE sap.source_account_id = sa.id)
+		   AND COALESCE(nm.sent_at, nm.created_at) >= now() - $1::interval`
+
+// routeUnarmedWaiting counts the messages routeInbox would read if their
+// receiving account were armed: routeInbox's filter with route_after IS NULL in
+// place of IS NOT NULL, and no limit. It also names the accounts, so the pass
+// log says which one needs the hand-run arming UPDATE (SWT-58).
+func routeUnarmedWaiting(ctx context.Context, pool *pgxpool.Pool, since time.Duration) (int, []string, error) {
+	var n int
+	var accounts []string
+	err := pool.QueryRow(ctx, `
+		SELECT count(*), COALESCE(array_agg(DISTINCT sa.account_email) FILTER (WHERE sa.account_email IS NOT NULL), '{}')`+
+		routeInboxFilter+`
+		   AND sa.route_after IS NULL`, since.String()).Scan(&n, &accounts)
+	if err != nil {
+		return 0, nil, fmt.Errorf("count route_apply messages waiting on unarmed accounts: %w", err)
+	}
+	return n, accounts, nil
+}
+
 // routeInbox is the route_apply queue-as-filter, oldest first. Each clause is
 // pinned by a fixture in route_integration_test.go:
 //
@@ -231,19 +278,9 @@ func applyRoute(ctx context.Context, pool *pgxpool.Pool, r routeRow, cands []Rou
 // same join pendingMessages makes; the provider payload is never read.
 func routeInbox(ctx context.Context, pool *pgxpool.Pool, since time.Duration, limit int) ([]routeRow, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT nm.id, nm.raw_source_item_id, COALESCE(nm.thread_id, 0), sa.id, sa.route_after
-		  FROM normalized_messages nm
-		  JOIN raw_source_items ri ON ri.id = nm.raw_source_item_id
-		  JOIN source_accounts sa ON sa.id = ri.source_account_id
-		  JOIN LATERAL (SELECT cd.action FROM capture_decisions cd
-		                 WHERE cd.message_id = nm.id ORDER BY cd.id DESC LIMIT 1) latest ON true
-		 WHERE nm.direction = 'inbound'
-		   AND latest.action = 'unmatched'
-		   AND EXISTS (SELECT 1 FROM capture_decisions lv
-		                WHERE lv.message_id = nm.id AND lv.mode = 'live' AND lv.action = 'unmatched')
+		SELECT nm.id, nm.raw_source_item_id, COALESCE(nm.thread_id, 0), sa.id, sa.route_after`+
+		routeInboxFilter+`
 		   AND sa.route_after IS NOT NULL
-		   AND EXISTS (SELECT 1 FROM source_account_projects sap WHERE sap.source_account_id = sa.id)
-		   AND COALESCE(nm.sent_at, nm.created_at) >= now() - $1::interval
 		 ORDER BY COALESCE(nm.sent_at, nm.created_at), nm.id
 		 LIMIT $2`, since.String(), limit)
 	if err != nil {

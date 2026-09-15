@@ -1070,6 +1070,15 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - **The route eval scores against the RULES tier's answers** (`docs/evals/route-from-rules.jsonl`, `stratum: rules`,
   labels are project slugs checked against `projects.slug`), multi-class, ratio only at 120. Biased easy: read every
   disagreement before arming.
+- **LANDMINE (SWT-58, 2026-09-15): an unarmed account is invisible in route_apply's log.** `routeInbox` filters
+  `sa.route_after IS NOT NULL` in SQL, so an unarmed account's messages never reach `DecideRoute` and no unrouted
+  counter moves. `written=0` with every reason at 0 reads the same as an empty inbox. Part B's go-live (route eval →
+  arm → V6.5 backfill) was NEVER done: the label file `docs/evals/route-from-rules.jsonl` was never produced, 1009 stayed
+  NULL, and prod had zero `mode='route'` rows. So unmatched client mail the route lane had already verdicted (Sana,
+  291568) never reached the inquiry lane. Rule for any shadow-until-armed gate: the stage must COUNT and LOG "work
+  waiting on arming" (the C-D2 precedent in `promote.runInquiry`), and the go-live step needs a tracked owner, not
+  only a runbook line. Arming at `now()` invalidates the shadow verdicts (`verdict_before_arming`); the route stage
+  re-verdicts the 168h ones on its own, and the 720h backlog needs the V6.5 hand backfill.
 
 ### Link preservation (SWT-25)
 

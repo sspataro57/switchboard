@@ -11,7 +11,8 @@ package main
 //     (E-D4), writing mode='route' capture_decisions rows directly (capture's
 //     own log, B5: no task, no tool call). Woken by route_classified and the
 //     sweep; buildPass publishes routed after a pass that wrote >= 1 row. An
-//     unarmed account (route_after NULL) writes nothing.
+//     unarmed account (route_after NULL) writes nothing, and since SWT-58 every
+//     pass logs how many messages it is holding back (unarmed=N, by account).
 //
 // A lost lock is not an error: it maps to pipeline.ErrLockHeld, and the loop
 // retries once after 30 s, then waits for the sweep. This file wakes nobody
@@ -22,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -93,7 +95,15 @@ func routeApplyPass(pool *pgxpool.Pool) pipeline.PassFunc {
 			"pending_verdict", st.Unrouted[capture.RouteReasonPendingVerdict],
 			"no_default", st.Unrouted[capture.RouteReasonNoDefault],
 			"verdict_before_arming", st.Unrouted[capture.RouteReasonBeforeArming],
-			"candidate_revoked", st.Unrouted[capture.RouteReasonCandidateRevoked])
+			"candidate_revoked", st.Unrouted[capture.RouteReasonCandidateRevoked],
+			"unarmed", st.Unarmed, "accounts", strings.Join(st.UnarmedAccounts, ","))
+		// SWT-58: an unarmed account is otherwise invisible here — routeInbox
+		// drops it in SQL, so every counter above stays 0. Say so, and how to fix.
+		if st.Unarmed > 0 {
+			slog.Warn("route_apply: messages are waiting on unarmed accounts; arming is a hand-run UPDATE of "+
+				"source_accounts.route_after (docs/runbooks/local-classifier.md)",
+				"unarmed", st.Unarmed, "accounts", strings.Join(st.UnarmedAccounts, ","))
+		}
 		return st.Written, err
 	}
 }
