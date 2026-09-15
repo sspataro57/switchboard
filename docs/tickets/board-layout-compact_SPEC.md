@@ -45,7 +45,9 @@ by SWT-31 (Dismiss), SWT-51 (Done), SWT-52 (lights, auto-refresh) and SWT-56
 **blocked**, **in flight**, **queue**, **holding**, **done**, **other**.
 - A task appears in exactly one section, and each header shows its count.
 - The first line is the project select plus an "Advanced filter" popup (a
-  `<details>`) and the auto-refresh toggle.
+  `<details>`) and the auto-refresh toggle. Amended 2026-09-15 (owner): the
+  filter now sits on the nav line, right after the JSON link, and the
+  auto-refresh toggle moved to the Board heading's line (see L5).
 - The legend and the board note sit at the bottom.
 - Each row is one line tall: the verbs sit behind a per-row `actions` popup, and
   `updated` shows a short stamp in the board's time zone.
@@ -183,6 +185,20 @@ made both `TestTasksTemplate_AutoRefreshToggleIndicatorAndOneScript` and
 `{{if .AutoRefresh}}`) read the toggle's text as the block. The opening tag and the
 rendered words are unchanged; go-reviewer accepted it as forced by "existing tests
 pass unchanged".
+
+**Amendment (2026-09-15, owner: "the filter I want it next to JSON link").** The
+shape above is superseded, in this order:
+- `<div class="headbar">`, one flex row, holds the byte-unchanged `<nav>` and then
+  the `<div class="topbar">`. The topbar holds ONLY the filter form and the
+  `{{if .AdvancedFilters}}` clear link, so it fits beside JSON at about 1000px.
+- `<div class="titlebar">` follows it, the second line, holding `<h1>Board</h1>`,
+  then the toggle, then the `{{if .AutoRefresh}}` block (indicator and script).
+  The auto-refresh controls moved here because at 1000px the nav plus the full
+  topbar wrapped the filter onto its own line.
+- The flash and the orchestrator alert follow the titlebar as full-width blocks.
+- `TestTasksTemplate_FirstLineIsTheTopbar` pins this order, deliberately amended.
+  The indicator, the toggle's opening tag, the one script and the one onchange are
+  unchanged.
 
 **The advanced inputs stay INSIDE the one form.** The `status`,
 `assignee_type` and `subproject` text inputs and the Filter button move into the
@@ -445,11 +461,12 @@ twelve statuses. Its comment is updated, and the var is not deleted.
 ### Part 3 — the template (`internal/dashboard/templates/tasks.html`)
 
 9. **The first line.**
-   - In document order: nav, `<h1>`, flash, orchestrator alert, then
-     `<div class="topbar">`.
+   - Amended 2026-09-15 (L5 amendment). In document order: `<div class="headbar">`
+     holding nav then `<div class="topbar">`; then `<div class="titlebar">`
+     holding `<h1>`, the `id="auto-refresh-toggle"` link and the
+     `{{if .AutoRefresh}}` block; then the flash and the orchestrator alert.
    - The topbar holds the filter form, then the `{{if .AdvancedFilters}}`
-     clear link, the `id="auto-refresh-toggle"` link, and the
-     `{{if .AutoRefresh}}` block.
+     clear link, and nothing else.
    - The toggle's markup `<a id="auto-refresh-toggle"
      href="{{.RefreshToggleURL}}">` and the indicator `<p>` are byte-unchanged,
      and the toggle stays outside the `{{if .AutoRefresh}}` block.
@@ -819,8 +836,9 @@ Run in this order. Do not commit before step 4 passes.
      `in_progress`).
    - In Chrome DevTools' device toolbar at 1000×700, open
      `/tasks?project=<slug>&refresh=on` and check:
-     - The first line holds the project select, `Advanced filter` and the
-       auto-refresh indicator/toggle, with no second filter row.
+     - The first line is the nav with the project select and `Advanced filter`
+       right after JSON; the second line is `Board` with the auto-refresh
+       toggle and indicator (L5 amendment); there is no separate filter row.
      - `BLOCKED (2)` and `IN FLIGHT (2)` are fully visible without scrolling.
        The red row is above the grey one, and `QUEUE` starts below them with
        the blue head first.

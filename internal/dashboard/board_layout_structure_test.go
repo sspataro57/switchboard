@@ -273,10 +273,13 @@ func TestTasksTemplate_FirstLineIsTheTopbar(t *testing.T) {
 		prev = i
 	}
 	hb := strings.Index(s, `<div class="headbar">`)
+	he := -1
 	if hb < 0 || hb > strings.Index(s, "<nav>") {
 		t.Errorf(`the nav and the topbar are not wrapped in one <div class="headbar"> row opening before <nav> (the filter sits next to the JSON link)`)
-	} else if he, ok := elementEnd(s, hb, "div"); !ok || he < strings.Index(s, topOpen) {
+	} else if e, ok := elementEnd(s, hb, "div"); !ok || e < strings.Index(s, topOpen) {
 		t.Errorf("the .headbar row does not contain the topbar")
+	} else {
+		he = e
 	}
 	if n := strings.Count(s, topOpen); n != 1 {
 		t.Fatalf("tasks.html has %d %s, want exactly 1", n, topOpen)
@@ -318,6 +321,17 @@ func TestTasksTemplate_FirstLineIsTheTopbar(t *testing.T) {
 		t.Fatalf("the titlebar <div> is never closed")
 	}
 	title := s[tb:tbe]
+	// go-reviewer (2026-09-15): the titlebar is the SECOND line, so it must
+	// open after the headbar closes, and the flash and alert stay full-width
+	// blocks below it rather than inline in its flex row.
+	if he >= 0 && tb < he {
+		t.Errorf("the titlebar sits inside the .headbar row; it is the second line")
+	}
+	for _, m := range []string{"{{if .Flash}}", "{{with .OrchAlert}}"} {
+		if strings.Index(s, m) < tbe {
+			t.Errorf("%s renders inside or before the titlebar; it stays a full-width block below it", m)
+		}
+	}
 	hi := strings.Index(title, "<h1>Board</h1>")
 	gi := strings.Index(title, `<a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">`)
 	ai := strings.Index(title, "{{if .AutoRefresh}}")

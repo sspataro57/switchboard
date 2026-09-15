@@ -2406,8 +2406,15 @@ activity (SWT-45)".
   instead (`advanced-active` summary + `clear advanced`).
 - **Landmine: the toggle's text uses `{{if not .AutoRefresh}}`.** Two structure
   tests take the refresh block as the FIRST `{{if .AutoRefresh}}` in the file /
-  topbar, and the toggle now sits before the block. Writing the toggle's text
+  titlebar, and the toggle sits before the block. Writing the toggle's text
   with `{{if .AutoRefresh}}` makes both tests read the toggle as the block.
+- **The top of the board is two rows, by the owner's choice (2026-09-15, "the
+  filter I want it next to JSON link").** `.headbar` = the nav plus the topbar,
+  which holds ONLY the filter form and the clear link, so it fits beside JSON at
+  about 1000px. `.titlebar` = `<h1>Board</h1>`, the auto-refresh toggle and the
+  refresh block. The flash and alert follow as full-width blocks.
+  `TestTasksTemplate_FirstLineIsTheTopbar` pins this order, deliberately amended
+  from the SPEC's original "nav, h1, …, topbar": do not "fix" it back.
 - **Dismiss and Done sit in a per-row `actions` `<details>`**, their forms
   byte-identical (the VerbFormsByteUnchanged regex pins inner indentation).
 
