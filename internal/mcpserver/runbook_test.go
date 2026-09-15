@@ -72,6 +72,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -190,10 +191,12 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		// `\beleven tools\b|\b11 tools\b` (SWT-42 criterion 24). SWT-44:
 		// draft_delivery and update_delivery make it thirteen.
 		// SWT-52: task_signal makes it fourteen.
-		{`\bfourteen tools\b|\b14 tools\b`, "the user profile's tool list becomes fourteen (SWT-52)"},
+		// SWT-56: task_context makes it fifteen (criterion 34).
+		{`\bfifteen tools\b|\b15 tools\b`, "the user profile's tool list becomes fifteen (SWT-56)"},
 		// SWT-52 criterion 26.
 		{`swt-52`, "the title gains SWT-52"},
-		{`(?s)fourteen tools:.{0,700}task_signal`, "task_signal is in the header list"},
+		{`(?s)fifteen tools:.{0,900}task_signal`, "task_signal is in the header list (fifteen since SWT-56)"},
+		{`(?s)fifteen tools:.{0,900}task_context`, "SWT-56 criterion 34: task_context is in the header list"},
 		{`swb start`, "usage: 'swb start <id>' → task_signal working"},
 		{`swb stop`, "usage: 'swb stop <id>' → task_signal clear"},
 		{`(?s)needs_input.{0,500}console|console.{0,500}needs_input`, "the waiting/answer protocol: red while waiting; he answers in the session's own console"},
@@ -244,7 +247,9 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 	// SWT-42 criterion 24: the superseded counts are false claims now.
 	for _, stale := range []string{`\bnine tools\b`, `\b9 tools\b`, `\b23 tools\b`, `\beleven tools\b`, `\b11 tools\b`, `\b25 tools\b`,
 		// SWT-52: thirteen/26 are superseded too.
-		`\bthirteen tools\b`, `\b13 tools\b`, `\b26 tools\b`} {
+		`\bthirteen tools\b`, `\b13 tools\b`, `\b26 tools\b`,
+		// SWT-56: fourteen is superseded too.
+		`\bfourteen tools\b`, `\b14 tools\b`} {
 		if regexp.MustCompile(stale).MatchString(lower) {
 			t.Errorf("%s still matches /%s/: since SWT-52 the user profile lists fourteen tools and the full "+
 				"profile 27", rel, stale)
@@ -287,5 +292,72 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 	}
 	if adds == 0 {
 		t.Errorf("POSITIVE CONTROL: %s has no `claude mcp add` line at all", rel)
+	}
+}
+
+// SWT-56 (docs/tickets/signal-session-name_SPEC.md) criteria 24, 35 and 36 (Q1 =
+// (a), owner 2026-09-15: no mail-text filter). EXPECTED RED until the runbook is
+// rewritten.
+func TestRunbook_SessionNameAndTaskContext(t *testing.T) {
+	const rel = "docs/runbooks/ops-mcp-user-scope.md"
+	b, err := os.ReadFile(filepath.Join("..", "..", rel))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	lower := strings.ToLower(string(b))
+	use := lower
+	if i := strings.Index(lower, "\n## use"); i >= 0 {
+		use = lower[i:]
+	} else {
+		t.Errorf("%s has no \"## Use\" section", rel)
+	}
+
+	for _, want := range []struct{ re, why string }{
+		// criterion 24: the session name rides along.
+		{`(?s)swb start 412.{0,400}session`, "the swb start Use line says the session name rides along"},
+		{`(?s)needs_input.{0,400}session`, "the waiting/needs_input Use line says the session name rides along"},
+		// criterion 35: the read-only per-task read.
+		{`task_context`, "the Use section gains task_context"},
+		{`read a task in full`, "…as 'read a task in full'"},
+		{`(?s)task_context.{0,500}read-only.{0,400}pin`, "…read-only here, and why: the pin"},
+	} {
+		if !regexp.MustCompile(want.re).MatchString(use) {
+			t.Errorf("%s's Use section does not match /%s/ — %s", rel, want.re, want.why)
+		}
+	}
+
+	for _, want := range []struct{ re, why string }{
+		// criterion 24: the accepted-risk bullet, restated honestly.
+		{`self-reported`, "the board shows a self-reported session name…"},
+		{`nothing verifies`, "…which nothing verifies"},
+		{`any name`, "a prompt-injected session can signal any human task under any name"},
+		{`wrong name`, "the damage is unchanged: a wrong light or a wrong name"},
+		// criterion 36 (a): what a session in any repo can now read.
+		{`(?s)captur.{0,400}preview.{0,800}\bpersonal\b|\bpersonal\b.{0,800}captur.{0,400}preview`,
+			"Q1 (a): every repo's session can read capture's message previews for every project, personal included"},
+	} {
+		if !regexp.MustCompile(want.re).MatchString(lower) {
+			t.Errorf("%s does not match /%s/ — %s", rel, want.re, want.why)
+		}
+	}
+	if strings.Contains(lower, "no session identity") {
+		t.Errorf("%s still says there is `no session identity`: since SWT-56 the board shows a self-reported name", rel)
+	}
+
+	// The trail bullet names the five event keys, and no stale three-key list remains.
+	lists := regexp.MustCompile(`working_state_changed\s*\{([^}]*)\}`).FindAllStringSubmatch(lower, -1)
+	if len(lists) == 0 {
+		t.Errorf("%s names no working_state_changed {…} key list (criterion 24: the trail bullet)", rel)
+	}
+	for _, l := range lists {
+		var keys []string
+		for _, k := range strings.Split(l[1], ",") {
+			keys = append(keys, strings.TrimSpace(k))
+		}
+		sort.Strings(keys)
+		if strings.Join(keys, ",") != "from,from_session,session,to,worker_id" {
+			t.Errorf("%s lists working_state_changed {%s}; want the five keys from, to, worker_id, session, "+
+				"from_session (S5)", rel, l[1])
+		}
 	}
 }

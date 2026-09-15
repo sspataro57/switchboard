@@ -40,8 +40,27 @@ func sgTask(t *testing.T, ctx context.Context, pool *pgxpool.Pool, proj int64, t
 	return id
 }
 
+// sgExec signals as the tests always have, AMENDED by SWT-56 (signal-session-name)
+// S2: working and needs_input carry session "kube-c7" (required now); clear
+// carries none (optional). sgExecS names the session explicitly.
 func sgExec(ctx context.Context, ex *executor.Executor, actor string, task int64, state string) (map[string]json.RawMessage, error) {
-	args, _ := json.Marshal(map[string]any{"task_id": task, "state": state, "worker_id": strings.TrimPrefix(actor, "mcp:")})
+	session := sgSession
+	if state == "clear" {
+		session = ""
+	}
+	return sgExecS(ctx, ex, actor, task, state, session)
+}
+
+// sgSession is the session every sgExec set carries (criterion 10: "kube-c7").
+const sgSession = "kube-c7"
+
+// sgExecS calls task_signal with an explicit session; "" omits the key.
+func sgExecS(ctx context.Context, ex *executor.Executor, actor string, task int64, state, session string) (map[string]json.RawMessage, error) {
+	a := map[string]any{"task_id": task, "state": state, "worker_id": strings.TrimPrefix(actor, "mcp:")}
+	if session != "" {
+		a["session"] = session
+	}
+	args, _ := json.Marshal(a)
 	res, err := ex.Execute(ctx, executor.Call{Tool: "task_signal", Actor: actor, Args: args, TaskID: &task})
 	if err != nil {
 		return nil, err
@@ -53,17 +72,19 @@ func sgExec(ctx context.Context, ex *executor.Executor, actor string, task int64
 	return out, nil
 }
 
+// sgRow gains session (SWT-56): working_session, read beside the marker, so every
+// "all NULL" and "untouched" comparison covers the third column.
 type sgRow struct {
-	state, stateAt, status, updatedAt, closedAt, closedFrom, surfacedAt string
-	priority                                                            int
+	session, state, stateAt, status, updatedAt, closedAt, closedFrom, surfacedAt string
+	priority                                                                     int
 }
 
 func sgRead(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id int64) sgRow {
 	t.Helper()
 	var r sgRow
-	if err := pool.QueryRow(ctx, `SELECT COALESCE(working_state,''), COALESCE(working_state_at::text,''), status,
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(working_session,''), COALESCE(working_state,''), COALESCE(working_state_at::text,''), status,
 		updated_at::text, COALESCE(closed_at::text,''), COALESCE(closed_from_status,''), COALESCE(surfaced_at::text,''), priority
-		FROM tasks WHERE id=$1`, id).Scan(&r.state, &r.stateAt, &r.status, &r.updatedAt, &r.closedAt, &r.closedFrom,
+		FROM tasks WHERE id=$1`, id).Scan(&r.session, &r.state, &r.stateAt, &r.status, &r.updatedAt, &r.closedAt, &r.closedFrom,
 		&r.surfacedAt, &r.priority); err != nil {
 		t.Fatalf("read task %d: %v", id, err)
 	}
@@ -119,8 +140,9 @@ func TestSignal_Integration_SetRefreshChangeClear(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if strings.Join(keys, ",") != "changed,state,state_at,task_id" {
-		t.Errorf("result keys = %v, want exactly [changed state state_at task_id] (D10 e)", keys)
+	// AMENDED by SWT-56 criterion 7: the result gains session.
+	if strings.Join(keys, ",") != "changed,session,state,state_at,task_id" {
+		t.Errorf("result keys = %v, want exactly [changed session state state_at task_id] (SWT-56 criterion 7)", keys)
 	}
 	if sgStr(out["state"]) != "working" || string(out["changed"]) != "true" || sgStr(out["state_at"]) == "" {
 		t.Errorf("set result = %v, want state working, changed true, a state_at", out)
@@ -136,8 +158,9 @@ func TestSignal_Integration_SetRefreshChangeClear(t *testing.T) {
 	if n := sgEvents(t, ctx, pool, h); n != 1 {
 		t.Errorf("working_state_changed events after set = %d, want 1", n)
 	}
-	if k, from, to, w := sgLastEvent(t, ctx, pool, h); strings.Join(k, ",") != "from,to,worker_id" || from != "" || to != "working" || w != "manual:salvo" {
-		t.Errorf("set event = keys %v from %q to %q worker %q, want [from to worker_id] \"\" working manual:salvo (D10 b)", k, from, to, w)
+	if k, from, to, w := sgLastEvent(t, ctx, pool, h); strings.Join(k, ",") != "from,from_session,session,to,worker_id" || from != "" || to != "working" || w != "manual:salvo" {
+		// AMENDED by SWT-56 criterion 6: the SWT-52 key list [from to worker_id] gains session and from_session.
+		t.Errorf("set event = keys %v from %q to %q worker %q, want [from from_session session to worker_id] \"\" working manual:salvo (D10 b)", k, from, to, w)
 	}
 
 	// refresh: same state, timestamp moves, no event.

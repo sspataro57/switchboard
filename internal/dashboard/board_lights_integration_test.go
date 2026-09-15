@@ -116,10 +116,13 @@ func lsCall(t *testing.T, ctx context.Context, ex *executor.Executor, actor, too
 	}
 }
 
+// AMENDED by SWT-56 (signal-session-name): every signal names its session
+// (required on working and needs_input, S2), so the row-5 labels read
+// "session kube-c7" in place of "a session" (S8).
 func lsSignal(t *testing.T, ctx context.Context, ex *executor.Executor, task int64, state string) {
 	t.Helper()
 	lsCall(t, ctx, ex, "mcp:manual:salvo", "task_signal", task,
-		map[string]any{"task_id": task, "state": state, "worker_id": "manual:salvo"})
+		map[string]any{"task_id": task, "state": state, "worker_id": "manual:salvo", "session": "kube-c7"})
 }
 
 func assertBoardLight(t *testing.T, step, body string, id int64, class, labelPrefix string) {
@@ -285,12 +288,12 @@ func TestBoardLights_Integration_EndToEnd(t *testing.T) {
 
 	lsSignal(t, ctx, ex, a, "working")
 	body = board("")
-	assertBoardLight(t, "working (A)", body, a, "working", "in progress (a session, last signal ")
+	assertBoardLight(t, "working (A)", body, a, "working", "in progress (session kube-c7, last signal ")
 	bIsNext("working", body)
 
 	lsSignal(t, ctx, ex, a, "needs_input")
 	body = board("")
-	assertBoardLight(t, "needs_input (A)", body, a, "input", "waiting on your input (a session, since ")
+	assertBoardLight(t, "needs_input (A)", body, a, "input", "waiting on your input (session kube-c7, since ")
 	if _, l, _ := boardLight(body, a); !strings.Contains(l, "since") {
 		t.Errorf("needs_input label %q does not say since", l)
 	}
@@ -305,14 +308,14 @@ func TestBoardLights_Integration_EndToEnd(t *testing.T) {
 		t.Fatalf("move the red to yesterday: %v", err)
 	}
 	body = board("")
-	assertBoardLight(t, "needs_input from yesterday (A)", body, a, "input", "waiting on your input (a session, since ")
+	assertBoardLight(t, "needs_input from yesterday (A)", body, a, "input", "waiting on your input (session kube-c7, since ")
 	if _, l, _ := boardLight(body, a); !regexp.MustCompile(`since \d{4}-\d{2}-\d{2} \d{2}:\d{2}\)$`).MatchString(l) {
 		t.Errorf("yesterday's needs_input label %q, want `since YYYY-MM-DD HH:MM)` (D1 amendment)", l)
 	}
 
 	lsSignal(t, ctx, ex, a, "working")
 	body = board("")
-	assertBoardLight(t, "working again (A)", body, a, "working", "in progress (a session, last signal ")
+	assertBoardLight(t, "working again (A)", body, a, "working", "in progress (session kube-c7, last signal ")
 	bIsNext("working again", body)
 
 	if _, err := pool.Exec(ctx, `UPDATE tasks SET working_state_at = now() - interval '3 hours' WHERE id=$1`, a); err != nil {
@@ -334,7 +337,7 @@ func TestBoardLights_Integration_EndToEnd(t *testing.T) {
 	body = board("")
 	assertBoardLight(t, "done (A)", body, a, "done", "done today")
 	bIsNext("done", body)
-	if n := bdCount(t, ctx, pool, `SELECT count(*) FROM tasks WHERE id=$1 AND working_state IS NULL AND working_state_at IS NULL`, a); n != 1 {
+	if n := bdCount(t, ctx, pool, `SELECT count(*) FROM tasks WHERE id=$1 AND working_state IS NULL AND working_state_at IS NULL AND working_session IS NULL`, a); n != 1 {
 		t.Errorf("after Done the marker is not NULL (D9: a real close clears it)")
 	}
 
@@ -387,7 +390,7 @@ func TestBoardLights_Integration_ClosePathsClearTheMarker(t *testing.T) {
 
 	for _, id := range []int64{x, y, z} {
 		if n := bdCount(t, ctx, pool,
-			`SELECT count(*) FROM tasks WHERE id=$1 AND status='closed' AND working_state IS NULL AND working_state_at IS NULL`, id); n != 1 {
+			`SELECT count(*) FROM tasks WHERE id=$1 AND status='closed' AND working_state IS NULL AND working_state_at IS NULL AND working_session IS NULL`, id); n != 1 {
 			t.Errorf("task %d: not closed with a NULL marker (criterion 20 / D9)", id)
 		}
 		var keys []string

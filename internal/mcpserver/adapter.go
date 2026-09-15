@@ -45,8 +45,10 @@ const (
 	// send, book, link, decide, read mail bodies or reopen; since SWT-42 it reads attachments of non-private mail (O1); since SWT-44 it drafts and edits client replies (draft_delivery,
 	// update_delivery), approving and sending staying on the dashboard; since
 	// SWT-52 it signals its human task's session state (task_signal: working,
-	// needs_input, clear) for the board's lights. Policy refuses the verbs,
-	// task_set_priority and task_signal to worker identities.
+	// needs_input, clear) for the board's lights; since SWT-56 it reads one task
+	// in full with task_context, READ-ONLY by the pin below plus the handler's
+	// require_read_only. Policy refuses the verbs, task_set_priority and
+	// task_signal to worker identities.
 	ProfileUser Profile = "user"
 	// ProfileRead serves the queue reads only. No binary builds it since
 	// SWT-37; it is the named fail-closed floor an unknown profile lands on.
@@ -54,7 +56,9 @@ const (
 )
 
 // readProfileTools write nothing but their audit row. task_context is left out
-// deliberately: fetched by the claim holder it flips claimed → in_progress.
+// deliberately: fetched by the claim holder it flips claimed → in_progress, and
+// this profile has no pins. The user profile lists it only because its pin
+// (worker_id:"", require_read_only:"true") makes that flip unreachable (SWT-56).
 var readProfileTools = []string{"project_list", "task_list", "task_get_next"}
 
 // userProfileTools is the read slice plus the three task verbs (SWT-37 V3),
@@ -83,7 +87,10 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// (working | needs_input | clear) so the board's light is truthful. No pin:
 	// the handler refuses a claude task for every caller (D7), so a pin could
 	// only narrow what already holds for everyone.
-	"task_signal")
+	"task_signal",
+	// SWT-56 (Salvador, 2026-09-15: "we need a tool so it can pull the task with
+	// detail"): one task's full document, read-only by the pin below.
+	"task_context")
 
 // userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
 // by OVERWRITE, after injectWorkerID. require_assignee_type:"human" makes the
@@ -104,11 +111,18 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 // means drafts created by the mcp:manual:salvo actor (any interactive
 // session), gmail only; never the drafts worker's or the dashboard's. Each
 // only narrows, and none appears in a schema.
+//
+// SWT-56 S12: task_context is pinned worker_id:"" (overwriting the injected
+// manual:salvo, fold-equivalent keys deleted) AND require_read_only:"true", so
+// a session's read of a task claimed as manual:salvo never flips it to
+// in_progress. Two layers: the handler honours the flag even if worker_id were
+// ever non-empty.
 var userProfilePins = map[string]map[string]string{
 	"create_task":     {"require_assignee_type": "human"},
 	"task_append_log": {"require_assignee_type": "human"},
 	"draft_delivery":  {"require_channel": "gmail", "require_thread_in_task_project": "true"},
 	"update_delivery": {"require_own_draft": "true", "require_channel": "gmail"},
+	"task_context":    {"worker_id": "", "require_read_only": "true"},
 }
 
 // Server adapts MCP tool calls onto the executor for one worker identity.

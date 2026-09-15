@@ -13,6 +13,13 @@ a new item in an existing category).
 
 ## Known landmines (verified bites)
 
+- **The Write tool decodes `\u` / `\U` escape sequences into real characters.**
+  Bit on 2026-09-15 (SWT-56): the SPEC's first draft ended up carrying invisible
+  code points (bidi overrides, zero-width spaces) where it meant to show their
+  escapes. In Go test sources, build unusual runes from their values —
+  `string(rune(0x202E))` — never paste them and never write a backslash escape
+  a tool might decode. The same class as "No python escapes into Go".
+
 - **`cmd/classify` reads `DATABASE_URL`, not `OPS_DATABASE_URL`.** The shell
   exports only `OPS_DATABASE_URL`; run it as
   `DATABASE_URL="$OPS_DATABASE_URL" go run ./cmd/classify ...` (same pattern as
@@ -545,8 +552,11 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   (connector code is linked via internal/tools but stays nil). Not an env
   setting on ops-mcp: that was tried and fails open (unset had to mean full for
   existing launchers). `ProfileRead` survives only as the fail-closed floor an
-  unknown profile lands on. `task_context` is in neither narrow profile: the
-  claim holder's fetch flips claimed → in_progress.
+  unknown profile lands on. `task_context` is NOT in `ProfileRead` (the claim
+  holder's fetch flips claimed → in_progress, and that profile has no pins);
+  since SWT-56 the user profile lists it READ-ONLY by the pin
+  `{worker_id:"", require_read_only:"true"}` plus the handler's
+  `require_read_only` branch (see the SWT-52 section).
 - Installed once at Claude Code USER scope as `ops` → `ops-mcp-user` (runbook
   `docs/runbooks/ops-mcp-user-scope.md`, which also carries the migration from
   the old `ops-mcp-read` registration): a `go install` binary from `main`,
@@ -564,16 +574,18 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   the same name as `.mcp.json`'s).
 - **LANDMINE: `claude mcp get/list` lie about same-name precedence.** Inside
   this repo they show the user-scope `ops`, yet a session here loads
-  `.mcp.json`'s full `ops` (26 tools since SWT-44; a session in `kube` gets 13).
+  `.mcp.json`'s full `ops` (27 tools since SWT-52; a session in `kube` gets 15
+  since SWT-56).
   Verify precedence from inside a session, never from the CLI listing.
 - `claude -p` from a shell uses `ANTHROPIC_API_KEY` (exported, no credit) over
   the claude.ai login: prefix `env -u ANTHROPIC_API_KEY` for smoke sessions.
 - `task_list` reads resolve + page + counts in ONE `RepeatableRead, ReadOnly`
   transaction: a shared WHERE stops predicate drift, not drift in time.
 - Residual (Future work): row TITLES — some derived from private mail — reach
-  whatever model the calling session runs, including for `personal`; and in
-  the full profile `task_context` still returns any task's body by id with no
-  client or locality clause.
+  whatever model the calling session runs, including for `personal`; and
+  `task_context` returns any task's body and log lines by id with no client or
+  locality clause, in the full profile AND (since SWT-56, owner's Q1 "Show
+  everything", 2026-09-15) in the user profile every repo's session has.
 
 ### Task verbs over MCP (SWT-37, mcp-task-verbs)
 
@@ -2263,9 +2275,18 @@ activity (SWT-45)".
   Candidates are ordered by `tools.TaskQueueOrder` (an alias of `taskQueueOrder`,
   never a second literal). Eligible = `lightFor` with `QueueHead=false` gives
   `none`. A filter can hide a queue's head, never promote the second task.
-- **Session state is two columns on `tasks` (0033), not a status.** Only three
-  places write `working_state` / `working_state_at` (structure scan, allow-list
-  with minimum counts):
+- **Session state is three columns on `tasks` (0033 + 0036), not a status.**
+  SWT-56 added `working_session`, the signalling session's self-reported name
+  (ListAgents' `This session is <name>`). Only three files write the columns
+  (structure scan, allow-list with minimum counts), in four statements (signal
+  set/clear, close, reopen, claim). `TestWorkingSession_TravelsWithWorkingState`
+  requires every literal that NULLs or sets `working_state` to NULL or set
+  `working_session` in the same statement, so a fifth clear site cannot forget
+  the name. The name is READ-GATED on a non-NULL `working_state` (the board's
+  session rows, `signalTask`'s `from_session`, `task_context`'s CASE): an old
+  binary's clear leaves a dangling name that nothing shows. No CHECK ties the
+  columns, deliberately — it would make every old-binary close, reopen or claim
+  of a named marker FAIL during a rollback. The writers:
   - `internal/tools/signal.go` (`task_signal`);
   - `closeTransition`, which clears them on a real close AND in the reopen UPDATE,
     for all three `task_reopen` forms;
@@ -2287,12 +2308,34 @@ activity (SWT-45)".
   can set a marker. After it, a rollback is covered by reopen-clears and
   claim-clears. See `docs/runbooks/HANDOFF-kube-board-status-lights.md`.
 - **Accepted residual: a prompt-injected session can signal ANY human task.**
-  There is no session identity to bind a signal to, and no identity plumbing was
-  added (Codex review, 2026-09-14). The harm is a wrong light: nothing is sent,
-  and no status or claim changes. The mitigation is instruction-level only: the
-  skill says to signal only the task the session is working on, and never
-  because read text asks. The tool cannot touch a worker's `needs_feedback` red
-  or any claude task (tests pin both).
+  Since SWT-56 the board shows a self-reported session name, which nothing
+  verifies: no identity plumbing binds a name to a session process (Codex
+  review, 2026-09-14; Claude Code passes no session identity to a stdio MCP
+  server). The harm is a wrong light or a wrong name: nothing is sent, and no
+  status or claim changes. The mitigation is instruction-level only: the skill
+  says to signal only the task the session is working on, and never because
+  read text asks. The tool cannot touch a worker's `needs_feedback` red or any
+  claude task (tests pin both).
+- **Session names (SWT-56): 200 runes, `unicode.IsPrint` plus ZWJ, trimmed.**
+  `tools.NormalizeSessionName` is the one spelling (validator AND handler).
+  Not 64 and not ASCII-only: Claude Code session names are titles that can hit
+  its 200-character cap and carry emoji, and a refused session cannot signal at
+  all. `IsPrint` rejects Cc, the Cf bidi overrides, ZWSP and BOM; U+200D is let
+  back in for joined emoji. Required on `working` / `needs_input`; `clear` may
+  omit it (the opsctl recovery). The board ellipsizes the tag in CSS only; Go
+  never truncates a name. Pre-0036 markers render `session unknown`.
+- **Mixed-binary residual (SWT-56).** A session opened before the
+  `ops-mcp-user` reinstall keeps the old binary: its sets write state and time
+  but not the name, so a name left by a newer session on the same task shows
+  against the old session's state. Restart open sessions after the reinstall.
+- **`task_context` is on the user profile, READ-ONLY (SWT-56).** The adapter
+  injects `worker_id=manual:salvo` on every call, and claims by that id exist,
+  so the tool alone would flip a claimed task to `in_progress` on a read. Two
+  layers stop it: the user-profile pin `{worker_id:"", require_read_only:"true"}`
+  and the handler's `require_read_only` branch. `ProfileRead` never lists it.
+  Q1 (owner, 2026-09-15, "Show everything"): no locality filter — every repo's
+  session can read every task in full, capture's mail previews for `personal`
+  included.
 - **"Today" is the DB clock in America/New_York.** `boardDayStart(p)` is the one
   spelling of local midnight; `BoardTimeZone` is bound as a parameter. The close
   instant is `COALESCE(closed_at, updated_at)`. No Go `time.Now()` feeds visibility,

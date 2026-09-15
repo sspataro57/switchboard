@@ -60,7 +60,7 @@ var fixedLabelPrefixes = []string{
 	"done locally; delivery pending", "delivered",
 	"in progress (claimed)", "in progress", "in progress: PR open", "in progress: awaiting CI",
 	"in progress: awaiting merge",
-	"waiting on your input (a session, since ", "in progress (a session, last signal ",
+	"waiting on your input (session ", "in progress (session ",
 	"in progress? no session signal since ",
 	"next in queue (",
 	"holding (review lane; not queued)", "blocked on a dependency", "ready, queued",
@@ -135,11 +135,11 @@ func expectedLight(status string, f lightFacts) (class, prefix string) {
 	case "holding", "ready", "blocked":
 		switch {
 		case f.State == "needs_input":
-			return "input", "waiting on your input (a session, since "
+			return "input", "waiting on your input (session "
 		case f.State == "working" && f.Stale:
 			return "stale", "in progress? no session signal since "
 		case f.State == "working":
-			return "working", "in progress (a session, last signal "
+			return "working", "in progress (session "
 		}
 		switch {
 		case status == "ready" && f.QueueHead:
@@ -184,6 +184,10 @@ func TestLightFor_EveryStatusAcrossFactCombinations(t *testing.T) {
 // AMENDED — not deleted — 2026-09-14: the two fresh-label rows used to pass
 // with no StateToday fact and expect HH:MM; they now set StateToday, and the
 // earlier-day rows are new.
+//
+// AMENDED — not deleted — by SWT-56 (signal-session-name) criterion 16: the three
+// session rows read "session <name>" in place of "a session", and "session
+// unknown" when the marker has no name (S8, S9). These facts carry no Session.
 func TestLightFor_SessionLabelsCarryTheSignalTime(t *testing.T) {
 	const earlier = "2026-09-13 22:40"
 	for _, st := range []string{"holding", "ready", "blocked"} {
@@ -193,17 +197,17 @@ func TestLightFor_SessionLabelsCarryTheSignalTime(t *testing.T) {
 			want string
 		}{
 			{"needs_input today", lightFacts{State: "needs_input", StateAt: stateAt, StateToday: true},
-				"waiting on your input (a session, since 10:05)"},
+				"waiting on your input (session unknown, since 10:05)"},
 			{"needs_input on an earlier day", lightFacts{State: "needs_input", StateAt: earlier},
-				"waiting on your input (a session, since 2026-09-13 22:40)"},
+				"waiting on your input (session unknown, since 2026-09-13 22:40)"},
 			{"working today", lightFacts{State: "working", StateAt: stateAt, StateToday: true},
-				"in progress (a session, last signal 10:05)"},
+				"in progress (session unknown, last signal 10:05)"},
 			{"working (fresh) on an earlier day", lightFacts{State: "working", StateAt: earlier},
-				"in progress (a session, last signal 2026-09-13 22:40)"},
+				"in progress (session unknown, last signal 2026-09-13 22:40)"},
 			{"stale working today", lightFacts{State: "working", StateAt: stateAt, StateToday: true, Stale: true},
-				"in progress? no session signal since 2026-09-14 10:05"},
+				"in progress? no session signal since 2026-09-14 10:05 (session unknown)"},
 			{"stale working on an earlier day", lightFacts{State: "working", StateAt: earlier, Stale: true},
-				"in progress? no session signal since 2026-09-13 22:40"},
+				"in progress? no session signal since 2026-09-13 22:40 (session unknown)"},
 		} {
 			if got := lightFor(st, tc.f).Label; got != tc.want {
 				t.Errorf("%s + %s label = %q, want %q", st, tc.name, got, tc.want)
@@ -224,13 +228,13 @@ func TestLightFor_NamedPrecedenceCases(t *testing.T) {
 		{"needs_feedback beats a working marker", "needs_feedback", lightFacts{State: "working", StateAt: stateAt},
 			"input", "waiting on your input: worker parked on a question"},
 		{"ready + needs_input beats queue head", "ready", lightFacts{State: "needs_input", StateAt: stateAt, QueueHead: true, Lane: "saka"},
-			"input", "waiting on your input (a session, since "},
+			"input", "waiting on your input (session "},
 		{"ready + working beats queue head", "ready", lightFacts{State: "working", StateAt: stateAt, QueueHead: true, Lane: "saka"},
-			"working", "in progress (a session, last signal "},
+			"working", "in progress (session "},
 		{"ready + stale working", "ready", lightFacts{State: "working", StateAt: stateAt, Stale: true}, "stale", "in progress? no session signal since "},
 		{"in_progress ignores the marker", "in_progress", lightFacts{State: "needs_input", StateAt: stateAt}, "working", "in progress"},
 		{"needs_input never goes stale", "holding", lightFacts{State: "needs_input", StateAt: stateAt, Stale: true},
-			"input", "waiting on your input (a session, since "},
+			"input", "waiting on your input (session "},
 	} {
 		assertLight(t, tc.name, lightFor(tc.status, tc.f), tc.class, tc.label)
 	}
@@ -404,6 +408,74 @@ func TestLights_PureNoIONoClock(t *testing.T) {
 			if strings.Contains(body, banned) {
 				t.Errorf("%s contains %q: it must be a pure function (criteria 1, 4)", fn, banned)
 			}
+		}
+	}
+}
+
+// ---- SWT-56 (signal-session-name) criteria 15 and 16: the session tag ----------
+//
+// IMPOSED SURFACE (S8): lightFacts.Session string (the stored name, "" when none);
+// light.Session string (the visible tag). lightFor sets light.Session ONLY on the
+// three session rows — input, fresh working, stale — to the name or the literal
+// "session unknown"; every other row gets "". EXPECTED RED: neither field exists,
+// so package dashboard's test binary compile-FAILS.
+
+func TestLightFor_SessionTag(t *testing.T) {
+	rows := []struct {
+		name  string
+		f     lightFacts
+		class string
+	}{
+		{"input", lightFacts{State: "needs_input", StateAt: stateAt, StateToday: true}, "input"},
+		{"working", lightFacts{State: "working", StateAt: stateAt, StateToday: true}, "working"},
+		{"stale", lightFacts{State: "working", StateAt: stateAt, Stale: true}, "stale"},
+	}
+	for _, st := range []string{"holding", "ready", "blocked"} {
+		for _, r := range rows {
+			named := r.f
+			named.Session = "kube-c7"
+			got := lightFor(st, named)
+			if got.Class != r.class || got.Session != "kube-c7" || !strings.Contains(got.Label, "session kube-c7") {
+				t.Errorf("%s/%s with session kube-c7 = %+v, want class %s, Session kube-c7, label naming `session kube-c7` (S8)",
+					st, r.name, got, r.class)
+			}
+			got = lightFor(st, r.f)
+			if got.Class != r.class || got.Session != "session unknown" || !strings.Contains(got.Label, "session unknown") {
+				t.Errorf("%s/%s with no session = %+v, want class %s, Session `session unknown`, label naming it (S9)",
+					st, r.name, got, r.class)
+			}
+		}
+	}
+	// The exact S8 labels.
+	for _, tc := range []struct {
+		f    lightFacts
+		want string
+	}{
+		{lightFacts{State: "needs_input", StateAt: stateAt, StateToday: true, Session: "kube-c7"},
+			"waiting on your input (session kube-c7, since 10:05)"},
+		{lightFacts{State: "working", StateAt: stateAt, StateToday: true, Session: "kube-c7"},
+			"in progress (session kube-c7, last signal 10:05)"},
+		{lightFacts{State: "working", StateAt: stateAt, Stale: true, Session: "kube-c7"},
+			"in progress? no session signal since 2026-09-14 10:05 (session kube-c7)"},
+	} {
+		if got := lightFor("ready", tc.f).Label; got != tc.want {
+			t.Errorf("label = %q, want %q (S8)", got, tc.want)
+		}
+	}
+	// A dangling name under no state (an old binary's clear) shows nothing (S4).
+	if got := lightFor("ready", lightFacts{Session: "ghost", QueueHead: true, Lane: "saka"}); got.Class != "next" ||
+		got.Session != "" || strings.Contains(got.Label, "ghost") {
+		t.Errorf("ready + queue head + a dangling name = %+v, want blue, Session \"\", no name in the label", got)
+	}
+	for _, st := range []string{"holding", "blocked", "ready"} {
+		if got := lightFor(st, lightFacts{Session: "ghost"}); got.Session != "" {
+			t.Errorf("%s with a dangling name and no state: Session = %q, want \"\"", st, got.Session)
+		}
+	}
+	// Every non-session row gets no tag, whatever the facts say.
+	for _, st := range []string{"closed", "needs_feedback", "in_progress", "pr_open", "claimed", "done_locally"} {
+		if got := lightFor(st, lightFacts{Session: "kube-c7", State: "needs_input", StateAt: stateAt}); got.Session != "" {
+			t.Errorf("%s with a session marker: Session = %q, want \"\" (S8: only the three session rows)", st, got.Session)
 		}
 	}
 }

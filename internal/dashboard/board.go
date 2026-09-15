@@ -322,11 +322,12 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	var renderedAt string
 	q, err := s.pool.Query(ctx,
 		`SELECT to_char(now() AT TIME ZONE $2, 'HH24:MI:SS'),
-		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today
+		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today, f.session
 		   FROM (SELECT 1) one
 		   LEFT JOIN (
 		     SELECT t.id, t.status,
 		            COALESCE(t.working_state, '') AS state,
+		            COALESCE(t.working_session, '') AS session,
 		            COALESCE(to_char(t.working_state_at AT TIME ZONE $2, 'YYYY-MM-DD HH24:MI'), '') AS state_at,
 		            COALESCE(t.working_state_at >= `+boardDayStart("$2")+`, false) AS state_today,
 		            COALESCE(t.working_state = 'working'
@@ -347,9 +348,10 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	var ready []int64
 	for q.Next() {
 		var id *int64
-		var status, state, stateAt, dismissal *string
+		var status, state, stateAt, dismissal, session *string
 		var stateToday, stale, closedToday *bool
-		if err := q.Scan(&renderedAt, &id, &status, &state, &stateAt, &stateToday, &stale, &dismissal, &closedToday); err != nil {
+		if err := q.Scan(&renderedAt, &id, &status, &state, &stateAt, &stateToday, &stale, &dismissal, &closedToday,
+			&session); err != nil {
 			return nil, "", fmt.Errorf("scan light facts: %w", err)
 		}
 		if id == nil {
@@ -358,6 +360,7 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		facts[*id] = lightFacts{
 			OpenDismissalCode: *dismissal, ClosedToday: *closedToday,
 			State: *state, StateAt: *stateAt, StateToday: *stateToday, Stale: *stale,
+			Session: *session,
 		}
 		statusOf[*id] = *status
 		if *status == "ready" {

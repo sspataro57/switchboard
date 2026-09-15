@@ -24,7 +24,9 @@ type querier interface {
 // feedback_answered, done_local, child_created, released; SWT-38 adds
 // priority_changed {from, to, reason} (task_set_priority); SWT-52 adds
 // working_state_changed {from, to, worker_id} (task_signal — "" means no state;
-// an annotation, never a lifecycle event: the orchestrator ignores it).
+// an annotation, never a lifecycle event: the orchestrator ignores it); SWT-56
+// makes it exactly {from, from_session, session, to, worker_id} — the session
+// name that signalled and the one whose marker it replaced or cleared.
 func insertTaskEvent(ctx context.Context, q querier, taskID int64, eventType string, payload map[string]any) (int64, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {

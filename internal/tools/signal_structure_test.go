@@ -69,8 +69,10 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		// another ticket owns is accounted for by the living ledger in
 		// internal/classify/structure_test.go; this guard exempts it by number, and
 		// any other number above 33 is still flagged here.
-		if v > 33 && v != 34 && v != 35 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks)", e.Name())
+		// AMENDED — not deleted — by signal-session-name (SWT-56) criterion 14: 0036
+		// is its tasks.working_session, guarded by TestMigration0036_TaskWorkingSessionShape.
+		if v > 33 && v != 34 && v != 35 && v != 36 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {
@@ -114,9 +116,18 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 
 // ---- criterion 19: the only writers -----------------------------------------------
 
-var sigWrite = regexp.MustCompile(`(?is)\bset\b[^;]*?\bworking_state(_at)?\s*=[^=]` +
-	`|\bset\s*\([^)]*\bworking_state(_at)?\b[^)]*\)\s*=` +
-	`|insert\s+into\s+tasks\s*\([^)]*\bworking_state`)
+// AMENDED — not deleted — by SWT-56 (signal-session-name) criterion 12: the
+// pattern covers working_session in every shape it covers for the other two
+// columns: SET … =, a parenthesized SET (…) =, and INSERT INTO tasks (…).
+var sigWrite = regexp.MustCompile(`(?is)\bset\b[^;]*?\bworking_(state(_at)?|session)\s*=[^=]` +
+	`|\bset\s*\([^)]*\bworking_(state(_at)?|session)\b[^)]*\)\s*=` +
+	`|insert\s+into\s+tasks\s*\([^)]*\bworking_(state|session)`)
+
+// sessWrite / sessClear: the SWT-56 positive controls' patterns.
+var (
+	sessWrite = regexp.MustCompile(`(?is)\bset\b[^;]*?\bworking_session\s*=[^=]`)
+	sessClear = regexp.MustCompile(`(?i)\bworking_session\s*=\s*NULL\b`)
+)
 
 func TestWorkingStateWritePattern_Probe(t *testing.T) {
 	for _, s := range []string{
@@ -129,6 +140,11 @@ func TestWorkingStateWritePattern_Probe(t *testing.T) {
 		"INSERT INTO tasks (project_id, title, working_state, working_state_at)\n VALUES ($1,$2,'working',now())",
 		`ON CONFLICT (id) DO UPDATE SET working_state_at = EXCLUDED.working_state_at`,
 		`WITH x AS (UPDATE tasks SET priority = 1, working_state = 'working' WHERE id = $1 RETURNING id) SELECT 1`,
+		// SWT-56 criterion 12: working_session in each write shape.
+		`UPDATE tasks SET working_state = $2, working_state_at = now(), working_session = $3 WHERE id = $1`,
+		`UPDATE tasks SET working_session = NULL WHERE id=$1`,
+		`UPDATE tasks SET (working_session) = ('kube-c7') WHERE id=$1`,
+		"INSERT INTO tasks (project_id, title, working_session)\n VALUES ($1,$2,'kube-c7')",
 	} {
 		if !sigWrite.MatchString(s) {
 			t.Errorf("sigWrite misses a WRITE: %q", s)
@@ -140,6 +156,11 @@ func TestWorkingStateWritePattern_Probe(t *testing.T) {
 		`SELECT id FROM tasks WHERE working_state IS NOT NULL ORDER BY working_state_at DESC`,
 		`SELECT id FROM tasks t WHERE t.working_state = 'needs_input' OFFSET 0`,
 		`SELECT working_state, working_state_at FROM tasks WHERE id=$1 FOR UPDATE`,
+		// SWT-56 criterion 12 / S13: the gated read in task_context's SELECT list and
+		// the board's COALESCE are READS.
+		`SELECT t.id, COALESCE(CASE WHEN t.working_state IS NOT NULL THEN t.working_session END, '') FROM tasks t WHERE t.id = $1`,
+		`SELECT COALESCE(t.working_session, '') AS session FROM tasks t WHERE t.id = ANY($1)`,
+		`SELECT COALESCE(working_state,''), COALESCE(working_session,'') FROM tasks WHERE id=$1 FOR UPDATE`,
 	} {
 		if sigWrite.MatchString(s) {
 			t.Errorf("sigWrite flags a READ as a write: %q", s)
@@ -197,7 +218,11 @@ func literalTexts(t *testing.T, path string) []string {
 	return out
 }
 
-func TestWorkingState_OnlySignalAndCloseWriteIt(t *testing.T) {
+// RENAMED by SWT-56 (signal-session-name) criterion 12 from
+// TestWorkingState_OnlySignalAndCloseWriteIt, a name already stale: the
+// allow-list has held claim.go since the SWT-52 D9 amendment. The scan now also
+// covers working_session (sigWrite, amended below the migration guard).
+func TestWorkingState_OnlySignalCloseAndClaimWriteIt(t *testing.T) {
 	// The allow-list, extended DELIBERATELY by the SWT-52 D9 amendment
 	// (2026-09-14): task_signal (signal.go) sets and clears; closeTransition
 	// (close.go) clears on a real close AND on every reopen — the reopen clear is
@@ -257,5 +282,175 @@ func TestWorkingState_OnlySignalAndCloseWriteIt(t *testing.T) {
 	if writers["internal/tools/claim.go"] == 0 {
 		t.Errorf("POSITIVE CONTROL FAILED: internal/tools/claim.go writes no working_state. D9 amendment "+
 			"(2026-09-14): task_claim's ready → claimed UPDATE clears both columns (writers seen: %v)", seen)
+	}
+	// SWT-56 (signal-session-name) criterion 12: working_session travels with the
+	// marker, so each allowed file writes it too, with the same minimum counts.
+	sess := map[string]int{}
+	for _, f := range []string{"internal/tools/signal.go", "internal/tools/close.go", "internal/tools/claim.go"} {
+		for _, lit := range literalTexts(t, filepath.Join("..", "..", f)) {
+			if sessWrite.MatchString(lit) {
+				sess[f]++
+			}
+			if sessClear.MatchString(lit) {
+				sess[f+" clear"]++
+			}
+		}
+	}
+	if n := sess["internal/tools/signal.go"]; n < 2 {
+		t.Errorf("POSITIVE CONTROL FAILED: signal.go writes working_session in %d literal(s), want >= 2: the set "+
+			"(working_session = $3) and the clear (working_session = NULL), S7", n)
+	}
+	if n := sess["internal/tools/close.go clear"]; n < 2 {
+		t.Errorf("POSITIVE CONTROL FAILED: close.go has %d literal(s) clearing working_session, want >= 2: the real "+
+			"close and the reopen UPDATE (S7)", n)
+	}
+	if n := sess["internal/tools/claim.go clear"]; n < 1 {
+		t.Errorf("POSITIVE CONTROL FAILED: claim.go has %d literal(s) clearing working_session, want >= 1: the "+
+			"ready → claimed UPDATE (S7)", n)
+	}
+}
+
+// ---- SWT-56 criterion 13: the session name travels with the marker ---------------
+
+var (
+	wsNull     = regexp.MustCompile(`(?i)\bworking_state\s*=\s*NULL\b`)
+	wsSet      = regexp.MustCompile(`(?i)\bworking_state\s*=\s*([^\s,)]+)`)
+	wsParenSet = regexp.MustCompile(`(?is)\bset\s*\(([^)]*\bworking_state\b[^)]*)\)\s*=`)
+	wsInsert   = regexp.MustCompile(`(?is)insert\s+into\s+tasks\s*\(([^)]*\bworking_state\b[^)]*)\)`)
+	wssAssign  = regexp.MustCompile(`(?i)\bworking_session\s*=`)
+)
+
+// travelViolations names every way one write literal moves working_state
+// without working_session (S7): a clear that leaves the name, or a set (plain,
+// parenthesized or INSERT) that omits it. Reads are not writes (sigWrite gate).
+func travelViolations(lit string) []string {
+	if !sigWrite.MatchString(lit) {
+		return nil
+	}
+	var out []string
+	if wsNull.MatchString(lit) && !sessClear.MatchString(lit) {
+		out = append(out, "NULLs working_state but not working_session")
+	}
+	for _, m := range wsSet.FindAllStringSubmatch(lit, -1) {
+		if !strings.EqualFold(m[1], "NULL") && !wssAssign.MatchString(lit) {
+			out = append(out, "sets working_state to "+m[1]+" without setting working_session")
+		}
+	}
+	for _, re := range []*regexp.Regexp{wsParenSet, wsInsert} {
+		for _, m := range re.FindAllStringSubmatch(lit, -1) {
+			if !strings.Contains(m[1], "working_session") {
+				out = append(out, "names working_state in a column list without working_session: ("+m[1]+")")
+			}
+		}
+	}
+	return out
+}
+
+func TestWorkingSession_TravelsWithWorkingState_Probe(t *testing.T) {
+	for _, s := range []string{
+		// a four-column clear missing the name
+		"UPDATE tasks SET status=$2, updated_at=now(), working_state = NULL, working_state_at = NULL WHERE id=$1",
+		// a set missing the name
+		`UPDATE tasks SET working_state = $2, working_state_at = now() WHERE id = $1`,
+		`UPDATE tasks SET (working_state, working_state_at) = ('working', now()) WHERE id=$1`,
+		"INSERT INTO tasks (project_id, title, working_state, working_state_at)\n VALUES ($1,$2,'working',now())",
+	} {
+		if len(travelViolations(s)) == 0 {
+			t.Errorf("the travels-with rule does not bite on %q (criterion 13)", s)
+		}
+	}
+	// The real statement shapes after S7: signal's clear and set, close, reopen, claim.
+	for _, s := range []string{
+		`UPDATE tasks SET working_state = NULL, working_state_at = NULL, working_session = NULL WHERE id=$1`,
+		"UPDATE tasks\n   SET working_state = $2, working_state_at = now(), working_session = $3\n WHERE id = $1\n RETURNING working_state_at::text",
+		"UPDATE tasks SET status=$2, updated_at=now(), closed_at=now(), closed_from_status=$3,\n working_state = NULL, working_state_at = NULL, working_session = NULL WHERE id=$1",
+		"UPDATE tasks SET status=$2, updated_at=now(), closed_at=NULL, closed_from_status=NULL,\n working_state = NULL, working_state_at = NULL, working_session = NULL WHERE id=$1",
+		"UPDATE tasks SET status = 'claimed', updated_at = now(),\n working_state = NULL, working_state_at = NULL, working_session = NULL WHERE id = $1",
+		// reads
+		`SELECT t.id, COALESCE(CASE WHEN t.working_state IS NOT NULL THEN t.working_session END, '') FROM tasks t WHERE t.id = $1`,
+		`SELECT t.working_state = 'working' AND t.working_state_at < now() - make_interval(secs => $2) FROM tasks t`,
+	} {
+		if v := travelViolations(s); len(v) != 0 {
+			t.Errorf("the travels-with rule flags a correct statement %q: %v", s, v)
+		}
+	}
+}
+
+func TestWorkingSession_TravelsWithWorkingState(t *testing.T) {
+	stateWriters := 0
+	for _, root := range []string{"internal", "cmd"} {
+		base := filepath.Join("..", "..", root)
+		err := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, _ := filepath.Rel(filepath.Join("..", ".."), path)
+			for _, lit := range literalTexts(t, path) {
+				if !sigWrite.MatchString(lit) {
+					continue
+				}
+				if wsNull.MatchString(lit) || wsSet.MatchString(lit) || wsParenSet.MatchString(lit) || wsInsert.MatchString(lit) {
+					stateWriters++
+				}
+				for _, v := range travelViolations(lit) {
+					t.Errorf("%s: a literal %s. Criterion 13 / S7: every statement that NULLs working_state NULLs "+
+						"working_session in the SAME statement, and every set writes it. Literal: %q",
+						filepath.ToSlash(rel), v, lit)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+	if stateWriters < 5 {
+		t.Errorf("POSITIVE CONTROL FAILED: the scan saw %d working_state-writing literals, want >= 5 (signal's set "+
+			"and clear, close, reopen, claim)", stateWriters)
+	}
+}
+
+// ---- SWT-56 criterion 14: migration 0036 ------------------------------------------
+
+func TestMigration0036_TaskWorkingSessionShape(t *testing.T) {
+	dir := filepath.Join("..", "..", "migrations")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read migrations/: %v", err)
+	}
+	var n36 []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "0036_") && strings.HasSuffix(e.Name(), ".sql") {
+			n36 = append(n36, e.Name())
+		}
+	}
+	if len(n36) != 1 || n36[0] != "0036_task_working_session.sql" {
+		t.Fatalf("migrations/0036_*.sql = %v, want exactly [0036_task_working_session.sql] (criterion 14)", n36)
+	}
+	var code []string
+	for _, line := range strings.Split(sigRepoFile(t, "migrations/0036_task_working_session.sql"), "\n") {
+		if i := strings.Index(line, "--"); i >= 0 {
+			line = line[:i]
+		}
+		code = append(code, line)
+	}
+	sql := strings.ToLower(strings.TrimSpace(regexp.MustCompile(`\s+`).ReplaceAllString(strings.Join(code, " "), " ")))
+	if !regexp.MustCompile(`alter table (public\.)?tasks add column working_session text\b`).MatchString(sql) {
+		t.Errorf("0036 = %q, want ALTER TABLE tasks ADD COLUMN working_session TEXT (S4)", sql)
+	}
+	for _, banned := range []struct{ re, why string }{
+		{`\bdefault\b`, "no default: a marker set before this ticket has no recorded session (S9)"},
+		{`not null`, "nullable: old markers have no session, so 'a state implies a session' cannot hold (S4)"},
+		{`\bcheck\b`, "no CHECK: an old binary's close/reopen/claim of a named marker would FAIL under one, and the " +
+			"200-rune cap and character set are spelled once, in Go (S4)"},
+		{`create (unique )?index`, "no index: read by primary key and in the board's one facts statement (S4)"},
+		{`\bupdate\b`, "no backfill: inventing a name would put a false 'reply here' on the board (S9)"},
+	} {
+		if regexp.MustCompile(banned.re).MatchString(sql) {
+			t.Errorf("0036 matches /%s/ — %s", banned.re, banned.why)
+		}
 	}
 }

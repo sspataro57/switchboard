@@ -1,0 +1,15 @@
+-- 0036 signal-session-name (docs/tickets/signal-session-name_SPEC.md).
+-- The NAME of the Claude session that set a task's working_state (0033): the <name> from
+-- ListAgents' "This session is <name> [ref]", self-reported, never authority. Written ONLY by
+-- internal/tools: task_signal sets it with every working/needs_input and NULLs it on clear;
+-- closeTransition (close and every reopen) and task_claim NULL it in the same statement that
+-- NULLs working_state. Meaningful only while working_state IS NOT NULL (read gating): an old
+-- binary clears the state without naming this column, and the dangling name is invisible.
+-- Nullable, no default, no index, NO CHECK and NO backfill, deliberately:
+--   * a CHECK tying it to working_state would make every close/reopen/claim by an old binary
+--     (a rollback, or an ops-mcp-user started before the reinstall) FAIL on a named marker;
+--   * markers set before this migration have no recorded session and render "session unknown";
+--   * the 200-rune cap and character set are spelled once, in Go (tools.NormalizeSessionName).
+-- Deploy order: apply BEFORE any image or ops-mcp/ops-mcp-user/opsctl built with this file
+-- runs — the board and task_context select it, and close/reopen/claim/signal write it.
+ALTER TABLE tasks ADD COLUMN working_session TEXT;

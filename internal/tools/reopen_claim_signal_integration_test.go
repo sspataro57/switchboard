@@ -52,9 +52,9 @@ func rcOldBinaryClose(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id 
 // rcMarked asserts the fixture: closed, with the old binary's marker still set.
 func rcMarked(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id int64, state string) {
 	t.Helper()
-	if r := sgRead(t, ctx, pool, id); r.status != "closed" || r.state != state || r.stateAt == "" {
-		t.Fatalf("CONTROL: fixture task %d = (status %q, marker %q at %q), want closed carrying %q",
-			id, r.status, r.state, r.stateAt, state)
+	if r := sgRead(t, ctx, pool, id); r.status != "closed" || r.state != state || r.stateAt == "" || r.session != sgSession {
+		t.Fatalf("CONTROL: fixture task %d = (status %q, marker %q at %q, session %q), want closed carrying %q and session %q (SWT-56 criterion 10: state, time AND name)",
+			id, r.status, r.state, r.stateAt, r.session, state, sgSession)
 	}
 }
 
@@ -67,9 +67,9 @@ func rcWantCleared(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id int
 	if r.status == "closed" {
 		t.Fatalf("%s reopen left task %d closed", form, id)
 	}
-	if r.state != "" || r.stateAt != "" {
-		t.Errorf("%s reopen of task %d kept the old binary's marker (%q at %q); the D9 amendment: every reopen "+
-			"clears it in the same UPDATE that moves the task out of closed", form, id, r.state, r.stateAt)
+	if r.state != "" || r.stateAt != "" || r.session != "" {
+		t.Errorf("%s reopen of task %d kept the old binary's marker (%q at %q, session %q); the D9 amendment (and SWT-56 criterion 10): every reopen "+
+			"clears it in the same UPDATE that moves the task out of closed", form, id, r.state, r.stateAt, r.session)
 	}
 	if k := csStatusKeys(t, ctx, pool, id); k != "from,reason,to" {
 		t.Errorf("%s reopen's status_changed keys = %s, want exactly from,reason,to", form, k)
@@ -161,7 +161,7 @@ func TestClaimSignal_Integration_AClaimClearsTheMarker(t *testing.T) {
 			if _, err := ex.Execute(ctx, executorCall("task_claim", "opsctl:salvo", id, claim)); err != nil {
 				t.Fatalf("claim: %v", err)
 			}
-			if r := sgRead(t, ctx, pool, id); r.status != "claimed" || r.state != "" || r.stateAt != "" {
+			if r := sgRead(t, ctx, pool, id); r.status != "claimed" || r.state != "" || r.stateAt != "" || r.session != "" {
 				t.Errorf("after the claim: status %q, marker (%q, %q); want claimed with both NULL (D9 amendment: "+
 					"the claim is the signal now)", r.status, r.state, r.stateAt)
 			}
@@ -170,7 +170,7 @@ func TestClaimSignal_Integration_AClaimClearsTheMarker(t *testing.T) {
 			if _, err := ex.Execute(ctx, executorCall("task_release", "opsctl:salvo", id, release)); err != nil {
 				t.Fatalf("release: %v", err)
 			}
-			if r := sgRead(t, ctx, pool, id); r.status != "ready" || r.state != "" || r.stateAt != "" {
+			if r := sgRead(t, ctx, pool, id); r.status != "ready" || r.state != "" || r.stateAt != "" || r.session != "" {
 				t.Errorf("after claim → release: status %q, marker (%q, %q); want ready with no marker — the "+
 					"old %s must not re-emerge", r.status, r.state, r.stateAt, state)
 			}

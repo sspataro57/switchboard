@@ -74,10 +74,12 @@ func claimTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, er
 		// SWT-52 D9 amendment (2026-09-14, go-reviewer): a claim clears the session
 		// state marker (task_signal) in the same statement. From here the claim is
 		// the task's signal; a marker left behind would re-emerge as a stale red or
-		// yellow when task_release puts the task back to ready.
+		// yellow when task_release puts the task back to ready. SWT-56 S7: the
+		// marker's session name goes with it, in the same statement.
 		if _, err := tx.Exec(ctx,
 			`UPDATE tasks SET status = 'claimed', updated_at = now(),
-			                  working_state = NULL, working_state_at = NULL WHERE id = $1`, a.TaskID); err != nil {
+			                  working_state = NULL, working_state_at = NULL, working_session = NULL WHERE id = $1`,
+			a.TaskID); err != nil {
 			return fmt.Errorf("mark task %d claimed: %w", a.TaskID, err)
 		}
 

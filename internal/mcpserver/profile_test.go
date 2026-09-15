@@ -115,9 +115,13 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 // HUMAN task's state (working | needs_input | clear) so the board's light is
 // truthful; no pin (the handler refuses claude tasks for every caller, D7).
 // Fourteen in all.
+//
+// SWT-56 (signal-session-name) criteria 27 and 34: task_context — a session in
+// any repo reads one task's full document, READ-ONLY by the profile pin
+// {worker_id:"", require_read_only:"true"} plus the handler flag. Fifteen in all.
 var wantUserProfileTools = []string{
 	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
-	"task_append_log", "task_close", "task_dismiss",
+	"task_append_log", "task_close", "task_context", "task_dismiss",
 	"task_get_next", "task_list", "task_mark_delivered", "task_set_priority", "task_signal", "update_delivery",
 }
 
@@ -285,7 +289,12 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 		// internal/tools criterion 20.
 		"create_child_task", // creates child work, any assignee (claude included)
 		"task_claim",        // claims
-		"task_context",      // flips claimed → in_progress for the holder
+		// AMENDED — not deleted — by SWT-56 (signal-session-name) criterion 34:
+		// task_context LEFT this list. The read-only pin (criteria 28-30:
+		// worker_id forced "" and require_read_only "true", enforced in the handler)
+		// replaces the exclusion; the claimed → in_progress flip it guarded against is
+		// proven unreachable from this profile by criterion 30
+		// (user_context_integration_test.go). The mail BODY reads below stay forbidden.
 		"request_feedback", "mark_done_local",
 		"record_decision", // decides
 		// AMENDED — not deleted — by SWT-44 (Salvador, 2026-09-12): draft_delivery
@@ -351,9 +360,10 @@ func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 		}
 		checked++
 	}
-	// SWT-52 criterion 24: the control checks fourteen tools.
-	if len(wantUserProfileTools) != 14 {
-		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 14 (SWT-52)", len(wantUserProfileTools))
+	// SWT-52 criterion 24: the control checked fourteen tools; SWT-56 criterion
+	// 34: fifteen (task_context).
+	if len(wantUserProfileTools) != 15 {
+		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 15 (SWT-56)", len(wantUserProfileTools))
 	}
 	if checked != len(wantUserProfileTools) {
 		t.Fatalf("POSITIVE CONTROL FAILED: checked %d user-profile tools, want %d", checked, len(wantUserProfileTools))

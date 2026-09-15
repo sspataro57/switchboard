@@ -45,8 +45,9 @@ func TestTaskSignalSchema(t *testing.T) {
 	if s.Type != "object" {
 		t.Errorf("task_signal schema type = %q, want object", s.Type)
 	}
-	if len(s.Properties) != 2 || s.Properties["task_id"].Type != "integer" {
-		t.Errorf("task_signal properties = %s, want exactly task_id (integer) and state (criterion 23)", tl.InputSchema)
+	// AMENDED by SWT-56 (signal-session-name) criterion 20: a third property, session.
+	if len(s.Properties) != 3 || s.Properties["task_id"].Type != "integer" {
+		t.Errorf("task_signal properties = %s, want exactly task_id (integer), state and session (SWT-56 criterion 20)", tl.InputSchema)
 	}
 	st, ok := s.Properties["state"]
 	if !ok {
@@ -64,6 +65,40 @@ func TestTaskSignalSchema(t *testing.T) {
 	}
 	if strings.Contains(string(tl.InputSchema), "worker_id") || strings.Contains(string(tl.InputSchema), "require_") {
 		t.Errorf("task_signal's schema exposes worker_id or a pin; identity is injected and task_signal has no pins (D13)")
+	}
+
+	// SWT-56 criterion 20: the session property, its cap pinned to the handler's
+	// const (the TestTaskSetPrioritySchema way), and the words a model reads.
+	var ss struct {
+		Properties map[string]struct {
+			Type        string `json:"type"`
+			MaxLength   *int   `json:"maxLength"`
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(tl.InputSchema, &ss); err != nil {
+		t.Fatalf("task_signal InputSchema: %v", err)
+	}
+	if sp, ok := ss.Properties["session"]; !ok {
+		t.Errorf("task_signal schema has no session property (criterion 20)")
+	} else {
+		if sp.Type != "string" {
+			t.Errorf("task_signal session type = %q, want string", sp.Type)
+		}
+		if sp.MaxLength == nil || *sp.MaxLength != tools.SessionNameMax {
+			t.Errorf("task_signal session maxLength = %v, want tools.SessionNameMax = %d", sp.MaxLength, tools.SessionNameMax)
+		}
+		for _, want := range []string{"ListAgents", "This session is <name>", "required for working and needs_input",
+			"the name only, not the [ref]"} {
+			if !strings.Contains(sp.Description, want) {
+				t.Errorf("task_signal session description does not say %q (criterion 20): %q", want, sp.Description)
+			}
+		}
+	}
+	const always = "Always pass session (your name from ListAgents) with working and needs_input: the board shows it so " +
+		"Salvador knows which session to reply in."
+	if !strings.Contains(tl.Description, always) {
+		t.Errorf("task_signal description lacks %q (criterion 20)", always)
 	}
 
 	d := strings.ToLower(tl.Description)
@@ -88,8 +123,9 @@ func TestTaskSignal_ListedInBothProfiles(t *testing.T) {
 	if len(full) != 27 {
 		t.Errorf("the full profile lists %d tools, want 27 (26 → 27, criterion 23)", len(full))
 	}
-	if len(user) != 14 {
-		t.Errorf("the user profile lists %d tools, want 14 (13 → 14, criterion 23)", len(user))
+	// SWT-56 criterion 27: task_context makes the user profile fifteen.
+	if len(user) != 15 {
+		t.Errorf("the user profile lists %d tools, want 15 (14 → 15, SWT-56 criterion 27)", len(user))
 	}
 	find := func(ts []mcpserver.Tool) *mcpserver.Tool {
 		for i := range ts {
@@ -121,6 +157,31 @@ func TestUserProfile_ForwardsTaskSignalWithoutPin(t *testing.T) {
 	}
 	if got := keyList(forwardedKeys(t, fx.lastCall.Args)); got != "state,task_id,worker_id" {
 		t.Errorf("forwarded keys = %s, want state,task_id,worker_id — task_signal has no pin (D7, D13)", got)
+	}
+
+	// AMENDED by SWT-56 (signal-session-name) criterion 21: a model-supplied session
+	// (emoji ones included) reaches the executor byte-identical — it is data, not a
+	// pin — while worker_id is still overwritten.
+	for _, sess := range []string{"kube-c7", "Fix the board " + string(rune(0x1F6A6)),
+		string([]rune{0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467})} {
+		fx := &fakeExec{result: executor.Result{Output: json.RawMessage(`{}`)}}
+		srv := mcpserver.NewWithProfile(fx, "manual:salvo", mcpserver.ProfileUser)
+		in, _ := json.Marshal(map[string]any{"task_id": 412, "state": "needs_input", "session": sess, "worker_id": "victim"})
+		if _, err := srv.CallTool(context.Background(), "task_signal", in); err != nil {
+			t.Fatalf("user profile refused task_signal with session %q: %v", sess, err)
+		}
+		args := forwardedKeys(t, fx.lastCall.Args)
+		var got string
+		_ = json.Unmarshal(args["session"], &got)
+		if got != sess {
+			t.Errorf("forwarded session = %q, want %q byte-identical (S1: never rewritten)", got, sess)
+		}
+		if string(args["worker_id"]) != `"manual:salvo"` {
+			t.Errorf("forwarded worker_id = %s, want \"manual:salvo\" (overwritten)", args["worker_id"])
+		}
+		if k := keyList(args); k != "session,state,task_id,worker_id" {
+			t.Errorf("forwarded keys = %s, want session,state,task_id,worker_id — task_signal still has no pin", k)
+		}
 	}
 }
 

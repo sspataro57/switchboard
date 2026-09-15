@@ -66,11 +66,14 @@ func TestCloseSignal_Integration_EveryCloseClearsTheMarker(t *testing.T) {
 			if _, err := sgExec(ctx, ex, "mcp:manual:salvo", id, tc.state); err != nil {
 				t.Fatalf("set %s: %v", tc.state, err)
 			}
+			if r := sgRead(t, ctx, pool, id); r.session != sgSession {
+				t.Fatalf("CONTROL: session = %q after the real task_signal, want %q (SWT-56 criterion 10)", r.session, sgSession)
+			}
 			csCall(t, ctx, ex, tc.actor, tc.tool, id, tc.args(id))
 			r := sgRead(t, ctx, pool, id)
-			if r.status != "closed" || r.state != "" || r.stateAt != "" {
-				t.Errorf("after %s: status %q, marker (%q, %q); want closed with both NULL (criterion 20 / D9)",
-					tc.tool, r.status, r.state, r.stateAt)
+			if r.status != "closed" || r.state != "" || r.stateAt != "" || r.session != "" {
+				t.Errorf("after %s: status %q, marker (%q, %q, session %q); want closed with all three NULL (criterion 20 / D9; SWT-56 criterion 10)",
+					tc.tool, r.status, r.state, r.stateAt, r.session)
 			}
 			if k := csStatusKeys(t, ctx, pool, id); k != "from,reason,to" {
 				t.Errorf("status_changed keys = %s, want exactly from,reason,to (SWT-51 criterion 11)", k)
@@ -87,7 +90,7 @@ func TestCloseSignal_Integration_IdempotentReCloseTouchesNothing(t *testing.T) {
 	ex := queueMatrixExecutor(pool)
 	proj := seedProject(t, ctx, pool, sgSlug, "itest-mcp-tools-signalclient")
 	id := sgTask(t, ctx, pool, proj, "CLOSESIG already closed", "human", "closed")
-	if _, err := pool.Exec(ctx, `UPDATE tasks SET working_state='needs_input', working_state_at=now() - interval '1 hour',
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET working_state='needs_input', working_state_at=now() - interval '1 hour', working_session='kube-c7',
 		closed_at = now() - interval '2 hours' WHERE id=$1`, id); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
