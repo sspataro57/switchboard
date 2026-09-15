@@ -807,6 +807,9 @@ default. A verdict recorded before the account's `route_after` →
 A candidate removed (`route-candidates remove`) while a pass is running →
 `candidate_revoked`: the insert re-checks the candidate row, writes nothing, and
 the message retries on the next pass against the current candidates.
+A message on an account whose `route_after` is NULL never enters the pass at
+all; since SWT-58 the pass reports it as `unarmed=N` with `accounts`,
+and logs a WARN naming the hand-run arming `UPDATE` while N > 0.
 
 **What a route is.** A `capture_decisions` row with `mode='route'`,
 `action='attributed'`, a `route_step`, and `ai_extraction_id` iff the step is
