@@ -53,8 +53,12 @@ func sectionIndex(key string) int {
 
 // ---- criterion 1: the declarations, the order, the purity -----------------------
 
-func TestBoardSectionOrder_SixPairsInOrder(t *testing.T) {
-	want := "blocked/blocked, in_flight/in flight, queue/queue, holding/holding, done/done, other/other"
+// AMENDED deliberately by board-incoming-first (SWT-59,
+// docs/tickets/board-incoming-first_SPEC.md, I3): the SPEC's ONE amendment of an
+// existing test. boardSectionOrder gains incoming/incoming as its FIRST pair,
+// above blocked, so the six pairs become seven; the other six are unchanged.
+func TestBoardSectionOrder_SevenPairsInOrder(t *testing.T) {
+	want := "incoming/incoming, blocked/blocked, in_flight/in flight, queue/queue, holding/holding, done/done, other/other"
 	var got []string
 	for _, s := range boardSectionOrder {
 		got = append(got, s.Key+"/"+s.Title)
