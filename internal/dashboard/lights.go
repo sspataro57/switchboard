@@ -37,6 +37,13 @@ type lightFacts struct {
 	// Session is the name of the session that set State (SWT-56), "" for a
 	// marker set before 0036. lightFor reads it only in the session rows.
 	Session string
+	// QueueRank and UpdatedStamp are display-only (SWT-57, board-layout-compact):
+	// lightFor never reads them. QueueRank is the task's 1-based position among
+	// every ready task in tools.TaskQueueOrder (0 = unranked), which orders the
+	// board's queue section; UpdatedStamp is updated_at as HH:MM since local
+	// midnight, else YYYY-MM-DD, in BoardTimeZone on the DB clock.
+	QueueRank    int
+	UpdatedStamp string
 	// Stale: a working state older than tools.WorkingLease. QueueHead: the first
 	// eligible ready task of its queue, whose name is Lane (D2).
 	Stale, QueueHead bool

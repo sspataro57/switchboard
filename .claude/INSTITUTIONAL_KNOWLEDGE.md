@@ -2344,7 +2344,9 @@ activity (SWT-45)".
   stays until closed.
 - **Five keys, one list.** `boardKeys` = project, status, assignee_type,
   subproject, refresh. `boardBack` (POST side) and `boardRefreshURLs` (GET side:
-  the toggle and the reload URL) both iterate it; `flash` never rides along, so a
+  the toggle and the reload URL) both iterate it, and since SWT-57 so does
+  `boardAdvanced` (the first line's advanced-filter marker and its clear URL:
+  every key but project and refresh is "advanced"); `flash` never rides along, so a
   verb's flash shows once. Every form on the board carries a hidden `refresh`
   input. `boardQuery` reads only the four filters.
 - **Auto-refresh is `refresh=on` only, a fixed 5 s const** (`boardRefreshInterval`;
@@ -2354,7 +2356,10 @@ activity (SWT-45)".
   selection differs from the one its markup selects (the literal "any option with
   `selected !== defaultSelected`" is true for every select with no `selected`
   attribute and would block every reload). The word `onchange` must not appear in
-  the script: the file's one-onchange count covers it.
+  the script: the file's one-onchange count covers it. SWT-57: it also postpones
+  while any `<details>` is open (the Advanced filter and per-row `actions`
+  popups) — the markup never renders one open, so an open one is his; a popup
+  left open pauses reloads, and the "last refreshed" time shows it.
 - **Load (D15's cost statement, pg-main is shared).** One refresh is exactly one
   normal board render; there is no refresh-only query. Per visible tab, every 5 s:
 
@@ -2377,6 +2382,34 @@ activity (SWT-45)".
   root, not `.claude/skills/`) is installed to `~/.claude/skills/swb-status/` by
   `make install-skill` from `main`, on the workstation and on .30. Re-run after
   any merge touching `skills/swb-status/`.
+
+## Board layout (SWT-57, board-layout-compact)
+
+- **Sections come from the LIGHT, not the status** (`sections.go`, pure):
+  blocked (red: session `needs_input` or worker `needs_feedback`, then grey
+  `blocked`), in flight (yellow and stale ring, any status), queue, holding,
+  done, other (dismissed under `?status=closed`, unknown statuses). The status
+  is consulted only for a grey ring. A yellow `ready` row is in flight, never
+  queued. A status filter narrows the rows; the grouping still applies.
+- **The queue's order is Postgres's, never a Go re-sort.** `boardLightFacts`'
+  second statement (the queue-head candidates, `ORDER BY tools.TaskQueueOrder`)
+  sets `lightFacts.QueueRank`; the queue section sorts on it. Re-sorting by
+  priority/plan_order/created_at in Go would be a second spelling.
+- **`updated` is a short stamp computed in SQL** (HH:MM since local midnight,
+  else the date, `BoardTimeZone`), carried as `lightFacts.UpdatedStamp`; the raw
+  value stays in the cell's `title`. `QueueRank` and `UpdatedStamp` are
+  display-only: `lightFor` never reads them (structure test).
+- **The advanced filters live INSIDE the one GET form**, in a `<details>`: a
+  control in a closed `<details>` still submits, so the project select's
+  auto-submit keeps them. A separate popup form would drop them. No `<details>`
+  is ever rendered `open`; an active advanced filter is marked on the first line
+  instead (`advanced-active` summary + `clear advanced`).
+- **Landmine: the toggle's text uses `{{if not .AutoRefresh}}`.** Two structure
+  tests take the refresh block as the FIRST `{{if .AutoRefresh}}` in the file /
+  topbar, and the toggle now sits before the block. Writing the toggle's text
+  with `{{if .AutoRefresh}}` makes both tests read the toggle as the block.
+- **Dismiss and Done sit in a per-row `actions` `<details>`**, their forms
+  byte-identical (the VerbFormsByteUnchanged regex pins inner indentation).
 
 ## PR review tasks from GitHub mail (SWT-54, treetop-pr-review-tasks)
 
