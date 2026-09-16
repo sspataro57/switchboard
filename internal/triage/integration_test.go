@@ -94,6 +94,29 @@ func cleanupTriage(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-imap-%')`,
 		`DELETE FROM sync_runs WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-imap-%')`,
 		`DELETE FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-imap-%'`,
+		// foreign corpus (SWT-64 mail-refetch leftovers). Same shape and same
+		// reason as the SWT-11 block above: INBOUND gmail-channel rows that
+		// triage's GLOBAL pending filter would otherwise count.
+		// SAME FK DISCIPLINE as cleanupMailRefetch (the statement order differs;
+		// what matters is that every child precedes its parent):
+		// capture_decisions.project_id and .task_id reference projects/tasks with
+		// NO ON DELETE, and deliveries.from_account_id references source_accounts
+		// the same way. Deleting projects or tasks first raises an FK violation
+		// that fatals HERE, reporting the failure against triage instead of its
+		// owner — which is exactly the scenario a rerunnable pact exists for.
+		`DELETE FROM capture_decisions WHERE message_id IN (SELECT id FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-mailrefetch-%'))) OR project_id IN (SELECT id FROM projects WHERE slug LIKE 'itest-mailrefetch-%') OR task_id IN (SELECT id FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug LIKE 'itest-mailrefetch-%'))`,
+		`DELETE FROM task_events WHERE task_id IN (SELECT id FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug LIKE 'itest-mailrefetch-%'))`,
+		`DELETE FROM deliveries WHERE task_id IN (SELECT id FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug LIKE 'itest-mailrefetch-%'))`,
+		`DELETE FROM deliveries WHERE from_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-mailrefetch-%')`,
+		`DELETE FROM tasks WHERE project_id IN (SELECT id FROM projects WHERE slug LIKE 'itest-mailrefetch-%')`,
+		`DELETE FROM projects WHERE slug LIKE 'itest-mailrefetch-%'`,
+		`DELETE FROM normalized_events WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-mailrefetch-%'))`,
+		`DELETE FROM ai_extractions WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-mailrefetch-%'))`,
+		`DELETE FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-mailrefetch-%'))`,
+		`DELETE FROM normalized_threads WHERE thread_key LIKE 'gmail:itest-mailrefetch-%'`,
+		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-mailrefetch-%')`,
+		`DELETE FROM sync_runs WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-mailrefetch-%')`,
+		`DELETE FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-mailrefetch-%'`,
 		// foreign corpus (Slack Web connector integration leftovers)
 		`DELETE FROM ai_extractions WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='slack_web' AND account_email='titest@slack-web.local'))`,
 		`DELETE FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='slack_web' AND account_email='titest@slack-web.local'))`,

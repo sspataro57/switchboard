@@ -78,6 +78,20 @@ type Stats struct {
 	CalendarSuperseded int `json:"calendar_superseded"`
 	// AccountsBusy counts accounts skipped because another pass held the lock.
 	AccountsBusy int `json:"accounts_busy"`
+	// The targeted-refetch refusal counters (SWT-64). Written only by the
+	// imap_refetch phase, and omitempty for the same reason CalendarSource is:
+	// no other transport's run should grow present-and-zero keys. They are
+	// DIAGNOSTIC — nothing branches on them — but without them the durable
+	// sync_runs row cannot tell "refused every target" from "planned nothing".
+	RefetchUIDValidityChanged  int `json:"refetch_uidvalidity_changed,omitempty"`
+	RefetchFolderNotSelectable int `json:"refetch_folder_not_selectable,omitempty"`
+	RefetchEnvelopeMismatch    int `json:"refetch_envelope_mismatch,omitempty"`
+	RefetchGone                int `json:"refetch_gone,omitempty"`
+	RefetchWrongAccount        int `json:"refetch_wrong_account,omitempty"`
+	RefetchRowVanished         int `json:"refetch_row_vanished,omitempty"`
+	RefetchStillTruncated      int `json:"refetch_still_truncated,omitempty"`
+	RefetchWouldDowngrade      int `json:"refetch_would_downgrade,omitempty"`
+	RefetchWouldShrink         int `json:"refetch_would_shrink,omitempty"`
 	// CalendarSource and CalendarEmptySnapshot are DIAGNOSTIC ONLY (SWT-27):
 	// an operator can tell from sync_runs.stats which transport produced a run
 	// and whether a verified empty snapshot kept stale events. NOTHING may

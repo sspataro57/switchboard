@@ -461,6 +461,72 @@ INSERT.
 - No `CHECK (channel <> 'gmail' OR btrim(subject) <> '')` migration: prod row #36
   is a sent row that would violate it, so it needs a backfill decision first.
 
+### The mail size cap is a FETCH-time decision, so raising it repairs nothing (SWT-64)
+**Location:** `internal/connector/google/imap_ingest.go` (`src.Fetch(..., maxBytes)`) +
+`internal/connector/google/imap.go:43` (`DefaultMaxMessageBytes = 1 << 20`)
+
+`MAIL_MAX_MESSAGE_BYTES` bounds what is pulled off the server, not what is parsed or kept.
+A message over the cap is stored as headers plus one text part, `truncated: true`, and its
+attachment bytes **were never transferred and are nowhere in the database**. So:
+
+- **Raising the cap fixes only future mail.** Nothing reprocesses a stored row into having
+  bytes it never had. `mail_list_attachments` will keep reporting
+  `available:false, "not stored: message was over the … cap"` for every row captured under
+  the old cap, forever, until the message is re-fetched from IMAP.
+- **The incremental pass will never re-fetch it.** `imap_ingest.go` searches
+  `FromUID = stored.UIDNext`, so an old UID is never revisited. The only built-in escapes
+  (`cfg.Full`, a UIDVALIDITY change) re-run the whole backfill window for every folder — on
+  `sspataro@gmail.com` that is 106,930 messages, the mailbox whose backfill already blew the
+  pass deadline every run.
+- **The repair is `opsctl mail refetch`** (SWT-64): named rows, re-fetched at 100 MiB,
+  upserted in place. It needs no image build and no manifest change.
+
+**Two cap numbers, deliberately different:** the always-on connector's
+`MAIL_MAX_MESSAGE_BYTES` (owner chose 25 MiB on 2026-09-16; the CronJob sets nothing yet, so
+it still runs on the 1 MiB default until the kube session rolls it) and the hand-run tool's
+`RefetchMaxMessageBytes` (100 MiB). The first is an always-on bound where one pathological
+message would outweigh thousands; the second is a human naming a handful and accepting their
+size. Do not collapse them into one knob.
+
+**Why the refetch refuses so much.** `raw_json` is overwritten in place and
+`raw_source_items` keeps NO version history (`superseded_at` is a tombstone, not a version
+chain), so a refetch that pairs the wrong message with a row destroys that row's bytes with
+no way back. Hence: a stale UIDVALIDITY is refused rather than resynced (the UID now names a
+different message); a folder outside the selectable set is refused rather than substituted;
+an envelope disagreeing with its `external_id` is refused rather than reconciled; a UID the
+server did not return is counted `gone`; and — found in review, not by tests — **a target
+whose `AccountID` is not this pass's account is refused**, because the write keys on the
+pass's account and would otherwise take the insert branch and file recovered bytes on a NEW
+row under the wrong account while the real row stayed truncated. Two more, found in the two
+review rounds after that, both of which would have SHRUNK a stored capture: a refetch that
+comes back truncated may not replace a COMPLETE row (`would_downgrade`), and — because
+`truncated` is a flag and two truncated captures are not equal — a replacement carrying
+fewer bytes than the row already holds is refused outright (`would_shrink`, a byte-exact
+floor on `octet_length(raw_json->>'rfc822_b64')`).
+
+**Three rounds, three instances of one mistake: validating a FLAG instead of the value that
+lands.** The account, the truncated flag, and then the byte count. Each was a field already
+present in the row and not compared against what was about to be written.
+
+**And the guard itself needs a column-level pin.** The first byte floor was inert: its input
+was read from `octet_length(raw_json->>'rfc822_b64')`, and a mutation replacing that select
+with a literal `0` left the whole suite GREEN, because every `newLen < 0` is false. A guard
+nothing tests is decoration. It is now asserted per row against Postgres's own
+`octet_length`, with two fixture rows of different lengths so no literal satisfies both.
+
+**Known and accepted (SWT-64): the floor's input is read BEFORE the advisory lock.**
+`SelectRefetchTargets` runs outside it; `LockAccount` is taken later, so `StoredB64Len` is a
+selection-time snapshot. If a connector pass re-ingests a row between selection and the lock
+— possible once `MAIL_MAX_MESSAGE_BYTES` is raised to 25 MiB and someone runs `--full` — a
+refetch with an explicitly LOW `--max-bytes` could still shrink it. Unreachable at the
+default 100 MiB cap (a full capture cannot be smaller than a subset of itself); it needs an
+operator-supplied cap AND concurrency. Closing it means re-reading `octet_length` under the
+lock.
+
+**Rule:** when a value is selected into a struct and never read, ask what would happen if it
+disagreed with the value actually used. `RefetchTarget.AccountID` was selected and unused for
+exactly one review cycle.
+
 ---
 
 ## The seven invariants (review checklist form)
