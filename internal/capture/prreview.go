@@ -393,9 +393,10 @@ func matchExcludedAuthor(login string, exclude []string) (string, bool) {
 }
 
 var (
-	// "Re: ", repeated and in any case, at the start of a subject.
-	prSubjectReplyRe = regexp.MustCompile(`^(?i:re:\s*)+`)
-	// GitHub's "[owner/repo] " subject prefix.
+	// GitHub's "[owner/repo] " subject prefix. The reply prefix is deliberately
+	// NOT spelled here any more: it is textmatch.StripReplyPrefix, the ONE
+	// spelling this board title and the client-visible gmail reply subject now
+	// share (SWT-61). Two regexps that must agree drift silently.
 	prSubjectRepoRe = regexp.MustCompile(`^\[[^\]\s/]+/[^\]\s]+\]\s*`)
 )
 
@@ -407,7 +408,7 @@ var (
 // separator). Truncated with the ONE spelling, textmatch.NormalizedPrefix.
 func prReviewTitle(ref github.PRRef, subject, body string) string {
 	head := strings.TrimSpace(subject)
-	head = strings.TrimSpace(prSubjectReplyRe.ReplaceAllString(head, ""))
+	head = textmatch.StripReplyPrefix(head)
 	head = strings.TrimSpace(prSubjectRepoRe.ReplaceAllString(head, ""))
 	head = strings.TrimSpace(strings.TrimSuffix(head, fmt.Sprintf("(PR #%d)", ref.PR)))
 	if head == "" {

@@ -101,8 +101,9 @@ func TestValidateDraftDelivery_ThreadProjectPinNeedsAThread(t *testing.T) {
 	}
 }
 
-// SWT-44 fix 5: a present body must say something. subject "" stays legal —
-// it clears the subject, as before.
+// SWT-44 fix 5: a present body must say something. subject "" stays legal at
+// VALIDATE — SWT-61 refuses it for gmail in the handler, where the channel is
+// known (delivery_subject_channels_integration_test.go pins both halves).
 func TestValidateUpdateDelivery_RefusesEmptyBody(t *testing.T) {
 	for _, args := range []string{
 		`{"delivery_id":7,"body":""}`,

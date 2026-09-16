@@ -82,12 +82,25 @@ func TestApproveDelivery_Integration_ContentBound(t *testing.T) {
 		t.Errorf("approve with the current hash left status %q, want approved", s)
 	}
 
-	// A cleared subject (NULL in the row) hashes as "", the dashboard's COALESCE.
-	id2 := draftGmail(t, ctx, ex, fx.parentID, fx.threadID)
-	callOK(t, ctx, ex, delActor, "update_delivery", `{"delivery_id":`+itoa(id2)+`,"subject":""}`)
+	// A subject-less row (NULL in the row) hashes as "", the dashboard's COALESCE.
+	//
+	// SWT-61 moved this stanza OFF gmail, and that is the honest shape rather
+	// than a workaround: a subject-less gmail row is now refused at draft, at
+	// edit AND at approve, so pinning the hash property on one would pin a row
+	// the executor can no longer produce. slack_reply legitimately carries no
+	// subject — its send path never reads one — so the property is asserted
+	// where the fixture is production-shaped and the NULL is reached through
+	// the executor, not planted behind its back. The hash assertion itself is
+	// unchanged: hash("", body) approves.
+	out2 := callOK(t, ctx, ex, delActor, "draft_delivery",
+		`{"task_id":`+itoa(fx.parentID)+`,"channel":"slack_reply","target_ref":"`+gsubchSlackTarget+`","body":"draft body"}`)
+	var d2 struct {
+		DeliveryID int64 `json:"delivery_id"`
+	}
+	mustUnmarshal(t, out2, &d2)
 	callOK(t, ctx, ex, delActor, "approve_delivery",
-		`{"delivery_id":`+itoa(id2)+`,"expect_content_hash":"`+tools.DeliveryContentHash("", "draft body")+`"}`)
-	if s := deliveryStatus(t, ctx, pool, id2); s != "approved" {
+		`{"delivery_id":`+itoa(d2.DeliveryID)+`,"expect_content_hash":"`+tools.DeliveryContentHash("", "draft body")+`"}`)
+	if s := deliveryStatus(t, ctx, pool, d2.DeliveryID); s != "approved" {
 		t.Errorf("approve of a subject-less draft with hash(\"\", body) left status %q, want approved", s)
 	}
 

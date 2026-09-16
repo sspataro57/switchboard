@@ -392,6 +392,75 @@ the run actually exported. Last-written `raw_source_items` rows per run window
 plus `messages_seen` arithmetic is the only record until coverage telemetry
 ships.
 
+### The send path had the subject and threw it away (SWT-61)
+**Location:** `internal/tools/delivery.go:1160-1199` + `internal/connector/google/send.go:71-73`,
+bit 2026-09-15 (`docs/bugs/gmail-reply-empty-subject-off-thread_DIAGNOSIS.md`)
+
+Delivery #36 reached a university client as a **standalone email with no Subject
+header at all**. Two halves, each defensible alone:
+
+1. **A resolver field whose only consumer is a display.** `ResolveGmailRoute`
+   (SWT-44) resolves `GmailRoute.Subject` from `normalized_threads.subject`, and
+   `send_delivery` phase 1 CALLS IT — for From/To/In-Reply-To — then builds the
+   message from `deliveries.subject` and ignores the resolved subject. The only
+   reader of that field is `internal/dashboard/server.go:160-162`. The value the
+   send needed was in memory and discarded.
+2. **The one conditional header was the one nobody validated.**
+   `BuildOutboundMIME` hard-requires From, To and Message-ID (send.go:57-62) but
+   writes `Subject:` only `if msg.Subject != ""`. Subject is OPTIONAL in RFC 5322,
+   so nothing downstream — SMTP submission, the re-ingest, invariant 5's
+   own-message match — complained. Loop closure happily matched an outbound
+   message with `subject` length 0.
+
+**What made it reachable was a change in CALLERS, not in this code** (the
+conditional line is original to `64e4545`). While gmail drafts came from the
+drafts worker, its model contract made `subject` REQUIRED
+(`internal/drafts/drafts.go:54-64`) and it always passed one. SWT-44 made an
+interactive MCP session the common drafting path, and `draft_delivery`'s schema
+lists only `task_id, channel, body` as required. Prod: both gmail drafts ever
+made, one with subject (#35, fine), one without (#36, the defect).
+
+**Rules:**
+- **When a resolver computes a field, grep its consumers before trusting that the
+  write path uses it.** A field read only by a template is decoration, and the
+  gap between "the dashboard shows it" and "the send uses it" is invisible in
+  every test that asserts the dashboard.
+- **An optional-by-RFC field is not optional by product.** `if x != "" { write x }`
+  in a transport means "silently emit a message missing x"; if the field is
+  required for the message to make sense, refuse like From/To do.
+- **When a tool's schema makes a field optional, ask which caller used to supply
+  it.** A required-by-prompt field becomes an absent field the day a new caller
+  is added, and validators that never checked it will not notice.
+
+Related shape, same file: `validateDraftDelivery` requires `subject` for
+`calendar` only — a per-channel rule written once and never revisited when a new
+channel started needing it.
+
+**A scrub that runs AFTER your emptiness check can re-create the hole.** The
+first cut of the fix checked `a.Subject == ""` and then stored
+`ScrubAIAttribution(a.Subject)` through `NULLIF($5,'')`. `ScrubAIAttribution`
+drops any LINE carrying an attribution marker (`generated with`,
+`co-authored-by:`, 🤖) and **a subject is one line**, so `Re: Report generated
+with the new portal` passed the check, scrubbed to `""`, and stored SQL NULL —
+#36's exact shape, produced by the code written to prevent it. Caught in review,
+not by tests. The rule: **validate the value that LANDS, not the value you were
+handed** — `updateDelivery` already re-checks the body after the scrub for this
+reason. Applies to every write where a sanitizer sits between the check and the
+INSERT.
+
+**Residuals left open (SWT-61):**
+- `internal/drafts/drafts.go:50` still tells the model to "reuse the thread's
+  subject with Re: when replying" and always passes a subject, so the fill never
+  runs on that path and `ReplySubject`'s doubling protection never applies: a
+  model reply on an already-prefixed thread can still produce `Re: Re: …`. The
+  one-spelling scan cannot see prompts.
+- `internal/dashboard/server.go` `actionEdit` forwards `subject` only when the
+  posted value is non-empty, so clearing the dashboard's subject box silently
+  keeps the old subject and never surfaces the new refusal. Pre-existing; it
+  means the edit rule's real reach is MCP/opsctl.
+- No `CHECK (channel <> 'gmail' OR btrim(subject) <> '')` migration: prod row #36
+  is a sent row that would violate it, so it needs a backfill decision first.
+
 ---
 
 ## The seven invariants (review checklist form)
