@@ -1,5 +1,8 @@
 // opsctl is a minimal CLI client of the executor — it never writes tool-action
-// tables directly (invariant 3). Usage:
+// tables directly (invariant 3). Two verbs are CONNECTOR passes rather than tool
+// calls and write connector-owned tables (raw_source_items, sync_runs) the way
+// every connector does: `capture-rules run`/`gate` and `mail refetch`. Neither
+// touches tasks, task_events, external_refs or deliveries. Usage:
 //
 //	opsctl create-task --project <slug> --title "..." [--body ... --assignee human|claude --priority N --subproject X]
 //	opsctl call --tool <name> [--args '<json>']   (raw executor call; used by the negative smoke)
@@ -8,6 +11,8 @@
 //	opsctl capture-rules <list|add|run|report|gate> [flags]
 //	opsctl ticket-status <sync|report> [flags]   (SWT-32: the jira reconciler by hand)
 //	opsctl route-candidates <add|remove|list> [flags]   (SWT-40 Part B: the routing tier's candidate sets)
+//	opsctl mail refetch <--from <sender>|--raw-id <id[,id...]>> --limit N [--since D --until D --account E --max-bytes N --dry-run]
+//	    (SWT-64: re-fetch named already-ingested messages at a raised cap to recover attachments the fetch-time cap dropped)
 package main
 
 import (
@@ -34,7 +39,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules|ticket-status|route-candidates> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules|ticket-status|route-candidates|mail> [flags]")
 		os.Exit(2)
 	}
 
@@ -105,6 +110,19 @@ func main() {
 			break
 		}
 		if err := runCaptureRules(os.Args[2], os.Args[3:]); err != nil {
+			fmt.Fprintln(os.Stderr, "opsctl:", err)
+			os.Exit(1)
+		}
+		return
+	case "mail":
+		// Its own path with its own deadline, like `capture-rules run`: a 100 MiB
+		// IMAP fetch does not fit the 30s tool deadline, and the pass is a
+		// connector pass rather than a tool call.
+		if len(os.Args) < 3 || os.Args[2] != "refetch" {
+			err = fmt.Errorf("usage: opsctl mail refetch <--from <sender>|--raw-id <id[,id...]>> --limit N [--since D] [--until D] [--account E] [--max-bytes N] [--dry-run]")
+			break
+		}
+		if err := runMailRefetch(os.Args[3:]); err != nil {
 			fmt.Fprintln(os.Stderr, "opsctl:", err)
 			os.Exit(1)
 		}

@@ -78,7 +78,7 @@ producing a zero):
 
 | env | default | effect |
 |---|---|---|
-| `MAIL_MAX_MESSAGE_BYTES` | 1 MiB | above it, headers + text are fetched and attachments are skipped |
+| `MAIL_MAX_MESSAGE_BYTES` | 1 MiB (prod target **25 MiB**, pending the kube roll — `HANDOFF-kube-mail-refetch.md`) | above it, headers + text are fetched and attachments are skipped. Applied at FETCH time, so raising it repairs nothing already stored — see "Recovering attachments on an over-cap message" |
 | `MAIL_FOLDERS` | discover | comma-separated override; otherwise INBOX + the `\Sent` mailbox |
 | `MAIL_IDLE_REFRESH` | 25m | IDLE re-issue interval (RFC 2177 caps at 29m) |
 | `MAIL_RECONCILE_INTERVAL` | 10m | full sweep in `--watch` |
@@ -140,8 +140,60 @@ google --normalize-only --all
 ## Attachments (SWT-42)
 
 - **Where they live:** attachments are stored with the message. `raw_source_items.raw_json->>'rfc822_b64'` holds the whole RFC822 message, up to `MAIL_MAX_MESSAGE_BYTES` (1 MiB default).
-- **Over the cap:** a larger message is captured `truncated: true`, with headers and one text part, and its `parts` manifest lists what was left behind.
+- **Over the cap:** a larger message is captured `truncated: true`, with headers and one text part, and its `parts` manifest lists what was left behind. Those bytes were never transferred, so no reprocessing recovers them — only `opsctl mail refetch` does.
 - **Reading them:** normalization keeps only body text. To read attachments, use the executor tools `mail_list_attachments` and `mail_read_attachment`, which are in both MCP profiles.
 - **Who may see what:** both tools gate every caller by the SWT-21 locality rule. Only mail filed under a non-`local_only` project is shown. Unfiled mail is shown only on a mailbox with at least 20 filed messages, none of them local-only (owner decision O2).
 - **Refusal wording:** a truncated part is reported as "not stored … capture cap", never as missing.
 - **Finder bounds:** `from`/`subject` are literal substrings (`%` and `_` match themselves). One call examines at most 2,000 candidates and reads at most 64 MiB of stored mail; past either limit it returns `truncated: true`, and the fix is a narrower sender, subject or date window.
+
+## Recovering attachments on an over-cap message (SWT-64)
+
+The cap is applied at FETCH time. A message ingested while the cap was lower has no
+attachment bytes anywhere in the database, and raising `MAIL_MAX_MESSAGE_BYTES` only helps
+future mail. The incremental pass will never revisit it either: it searches
+`FromUID = stored.UIDNext`, and the only built-in escapes re-run the whole backfill window
+for every folder (106,930 messages on `sspataro@gmail.com`).
+
+`opsctl mail refetch` re-fetches NAMED rows at 100 MiB and upserts them in place. It runs on
+the workstation — no image, no manifest, no deploy.
+
+```bash
+# Always look first. Writes nothing, but does contact IMAP for the live UIDVALIDITY.
+opsctl mail refetch --from '@example.com' --since 720h --limit 50 --dry-run
+
+# Then the smallest possible live run.
+opsctl mail refetch --raw-id 73094 --limit 1
+```
+
+`--limit` is required; one of `--from` or `--raw-id` is required; `--from` is a literal
+substring, not a pattern.
+
+**Read the refusals, they are the point.** `raw_json` is overwritten in place and there is no
+version history, so the pass refuses anything it cannot prove is the same message:
+
+| counter | meaning |
+|---|---|
+| `uidvalidity_changed` | the folder's generation rolled; that UID now names a different message. **Not recoverable this way** — the row's coordinates are stale. |
+| `folder_not_selectable` | the row's folder is outside INBOX + `\Sent` (or `MAIL_FOLDERS`) |
+| `envelope_mismatch` | `raw_json` disagrees with `external_id`; the row was not written by this connector |
+| `gone` | the server returned no message for that UID (expunged) |
+| `wrong_account` | the target belongs to a different account than the pass is running as |
+| `row_vanished` | the row disappeared between selection and write; re-run the selection |
+| `would_downgrade` | the refetch came back truncated but the stored row is COMPLETE — refused, because the write would destroy stored bytes |
+| `would_shrink` | the refetch carries fewer bytes than the row already holds (both truncated, but the replacement is smaller) — refused for the same reason. Usually means `--max-bytes` is too low. |
+| `still_truncated` | **the repair recovered nothing** — the message is over this pass's cap too, and a truncated capture WAS written (it was no smaller than the stored one). Every other counter reads as success, so check this one. |
+
+Verify with the tool that reports the problem in the first place:
+
+```bash
+opsctl call --tool mail_list_attachments --args '{"raw_source_item_id":73094}'
+```
+
+Expect `available: true` on the parts. This works before re-normalization, because
+`mail_list_attachments` reads `raw_json` directly.
+
+**One cosmetic side effect.** A refetch writes a `sync_runs` row with phase `imap_refetch`.
+The **`/funnel`** page judges health per phase (`funnelDisplayStaleAfter`, 3h), so that
+account grows an `imap_refetch` row whose `last_ok` ages past the threshold and then reads
+`stale` forever, with no further run to clear it. It reflects a one-off hand-run, not a
+broken connector.

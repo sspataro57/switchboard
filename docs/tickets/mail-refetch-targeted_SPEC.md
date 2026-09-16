@@ -101,10 +101,24 @@ readable with `mail_read_attachment`.
      optionally narrowed by `--since <Go duration|RFC3339>` and `--until <RFC3339>`;
    - **explicit:** `--raw-id N[,N...]` (`raw_source_items.id`).
    Giving both, or neither, is an error naming the two families.
-2. `--limit N` is REQUIRED, `N >= 1`. Omitting it errors with
-   `--limit is required: this tool never runs unbounded`. A run whose selection matches more
-   than `N` rows takes the `N` oldest by `sent_at` and SAYS SO in the output (`matched=M
-   limit=N truncated=true`), so a silent partial recovery is impossible.
+2. `--limit N` is REQUIRED, `N >= 1`. Omitting it errors with `--limit is required and must
+   be >= 1: this tool never runs unbounded, because it overwrites stored mail in place with
+   no version history` — the SAME string in the CLI and in `SelectRefetchTargets`, so a
+   caller who hits one can grep for the other. A run whose selection matches more than `N`
+   rows takes the `N` oldest by `sent_at` and SAYS SO, so a silent partial recovery is
+   impossible.
+
+   **AMENDED 2026-09-16 (review round 2) to what shipped.** This criterion originally
+   specified the output `matched=M limit=N truncated=true`. `SelectRefetchTargets` applies
+   `LIMIT` in SQL and therefore never computes `M`; producing it would need a second
+   `COUNT(*)` over a 106,930-row mailbox for a number the operator does not act on
+   differently. What ships instead is exact rather than approximate: when the selection
+   fills the limit, the CLI prints "the selection filled the limit exactly; there may be
+   more — re-run after this batch", which is precisely the case where more may exist. The
+   one edge is a selection that fills the limit with nothing left over: the operator is told
+   to re-run, and the re-run finds nothing. Additionally `--raw-id` is refused at PARSE time
+   when it names more ids than `--limit` allows, so a limit can never silently cut an id the
+   operator named and have the selection then report it as nonexistent.
 3. `--account <email>` optionally narrows to one `source_accounts` row; without it the
    selection may span app-password accounts and each account is processed independently.
 4. Only `imap:`-shaped rows are targets. A `gmail:` or `calendar:` row selected by id is
@@ -274,6 +288,18 @@ Modified:
 - `cmd/opsctl/main.go` — a `case "mail":` arm dispatching `refetch`, in the
   `capture-rules`/`ticket-status` two-level shape (`main.go:83-111`), plus the usage line at
   `main.go:37` and the package doc at `main.go:1-10`.
+- **AMENDED 2026-09-16 (review round 3), files this list did not anticipate:**
+  - `internal/connector/google/ingest.go` — nine `omitempty` `refetch_*` counters on the
+    shared `Stats`, which is what criterion 18's "plus the refusal counters" requires to
+    reach the durable `sync_runs` row. `omitempty` keeps every other transport's stats JSON
+    byte-identical.
+  - `internal/triage/integration_test.go` — the cross-suite mutual-cleanup pact this repo's
+    integration convention mandates, because this suite's inbound rows are visible to
+    triage's global pending filter.
+  - `RefetchTarget` also carries `StoredB64Len` (the length of the stored `rfc822_b64`),
+    which the byte floor compares against; and `RefetchStats` carries `WrongAccount`,
+    `RowVanished`, `WouldDowngrade`, `WouldShrink` and `StillTruncated` beyond the counters
+    this SPEC first listed. Each is a refusal review found; see the IK entry.
 - `docs/runbooks/imap-mail-connector.md` — a "Recovering attachments on an over-cap message"
   section, and the cap table at line 81.
 - `.claude/INSTITUTIONAL_KNOWLEDGE.md` — one entry: the cap is a FETCH-time decision, so
@@ -497,6 +523,22 @@ new bytes strictly contain the old information. The only thing lost is the `part
 (now redundant, the real parts are present) and, after re-normalization, the
 `[Attachments not stored: ...]` line appended to `body_text`. Nothing downstream keys on
 either.
+
+**AMENDED 2026-09-16 (review rounds 2 and 3): that premise is now ENFORCED, not assumed.**
+It was written as a description of the intended case, and review found two ways to violate
+it while every counter still read as success:
+
+- a refetch that comes back truncated overwriting a COMPLETE stored row (`would_downgrade`);
+- a refetch carrying FEWER BYTES than the row already holds — both sides truncated, so the
+  `truncated` flag cannot tell them apart, e.g. `--max-bytes` below the cap the row was
+  captured under (`would_shrink`, a byte-exact floor on
+  `octet_length(raw_json->>'rfc822_b64')` compared against `base64.EncodedLen` of what came
+  back).
+
+Both are refusals, both are counted, both are pinned by mutations — and the second needed a
+SECOND mutation (M15) before it was real, because the first version read the floor's input
+from a literal and the suite stayed green. **The rule the three rounds keep restating: a
+guard that compares a FLAG is not a guard on the bytes that land.**
 
 It is NOT acceptable for the wrong write, and there is no undo for it: fetching whatever now
 sits at a stale UID and upserting it over a real message would destroy that message's stored
