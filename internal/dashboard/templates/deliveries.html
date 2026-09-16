@@ -74,6 +74,12 @@
         {{end}}
       </td>
       <td>
+        {{/* SWT-61: the delivery's OWN subject, as readable text, on every row.
+             It is a DIFFERENT string from the "Thread:" line in the Goes-to
+             cell (the thread's is frozen first-writer-wins and goes stale), and
+             #36 was approved because an empty subject inside an input's value=
+             was indistinguishable from one that simply hadn't been read. */}}
+        <div>{{if .Subject}}<strong>{{.Subject}}</strong>{{else}}{{if eq .Channel "gmail"}}<em class="muted">(no subject)</em>{{end}}{{end}}</div>
         {{if eq .Status "drafted"}}
         <form method="post" action="/deliveries/{{.ID}}/edit">
           <input type="text" name="subject" value="{{.Subject}}" placeholder="subject">
@@ -81,7 +87,6 @@
           <button>Save edit</button>
         </form>
         {{else}}
-        <strong>{{.Subject}}</strong>
         <pre style="white-space:pre-wrap; font: inherit;">{{.Body}}</pre>
         {{end}}
       </td>

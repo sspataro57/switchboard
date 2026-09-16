@@ -60,6 +60,19 @@ func BuildOutboundMIME(msg OutboundMessage) ([]byte, error) {
 	if msg.MessageID == "" {
 		return nil, fmt.Errorf("outbound message requires a self-chosen Message-ID")
 	}
+	// SWT-61. Subject is OPTIONAL in RFC 5322, and that is exactly the trap:
+	// `if msg.Subject != "" { write it }` in a transport means "silently emit a
+	// message with no Subject header". Nothing downstream complained — not SMTP
+	// submission, not the re-ingest, not invariant 5's own-message match — and
+	// delivery #36 reached a client as a standalone, subject-less email. A
+	// blank-but-present subject is still no subject to the person reading it.
+	//
+	// This is a FLOOR, not the fix: this function has no database and cannot
+	// construct the right subject. The fix is the draft-time fill in
+	// tools.draftDelivery, where the thread is in reach.
+	if strings.TrimSpace(msg.Subject) == "" {
+		return nil, fmt.Errorf("outbound message requires a Subject")
+	}
 	date := msg.Date
 	if date.IsZero() {
 		date = time.Now()
@@ -68,9 +81,7 @@ func BuildOutboundMIME(msg OutboundMessage) ([]byte, error) {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "From: %s\r\n", msg.From)
 	fmt.Fprintf(&b, "To: %s\r\n", msg.To)
-	if msg.Subject != "" {
-		fmt.Fprintf(&b, "Subject: %s\r\n", msg.Subject)
-	}
+	fmt.Fprintf(&b, "Subject: %s\r\n", msg.Subject)
 	fmt.Fprintf(&b, "Date: %s\r\n", date.Format(time.RFC1123Z))
 	fmt.Fprintf(&b, "Message-ID: %s\r\n", msg.MessageID)
 	if msg.InReplyTo != "" {

@@ -21,6 +21,7 @@ import (
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/policy"
 	"github.com/sspataro57/switchboard/internal/store"
+	"github.com/sspataro57/switchboard/internal/textmatch"
 )
 
 // The SWT-8 delivery lifecycle tools (invariant 4: nothing external without a
@@ -421,8 +422,10 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		// From is resolved server-side from the thread's mailbox segment
 		// (gmail:{account_email}:{threadId}) — the caller cannot choose it.
 		var threadKey *string
+		var threadSubject string
 		err := pool.QueryRow(ctx,
-			`SELECT thread_key FROM normalized_threads WHERE id=$1`, *a.ThreadID).Scan(&threadKey)
+			`SELECT thread_key, COALESCE(subject,'') FROM normalized_threads WHERE id=$1`, *a.ThreadID).
+			Scan(&threadKey, &threadSubject)
 		if errors.Is(err, pgx.ErrNoRows) || threadKey == nil {
 			return nil, fmt.Errorf("thread %d not found", *a.ThreadID)
 		}
@@ -444,6 +447,59 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 			return nil, fmt.Errorf("resolve mailbox account: %w", err)
 		}
 		fromAccountID = &acctID
+
+		// SWT-61: the reply's SUBJECT is resolved server-side too, for the same
+		// reason From is — the caller cannot choose it and cannot omit it. The
+		// fill lives HERE, in the executor, so it covers EVERY caller
+		// (user-profile MCP, full-profile MCP, opsctl, dashboard, drafts
+		// worker) and no future one can route around it (invariant 4: gate the
+		// row, not the caller). Filling at draft time also makes the words
+		// visible on the dashboard before approval, part of
+		// DeliveryContentHash, and editable with update_delivery — a fill at
+		// send time would put words on the wire that nobody reviewed.
+		//
+		// Words a caller chose are NEVER rewritten: this runs only when the
+		// subject is absent.
+		if strings.TrimSpace(a.Subject) == "" {
+			// The latest INBOUND message's subject, not the thread's: the
+			// thread's is frozen first-writer-wins (google/sink.go's
+			// COALESCE(existing, new)) and goes stale when a correspondent
+			// renames the thread — prod thread 159886 exactly. It is also the
+			// message In-Reply-To names, so the subject cannot disagree with
+			// the headers. The thread's stored subject is the fallback, for
+			// when that message carries none.
+			source := threadSubject
+			m, err := latestInboundMessage(ctx, pool, *a.ThreadID)
+			switch {
+			case err == nil && strings.TrimSpace(m.subject) != "":
+				source = m.subject
+			case err != nil && !errors.Is(err, pgx.ErrNoRows):
+				return nil, fmt.Errorf("resolve reply subject for thread %d: %w", *a.ThreadID, err)
+			}
+			a.Subject = textmatch.ReplySubject(source)
+			if a.Subject == "" {
+				return nil, fmt.Errorf("thread %d has no subject to reply to, on its latest inbound message or "+
+					"on the thread itself: pass subject explicitly (a gmail reply must carry one — a subject-less "+
+					"message reaches the recipient as a standalone email, which is what happened to delivery #36)",
+					*a.ThreadID)
+			}
+		}
+		// ...and what LANDS in the row is the SCRUBBED subject (invariant 6's
+		// belt, applied at the INSERT below). A subject is a single LINE, and
+		// ScrubAIAttribution drops any line carrying an attribution marker — so
+		// "Re: Report generated with the new portal" survives the check above,
+		// scrubs to "", and NULLIF stores NULL: delivery #36's exact shape,
+		// created through the executor by the code meant to prevent it.
+		//
+		// Checked for BOTH paths — a subject filled above AND one the caller
+		// chose — because either can carry a marker. This is the same
+		// post-scrub re-check updateDelivery already does for body ("the
+		// validator saw the body before the scrub").
+		if strings.TrimSpace(google.ScrubAIAttribution(a.Subject)) == "" {
+			return nil, fmt.Errorf("delivery subject %q is empty once AI-attribution lines are removed: a gmail "+
+				"reply must carry a subject, and storing it would leave the NULL-subject row that reached a "+
+				"client as delivery #36 — pass subject explicitly", a.Subject)
+		}
 	}
 
 	// SWT-37 (Q1 = b, Codex review): no caller may draft for CLOSED work, and a
@@ -694,8 +750,12 @@ func validateUpdateDelivery(args []byte) error {
 		return errors.New("nothing to update (subject or body required)")
 	}
 	// SWT-44 review: a present body must say something — an empty one would
-	// sit in the approval queue as a blank email. subject "" stays legal: it
-	// clears the subject, as it always has.
+	// sit in the approval queue as a blank email. subject "" stays legal HERE
+	// and is refused per-channel in the handler instead: SWT-61 forbids
+	// clearing a GMAIL subject (it re-opens the hole the draft-time fill
+	// closes), while the channels whose send paths never read subject keep the
+	// old freedom. The validator cannot make that distinction — channel is not
+	// among its args.
 	if a.Body != nil && strings.TrimSpace(*a.Body) == "" {
 		return errors.New("body is empty: a delivery must say something (omit body to keep the current one)")
 	}
@@ -738,6 +798,14 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 		if a.RequireChannel != "" && channel != a.RequireChannel {
 			return fmt.Errorf("delivery %d is a %s delivery: this caller edits %s drafts only; change it on the dashboard",
 				a.DeliveryID, channel, a.RequireChannel)
+		}
+		// SWT-61: a gmail subject may be EDITED but never BLANKED. Without this
+		// an edit re-opens, on a row one click from approval, exactly the hole
+		// the draft-time fill closes. Channel-scoped on purpose: the channels
+		// whose send paths never read subject keep their old freedom.
+		if channel == "gmail" && a.Subject != nil && strings.TrimSpace(subject) == "" {
+			return fmt.Errorf("delivery %d is a gmail reply: its subject cannot be cleared (omit subject to keep "+
+				"the current one, or pass the words you want)", a.DeliveryID)
 		}
 		// draft_delivery stores created_by = executor.ActorFrom(ctx), the same
 		// string compared here: mcp:manual:salvo for every interactive session,
@@ -846,12 +914,12 @@ func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 		if err := refuseClosedTask(ctx, tx, a.DeliveryID); err != nil {
 			return err
 		}
-		var status, subject, body string
+		var status, channel, subject, body string
 		var extID *string
 		if err := tx.QueryRow(ctx,
-			`SELECT status, sent_external_id, COALESCE(subject,''), COALESCE(body,'')
+			`SELECT status, channel, sent_external_id, COALESCE(subject,''), COALESCE(body,'')
 			   FROM deliveries WHERE id=$1 FOR UPDATE`,
-			a.DeliveryID).Scan(&status, &extID, &subject, &body); err != nil {
+			a.DeliveryID).Scan(&status, &channel, &extID, &subject, &body); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("delivery %d not found", a.DeliveryID)
 			}
@@ -862,6 +930,17 @@ func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 		case status == "failed" && extID == nil:
 		default:
 			return fmt.Errorf("delivery %d is %s; only drafted (or failed without a sent id) can be approved", a.DeliveryID, status)
+		}
+		// SWT-61 (owner decision, 2026-09-16): the third gate. A subject-less
+		// gmail row is refused at DRAFT, at EDIT and here at APPROVE, so the
+		// only way one can still exist is a direct write to the table — and the
+		// send floor catches that. Without this gate such a row could be
+		// approved and would then fail at send, stranding it in `approved`,
+		// where update_delivery (drafted only) can no longer edit it and
+		// recovery means Deny/Redo.
+		if channel == "gmail" && strings.TrimSpace(subject) == "" {
+			return fmt.Errorf("delivery %d is a gmail reply with no subject: approving it would queue a message "+
+				"that reaches the recipient as a standalone email (delivery #36). Deny and re-draft it", a.DeliveryID)
 		}
 		// Compared under the FOR UPDATE lock update_delivery also takes, so no
 		// edit can land between this check and the status write below.
@@ -1193,6 +1272,14 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		if d.subject != nil {
 			subject = *d.subject
 		}
+		// SWT-61 floor. Unreachable for rows drafted after the fill above; this
+		// catches rows written BEFORE it and anything that writes the table
+		// directly. It REFUSES rather than fills, so the words Salvador
+		// approved and the words on the wire can never differ.
+		if strings.TrimSpace(subject) == "" {
+			return fmt.Errorf("delivery %d has an empty subject: a gmail reply must carry one, and filling it "+
+				"here would send words nobody approved (edit the draft, or re-draft it)", a.DeliveryID)
+		}
 		msg = google.OutboundMessage{
 			From: d.fromEmail, To: to, Subject: subject, Body: d.body,
 			MessageID: msgID, InReplyTo: inReplyTo, References: refs, Date: time.Now(),
@@ -1304,6 +1391,10 @@ type inboundMessage struct {
 	id        int64
 	sender    string
 	messageID string
+	// subject is the words the reply answers (SWT-61). It comes from the SAME
+	// message To and In-Reply-To come from, so the subject cannot disagree with
+	// the headers.
+	subject string
 }
 
 // latestInboundMessage is the ONE spelling of "the message a gmail reply on
@@ -1314,10 +1405,10 @@ type inboundMessage struct {
 func latestInboundMessage(ctx context.Context, q store.Querier, threadID int64) (inboundMessage, error) {
 	var m inboundMessage
 	err := q.QueryRow(ctx,
-		`SELECT id, COALESCE(sender,''), COALESCE(external_message_id,'')
+		`SELECT id, COALESCE(sender,''), COALESCE(external_message_id,''), COALESCE(subject,'')
 		 FROM normalized_messages
 		 WHERE thread_id=$1 AND direction='inbound'
-		 ORDER BY sent_at DESC, id DESC LIMIT 1`, threadID).Scan(&m.id, &m.sender, &m.messageID)
+		 ORDER BY sent_at DESC, id DESC LIMIT 1`, threadID).Scan(&m.id, &m.sender, &m.messageID, &m.subject)
 	return m, err
 }
 
