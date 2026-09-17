@@ -463,6 +463,9 @@ type taskDetail struct {
 	Feedback   []feedbackRow
 	Deliveries []deliveryRow
 	Refs       []refRow
+	// SourceMessage is nil for the MAJORITY of tasks — everything hand-made or
+	// plan-derived. Nil renders nothing at all, not an empty section (SWT-65).
+	SourceMessage *sourceMessage
 }
 
 type eventRow struct {
@@ -490,13 +493,16 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 	var d taskDetail
 	var parentID *int64
 	var planOrder *int
+	var sourceThreadID *int64
 	err := s.pool.QueryRow(r.Context(),
 		`SELECT t.id, COALESCE(p.slug,''), COALESCE(t.subproject,''), t.parent_id, t.title,
 		        COALESCE(t.body,''), t.status, t.assignee_type, COALESCE(t.worker_type,''),
-		        COALESCE(t.autonomy,''), t.priority, t.plan_order, COALESCE(t.updated_at::text,'')
+		        COALESCE(t.autonomy,''), t.priority, t.plan_order, COALESCE(t.updated_at::text,''),
+		        t.source_thread_id
 		 FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1`, id).
 		Scan(&d.ID, &d.Project, &d.Subproject, &parentID, &d.Title, &d.Body, &d.Status,
-			&d.AssigneeType, &d.WorkerType, &d.Autonomy, &d.Priority, &planOrder, &d.UpdatedAt)
+			&d.AssigneeType, &d.WorkerType, &d.Autonomy, &d.Priority, &planOrder, &d.UpdatedAt,
+			&sourceThreadID)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -576,6 +582,13 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 				d.Refs = append(d.Refs, ref)
 			}
 		}
+	}
+
+	// Last, and never fatal: the section is an addition to a page that already
+	// answered. A source message that will not load must cost him the section,
+	// not the task.
+	if sm, err := s.loadSourceMessage(r.Context(), d.ID, sourceThreadID); err == nil {
+		d.SourceMessage = sm
 	}
 
 	if err := s.tmpl.ExecuteTemplate(w, "task.html", d); err != nil {

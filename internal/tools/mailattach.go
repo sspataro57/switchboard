@@ -469,7 +469,7 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 		rows, err := pool.Query(ctx, mailAttachHeaderSelect+`
 		   AND (($1::bigint IS NOT NULL AND m.thread_id = $1) OR ($1 IS NULL AND t.thread_key = $2))
 		 ORDER BY m.sent_at ASC NULLS LAST, m.id ASC LIMIT $3`,
-			nullableID(a.ThreadID), strings.TrimSpace(a.ThreadKey), mailThreadMaxMessages)
+			nullableID(a.ThreadID), strings.TrimSpace(a.ThreadKey), MailThreadMaxMessages)
 		if err != nil {
 			return nil, fmt.Errorf("load thread messages: %w", err)
 		}
@@ -500,7 +500,7 @@ func mailListAttachments(ctx context.Context, pool *pgxpool.Pool, args []byte) (
 			out = append(out, l)
 		}
 		return marshalResult(map[string]any{"messages": out, "withheld_private": withheld,
-			"truncated": len(msgs) == mailThreadMaxMessages})
+			"truncated": len(msgs) == MailThreadMaxMessages})
 	}
 
 	// Finder: headers only, newest first, messages with at least one listed part.
@@ -868,4 +868,37 @@ func sanitizeAttachmentName(name string) string {
 		return "part"
 	}
 	return s
+}
+
+// MailAttachmentsForRawItem is the attachment manifest of one raw_source_items
+// row: exactly what mail_list_attachments reports for that message, with no
+// finder, no ranking and no tool envelope.
+//
+// It exists so the task detail page (SWT-65 D10) can show the manifest without
+// the dashboard importing internal/connector/google and growing a SECOND
+// understanding of the IMAP envelope. Parsing rfc822_b64 is google's job; this
+// is the one door into it from outside internal/connector.
+//
+// It reads raw_json and NOTHING else — no class judgement, no locality gate.
+// That is deliberate and belongs to the caller: mail_list_attachments gates
+// because it answers a hosted MODEL; the dashboard does not because it renders
+// Salvador's own mail to Salvador (see internal/dashboard/sourcemessage.go's
+// header). Do not add a gate here and assume both callers wanted it.
+//
+// A row with no attachments returns an empty slice, not an error. An error
+// means the raw row is missing or its envelope will not parse.
+func MailAttachmentsForRawItem(ctx context.Context, pool *pgxpool.Pool, rawItemID int64) ([]google.Attachment, google.SourceInfo, error) {
+	var raw json.RawMessage
+	if err := pool.QueryRow(ctx,
+		`SELECT raw_json FROM raw_source_items WHERE id = $1`, rawItemID).Scan(&raw); err != nil {
+		return nil, google.SourceInfo{}, fmt.Errorf("load raw item %d: %w", rawItemID, err)
+	}
+	atts, info, err := google.ListAttachments(raw)
+	if err != nil {
+		return nil, google.SourceInfo{}, fmt.Errorf("list attachments of raw item %d: %w", rawItemID, err)
+	}
+	if atts == nil {
+		atts = []google.Attachment{}
+	}
+	return atts, info, nil
 }

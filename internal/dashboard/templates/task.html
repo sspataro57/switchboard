@@ -13,6 +13,9 @@
     pre { background: #f7f7f7; border: 1px solid #e2e2e2; padding: .6rem; white-space: pre-wrap; }
     nav a { margin-right: .8rem; }
     .muted { color: #777; font-size: .8rem; }
+    .source-message { margin-top: 1.3rem; }
+    .source-message summary { cursor: pointer; font-size: .87rem; padding: .2rem 0; }
+    .source-message details { border-top: 1px solid #eee; }
   </style>
 </head>
 <body>
@@ -28,6 +31,33 @@
   </table>
 
   {{if .Body}}<h2>Body</h2><pre>{{.Body}}</pre>{{end}}
+  {{- with .SourceMessage}}
+
+  <!-- source-message: begin -->
+  <section class="source-message">
+    <h2>{{.Heading}}</h2>
+    <p class="muted">{{.Direction}} · {{.Sender}} · {{.SentAt}}</p>
+    {{if .Subject}}<p><strong>{{.Subject}}</strong></p>{{end}}
+    {{if .BodyNote}}<p class="muted">{{.BodyNote}}</p>{{end}}
+    <pre>{{.Body}}</pre>
+    {{if .Attachments}}
+    <h3>Attachments</h3>
+    <table>
+      <tr><th>file</th><th>type</th><th>size</th><th>stored</th></tr>
+      {{range .Attachments}}<tr><td>{{.Filename}}</td><td>{{.ContentType}}</td><td>{{.Size}}</td><td>{{.Stored}}</td></tr>
+      {{end}}
+    </table>
+    {{end}}
+    {{if .AttachNote}}<p class="muted">{{.AttachNote}}</p>{{end}}
+    {{if .Thread}}
+    <h3>Thread ({{.ThreadMore}} more)</h3>
+    {{if .ThreadNote}}<p class="muted">{{.ThreadNote}}</p>{{end}}
+    {{range .Thread}}<details><summary>{{.Summary}}</summary>{{if .BodyNote}}<p class="muted">{{.BodyNote}}</p>{{end}}<pre>{{.Body}}</pre></details>
+    {{end}}
+    {{end}}
+  </section>
+  <!-- source-message: end -->
+  {{- end}}
 
   {{if .Children}}
   <h2>Children</h2>

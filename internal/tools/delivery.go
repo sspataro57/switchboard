@@ -1397,6 +1397,12 @@ type inboundMessage struct {
 	subject string
 }
 
+// LatestInboundOrder is that ordering, exported so anything else resolving "the
+// latest inbound message on this thread" — the task detail page's third
+// precedence branch (SWT-65 D8) — sorts by the same rule rather than by a second
+// copy of the same three words that could drift.
+const LatestInboundOrder = "sent_at DESC, id DESC"
+
 // latestInboundMessage is the ONE spelling of "the message a gmail reply on
 // this thread answers": the thread's latest INBOUND message, `ORDER BY sent_at
 // DESC, id DESC`. ResolveGmailRoute takes its To and In-Reply-To from it, and
@@ -1408,7 +1414,7 @@ func latestInboundMessage(ctx context.Context, q store.Querier, threadID int64) 
 		`SELECT id, COALESCE(sender,''), COALESCE(external_message_id,''), COALESCE(subject,'')
 		 FROM normalized_messages
 		 WHERE thread_id=$1 AND direction='inbound'
-		 ORDER BY sent_at DESC, id DESC LIMIT 1`, threadID).Scan(&m.id, &m.sender, &m.messageID, &m.subject)
+		 ORDER BY `+LatestInboundOrder+` LIMIT 1`, threadID).Scan(&m.id, &m.sender, &m.messageID, &m.subject)
 	return m, err
 }
 

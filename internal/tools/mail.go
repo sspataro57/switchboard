@@ -29,8 +29,12 @@ const (
 	mailSearchDefaultLimit = 20
 	mailSearchMaxLimit     = 50
 	mailSnippetLen         = 300
-	mailThreadMaxMessages  = 50
-	mailThreadBodyCap      = 8 * 1024
+	// MailThreadMaxMessages and MailThreadBodyCap are exported because the task
+	// detail page renders the same conversation this tool returns, at the same
+	// caps (SWT-65 D8). Two spellings of "how much of a thread is enough" would
+	// drift apart the first time either moved; there is exactly one.
+	MailThreadMaxMessages = 50
+	MailThreadBodyCap     = 8 * 1024
 )
 
 // ---- mail_search --------------------------------------------------------------
@@ -183,8 +187,8 @@ func mailReadThread(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 		return nil, fmt.Errorf("parse args: %w", err)
 	}
 	limit := a.Limit
-	if limit <= 0 || limit > mailThreadMaxMessages {
-		limit = mailThreadMaxMessages
+	if limit <= 0 || limit > MailThreadMaxMessages {
+		limit = MailThreadMaxMessages
 	}
 
 	// Ascending: a thread is read forwards. The cap takes the OLDEST messages
@@ -200,7 +204,7 @@ func mailReadThread(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 		   AND (($1::bigint IS NOT NULL AND m.thread_id = $1) OR ($1 IS NULL AND t.thread_key = $2))
 		 ORDER BY m.sent_at ASC NULLS LAST, m.id ASC
 		 LIMIT $4`,
-		nullableID(a.ThreadID), strings.TrimSpace(a.ThreadKey), mailThreadBodyCap, limit)
+		nullableID(a.ThreadID), strings.TrimSpace(a.ThreadKey), MailThreadBodyCap, limit)
 	if err != nil {
 		return nil, fmt.Errorf("read mail thread: %w", err)
 	}
