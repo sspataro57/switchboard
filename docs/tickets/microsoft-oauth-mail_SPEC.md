@@ -1,8 +1,10 @@
 > Jira: SWT-66
 >
-> **PROVISIONAL** — `docs/tickets/microsoft-oauth-mail_OPEN_QUESTIONS.md` has two
-> unresolved decisions (capture-rule priority, Azure audience). Both are answerable
-> without changing the shape below, but the SPEC is not final until they are.
+> **DECIDED.** Both open questions are answered (Salvador, 2026-09-17) and folded
+> in below: Q1 the MSN mailbox rule is HIGH priority 95 — everything arriving at
+> that address is `personal`, a client writing there included; Q2 the Azure
+> registration is **personal Microsoft accounts only** (`consumers`), so a work
+> account cannot complete the flow at all.
 
 # microsoft-oauth-mail — ingest sspataro57@msn.com over IMAP with Microsoft OAuth
 
@@ -86,7 +88,10 @@ Microsoft we use the **device code flow** instead:
 
 The account is a **personal Microsoft account**, so the app registration is a
 **public client** (no secret is issued and none is stored) and its audience must
-include personal accounts (see OPEN_QUESTIONS Q2).
+include personal accounts. Q2 is answered: the audience is `consumers`
+(personal Microsoft accounts ONLY), so a work/school account cannot complete the
+device flow — the wrong-account mistake is refused at the identity provider
+rather than caught afterwards by D4's claim check, which stays as the second net.
 
 ### D2. Scopes: IMAP read + offline_access + openid/email. NOT SMTP.Send
 
@@ -269,7 +274,8 @@ key.
   `opsctl mail refetch`. Absent ⇒ D9's loud per-account error, never a skip.
 - `MS_OAUTH_AUTHORITY` — optional override of the authority base
   (`https://login.microsoftonline.com/{audience}`); the default is the audience
-  chosen in OPEN_QUESTIONS Q2. Deployment property, never a `source_accounts`
+  chosen in Q2, i.e.
+  `https://login.microsoftonline.com/consumers`. Deployment property, never a `source_accounts`
   column — the `CAL_SOURCE` / `MAIL_SOURCE` precedent.
 - No client secret anywhere, no secret file.
 - `OPS_TOKEN_KEY` is already required by all three binaries.
@@ -505,8 +511,8 @@ Modified:
   messages; the capture rule's effect on history is the documented shadow
   `--all` re-pointing pass, run by hand if wanted.
 - **A second Microsoft mailbox / work (Office 365) accounts.** The code path is
-  generic, but nothing here onboards one and the audience question (Q2) is settled
-  only for this account.
+  generic, but nothing here onboards one, and the `consumers` audience chosen in
+  Q2 means a work mailbox could not sign in without a second registration.
 - **`opsctl` capture-rule changes.** The routing rule uses the existing tool.
 
 ## Invariants that apply
@@ -610,7 +616,7 @@ Modified:
 
 6. **Azure app registration** (his account; nobody else can do it). Entra ID →
    App registrations → New registration. Name `switchboard-mail`. Supported
-   account types per OPEN_QUESTIONS Q2. No redirect URI. Then Authentication →
+   account types: **Personal Microsoft accounts only** (Q2). No redirect URI. Then Authentication →
    **Allow public client flows = Yes**. API permissions → delegated:
    `IMAP.AccessAsUser.All` (Office 365 Exchange Online), plus `offline_access`,
    `openid`, `email`. **What he hands switchboard: the Application (client) ID and
@@ -655,9 +661,9 @@ Modified:
     save the pre-add output (after an add, `try` refuses the same triple by name):
     ```bash
     opsctl capture-rules try --project personal --type thread_key_prefix \
-      --pattern 'gmail:sspataro57@msn.com:' --priority <Q1>
+      --pattern 'gmail:sspataro57@msn.com:' --priority 95
     opsctl capture-rules add --project personal --type thread_key_prefix \
-      --pattern 'gmail:sspataro57@msn.com:' --priority <Q1> \
+      --pattern 'gmail:sspataro57@msn.com:' --priority 95 \
       --note "microsoft-oauth-mail: mail arriving in the MSN mailbox"
     opsctl capture-rules list
     ```
@@ -675,7 +681,11 @@ Modified:
   to whichever copy normalized first (`PendingRaw` orders by
   `r.external_id, r.id`, which across accounts is effectively arbitrary). So a
   `thread_key_prefix` rule on the MSN mailbox is "arrived in that mailbox **and
-  won dedup**". This cuts both ways and is the main reason Q1's priority matters.
+  won dedup**". This cuts both ways, and with Q1 answered HIGH it is the one
+residual sharp edge: a mail delivered to BOTH a Gmail mailbox and the MSN one
+keeps a single normalized row attached to whichever copy normalized first, so
+a cross-delivered client mail is `personal` only about half the time. Run
+`opsctl capture-rules try` before storing the rule to see the real corpus answer.
   Not fixed here; per-account threads and cross-account unification are already
   documented Future work from SPEC 07.
 - **Capture only decides inbound messages** (`rules_store.go:650`), so nothing

@@ -1,4 +1,4 @@
-# microsoft-oauth-mail — open questions
+# microsoft-oauth-mail — open questions (ANSWERED 2026-09-17)
 
 Two decisions the SPEC cannot take for you. Everything else is settled in
 `microsoft-oauth-mail_SPEC.md` under "Decisions taken in this SPEC".
@@ -39,7 +39,11 @@ a cross-delivered client mail is `personal` only about half the time, which is
 worse than either pure outcome. `opsctl capture-rules try` prints the real corpus
 answer for both priorities before anything is stored.
 
-**Answer:**
+**Answer: A — HIGH, priority 95. The mailbox wins.** That inbox is his private
+life; no client rule may quietly pull mail out of it. Accepted cost: a client
+writing to that address files `personal` and never reaches their board, and
+`personal` is `ai_locality='local_only'` so it never reaches a hosted model.
+
 
 ---
 
@@ -63,7 +67,10 @@ account can complete the device flow, and only switchboard's id_token claim chec
 stops it being stored), and the registration is a broader thing to leave lying
 around than the job needs.
 
-**Answer:**
+**Answer: A — `consumers`, personal Microsoft accounts only.** Matches the one
+mailbox in scope and makes the wrong-account mistake impossible at Microsoft's
+end. A future Office 365 mailbox would need its own registration.
+
 
 ---
 
