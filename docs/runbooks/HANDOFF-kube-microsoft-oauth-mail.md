@@ -6,8 +6,15 @@ only mechanism, before authentication is attempted. This ticket teaches the
 existing IMAP connector a second credential kind — an OAuth refresh token used to
 mint XOAUTH2 bearer tokens. Spec: `docs/tickets/microsoft-oauth-mail_SPEC.md`.
 
-Image: **to be built at delivery** (`192.168.50.20:5000/switchboard:<tag>`); the
-tag and digest go here before this hand-off is acted on.
+Image: `192.168.50.20:5000/switchboard:0.7.29`
+(`sha256:d2a2b6081a7f60f1b6e240b99335c32f6f54fddfd71a71fc981ce6b485b4e81a`), built
+from `main` at `9caf2f7`.
+
+**It also carries 0.7.28 (SWT-65, the task detail source message) and 0.7.27
+(SWT-61, gmail reply subjects), neither of which has been rolled yet.** Rolling
+0.7.29 gets all three; their handoffs
+(`HANDOFF-kube-task-detail-source-message.md`, `HANDOFF-kube-gmail-reply-subject.md`)
+still describe what to check afterwards.
 
 ## 1. Migration 0037 must be applied FIRST
 
