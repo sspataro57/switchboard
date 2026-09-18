@@ -19,7 +19,7 @@ package promote_test
 //	// Verdict gains Lane; on the inquiry lane Kind carries ask_kind.
 //	type Verdict struct { Lane Lane; Kind string; ... }
 //	// Decide: attach-open -> attach+reopen dismissed -> create. On the inquiry
-//	// lane create uses inquiryCreateStatus ("holding" under O7 -> action
+//	// lane create uses inquiryCreateStatus ("ready" since 2026-09-18 -> action
 //	// "review"; "ready" after the flip -> action "task"); the personal whitelist
 //	// never applies to it.
 //
@@ -244,14 +244,15 @@ func TestInquiryGate_ReportsTheFirstReasonInCThreeOrder(t *testing.T) {
 
 var inquiryKinds = []string{"question", "request", "decision", "scheduling"}
 
-// O7: a promoted inquiry lands in the Holding column (action 'review'). The
-// flip to "ready" (action 'task') is ONE line, inquiryCreateStatus, and it
-// edits this assertion and inquiry_internal_test.go's pin in the same diff.
-func TestDecide_InquiryCreatesAHoldingReviewTask(t *testing.T) {
+// O7: a promoted inquiry lands READY (action 'task') since Salvador's flip on
+// 2026-09-18. It began as Holding/'review'; the change is ONE line,
+// inquiryCreateStatus, and it edits this assertion and
+// inquiry_internal_test.go's pin in the same diff.
+func TestDecide_InquiryCreatesAReadyTask(t *testing.T) {
 	for _, k := range inquiryKinds {
 		got := promote.Decide(promote.Verdict{Lane: promote.LaneInquiry, Kind: k}, nil)
-		if got.Action != "review" || got.Status != "holding" || got.TaskID != 0 || got.ReopenDismissalID != 0 {
-			t.Errorf("Decide(inquiry, kind=%q, nil) = %+v, want {Action:review Status:holding} — O7: Holding first", k, got)
+		if got.Action != "task" || got.Status != "ready" || got.TaskID != 0 || got.ReopenDismissalID != 0 {
+			t.Errorf("Decide(inquiry, kind=%q, nil) = %+v, want {Action:task Status:ready}", k, got)
 		}
 	}
 }
@@ -260,10 +261,17 @@ func TestDecide_InquiryCreatesAHoldingReviewTask(t *testing.T) {
 // It must not leak into the inquiry lane: an inquiry verdict whose kind string
 // happens to be whitelisted still follows inquiryCreateStatus.
 func TestDecide_ThePersonalWhitelistNeverAppliesToTheInquiryLane(t *testing.T) {
+	// The property is that KIND does not influence the inquiry lane at all, so
+	// this compares a whitelisted kind against an ordinary one rather than
+	// against a literal. Before 2026-09-18 it could assert "not task/ready",
+	// because the two lanes disagreed on the create status; now that both create
+	// ready tasks, that spelling would pass on a genuine leak.
+	ordinary := promote.Decide(promote.Verdict{Lane: promote.LaneInquiry, Kind: "question"}, nil)
 	for _, k := range []string{"payment_due", "deadline"} {
 		got := promote.Decide(promote.Verdict{Lane: promote.LaneInquiry, Kind: k}, nil)
-		if got.Action == "task" || got.Status == "ready" {
-			t.Errorf("Decide(inquiry, kind=%q) = %+v; the personal whitelist leaked into the inquiry lane", k, got)
+		if got != ordinary {
+			t.Errorf("Decide(inquiry, kind=%q) = %+v, want %+v (the same as any other kind); the personal "+
+				"whitelist leaked into the inquiry lane", k, got, ordinary)
 		}
 	}
 	// Control: the zero Lane is still the personal lane, whitelist and all.
@@ -286,7 +294,7 @@ func TestDecide_InquiryAttachOrderIsTheExistingOne(t *testing.T) {
 	}
 	// Q3: a closed, non-dismissed task -> a new holding task
 	for _, st := range []string{"closed", "delivered"} {
-		if got := promote.Decide(v, &promote.ExistingTask{ID: 13, Status: st}); got.Action != "review" || got.Status != "holding" {
+		if got := promote.Decide(v, &promote.ExistingTask{ID: 13, Status: st}); got.Action != "task" || got.Status != "ready" {
 			t.Errorf("inquiry verdict past a %s task: %+v, want a NEW {review holding} task (Q3)", st, got)
 		}
 	}

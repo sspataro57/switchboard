@@ -353,12 +353,12 @@ func (f *sanaFixture) inquiryVerdicts(t *testing.T, ctx context.Context) int {
 }
 
 // promotion returns the message's classify_promotions action and task, and the
-// number of holding tasks in collaboratory.
-func (f *sanaFixture) promotion(t *testing.T, ctx context.Context) (action string, task *int64, holding int) {
+// number of ready tasks in collaboratory (inquiry creates ready since 2026-09-18).
+func (f *sanaFixture) promotion(t *testing.T, ctx context.Context) (action string, task *int64, ready int) {
 	t.Helper()
 	f.pool.QueryRow(ctx, `SELECT action, task_id FROM classify_promotions WHERE normalized_message_id=$1`, f.msg).Scan(&action, &task)
-	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE project_id=$1 AND status='holding'`, f.collab).Scan(&holding); err != nil {
-		t.Fatalf("count holding tasks: %v", err)
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE project_id=$1 AND status='ready'`, f.collab).Scan(&ready); err != nil {
+		t.Fatalf("count ready tasks: %v", err)
 	}
 	return
 }
@@ -409,8 +409,8 @@ func TestRegression_SanaEmailNotCaptured_UnarmedAccountIsCountedAndNothingRoutes
 	if v := f.inquiryVerdicts(t, ctx); v != 0 || f.inqCalls.Load() != 0 {
 		t.Errorf("an unrouted, unarmed message got %d inquiry verdict(s) (%d model calls); want none", v, f.inqCalls.Load())
 	}
-	if _, task, holding := f.promotion(t, ctx); task != nil || holding != 0 {
-		t.Errorf("an unrouted, unarmed message produced a task (%v, holding=%d); want none", task, holding)
+	if _, task, ready := f.promotion(t, ctx); task != nil || ready != 0 {
+		t.Errorf("an unrouted, unarmed message produced a task (%v, ready=%d); want none", task, ready)
 	}
 }
 
@@ -440,12 +440,12 @@ func TestRegression_SanaEmailNotCaptured_ArmedBeforeVerdictBecomesHoldingTask(t 
 	}
 
 	f.pass(t, ctx, pipeline.StageInquiryPromote)
-	action, task, holding := f.promotion(t, ctx)
+	action, task, ready := f.promotion(t, ctx)
 	// The thread's only outbound (74h) is BEFORE the ask (2h): RepliedSinceCol is
 	// strictly later, so it must not gate the ask `answered`. A task here is that proof.
-	if task == nil || action != "review" || holding != 1 {
-		t.Errorf("STAGE inquiry_promote: action=%q task_id=%v, holding tasks in collaboratory=%d; want review, a task, "+
-			"and exactly 1 'holding' task (an outbound BEFORE the ask must not gate it answered)", action, task, holding)
+	if task == nil || action != "task" || ready != 1 {
+		t.Errorf("STAGE inquiry_promote: action=%q task_id=%v, ready tasks in collaboratory=%d; want task, a task id, "+
+			"and exactly 1 'ready' task (an outbound BEFORE the ask must not gate it answered)", action, task, ready)
 	}
 }
 
@@ -500,8 +500,8 @@ func TestRegression_SanaEmailNotCaptured_ArmedAfterVerdictWaitsThenReclassifies(
 		t.Errorf("STAGE inquiry: %d classify_inquiry verdict(s) (inquiry model called %d time(s)); want 1", v, f.inqCalls.Load())
 	}
 	f.pass(t, ctx, pipeline.StageInquiryPromote)
-	if action, task, holding := f.promotion(t, ctx); task == nil || action != "review" || holding != 1 {
-		t.Errorf("STAGE inquiry_promote: action=%q task_id=%v, holding tasks in collaboratory=%d; want review, a task, "+
-			"and exactly 1 'holding' task", action, task, holding)
+	if action, task, ready := f.promotion(t, ctx); task == nil || action != "task" || ready != 1 {
+		t.Errorf("STAGE inquiry_promote: action=%q task_id=%v, ready tasks in collaboratory=%d; want task, a task id, "+
+			"and exactly 1 'ready' task", action, task, ready)
 	}
 }

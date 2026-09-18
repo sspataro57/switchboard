@@ -20,9 +20,10 @@ package promote
 import "testing"
 
 func TestInquiryCreateStatus_IsHoldingUnderO7(t *testing.T) {
-	if inquiryCreateStatus != "holding" {
-		t.Fatalf("inquiryCreateStatus = %q, want \"holding\" (O7: Holding first). Flipping it to \"ready\" is a "+
-			"deliberate one-line change that edits THIS assertion in the same diff", inquiryCreateStatus)
+	if inquiryCreateStatus != "ready" {
+		t.Fatalf("inquiryCreateStatus = %q, want \"ready\" (O7: Holding first, flipped by Salvador 2026-09-18). "+
+			"Changing it back is the same deliberate one-line change and edits THIS assertion in the same diff",
+			inquiryCreateStatus)
 	}
 	d := Decide(Verdict{Lane: LaneInquiry, Kind: "question"}, nil)
 	if d.Status != inquiryCreateStatus {

@@ -57,7 +57,7 @@ package promote_test
 //	          thread_id, thread_key, thread_scope (the stored thread identity),
 //	          external_message_id, verdict (the verdict's reason)
 //	  project = the current attribution; assignee_type human; priority 0;
-//	  status holding (O7); promotion action review; kind = ask_kind.
+//	  status ready (O7, flipped 2026-09-18); promotion action task; kind = ask_kind.
 //	  Order (C8): claim -> create_task -> recordTask -> task_set_source_thread,
 //	  all as promote:inquiry.
 //
@@ -605,7 +605,7 @@ func TestPromoteInquiry_Integration_InboxOneFixturePerClause(t *testing.T) {
 
 	for why, msg := range eligible {
 		p, ok := s.promotion(t, ctx, msg)
-		if !ok || p.taskID == nil || p.action != "review" {
+		if !ok || p.taskID == nil || p.action != "task" {
 			t.Errorf("%s: want a review promotion with a task, got found=%v %+v (C2)", why, ok, p)
 		}
 	}
@@ -620,8 +620,8 @@ func TestPromoteInquiry_Integration_InboxOneFixturePerClause(t *testing.T) {
 	if p, _ := s.promotion(t, ctx, claimed); p.taskID != nil {
 		t.Errorf("the crash artifact was completed with task %d; a later pass never completes a claim it did not make", *p.taskID)
 	}
-	if st.Review != 3 || st.Created != 0 {
-		t.Errorf("stats = %+v, want Review 3 (base, shadowlatest, gatelatest), Created 0 (O7: holding)", st)
+	if st.Created != 3 || st.Review != 0 {
+		t.Errorf("stats = %+v, want Created 3 (base, shadowlatest, gatelatest), Review 0 — the 2026-09-18 flip moved the counter", st)
 	}
 	if n := gatedTotal(st); n != 0 {
 		t.Errorf("Gated = %v; every exclusion above is an INBOX clause, never a gate reason — in particular the "+
@@ -656,7 +656,7 @@ func TestPromoteInquiry_Integration_RouteAttributionIsFollowed(t *testing.T) {
 	                VALUES ($1,'route','attributed',$2,'default','itest-inqp routed')`, m, s.armed)
 	s.verdict(t, ctx, m, r, iqpV{scope: "thread"})
 	s.run(t, ctx, promote.Config{})
-	if p, ok := s.promotion(t, ctx, m); !ok || p.action != "review" {
+	if p, ok := s.promotion(t, ctx, m); !ok || p.action != "task" {
 		t.Errorf("a message attributed by the route tier (mode='route', latest) was not promoted (found=%v %+v)", ok, p)
 	}
 }
@@ -677,8 +677,8 @@ func TestPromoteInquiry_Integration_OldestFirst(t *testing.T) {
 	s.run(t, ctx, promote.Config{})
 	pa, _ := s.promotion(t, ctx, a)
 	pb, _ := s.promotion(t, ctx, b)
-	if pa.action != "review" || pb.action != "attached" || pa.taskID == nil || pb.taskID == nil || *pa.taskID != *pb.taskID {
-		t.Fatalf("oldest-first: a=%+v b=%+v, want a creates (review) and b attaches to the same task", pa, pb)
+	if pa.action != "task" || pb.action != "attached" || pa.taskID == nil || pb.taskID == nil || *pa.taskID != *pb.taskID {
+		t.Fatalf("oldest-first: a=%+v b=%+v, want a creates (task) and b attaches to the same task", pa, pb)
 	}
 	var title string
 	s.pool.QueryRow(ctx, `SELECT title FROM tasks WHERE id=$1`, *pa.taskID).Scan(&title)
@@ -711,7 +711,7 @@ func TestPromoteInquiry_Integration_CrossLaneControls(t *testing.T) {
 	if _, ok := s.promotion(t, ctx, pm); ok {
 		t.Errorf("the INQUIRY lane promoted a personal-lane verdict")
 	}
-	if p, ok := s.promotion(t, ctx, im); !ok || p.action != "review" {
+	if p, ok := s.promotion(t, ctx, im); !ok || p.action != "task" {
 		t.Fatalf("the inquiry lane did not promote its own verdict (found=%v %+v)", ok, p)
 	}
 
@@ -782,7 +782,7 @@ func TestPromoteInquiry_Integration_AddressedToSalvador(t *testing.T) {
 	st := s.run(t, ctx, promote.Config{})
 
 	for name, m := range map[string]int64{"1:1 DM": dm, "rooted thread he posted in BEFORE": rootedPrior, "gmail": gm} {
-		if p, ok := s.promotion(t, ctx, m); !ok || p.action != "review" {
+		if p, ok := s.promotion(t, ctx, m); !ok || p.action != "task" {
 			t.Errorf("%s: not promoted (found=%v %+v); C-D3 addresses it to Salvador", name, ok, p)
 		}
 	}
@@ -869,7 +869,7 @@ func TestPromoteInquiry_Integration_CreateShapeOrderAndExactText(t *testing.T) {
 	if !ok || p.taskID == nil {
 		t.Fatalf("no promoted task for the create fixture (found=%v %+v)", ok, p)
 	}
-	if p.action != "review" || p.kind != "question" || p.project != s.armed || p.extr != extr || p.raw == nil || *p.raw != r {
+	if p.action != "task" || p.kind != "question" || p.project != s.armed || p.extr != extr || p.raw == nil || *p.raw != r {
 		t.Errorf("promotion row = %+v, want action review (O7), kind question (ask_kind), project %d, extraction %d, raw %d",
 			p, s.armed, extr, r)
 	}
@@ -886,8 +886,8 @@ func TestPromoteInquiry_Integration_CreateShapeOrderAndExactText(t *testing.T) {
 		Scan(&title, &body, &status, &assignee, &project, &priority, &srcThread); err != nil {
 		t.Fatalf("read task: %v", err)
 	}
-	if status != "holding" {
-		t.Errorf("task status = %q, want holding (O7: inquiryCreateStatus)", status)
+	if status != "ready" {
+		t.Errorf("task status = %q, want ready (O7: inquiryCreateStatus, flipped 2026-09-18)", status)
 	}
 	if assignee != "human" || priority != 0 || project != s.armed {
 		t.Errorf("task = {assignee %q, priority %d, project %d}, want {human, 0, %d} (C-D9)", assignee, priority, project, s.armed)
@@ -951,9 +951,9 @@ func TestPromoteInquiry_Integration_CreateShapeOrderAndExactText(t *testing.T) {
 		if st != "ok" {
 			t.Errorf("audit %s status = %q, want ok", tool, st)
 		}
-		if tool == "create_task" && !strings.Contains(string(args), `"status": "holding"`) &&
-			!strings.Contains(string(args), `"status":"holding"`) {
-			t.Errorf("create_task args %s do not carry status holding", args)
+		if tool == "create_task" && !strings.Contains(string(args), `"status": "ready"`) &&
+			!strings.Contains(string(args), `"status":"ready"`) {
+			t.Errorf("create_task args %s do not carry status ready", args)
 		}
 		seq = append(seq, tool)
 	}
@@ -997,7 +997,7 @@ func TestPromoteInquiry_Integration_AttachesToTheOpenTask(t *testing.T) {
 	                          AND task_id=$1`, task); n != 1 {
 		t.Errorf("%d task_append_log calls as promote:inquiry on task %d, want 1", n, task)
 	}
-	if st := s.status(t, ctx, task); st != "holding" {
+	if st := s.status(t, ctx, task); st != "ready" {
 		t.Errorf("an attach changed the task's status to %q", st)
 	}
 }
@@ -1028,8 +1028,8 @@ func TestPromoteInquiry_Integration_ReopensADismissedTask(t *testing.T) {
 	if st.Reopened != 1 {
 		t.Errorf("Stats.Reopened = %d, want 1", st.Reopened)
 	}
-	if got := s.status(t, ctx, task); got != "holding" {
-		t.Errorf("reopened task status = %q, want holding (closed_from_status)", got)
+	if got := s.status(t, ctx, task); got != "ready" {
+		t.Errorf("reopened task status = %q, want ready (closed_from_status: the status it held when dismissed)", got)
 	}
 	var by string
 	var byMsg *int64
@@ -1060,11 +1060,11 @@ func TestPromoteInquiry_Integration_ClosedTaskYieldsANewHoldingTask(t *testing.T
 	s.run(t, ctx, promote.Config{})
 
 	p, ok := s.promotion(t, ctx, b)
-	if !ok || p.action != "review" || p.taskID == nil || *p.taskID == first {
+	if !ok || p.action != "task" || p.taskID == nil || *p.taskID == first {
 		t.Fatalf("an ask past a plain-closed task: %+v (found=%v), want a NEW review task (Q3)", p, ok)
 	}
-	if s.status(t, ctx, *p.taskID) != "holding" {
-		t.Errorf("the Q3 task is %q, want holding", s.status(t, ctx, *p.taskID))
+	if s.status(t, ctx, *p.taskID) != "ready" {
+		t.Errorf("the Q3 task is %q, want ready", s.status(t, ctx, *p.taskID))
 	}
 	if !strings.Contains(p.reason, strconv.FormatInt(first, 10)) {
 		t.Errorf("promotion reason %q does not name the closed task %d", p.reason, first)
@@ -1086,8 +1086,8 @@ func TestPromoteInquiry_Integration_ClaimBeforeAct(t *testing.T) {
 		t.Fatalf("a pass whose executor has no create_task returned nil")
 	}
 	p, ok := s.promotion(t, ctx, m)
-	if !ok || p.taskID != nil || p.action != "review" {
-		t.Errorf("after a failed create_task: promotion %+v (found=%v), want the CLAIM (action review, task_id NULL) — "+
+	if !ok || p.taskID != nil || p.action != "task" {
+		t.Errorf("after a failed create_task: promotion %+v (found=%v), want the CLAIM (action task, task_id NULL) — "+
 			"it is written before the executor call (C9)", p, ok)
 	}
 	if s.armedTasks(t, ctx) != 0 {
@@ -1152,8 +1152,8 @@ func TestPromoteInquiry_Integration_LostClaimsAndThePersonalClaim(t *testing.T) 
 		pm, pr, pextr, s.armed)
 
 	st := s.run(t, ctx, promote.Config{})
-	if st.Lost != 1 || st.Review != 1 {
-		t.Errorf("stats %+v, want Lost 1 (the second verdict for `dup`) and Review 1", st)
+	if st.Lost != 1 || st.Created != 1 {
+		t.Errorf("stats %+v, want Lost 1 (the second verdict for `dup`) and Created 1", st)
 	}
 	if n := s.count(t, ctx, `SELECT count(*) FROM classify_promotions WHERE normalized_message_id=$1`, dup); n != 1 {
 		t.Errorf("`dup` has %d promotion rows, want 1 (one row per message, forever)", n)
@@ -1229,8 +1229,8 @@ func TestPromoteInquiry_Integration_PendingReleasesAfterGrace(t *testing.T) {
 	s.exec(t, ctx, `UPDATE normalized_messages SET sent_at = now() - interval '2 hours' WHERE id=$1`, m)
 	s.run(t, ctx, promote.Config{})
 	p, ok := s.promotion(t, ctx, m)
-	if !ok || p.action != "review" || p.taskID == nil || s.status(t, ctx, *p.taskID) != "holding" {
-		t.Errorf("after the grace: %+v (found=%v), want a holding review task", p, ok)
+	if !ok || p.action != "task" || p.taskID == nil || s.status(t, ctx, *p.taskID) != "ready" {
+		t.Errorf("after the grace: %+v (found=%v), want a ready task", p, ok)
 	}
 }
 
@@ -1256,19 +1256,19 @@ func TestPromoteInquiry_Integration_DryRunWritesNothingAndPlansTheSame(t *testin
 	if s.armedTasks(t, ctx) != 0 || s.inquiryAudit(t, ctx) != 0 {
 		t.Errorf("--dry-run created tasks or made executor calls")
 	}
-	if dry.Review != 1 || dry.Gated["pending"] != 1 {
-		t.Errorf("dry-run stats %+v, want Review 1 and Gated[pending] 1 (it counts gated verdicts by reason, C11)", dry)
+	if dry.Created != 1 || dry.Gated["pending"] != 1 {
+		t.Errorf("dry-run stats %+v, want Created 1 and Gated[pending] 1 (it counts gated verdicts by reason, C11)", dry)
 	}
-	if !strings.Contains(buf.String(), "status=holding") {
-		t.Errorf("the dry-run plan does not show status=holding for the would-create line (V5: every would-create "+
-			"line shows status=holding, O7):\n%s", buf.String())
+	if !strings.Contains(buf.String(), "status=ready") {
+		t.Errorf("the dry-run plan does not show status=ready for the would-create line (V5: every would-create "+
+			"line shows status=ready, O7 as flipped):\n%s", buf.String())
 	}
 	if !strings.Contains(buf.String(), strconv.FormatInt(create, 10)) {
 		t.Errorf("the dry-run plan never names message %d", create)
 	}
 
 	live := s.run(t, ctx, promote.Config{})
-	if live.Review != dry.Review || live.Gated["pending"] != dry.Gated["pending"] {
+	if live.Created != dry.Created || live.Gated["pending"] != dry.Gated["pending"] {
 		t.Errorf("live %+v differs from the dry-run's plan %+v", live, dry)
 	}
 }
@@ -1287,12 +1287,12 @@ func TestPromoteInquiry_Integration_MaxAgeIsDryRunOnly(t *testing.T) {
 	if _, ok := s.promotion(t, ctx, m); ok || s.armedTasks(t, ctx) != 0 {
 		t.Errorf("the refused pass wrote something")
 	}
-	if st := s.run(t, ctx, promote.Config{DryRun: true}); st.Review != 0 {
-		t.Errorf("dry-run without --max-age planned %d creates for a 100h-old ask, want 0", st.Review)
+	if st := s.run(t, ctx, promote.Config{DryRun: true}); st.Created != 0 {
+		t.Errorf("dry-run without --max-age planned %d creates for a 100h-old ask, want 0", st.Created)
 	}
 	st := s.run(t, ctx, promote.Config{DryRun: true, MaxAge: 720 * time.Hour})
-	if st.Review != 1 || st.Gated["stale"] != 0 {
-		t.Errorf("dry-run --max-age 720h: %+v, want Review 1 and no stale (the widened fence reaches the gate too, V5)", st)
+	if st.Created != 1 || st.Gated["stale"] != 0 {
+		t.Errorf("dry-run --max-age 720h: %+v, want Created 1 and no stale (the widened fence reaches the gate too, V5)", st)
 	}
 	if _, ok := s.promotion(t, ctx, m); ok {
 		t.Errorf("the dry-run wrote a promotion row")
@@ -1337,8 +1337,9 @@ func TestPromoteInquiry_Integration_CountersByLaneReportsInquiryUnderReview(t *t
 	s.eligible(t, ctx, "counters", iqpV{})
 	s.run(t, ctx, promote.Config{})
 	after := lane()
-	if after.Review-before.Review != 1 || after.Created != before.Created {
-		t.Errorf("CountersByLane(classify_inquiry) %+v -> %+v, want +1 review and no created (O7's holding phase)", before, after)
+	if after.Created-before.Created != 1 || after.Review != before.Review {
+		t.Errorf("CountersByLane(classify_inquiry) %+v -> %+v, want +1 created and no review (since the "+
+			"2026-09-18 flip; it counted review while the lane created holding tasks)", before, after)
 	}
 }
 

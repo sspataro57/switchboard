@@ -166,13 +166,13 @@ func TestPromoteInquiryResurface_Integration_InboxOneFixturePerClause(t *testing
 	st := s.run(t, ctx, promote.Config{})
 
 	p, ok := s.promotion(t, ctx, admitted)
-	if !ok || p.action != "review" || p.taskID == nil || *p.taskID == closed {
+	if !ok || p.action != "task" || p.taskID == nil || *p.taskID == closed {
 		t.Fatalf("a resurfaced task_log onto a closed task: promotion %+v (found=%v), want a NEW review (holding) "+
 			"task — CC5: the inbox admits it exactly like an attributed message; CC2: never the closed task", p, ok)
 	}
 	status, body, _ := s.rsTaskRow(t, ctx, *p.taskID)
-	if status != "holding" {
-		t.Errorf("the resurfaced ask's task is %q, want holding (O7 unchanged)", status)
+	if status != "ready" {
+		t.Errorf("the resurfaced ask's task is %q, want ready (O7 unchanged)", status)
 	}
 	if want := "logged_on_closed_task: " + strconv.FormatInt(closed, 10) + "\n"; !strings.HasSuffix(body, want) {
 		t.Errorf("task body does not END with %q (CC6: one line, LAST):\n%s", want, body)
@@ -188,8 +188,8 @@ func TestPromoteInquiryResurface_Integration_InboxOneFixturePerClause(t *testing
 	if n := gatedTotal(st); n != 0 {
 		t.Errorf("Gated = %v; every exclusion above is an INBOX clause, never a gate reason", st.Gated)
 	}
-	if st.Review != 1 || s.armedTasks(t, ctx) != tasksBefore+1 {
-		t.Errorf("stats %+v, %d armed tasks (was %d); want exactly one review task", st, s.armedTasks(t, ctx), tasksBefore)
+	if st.Created != 1 || s.armedTasks(t, ctx) != tasksBefore+1 {
+		t.Errorf("stats %+v, %d armed tasks (was %d); want exactly one ready task", st, s.armedTasks(t, ctx), tasksBefore)
 	}
 	if got := s.status(t, ctx, closed); got != "closed" {
 		t.Errorf("the closed task is %q after promotion; CC2: it stays closed", got)
@@ -225,16 +225,16 @@ func TestPromoteInquiryResurface_Integration_AShadowResurfacePromotesNothing(t *
 
 	st := s.run(t, ctx, promote.Config{})
 
-	if p, ok := s.promotion(t, ctx, control); !ok || p.action != "review" {
-		t.Fatalf("POSITIVE CONTROL: the LIVE resurfaced ask: promotion %+v (found=%v), want review", p, ok)
+	if p, ok := s.promotion(t, ctx, control); !ok || p.action != "task" {
+		t.Fatalf("POSITIVE CONTROL: the LIVE resurfaced ask: promotion %+v (found=%v), want a ready task", p, ok)
 	}
 	if p, ok := s.promotion(t, ctx, m); ok {
 		t.Errorf("a message whose live decision is task_log resurface=false, under a NEWER shadow task_log "+
 			"resurface=true, promoted (%+v). CC5b: only a LIVE decision admits through the resurface branch; a "+
 			"shadow re-evaluation must never create a live Holding task", p)
 	}
-	if st.Review != 1 || s.armedTasks(t, ctx) != tasksBefore+1 {
-		t.Errorf("stats %+v, %d armed tasks (was %d); want exactly one review task, the control's",
+	if st.Created != 1 || s.armedTasks(t, ctx) != tasksBefore+1 {
+		t.Errorf("stats %+v, %d armed tasks (was %d); want exactly one ready task, the control's",
 			st, s.armedTasks(t, ctx), tasksBefore)
 	}
 	if n := gatedTotal(st); n != 0 {
@@ -263,7 +263,7 @@ func TestPromoteInquiryResurface_Integration_ANewerShadowRowRemovesNothing(t *te
 	st := s.run(t, ctx, promote.Config{})
 
 	p, ok := s.promotion(t, ctx, m)
-	if !ok || p.action != "review" || p.taskID == nil || *p.taskID == closed {
+	if !ok || p.action != "task" || p.taskID == nil || *p.taskID == closed {
 		t.Fatalf("a live resurfaced ask under a NEWER shadow `unmatched` row: promotion %+v (found=%v), want a NEW "+
 			"review task. CC5b: the resurface branch reads only live decisions, so a non-attributed shadow row "+
 			"must not remove it", p, ok)
@@ -278,7 +278,7 @@ func TestPromoteInquiryResurface_Integration_ANewerShadowRowRemovesNothing(t *te
 	if !strings.Contains(p.reason, rsPart(closed)) {
 		t.Errorf("promotion reason %q does not contain %q", p.reason, rsPart(closed))
 	}
-	if st.Review != 1 {
+	if st.Created != 1 {
 		t.Errorf("stats %+v, want Review 1", st)
 	}
 }
@@ -307,7 +307,7 @@ func TestPromoteInquiryResurface_Integration_ANewerShadowAttributedRowTakesPrece
 	st := s.run(t, ctx, promote.Config{})
 
 	p, ok := s.promotion(t, ctx, m)
-	if !ok || p.action != "review" || p.taskID == nil || *p.taskID == closed {
+	if !ok || p.action != "task" || p.taskID == nil || *p.taskID == closed {
 		t.Fatalf("live resurfaced task_log under a NEWER shadow `attributed` row: promotion %+v (found=%v), want a "+
 			"NEW review task (the attributed branch admits it; Part A: attribution moves)", p, ok)
 	}
@@ -329,7 +329,7 @@ func TestPromoteInquiryResurface_Integration_ANewerShadowAttributedRowTakesPrece
 	if strings.Contains(p.reason, rsPart(closed)) {
 		t.Errorf("promotion reason %q names the closed task; an attributed admission has LoggedOnTaskID = 0", p.reason)
 	}
-	if st.Review != 1 {
+	if st.Created != 1 {
 		t.Errorf("stats %+v, want Review 1", st)
 	}
 	if got := s.status(t, ctx, closed); got != "closed" {
@@ -343,7 +343,7 @@ func TestPromoteInquiryResurface_Integration_ANewerShadowAttributedRowTakesPrece
 // the inbox left at attributed-only → no promotion; inquiryBody without the
 // line → the suffix assertion; a reopen of the closed task anywhere → the
 // status / task_reopen assertions.
-func TestPromoteInquiryResurface_Integration_ACapturePassBecomesAHoldingTaskOnTheDM(t *testing.T) {
+func TestPromoteInquiryResurface_Integration_ACapturePassBecomesAReadyTaskOnTheDM(t *testing.T) {
 	ctx := context.Background()
 	s := newIQPSuite(t, ctx)
 	rsRequire0034(t, ctx, s)
@@ -382,13 +382,13 @@ func TestPromoteInquiryResurface_Integration_ACapturePassBecomesAHoldingTaskOnTh
 	st := s.run(t, ctx, promote.Config{})
 
 	p, ok := s.promotion(t, ctx, msg)
-	if !ok || p.action != "review" || p.taskID == nil || *p.taskID == bucket {
-		t.Fatalf("the resurfaced DM: promotion %+v (found=%v), want a NEW review task (not the bucket %d)", p, ok, bucket)
+	if !ok || p.action != "task" || p.taskID == nil || *p.taskID == bucket {
+		t.Fatalf("the resurfaced DM: promotion %+v (found=%v), want a NEW ready task (not the bucket %d)", p, ok, bucket)
 	}
 	task := *p.taskID
 	status, body, src := s.rsTaskRow(t, ctx, task)
-	if status != "holding" {
-		t.Errorf("the new task is %q, want holding", status)
+	if status != "ready" {
+		t.Errorf("the new task is %q, want ready", status)
 	}
 	if src == nil || *src != s.threads[dm] {
 		t.Errorf("the new task's source_thread_id = %v, want the DM's thread %d (the message's OWN conversation)", src, s.threads[dm])
@@ -400,7 +400,7 @@ func TestPromoteInquiryResurface_Integration_ACapturePassBecomesAHoldingTaskOnTh
 	if !strings.Contains(p.reason, rsPart(bucket)) {
 		t.Errorf("promotion reason %q does not name the closed task (%q)", p.reason, rsPart(bucket))
 	}
-	if st.Review != 1 {
+	if st.Created != 1 {
 		t.Errorf("stats %+v, want Review 1", st)
 	}
 
@@ -443,8 +443,8 @@ func TestPromoteInquiryResurface_Integration_ASecondAskOnTheSameDMAttaches(t *te
 	a := s.rsAsk(t, ctx, "rs-first", dm, "slack", "conversation", s.ago(3*time.Hour), s.armed, bucket, true)
 	s.run(t, ctx, promote.Config{})
 	holding := s.taskOf(t, ctx, a)
-	if st := s.status(t, ctx, holding); st != "holding" {
-		t.Fatalf("setup: the first resurfaced ask's task is %q, want holding", st)
+	if st := s.status(t, ctx, holding); st != "ready" {
+		t.Fatalf("setup: the first resurfaced ask's task is %q, want ready", st)
 	}
 
 	b := s.rsAsk(t, ctx, "rs-second", dm, "slack", "conversation", s.ago(2*time.Hour), s.armed, bucket, true)

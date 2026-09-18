@@ -56,14 +56,23 @@ const (
 
 // inquiryCreateStatus is the status a NEW inquiry task is created with — the
 // inquiry lane's autonomy argument, O7 (2026-09-11, "A is ok"): Holding first
-// (promotion action 'review'). A Go constant, not a column or an env var, for
+// (promotion action 'review'), then ready once the rate was seen.
+//
+// FLIPPED to "ready" (action 'task') by Salvador on 2026-09-18, "remove the
+// holding. the cadence is enought". The readout at the moment of the flip was
+// 14 true positives, 2 false positives, 16 decided — a seventh of the 120 the
+// design asked for, so this is his judgement on an INDICATIVE rate, not a
+// measured one. Both false positives share one cause, recorded as swb 386:
+// addressed() treats every gmail message as addressed to him, so a thread he is
+// merely copied on can promote. Expect those to land in the working queue now
+// rather than in holding. A Go constant, not a column or an env var, for
 // SWT-30 D2's reason: a typo cannot widen it unreviewed.
 //
 // THE FLIP to "ready" (action 'task') is a deliberate one-line change that
 // Salvador makes after about two weeks of `classify promote --outcomes`, and
 // it edits inquiry_internal_test.go's pin and inquiry_test.go's assertion in
 // the same diff. It changes only tasks promoted after the deploy.
-const inquiryCreateStatus = "holding"
+const inquiryCreateStatus = "ready"
 
 // actionForStatus maps a create status to its classify_promotions action: the
 // action follows the status, never the other way round.
