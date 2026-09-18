@@ -14,7 +14,7 @@ package promote_test
 //	const LaneInquiry  Lane = "inquiry"
 //	const InquiryActor = "promote:inquiry"       // every inquiry-lane executor call
 //	const InquiryMaxAge = 72 * time.Hour         // C-D6's second fence
-//	const InquiryGrace  = time.Hour              // C-D6's grace
+//	const InquiryGrace  = 30 * time.Minute       // C-D6's grace
 //
 //	// Verdict gains Lane; on the inquiry lane Kind carries ask_kind.
 //	type Verdict struct { Lane Lane; Kind string; ... }
@@ -78,8 +78,9 @@ func TestInquiryConstants(t *testing.T) {
 	if promote.InquiryMaxAge != 72*time.Hour {
 		t.Errorf("InquiryMaxAge = %v, want 72h (C-D6)", promote.InquiryMaxAge)
 	}
-	if promote.InquiryGrace != time.Hour {
-		t.Errorf("InquiryGrace = %v, want 1h (C-D6: the replied-since fold fires first)", promote.InquiryGrace)
+	if promote.InquiryGrace != 30*time.Minute {
+		t.Errorf("InquiryGrace = %v, want 30m (C-D6: the replied-since fold fires first; halved from 1h by "+
+			"Salvador on 2026-09-18)", promote.InquiryGrace)
 	}
 	if promote.InquiryActor != "promote:inquiry" {
 		t.Errorf("InquiryActor = %q, want promote:inquiry (C-D1)", promote.InquiryActor)
@@ -133,9 +134,12 @@ func TestInquiryGate_EachReasonAlone(t *testing.T) {
 			c.SentAt = iqNow.Add(-721 * time.Hour)
 		}, "stale"},
 
-		// C-D6: grace 1h, so the replied-since fold can fire first.
-		{"pending: 59m old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-59 * time.Minute) }, "pending"},
-		{"released: 61m old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-61 * time.Minute) }, ""},
+		// C-D6: grace 30m, so the replied-since fold can fire first.
+		{"pending: 29m old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-29 * time.Minute) }, "pending"},
+		{"released: 31m old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-31 * time.Minute) }, ""},
+		// The old boundary: an ask he answers in the second half-hour now costs a
+		// task where it used to be folded away.
+		{"released: 59m old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-59 * time.Minute) }, ""},
 		{"pending: sent in the future (clock skew)", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(time.Minute) }, "pending"},
 
 		// C-D7: ANY replied-since state blocks promotion.

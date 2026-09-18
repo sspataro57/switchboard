@@ -45,7 +45,13 @@ const (
 	// InquiryGrace is C-D6's grace on sent_at: an ask younger than this is
 	// `pending`, so the replied-since fold can fire first. The pipelined sweep
 	// (5 min) bounds how late a pending verdict releases.
-	InquiryGrace = time.Hour
+	//
+	// Halved from an hour to 30 minutes (Salvador, 2026-09-18, "make it 30 mins
+	// only"). The trade is the whole point of the constant: a shorter grace
+	// surfaces a client's question sooner, and costs a task for any exchange he
+	// answers between 30 and 60 minutes — which the replied-since fold would
+	// have folded away silently under the old value.
+	InquiryGrace = 30 * time.Minute
 )
 
 // inquiryCreateStatus is the status a NEW inquiry task is created with — the
