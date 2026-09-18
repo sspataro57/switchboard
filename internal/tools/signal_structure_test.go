@@ -71,8 +71,11 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		// any other number above 33 is still flagged here.
 		// AMENDED — not deleted — by signal-session-name (SWT-56) criterion 14: 0036
 		// is its tasks.working_session, guarded by TestMigration0036_TaskWorkingSessionShape.
-		if v > 33 && v != 34 && v != 35 && v != 36 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name)", e.Name())
+		// AMENDED — not deleted — by microsoft-oauth-mail (SWT-66): 0037 widens
+		// source_accounts.auth_type to include 'xoauth2', guarded by
+		// TestMigration0037_Integration_AppliesTwiceAndConstrainsAuthType.
+		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {

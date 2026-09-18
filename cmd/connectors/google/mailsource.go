@@ -67,17 +67,17 @@ func runIMAPIngest(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink,
 
 	key := os.Getenv("OPS_TOKEN_KEY")
 	if key == "" {
-		return total, fmt.Errorf("OPS_TOKEN_KEY is not set (required to decrypt app passwords)")
+		return total, fmt.Errorf("OPS_TOKEN_KEY is not set (required to resolve IMAP credentials)")
 	}
 
-	accounts, err := google.ListAppPasswordAccounts(ctx, pool, cfg.AccountEmail)
+	accounts, err := google.ListIMAPAccounts(ctx, pool, cfg.AccountEmail)
 	if err != nil {
 		return total, err
 	}
 	if len(accounts) == 0 {
 		// Not an error: a deployment may be mid-migration with no app-password
 		// mailbox onboarded yet. Silence here would look like a working pass.
-		fmt.Printf("imap: no provider='google' accounts with auth_type='app_password'\n")
+		fmt.Printf("imap: no provider='google' accounts with an IMAP credential (auth_type app_password or xoauth2)\n")
 		return total, nil
 	}
 
@@ -102,15 +102,22 @@ func runIMAPIngest(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink,
 			continue
 		}
 
-		password, err := google.DecryptAppPassword(ctx, pool, acct.ID, key)
+		src, err := google.OpenIMAPSource(ctx, pool, acct, key)
 		if err != nil {
 			release()
+			// LOUD, per account (D9). This used to `continue` with nothing but a
+			// stdout line, so a revoked token — the expected long-run failure of
+			// an OAuth mailbox — stopped ingestion silently while the pass still
+			// exited 0 on the strength of the other accounts.
+			fmt.Printf("imap: %v\n", err)
+			if runID, e := sink.StartRun(ctx, acct.ID, "imap"); e == nil {
+				_ = sink.FinishRun(ctx, runID, "error", google.Stats{}, err.Error())
+			}
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		src := google.NewIMAPClientSource(acct.Hosts(), acct.Email, password)
 		stats, err := google.IngestIMAP(ctx, src, sink, acct, cfg)
 		_ = src.Close()
 		release()

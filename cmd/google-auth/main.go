@@ -5,7 +5,8 @@
 // subcommand, which stays a pure executor client.
 //
 //	google-auth add <email> [--no-availability]
-//	google-auth add-app-password <email> [--imap-host H] [--imap-port P]
+//	google-auth add-microsoft <email>
+//	google-auth add-app-password [--imap-host H] [--imap-port P] <email>
 //	                                     [--smtp-host H] [--smtp-port P]
 //	                                     [--no-availability]   (password on stdin)
 //	google-auth add-calendar <email> [--no-availability]   (calendar.readonly only)
@@ -32,9 +33,10 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: google-auth <add|add-app-password|add-calendar|list> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: google-auth <add|add-app-password|add-microsoft|add-calendar|list> [flags]")
 		fmt.Fprintln(os.Stderr, "  add <email>                 OAuth loopback consent")
 		fmt.Fprintln(os.Stderr, "  add-app-password <email>    IMAP/SMTP app password, read from stdin")
+		fmt.Fprintln(os.Stderr, "  add-microsoft <email>       Microsoft mailbox, device-code sign-in (no secret to paste)")
 		fmt.Fprintln(os.Stderr, "  add-calendar <email>        OAuth consent for calendar.readonly ONLY; mail path untouched")
 		fmt.Fprintln(os.Stderr, "  list                        show accounts and their auth_type")
 		os.Exit(2)
@@ -45,6 +47,8 @@ func main() {
 		err = addCmd(os.Args[2:])
 	case "add-app-password":
 		err = addAppPasswordCmd(os.Args[2:])
+	case "add-microsoft":
+		err = addMicrosoftCmd(os.Args[2:])
 	case "add-calendar":
 		err = addCalendarCmd(os.Args[2:])
 	case "list":

@@ -14,7 +14,7 @@ import (
 //
 // CREDENTIAL-gated, never auth_type-gated (SWT-24, "credential-gated, not
 // auth_type-gated"): auth_type names the MAIL path (mailsender.go,
-// ListAppPasswordAccounts) and must keep saying 'app_password' after a
+// ListIMAPAccounts) and must keep saying 'app_password' after a
 // calendar consent, or mail breaks. A row holding both an app password and a
 // refresh token is legitimately dual-auth — IMAP/SMTP for mail, OAuth for
 // calendar — and is exactly the shape the consent flow produces.

@@ -195,7 +195,7 @@ func RefetchMessages(ctx context.Context, src MailSource, sink Sink, acct Accoun
 	byFolder := map[string][]RefetchTarget{}
 	for _, t := range targets {
 		// The account is checked FIRST, because every later check and the write
-		// itself key on this pass's account, not on the row's. ListAppPasswordAccounts
+		// itself key on this pass's account, not on the row's. ListIMAPAccounts
 		// matches lower(account_email), while source_accounts is unique only on
 		// (provider, account_email) — case-distinct rows are legal. Writing a
 		// target belonging to another account would find no stored hash, take the
