@@ -36,12 +36,20 @@ onboards one, which would then fail on the old CHECK.
 (the app is a public client; no client secret exists, and none is stored), so a
 ConfigMap value or a plain `env:` entry is fine.
 
-It is needed by every workload that resolves an IMAP credential:
+It is needed by every workload that resolves an IMAP credential. **In this
+cluster that is exactly one:**
 
 | workload | why |
 |---|---|
 | the mail connector **CronJob** | `runIMAPIngest` resolves each account's credential per pass |
-| the **watch Deployment** | `idleOnce` does the same per IDLE cycle |
+
+CORRECTED 2026-09-18 by the kube session: an earlier draft of this file also
+named a "watch Deployment". **There is no such workload.** Namespace `ops` runs
+eleven: deployments dashboard, orchestratord and pipelined, and cronjobs
+classify-{personal,promote,residue} and connector-{gcal,google,jira,slackweb,upworkcrm}.
+The `--watch` mode (`idleOnce`, IMAP IDLE) exists in the binary but is not
+deployed, so the locking it needs is dormant code, not a live path. If it is ever
+deployed, it needs this variable too.
 
 `opsctl mail refetch` also needs it, but that runs from the operator's shell, not
 in-cluster.
