@@ -134,6 +134,15 @@ spells `provider='google'` in SQL, and three of them are correctness-critical:
 | `availability/store.go:89,127,162` | it would ENTER the availability scope if `calendar_in_availability` were true, and `LoadBusy` refuses for *everyone* when any in-scope account has no fresh calendar sync (SWT-24 readiness contract) |
 | `cmd/opsctl/mailrefetch.go:236` | `opsctl mail refetch` cannot open the mailbox |
 
+A SEVENTH exists that this table missed, found in review: `sink.go:61`
+`ListAccounts`, which feeds `ingest.Run` under `MAIL_SOURCE=gmail_api`. It would
+hand the Microsoft refresh token to `google.TokenClient` and abort the WHOLE pass
+(`ingest.go:390` returns rather than continuing per account). Latent only:
+production is `MAIL_SOURCE=imap`, and gmail_api mode is already broken there
+because all three google rows carry a NULL refresh token — but the MSN row is the
+first `provider='google'` row ever to have a non-NULL one, so a future flip of
+that env var would fail differently than it does today.
+
 That is six production predicates, several of which mean subtly different things
 ("mailboxes we read", "mailboxes we may send from", "calendars in availability").
 The repo's most expensive recurring defect is a half-restated shared predicate
@@ -323,7 +332,7 @@ same file family, and it is the sentence that misled him.
    the token path and rejects the password path, and a server advertising neither
    accepts the password path — and the recorded wire bytes show `AUTHENTICATE
    XOAUTH2 <ir>` with the criterion-2 initial response inline.
-5. `google-auth add-microsoft <email> [--no-availability]` runs the device flow:
+5. `google-auth add-microsoft <email>` runs the device flow (no --no-availability flag: calendar_in_availability is forced false for this row, and a flag that cannot change anything is a lie):
    prints the verification URL and user code, polls honouring
    `authorization_pending` and `slow_down`, and on success verifies identity by
    D4's two checks, then upserts ONE `source_accounts` row with

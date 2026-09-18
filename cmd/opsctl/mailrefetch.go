@@ -197,7 +197,7 @@ type accountBatch struct {
 // groupTargetsByAccount groups by ACCOUNT ID, not by email.
 //
 // source_accounts is unique only on (provider, account_email), so case-distinct
-// rows are legal, and ListAppPasswordAccounts matches lower(account_email).
+// rows are legal, and ListIMAPAccounts matches lower(account_email).
 // Grouping by the email string and taking accounts[0] could hand a batch to the
 // wrong row's id — which the pass then refuses target by target (wrong_account),
 // correct but useless. The id is already on every target, so the case just works.
@@ -226,14 +226,14 @@ func groupTargetsByAccount(targets []google.RefetchTarget) []accountBatch {
 
 func refetchOneAccount(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, key string,
 	batch accountBatch, opts mailRefetchOpts) error {
-	accounts, err := google.ListAppPasswordAccounts(ctx, pool, batch.email)
+	accounts, err := google.ListIMAPAccounts(ctx, pool, batch.email)
 	if err != nil {
 		return err
 	}
 	if len(accounts) == 0 {
 		// Named, never a silent skip: "nothing to do" and "this mailbox cannot be
 		// opened" are different answers.
-		return fmt.Errorf("no provider='google' app-password account for %s; this tool refetches only mailboxes it can open", batch.email)
+		return fmt.Errorf("no provider='google' account with an IMAP credential for %s; this tool refetches only mailboxes it can open", batch.email)
 	}
 	// Matched by ID, not position: the lookup is case-insensitive while the table
 	// is not, so accounts[0] can be a different mailbox that merely shares the
@@ -270,11 +270,10 @@ func refetchOneAccount(ctx context.Context, pool *pgxpool.Pool, sink *google.PGS
 	}
 	defer release()
 
-	password, err := google.DecryptAppPassword(ctx, pool, acct.ID, key)
+	src, err := google.OpenIMAPSource(ctx, pool, acct, key)
 	if err != nil {
-		return fmt.Errorf("decrypt app password for %s: %w", batch.email, err)
+		return fmt.Errorf("resolve the IMAP credential for %s: %w", batch.email, err)
 	}
-	src := google.NewIMAPClientSource(acct.Hosts(), acct.Email, password)
 	defer func() { _ = src.Close() }()
 
 	stats, err := google.RefetchMessages(ctx, src, sink, acct, batch.targets, google.RefetchConfig{

@@ -37,14 +37,14 @@ package google_test
 //	// calendar.readonly in scopes. CREDENTIAL-gated, never auth_type-gated —
 //	// auth_type names the MAIL path and must keep saying 'app_password' after
 //	// consent or mail breaks (SPEC decision "Credential-gated, not
-//	// auth_type-gated"). Sibling of ListAppPasswordAccounts (mailsender.go).
+//	// auth_type-gated"). Sibling of ListIMAPAccounts (mailsender.go).
 //	func ListCalendarCredentialedAccounts(ctx context.Context, pool *pgxpool.Pool, onlyEmail string) ([]Account, error)
 //
 // The SPEC's "Files likely to touch" puts "which accounts are
 // calendar-credentialed" in cmd/connectors/google/calendarsource.go. It is
 // imposed in internal/connector/google here for one reason: it is a SQL
 // predicate over columns, its regression test therefore has to be an
-// integration test, and its only sibling (ListAppPasswordAccounts) already
+// integration test, and its only sibling (ListIMAPAccounts) already
 // lives in this package. If the implementation keeps it in cmd, this test moves
 // with it — the assertions, not the address, are the contract.
 
@@ -184,7 +184,7 @@ func TestCalendarPhase_Integration_AccountSelectionIsCredentialGated(t *testing.
 	}
 
 	// The onlyEmail narrowing (the --account flag), same idiom as
-	// ListAppPasswordAccounts.
+	// ListIMAPAccounts.
 	narrowed, err := google.ListCalendarCredentialedAccounts(ctx, pool, dualAuth)
 	if err != nil {
 		t.Fatalf("ListCalendarCredentialedAccounts(onlyEmail): %v", err)
@@ -196,7 +196,7 @@ func TestCalendarPhase_Integration_AccountSelectionIsCredentialGated(t *testing.
 
 // ---------------------------------------------------------------------------
 // Criterion 16: add-calendar leaves the MAIL path alone. auth_type is what the
-// send router and ListAppPasswordAccounts read; if consent flips it, mail stops.
+// send router and ListIMAPAccounts read; if consent flips it, mail stops.
 // ---------------------------------------------------------------------------
 
 func TestCalendarPhase_Integration_ConsentLeavesTheMailPathUntouched(t *testing.T) {
@@ -207,12 +207,12 @@ func TestCalendarPhase_Integration_ConsentLeavesTheMailPathUntouched(t *testing.
 
 	// Before: the mailbox is an app-password mailbox with no OAuth at all —
 	// the measured production shape of all three google rows.
-	before, err := google.ListAppPasswordAccounts(ctx, pool, email)
+	before, err := google.ListIMAPAccounts(ctx, pool, email)
 	if err != nil {
-		t.Fatalf("ListAppPasswordAccounts (before): %v", err)
+		t.Fatalf("ListIMAPAccounts (before): %v", err)
 	}
 	if len(before) != 1 {
-		t.Fatalf("ListAppPasswordAccounts (before) = %d rows, want 1", len(before))
+		t.Fatalf("ListIMAPAccounts (before) = %d rows, want 1", len(before))
 	}
 
 	// add-calendar's store write: the refresh token and the calendar scope,
@@ -233,7 +233,7 @@ func TestCalendarPhase_Integration_ConsentLeavesTheMailPathUntouched(t *testing.
 	}
 	if authType != "app_password" {
 		t.Errorf("auth_type = %q after add-calendar, want app_password. Flipping it points the send router at "+
-			"the Gmail API and ListAppPasswordAccounts stops returning the mailbox — mail breaks, silently, "+
+			"the Gmail API and ListIMAPAccounts stops returning the mailbox — mail breaks, silently, "+
 			"for a change that was only about calendars", authType)
 	}
 	if !hasPassword {
@@ -264,12 +264,12 @@ func TestCalendarPhase_Integration_ConsentLeavesTheMailPathUntouched(t *testing.
 	}
 
 	// And the mail path still finds it.
-	after, err := google.ListAppPasswordAccounts(ctx, pool, email)
+	after, err := google.ListIMAPAccounts(ctx, pool, email)
 	if err != nil {
-		t.Fatalf("ListAppPasswordAccounts (after): %v", err)
+		t.Fatalf("ListIMAPAccounts (after): %v", err)
 	}
 	if len(after) != 1 {
-		t.Errorf("ListAppPasswordAccounts (after) = %d rows, want 1 — the account fell out of the IMAP pass", len(after))
+		t.Errorf("ListIMAPAccounts (after) = %d rows, want 1 — the account fell out of the IMAP pass", len(after))
 	}
 
 	// It is now also calendar-credentialed: the row is legitimately dual-auth.

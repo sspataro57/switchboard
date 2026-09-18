@@ -69,6 +69,8 @@ func insID(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, ar
 // SWT-7 pact-join: the google connector's itest-google-% corpus (inbound Gmail
 // messages) is likewise visible to the global pending filter, so it is
 // neutralized here too.
+// SWT-66 pact-join: the microsoft-oauth-mail suite's itest-msoauth-% corpus is
+// the same shape (provider='google', inbound gmail-channel rows) and joins here.
 func cleanupTriage(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	stmts := []string{
@@ -94,6 +96,19 @@ func cleanupTriage(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-imap-%')`,
 		`DELETE FROM sync_runs WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-imap-%')`,
 		`DELETE FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-imap-%'`,
+		// foreign corpus (SWT-66 microsoft-oauth-mail leftovers). Same shape and
+		// same reason as the SWT-11 block above: its criterion-11 fixture creates
+		// an INBOUND gmail-channel row (a stranger writing to the MSN mailbox),
+		// which triage's GLOBAL pending filter would otherwise count.
+		`DELETE FROM capture_decisions WHERE message_id IN (SELECT id FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-msoauth-%')))`,
+		`DELETE FROM ai_extractions WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-msoauth-%'))`,
+		`DELETE FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-msoauth-%'))`,
+		`DELETE FROM normalized_events WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-msoauth-%'))`,
+		`DELETE FROM normalized_threads WHERE thread_key LIKE 'gmail:itest-msoauth-%'`,
+		`DELETE FROM deliveries WHERE from_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-msoauth-%')`,
+		`DELETE FROM raw_source_items WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-msoauth-%')`,
+		`DELETE FROM sync_runs WHERE source_account_id IN (SELECT id FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-msoauth-%')`,
+		`DELETE FROM source_accounts WHERE provider='google' AND account_email LIKE 'itest-msoauth-%'`,
 		// foreign corpus (SWT-64 mail-refetch leftovers). Same shape and same
 		// reason as the SWT-11 block above: INBOUND gmail-channel rows that
 		// triage's GLOBAL pending filter would otherwise count.

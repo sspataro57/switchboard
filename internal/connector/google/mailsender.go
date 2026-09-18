@@ -19,9 +19,14 @@ import (
 // because the transport changed.
 
 // Auth types stored in source_accounts.auth_type.
+//
+// The value names the CREDENTIAL-to-TRANSPORT binding, not the vendor, which is
+// why the third is the SASL mechanism's name: an `xoauth2` row is read over IMAP
+// with a bearer token minted from a stored refresh token.
 const (
 	AuthTypeOAuth       = "oauth"
 	AuthTypeAppPassword = "app_password"
+	AuthTypeXOAuth2     = "xoauth2"
 )
 
 // SMTPSender submits through an account's own SMTP endpoint using its app
@@ -101,8 +106,12 @@ func (m *MailSender) Send(ctx context.Context, fromUserID string, rawMIME []byte
 		// must be released rather than stranded.
 		return "", &SendRejectedError{Body: err.Error()}
 	}
-	switch acct.AuthType {
-	case AuthTypeAppPassword:
+	transport, err := routeSend(acct.AuthType, fromUserID)
+	if err != nil {
+		return "", err
+	}
+	switch transport {
+	case "smtp":
 		if m.SMTP == nil {
 			return "", &SendRejectedError{Body: fmt.Sprintf("account %s is app_password but no SMTP sender is configured", fromUserID)}
 		}
@@ -112,6 +121,38 @@ func (m *MailSender) Send(ctx context.Context, fromUserID string, rawMIME []byte
 			return "", &SendRejectedError{Body: fmt.Sprintf("account %s is %s but no OAuth sender is configured", fromUserID, acct.AuthType)}
 		}
 		return m.OAuth.Send(ctx, fromUserID, rawMIME, threadID)
+	}
+}
+
+// routeSend maps an auth_type to a send transport, or refuses.
+//
+// Pure, so the refusals are testable without a database or a network, and
+// EXHAUSTIVE on purpose. The switch it replaced ended in a `default` that meant
+// "OAuth", which quietly turns every auth_type invented later into a misroute —
+// an xoauth2 row would have handed a MICROSOFT refresh token to the Gmail-API
+// sender. An unknown value is now refused by name instead of assumed.
+//
+// A *SendRejectedError specifically: nothing reached the network, so
+// send_delivery can release the reserved Message-ID and leave the
+// failed->approved retry reachable (invariant 4).
+func routeSend(authType, accountEmail string) (string, error) {
+	switch authType {
+	case AuthTypeOAuth:
+		return "oauth", nil
+	case AuthTypeAppPassword:
+		return "smtp", nil
+	case AuthTypeXOAuth2:
+		// Deliberate absence, not an oversight: this ticket reads the mailbox
+		// and does not send from it. Saying which transport is missing is what
+		// stops the next reader hunting for a password that never existed.
+		return "", &SendRejectedError{Body: fmt.Sprintf(
+			"account %s authenticates with xoauth2 and no SMTP XOAUTH2 transport is wired: "+
+				"sending from this mailbox is out of scope (the SMTP.Send scope is not even requested)",
+			accountEmail)}
+	default:
+		return "", &SendRejectedError{Body: fmt.Sprintf(
+			"account %s has unknown auth_type %q; refusing rather than assuming a transport",
+			accountEmail, authType)}
 	}
 }
 
@@ -243,14 +284,21 @@ func scanAccounts(rows pgx.Rows) ([]Account, error) {
 	return out, nil
 }
 
-// ListAppPasswordAccounts returns the accounts authenticating with an app
-// password, optionally narrowed to one email.
+// ListIMAPAccounts returns the accounts switchboard reads over IMAP, optionally
+// narrowed to one email.
 //
-// Scoped to auth_type='app_password' on purpose: an OAuth row has no password to
-// decrypt, and handing it to the IMAP source would produce a login failure that
+// The predicate is the SET of IMAP credential kinds, spelled once (D7): an
+// app_password row carries a password, an xoauth2 row carries a refresh token,
+// and both are read by the same connector. A plain 'oauth' row is excluded
+// because it belongs to the Gmail API transport — it has nothing this path can
+// authenticate with, and handing it to IMAP would produce a login failure that
 // reads as a credential problem rather than a configuration one.
-func ListAppPasswordAccounts(ctx context.Context, pool *pgxpool.Pool, onlyEmail string) ([]Account, error) {
-	query := accountSelect + ` AND auth_type='app_password'`
+//
+// Renamed rather than joined by a sibling function on purpose: two functions
+// meaning "the IMAP account set" is how the one-shot pass ends up ingesting four
+// mailboxes while the watcher listens to three.
+func ListIMAPAccounts(ctx context.Context, pool *pgxpool.Pool, onlyEmail string) ([]Account, error) {
+	query := accountSelect + ` AND auth_type = ANY('{app_password,xoauth2}')`
 	var args []any
 	if strings.TrimSpace(onlyEmail) != "" {
 		query += ` AND lower(account_email)=lower($1)`

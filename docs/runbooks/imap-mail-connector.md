@@ -197,3 +197,74 @@ The **`/funnel`** page judges health per phase (`funnelDisplayStaleAfter`, 3h), 
 account grows an `imap_refetch` row whose `last_ok` ages past the threshold and then reads
 `stale` forever, with no further run to clear it. It reflects a one-off hand-run, not a
 broken connector.
+
+## A Microsoft mailbox (Outlook.com / MSN / Hotmail)
+
+Outlook.com refuses password logins on IMAP. `outlook.office365.com:993`
+advertises `LOGINDISABLED` with `AUTH=XOAUTH2` as its only mechanism, *before*
+authentication is attempted, so an app password cannot work no matter how it is
+generated — it is irrelevant for IMAP. A Microsoft mailbox authenticates with an
+OAuth bearer token minted from a stored refresh token (`auth_type='xoauth2'`).
+
+### 1. Register the app once (Salvador, in the Azure portal)
+
+Entra ID → **App registrations** → New registration.
+
+- **Supported account types: "Personal Microsoft accounts only"**. This is the
+  `consumers` audience. A work or school account then cannot complete the flow
+  at all, which is the cheapest possible guard against signing in as the wrong
+  account.
+- Authentication → **Allow public client flows** = Yes. That is the only setting
+  the device flow needs; there is no redirect URI to register.
+- API permissions → APIs my organization uses → *Office 365 Exchange Online* →
+  Delegated → `IMAP.AccessAsUser.All`. `offline_access` is requested by the
+  client itself and is what makes a refresh token come back; without it the
+  mailbox stops authenticating within the hour.
+- **No secret.** A public client is issued no client secret, switchboard stores
+  none, and nobody should go looking for one.
+
+What switchboard needs from this is one value: the **Application (client) ID**.
+It is not a secret.
+
+### 2. Roll it out IN THIS ORDER
+
+Onboarding before the deploy means every in-cluster pass writes an error row for
+that mailbox until the image catches up.
+
+1. Apply migration **0037** (`auth_type` gains `xoauth2`). Merging a migration is
+   not applying it.
+2. Hand the kube session the image bump plus `MS_OAUTH_CLIENT_ID` on **both**
+   workloads that resolve a credential: the connector **CronJob** and the watch
+   **Deployment**. (`opsctl mail refetch` reads it from the operator's shell.)
+   `MS_OAUTH_AUTHORITY` is optional and overrides the authority base; its default
+   is `https://login.microsoftonline.com/consumers`.
+3. Only then onboard the mailbox:
+
+```
+OPS_TOKEN_KEY=... DATABASE_URL=... google-auth add-microsoft sspataro57@msn.com
+```
+
+It prints a URL and a user code, waits while you sign in on any device, then
+verifies twice before storing anything: the `id_token`'s claim must equal the
+email you passed, and an IMAP `LIST` with the fresh access token must find a
+usable folder set. A mismatch stores nothing.
+
+### 3. What the mailbox can and cannot do
+
+It is **read-only**, deliberately and in three independent ways: `SMTP.Send` is
+never requested, the stored row has `send_enabled=false`, and `MailSender`
+refuses an `xoauth2` account by name. A reply attempt from this mailbox is
+supposed to fail — that is not a bug to fix in passing.
+
+### 4. When it stops working
+
+Microsoft rotates the refresh token every time it is redeemed, and switchboard
+stores the new one. A consent that is revoked (Microsoft account → Privacy →
+Apps and services), or one that ages out, shows up as `invalid_grant` in the
+account's `sync_runs.error` row, one row per failing account per pass. Other
+causes name themselves the same way: `MS_OAUTH_CLIENT_ID is not set`, or no
+stored token at all.
+
+Recovery is re-consent: run `google-auth add-microsoft <email>` again. It is an
+upsert — the same row is re-keyed, `send_enabled` is not touched, and nothing
+else about the mailbox changes.

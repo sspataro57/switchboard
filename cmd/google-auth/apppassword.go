@@ -63,7 +63,10 @@ func addAppPasswordCmd(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: google-auth add-app-password <email> [--imap-host H] [--imap-port P] [--smtp-host H] [--smtp-port P] [--no-availability]")
+		// Flags FIRST. Go's flag package stops parsing at the first non-flag
+		// argument, so the order this message used to document — email, then
+		// flags — silently produced this very usage error.
+		return fmt.Errorf("usage: google-auth add-app-password [--imap-host H] [--imap-port P] [--smtp-host H] [--smtp-port P] [--no-availability] <email>")
 	}
 	email := fs.Arg(0)
 

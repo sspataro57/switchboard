@@ -287,6 +287,16 @@ type IMAPClientSource struct {
 	// Password is the app password. Held only for the life of a pass, never
 	// logged, and never included in an error string.
 	Password string
+	// AccessToken, when set, authenticates with SASL XOAUTH2 instead of LOGIN:
+	// it mints a bearer token for this connection. It is a func rather than a
+	// string because an access token lives about an hour and a resident watcher
+	// outlives that — the token is fetched per connection, never cached here and
+	// never persisted anywhere.
+	//
+	// Microsoft requires this path (outlook.office365.com advertises
+	// LOGINDISABLED); Gmail's app-password mailboxes leave it nil and are
+	// byte-for-byte unaffected.
+	AccessToken func(ctx context.Context) (string, error)
 	// TLSConfig overrides the default; production leaves it nil.
 	TLSConfig *tls.Config
 
@@ -330,7 +340,12 @@ func (s *IMAPClientSource) connect(ctx context.Context) (*client.Client, error) 
 	if err != nil {
 		return nil, fmt.Errorf("imap dial %s: %w", s.addr(), err)
 	}
-	if err := conn.Login(s.Username, s.Password); err != nil {
+	if s.AccessToken != nil {
+		if err := s.authenticateXOAuth2(ctx, conn); err != nil {
+			_ = conn.Logout()
+			return nil, err
+		}
+	} else if err := conn.Login(s.Username, s.Password); err != nil {
 		_ = conn.Logout()
 		// The password is NOT interpolated: this string reaches logs and
 		// sync_runs.stats.
@@ -338,6 +353,32 @@ func (s *IMAPClientSource) connect(ctx context.Context) (*client.Client, error) 
 	}
 	s.conn = conn
 	return conn, nil
+}
+
+// authenticateXOAuth2 mints a bearer token and runs the SASL exchange.
+//
+// The server's failure CHALLENGE is what makes this worth its own function: a
+// rejected XOAUTH2 attempt comes back as a base64 JSON blob naming the status
+// and the scope, and go-imap surfaces only "AUTHENTICATE failed" unless the
+// mechanism keeps it. Folding it into the error here is the difference between
+// "sign in again" and "fix the app registration" for whoever reads the
+// sync_runs row six months from now.
+//
+// Neither the token nor anything derived from it is interpolated into an error.
+func (s *IMAPClientSource) authenticateXOAuth2(ctx context.Context, conn *client.Client) error {
+	token, err := s.AccessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("imap xoauth2 for %s: no access token: %w", s.Username, err)
+	}
+	mech := XOAuth2Client(s.Username, token)
+	if err := conn.Authenticate(mech); err != nil {
+		if c := mech.Challenge(); c != "" {
+			return fmt.Errorf("imap xoauth2 authentication as %s failed: %w (server said: %s)",
+				s.Username, err, c)
+		}
+		return fmt.Errorf("imap xoauth2 authentication as %s failed: %w", s.Username, err)
+	}
+	return nil
 }
 
 // selectFolder opens a mailbox READ-ONLY. Read-only is the first of the two

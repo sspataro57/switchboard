@@ -85,7 +85,7 @@ func runWatch(pool *pgxpool.Pool, cfg google.Config) error {
 	// surface a credential or connectivity problem at deploy time.
 	watchPass(ctx, pool, sink, ex, cfg, "initial")
 
-	accounts, err := google.ListAppPasswordAccounts(ctx, pool, cfg.AccountEmail)
+	accounts, err := google.ListIMAPAccounts(ctx, pool, cfg.AccountEmail)
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ func watchAccount(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, 
 		if ctx.Err() != nil {
 			return
 		}
-		err := idleOnce(ctx, pool, key, acct, idleRefresh, wake)
+		err := idleOnce(ctx, pool, sink, key, acct, idleRefresh, wake)
 		if ctx.Err() != nil {
 			return
 		}
@@ -216,14 +216,54 @@ func watchAccount(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, 
 }
 
 // idleOnce opens one IDLE and returns when it fires, refreshes, or fails.
-func idleOnce(ctx context.Context, pool *pgxpool.Pool, key string,
+func idleOnce(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, key string,
 	acct google.Account, idleRefresh time.Duration, wake chan<- string) error {
 
-	password, err := google.DecryptAppPassword(ctx, pool, acct.ID, key)
+	// Resolve the credential under the SAME per-account advisory lock the ingest
+	// pass takes, then release it before going idle.
+	//
+	// An OAuth mailbox makes this necessary. Microsoft rotates the refresh token
+	// every time it is redeemed, and in watch mode two paths in THIS process
+	// redeem it: an IDLE wake re-enters idleOnce while the wake it published
+	// sends watchPass into runIMAPIngest. Unsynchronised, both read the same
+	// stored token and both redeem it, so the loser's redemption comes back
+	// invalid_grant — and D9 dutifully records a per-account error row that
+	// looks exactly like a genuinely revoked consent. An alarm that fires on
+	// ordinary traffic is worse than no alarm.
+	//
+	// The lock is NOT held across the IDLE itself: that would block the ingest
+	// pass for the whole refresh interval. It covers only the mint.
+	release, ok, err := sink.LockAccount(ctx, acct.ID)
 	if err != nil {
 		return err
 	}
-	src := google.NewIMAPClientSource(acct.Hosts(), acct.Email, password)
+	if !ok {
+		// An ingest pass holds it and is about to read this mailbox anyway, so
+		// skipping this cycle is correct — but WAIT first. watchAccount treats a
+		// nil return as success and re-enters immediately, so returning straight
+		// away spins on pg_try_advisory_lock for the whole pass: thousands of
+		// round trips a second, each acquiring a pooled connection, contending
+		// with the very pass being waited on and lengthening it.
+		//
+		// A wait and not an error: an error here would write an imap_idle error
+		// run every time an ingest pass overlaps, which is the cry-wolf failure
+		// this locking was added to avoid.
+		select {
+		case <-ctx.Done():
+		case <-time.After(backoffMin):
+		}
+		return nil
+	}
+	src, err := google.OpenIMAPSource(ctx, pool, acct, key)
+	// Safe to release here ONLY because this cycle makes exactly one connection:
+	// src.Idle is the single connect, and it consumes the token minted above. A
+	// second connect after this point (say, fetching the new message here rather
+	// than through watchPass) would mint outside the lock and put the rotation
+	// race back, intermittently.
+	release()
+	if err != nil {
+		return err
+	}
 	defer func() { _ = src.Close() }()
 
 	// Bounded by the refresh interval: IDLE is re-issued rather than held past
