@@ -14,7 +14,7 @@ package promote_test
 //	const LaneInquiry  Lane = "inquiry"
 //	const InquiryActor = "promote:inquiry"       // every inquiry-lane executor call
 //	const InquiryMaxAge = 72 * time.Hour         // C-D6's second fence
-//	const InquiryGrace  = 30 * time.Minute       // C-D6's grace
+//	const InquiryGrace  = 0                      // C-D6's grace, removed 2026-09-18
 //
 //	// Verdict gains Lane; on the inquiry lane Kind carries ask_kind.
 //	type Verdict struct { Lane Lane; Kind string; ... }
@@ -78,9 +78,10 @@ func TestInquiryConstants(t *testing.T) {
 	if promote.InquiryMaxAge != 72*time.Hour {
 		t.Errorf("InquiryMaxAge = %v, want 72h (C-D6)", promote.InquiryMaxAge)
 	}
-	if promote.InquiryGrace != 30*time.Minute {
-		t.Errorf("InquiryGrace = %v, want 30m (C-D6: the replied-since fold fires first; halved from 1h by "+
-			"Salvador on 2026-09-18)", promote.InquiryGrace)
+	if promote.InquiryGrace != 0 {
+		t.Errorf("InquiryGrace = %v, want 0 — Salvador removed the wait on 2026-09-18 so an ask becomes a task "+
+			"on the first pass that sees it. GateAnswered still runs; the board is corrected afterwards instead",
+			promote.InquiryGrace)
 	}
 	if promote.InquiryActor != "promote:inquiry" {
 		t.Errorf("InquiryActor = %q, want promote:inquiry (C-D1)", promote.InquiryActor)
@@ -134,12 +135,13 @@ func TestInquiryGate_EachReasonAlone(t *testing.T) {
 			c.SentAt = iqNow.Add(-721 * time.Hour)
 		}, "stale"},
 
-		// C-D6: grace 30m, so the replied-since fold can fire first.
-		{"pending: 29m old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-29 * time.Minute) }, "pending"},
-		{"released: 31m old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-31 * time.Minute) }, ""},
-		// The old boundary: an ask he answers in the second half-hour now costs a
-		// task where it used to be folded away.
+		// C-D6: the grace is ZERO since 2026-09-18 — nothing waits.
+		{"released: one second old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-time.Second) }, ""},
+		{"released: 29m old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-29 * time.Minute) }, ""},
 		{"released: 59m old", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-59 * time.Minute) }, ""},
+		// The one thing a zero grace still refuses: a timestamp that has not
+		// happened yet. Negative age is less than zero, so clock skew cannot
+		// promote an ask early.
 		{"pending: sent in the future (clock skew)", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(time.Minute) }, "pending"},
 
 		// C-D7: ANY replied-since state blocks promotion.
@@ -222,7 +224,10 @@ func TestInquiryGate_ReportsTheFirstReasonInCThreeOrder(t *testing.T) {
 	}{
 		{"rethreaded", func(c *promote.InquiryCandidate) { c.CurrentThreadID = 7 }},
 		{"kind", func(c *promote.InquiryCandidate) { c.AskKind = "question" }},
-		{"stale", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-10 * time.Minute) }},
+		// Clearing `stale` has to leave the candidate PENDING, and with a zero
+		// grace the only pending case left is a timestamp in the future — which
+		// is exactly the clock-skew guard worth keeping in this order test.
+		{"stale", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(time.Minute) }},
 		{"pending", func(c *promote.InquiryCandidate) { c.SentAt = iqNow.Add(-2 * time.Hour) }},
 		{"answered", func(c *promote.InquiryCandidate) { c.RepliedSince = false }},
 		{"not_addressed", func(c *promote.InquiryCandidate) { c.ThreadKey = "slack:T0HPR78RX:D07PRIVATE" }},

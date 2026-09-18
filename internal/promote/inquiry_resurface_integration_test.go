@@ -496,9 +496,10 @@ func TestPromoteInquiryResurface_Integration_GatesExactlyAsForAnAttributedMessag
 	}
 	var asks []int64
 	for _, tw := range twins {
-		// pending: a DM ask inside the 1h grace.
+		// pending: with the grace at zero (2026-09-18) the only held case left is
+		// a sent_at in the future — the clock-skew guard.
 		asks = append(asks, tw.ask("rs-pending-"+tw.name, slackKey("D0IQPRSP"+tw.name, ""), "slack", "conversation",
-			s.ago(10*time.Minute)))
+			s.ago(-10*time.Minute)))
 		// answered: he spoke in the DM after the ask.
 		ka := slackKey("D0IQPRSA"+tw.name, "")
 		asks = append(asks, tw.ask("rs-answered-"+tw.name, ka, "slack", "conversation", s.ago(2*time.Hour)))

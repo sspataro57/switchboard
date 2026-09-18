@@ -46,12 +46,22 @@ const (
 	// `pending`, so the replied-since fold can fire first. The pipelined sweep
 	// (5 min) bounds how late a pending verdict releases.
 	//
-	// Halved from an hour to 30 minutes (Salvador, 2026-09-18, "make it 30 mins
-	// only"). The trade is the whole point of the constant: a shorter grace
-	// surfaces a client's question sooner, and costs a task for any exchange he
-	// answers between 30 and 60 minutes — which the replied-since fold would
-	// have folded away silently under the old value.
-	InquiryGrace = 30 * time.Minute
+	// ZERO since 2026-09-18 (Salvador: "remove the 30 min ... so comms become
+	// tasks as soon as they land and we can check for replies and remove them
+	// from the board if so"). An hour, then 30 minutes, now no wait at all: an
+	// ask becomes a task on the first pass that sees it.
+	//
+	// What this does NOT remove is the replied-since fold. GateAnswered still
+	// runs, so an ask he has already answered is still refused — it simply
+	// almost never fires now, because nothing waits long enough for a reply to
+	// land first. The board is meant to be corrected AFTER the fact instead:
+	// tasks whose thread has since been answered get closed, rather than never
+	// being created.
+	//
+	// Zero still holds the clock-skew case. A future sent_at gives a NEGATIVE
+	// age, and negative is less than zero, so such a message stays pending
+	// rather than promoting on a timestamp that has not happened yet.
+	InquiryGrace = 0
 )
 
 // inquiryCreateStatus is the status a NEW inquiry task is created with — the

@@ -219,7 +219,8 @@ func TestPipelinedInquiry_Integration_PromoteProcessedCountsActedVerdictsOnly(t 
 	f := piqSetup(t, ctx)
 	m1, r1 := f.message(t, ctx, "acted", 2*time.Hour)
 	f.verdict(t, ctx, m1, r1)
-	m2, r2 := f.message(t, ctx, "pending", 10*time.Minute)
+	// Held, with a zero grace, means a sent_at in the future.
+	m2, r2 := f.message(t, ctx, "pending", -10*time.Minute)
 	f.verdict(t, ctx, m2, r2)
 	n, err := registeredPass(t, pipeline.StageInquiryPromote, f.pool, nil)(ctx)
 	if err != nil {
@@ -227,7 +228,7 @@ func TestPipelinedInquiry_Integration_PromoteProcessedCountsActedVerdictsOnly(t 
 	}
 	if n != 1 {
 		t.Errorf("processed = %d, want 1: the passing verdict counts; the pending one stays in the inbox and must "+
-			"NOT count, or the loop re-runs at once while it sits inside its grace", n)
+			"NOT count, or the loop re-runs at once while it is still held", n)
 	}
 }
 

@@ -1173,7 +1173,9 @@ func TestPromoteInquiry_Integration_GatedVerdictsWriteNoRowAndCallNoTool(t *test
 	s := newIQPSuite(t, ctx)
 	gated := map[string]int64{}
 
-	m, r := s.message(t, ctx, iqpMsg{label: "g-pending", key: gmailKey("g-pending"), sentAt: s.ago(10 * time.Minute)})
+	// Pending, with the grace at zero, means a timestamp that has not happened
+	// yet — the clock-skew case.
+	m, r := s.message(t, ctx, iqpMsg{label: "g-pending", key: gmailKey("g-pending"), sentAt: s.ago(-10 * time.Minute)})
 	s.decision(t, ctx, m, "live", "attributed", s.armed)
 	s.verdict(t, ctx, m, r, iqpV{scope: "thread"})
 	gated["pending"] = m
@@ -1215,22 +1217,24 @@ func TestPromoteInquiry_Integration_GatedVerdictsWriteNoRowAndCallNoTool(t *test
 
 // C10's second half: a pending verdict promotes on the first pass after its
 // grace. The clock is the fixture's sent_at (C13's method).
-func TestPromoteInquiry_Integration_PendingReleasesAfterGrace(t *testing.T) {
+// The grace is zero, so the only thing still held is a future sent_at; it
+// releases once the clock catches up (here, simulated by moving sent_at back).
+func TestPromoteInquiry_Integration_PendingReleasesWhenTheClockCatchesUp(t *testing.T) {
 	ctx := context.Background()
 	s := newIQPSuite(t, ctx)
-	m, r := s.message(t, ctx, iqpMsg{label: "grace", key: gmailKey("grace"), sentAt: s.ago(10 * time.Minute)})
+	m, r := s.message(t, ctx, iqpMsg{label: "grace", key: gmailKey("grace"), sentAt: s.ago(-10 * time.Minute)})
 	s.decision(t, ctx, m, "live", "attributed", s.armed)
 	s.verdict(t, ctx, m, r, iqpV{scope: "thread"})
 
 	st := s.run(t, ctx, promote.Config{})
 	if _, ok := s.promotion(t, ctx, m); ok || st.Gated["pending"] != 1 {
-		t.Fatalf("inside the grace: promoted=%v Gated=%v, want no row and pending=1", ok, st.Gated)
+		t.Fatalf("a future sent_at: promoted=%v Gated=%v, want no row and pending=1", ok, st.Gated)
 	}
 	s.exec(t, ctx, `UPDATE normalized_messages SET sent_at = now() - interval '2 hours' WHERE id=$1`, m)
 	s.run(t, ctx, promote.Config{})
 	p, ok := s.promotion(t, ctx, m)
 	if !ok || p.action != "task" || p.taskID == nil || s.status(t, ctx, *p.taskID) != "ready" {
-		t.Errorf("after the grace: %+v (found=%v), want a ready task", p, ok)
+		t.Errorf("once the timestamp is in the past: %+v (found=%v), want a ready task", p, ok)
 	}
 }
 
@@ -1240,7 +1244,7 @@ func TestPromoteInquiry_Integration_DryRunWritesNothingAndPlansTheSame(t *testin
 	ctx := context.Background()
 	s := newIQPSuite(t, ctx)
 	create, _, _ := s.eligible(t, ctx, "dry-create", iqpV{})
-	m, r := s.message(t, ctx, iqpMsg{label: "dry-pending", key: gmailKey("dry-pending"), sentAt: s.ago(10 * time.Minute)})
+	m, r := s.message(t, ctx, iqpMsg{label: "dry-pending", key: gmailKey("dry-pending"), sentAt: s.ago(-10 * time.Minute)})
 	s.decision(t, ctx, m, "live", "attributed", s.armed)
 	s.verdict(t, ctx, m, r, iqpV{scope: "thread"})
 
