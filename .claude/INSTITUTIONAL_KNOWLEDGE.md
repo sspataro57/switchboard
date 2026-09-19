@@ -1282,12 +1282,16 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   **The dashboard IS deployed since 2026-07-31** (`deployment/dashboard` +
   `service/dashboard`, ops namespace, image tag `0.2.0`, manifest
   `kube/switchboard/dashboard.yaml`) — switchboard's first long-running
-  workload; everything else is still one-shot CronJobs. It is deliberately
-  NOT exposed by an Ingress: with `OIDC_ISSUER` unset the dashboard falls back
-  to a dev-login stub that hands a session to anyone who reaches `/dev/login`,
-  and the dashboard performs approvals and sends. Reach it with
-  `kubectl -n ops port-forward svc/dashboard 8085:80`; the Ingress block in the
-  manifest is commented out until OIDC is configured.
+  workload; everything else is still one-shot CronJobs.
+  **It IS exposed by an Ingress** (corrected 2026-09-19 by the kube session; the
+  earlier "port-forward only, Ingress commented out" note was stale):
+  `ops/dashboard`, class nginx, host `switchboard.home.arpa`, no TLS, controller
+  at 192.168.50.51, resolved on the LAN by a pfSense host override. Nothing gates
+  paths in front of the app. `OIDC_ISSUER` is still unset, so the dashboard runs
+  the dev-login stub: **anyone on the LAN who reaches `/dev/login` gets a session,
+  and the dashboard performs approvals and sends.** The LAN is the only gate. A
+  trusted cert is planned as `switchboard.sspataro.com` (cert-manager
+  `letsencrypt-prod`, DNS-01, LAN-only like n8n) — that does not add auth.
   Still not deployed: triage, drafts, fleetd, hooksd. **orchestratord IS deployed**
   (SWT-41, 2026-09-12, image 0.7.9): Deployment `orchestratord` in `ops`
   (`kube/switchboard/orchestrator.yaml`, replicas 1, Recreate, liveness `/healthz`
@@ -2393,8 +2397,8 @@ activity (SWT-45)".
   form sits inside the only `{{if eq .AssigneeType "human"}}`.
   - `task_close` accepts `pr_open`/`awaiting_*` on worker tasks, whose claims
     only `mark_done_local` and `task_release` release. So a hand-built or
-    cross-site POST (the dashboard has no CSRF tokens; it is reached by
-    port-forward only) could close one and strand its claim.
+    cross-site POST (the dashboard has no CSRF tokens, and it is reachable
+    LAN-wide through its Ingress) could close one and strand its claim.
   - A hard gate needs a new `task_close` argument: SPEC Future work.
   - Adding `task_close` to `humanOnly` breaks the orchestrator: five policy
     tests pin that.
