@@ -2819,5 +2819,7 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   Browsers fetch those without credentials. It serves real files only; misses and directories are a bare
   404 (an `immutable` 404 would be cached for a year). `.woff2`/`.webmanifest` need `mime.AddExtensionType`.
   The route's exact spelling is pinned by a test, so headers are set by a wrapper around the mux.
+- **Every dashboard response carries `X-Frame-Options: SAMEORIGIN`** (the mux wrapper). Never `DENY`: `/kiosk`
+  frames the board.
 - **Verify UI work in a real browser** (Playwright is installed: `channel="chrome"`). Chrome's
   `--screenshot`/`--dump-dom` with `--virtual-time-budget` hid both landmines above.

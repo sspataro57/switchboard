@@ -6,6 +6,7 @@ package dashboard
 // goes fullscreen and the board reloads inside it.
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -54,6 +55,69 @@ func TestKiosk_RendersTheShellAroundTheBoard(t *testing.T) {
 	}
 	if u != nil && u.Query().Has("status") {
 		t.Errorf("the iframe src carries status; the shell carries the project filter only")
+	}
+}
+
+// The render path escapes a hostile project too: the value reaches the iframe
+// src and the leave link only as a percent-escaped query value behind the
+// literal /tasks? prefix.
+func TestKiosk_HostileProjectStaysAQueryValue(t *testing.T) {
+	s, err := NewServer(nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	hostile := `javascript:alert(1)" onload="x"><script>`
+	rec := httptest.NewRecorder()
+	s.showKiosk(rec, httptest.NewRequest(http.MethodGet, "/kiosk?project="+url.QueryEscape(hostile), nil))
+	body := rec.Body.String()
+	if strings.Contains(body, "<script>x") || strings.Contains(body, `onload="x"`) || strings.Contains(body, "ZgotmplZ") {
+		t.Fatalf("the hostile project broke out of its attribute:\n%s", body)
+	}
+	for _, m := range regexp.MustCompile(`(?:src|href)="([^"]*)"`).FindAllStringSubmatch(body, -1) {
+		if !strings.HasPrefix(m[1], "/") || strings.HasPrefix(m[1], "//") {
+			t.Errorf("the shell renders %s: every URL is an in-app absolute path", m[0])
+		}
+	}
+}
+
+// staticCacheHeaders: a real embedded file is served immutable; a miss or a
+// directory is a bare 404 that never reaches the file server and carries no
+// cache header (an immutable 404 would be cached for a year; the open route
+// lists nothing). Every response refuses third-party framing.
+func TestStaticCacheHeaders(t *testing.T) {
+	sub, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	reached := 0
+	h := staticCacheHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached++ }), sub)
+	do := func(method, path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+		return rec
+	}
+	if rec := do(http.MethodGet, "/static/fonts/b612mono-400.woff2"); !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") || reached != 1 {
+		t.Errorf("a real file: Cache-Control %q, next reached %d times; want immutable and 1", rec.Header().Get("Cache-Control"), reached)
+	}
+	for _, p := range []string{"/static/", "/static/fonts", "/static/fonts/", "/static/nope.woff2", "/static/../server.go"} {
+		before := reached
+		rec := do(http.MethodGet, p)
+		if rec.Code != http.StatusNotFound || rec.Header().Get("Cache-Control") != "" || reached != before {
+			t.Errorf("GET %s = %d, Cache-Control %q, next reached: %v; want a bare 404 that never reaches the file server",
+				p, rec.Code, rec.Header().Get("Cache-Control"), reached != before)
+		}
+	}
+	if rec := do(http.MethodPost, "/static/fonts/b612mono-400.woff2"); rec.Header().Get("Cache-Control") != "" {
+		t.Errorf("POST to a real file carries Cache-Control %q; only GET and HEAD are cacheable", rec.Header().Get("Cache-Control"))
+	}
+	before := reached
+	if rec := do(http.MethodGet, "/tasks"); reached != before+1 || rec.Header().Get("Cache-Control") != "" {
+		t.Errorf("a non-static path must pass through untouched")
+	}
+	for _, p := range []string{"/tasks", "/kiosk", "/static/icon-192.png"} {
+		if got := do(http.MethodGet, p).Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+			t.Errorf("GET %s X-Frame-Options = %q, want SAMEORIGIN (never DENY: /kiosk frames the board)", p, got)
+		}
 	}
 }
 

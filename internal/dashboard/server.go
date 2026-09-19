@@ -131,13 +131,18 @@ func (s *Server) Handler() http.Handler {
 // open route lists nothing.
 func staticCacheHeaders(next http.Handler, static fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The board frames itself (/kiosk) and nothing else should: its POST
+		// verbs are one click each. SAMEORIGIN, never DENY — DENY breaks /kiosk.
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		if name, ok := strings.CutPrefix(r.URL.Path, "/static/"); ok {
 			fi, err := fs.Stat(static, name)
 			if err != nil || fi.IsDir() {
 				http.NotFound(w, r)
 				return
 			}
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

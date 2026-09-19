@@ -15,8 +15,6 @@ type kioskData struct {
 	// BoardURL is the framed board: always refreshing, carrying only the
 	// project filter.
 	BoardURL string
-	// PlainURL is the same board outside the shell.
-	PlainURL string
 }
 
 // kioskBoardURL is the board the shell frames.
@@ -38,7 +36,7 @@ func kioskURL(project string) string {
 
 func (s *Server) showKiosk(w http.ResponseWriter, r *http.Request) {
 	project := r.URL.Query().Get("project")
-	data := kioskData{BoardURL: kioskBoardURL(project), PlainURL: kioskBoardURL(project)}
+	data := kioskData{BoardURL: kioskBoardURL(project)}
 	if err := s.tmpl.ExecuteTemplate(w, "kiosk.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
