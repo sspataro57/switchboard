@@ -2764,3 +2764,23 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   resurrect a catch-all, and the reconciler would bounce it. The resurfaced ask
   becomes a Holding task on the message's OWN conversation (body line
   `logged_on_closed_task: N`), and the bucket stays closed.
+
+## Mail history without tasks (MSN onboarding, 2026-09-19)
+
+- **To ingest old mail as data only, backfill with `CAPTURE_RULES_MODE=live`.**
+  `go run ./cmd/connectors/google --account X --full --backfill <N>h` with live
+  mode set: live capture is bounded by `DefaultRulesHorizon` (720h), so mail older
+  than 30 days gets NO capture decision, and every lane (personal, inquiry, residue,
+  route) selects on the latest decision — no decision, no lane, no task. A default
+  (shadow) run is unbounded and would attribute the whole backfill.
+- **The personal lane has no age fence** (inquiry has 72h, live capture 720h).
+  Anything that writes an `attributed→personal` decision on old mail — a shadow
+  `capture-rules run --all` without `--since`, or a shadow connector pass — feeds
+  it to classify-personal and then promote, which create tasks whatever the age.
+  Always pass `--since 720h` to a shadow `--all` re-pass.
+- `--full --backfill` on IMAP re-scans the window without touching UID cursors;
+  already-stored messages come back `raw_unchanged`.
+- `sspataro57@msn.com` = source_accounts 14418 (xoauth2, read-only); capture rule
+  76 files the whole mailbox under `personal` (Salvador: "everything from that
+  email is personal"). Rules 1, 2, 63 and 68 outrank it; the 30-day try showed it
+  lost to none of them.
