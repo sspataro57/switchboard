@@ -498,6 +498,36 @@ selects, except `state_age_min`, which is arithmetic on
 keep their handlers, their args, their actor and their `executeTask` call. If
 implementation finds otherwise, STOP: it means a decision above is wrong.
 
+### B21 — AMENDMENT (2026-09-19, found in implementation): FULL opens a full-screen shell, `/kiosk`
+
+B18-1 was wrong as written. A full-page navigation ends the document's
+fullscreen, and the board's auto-refresh IS a full-page navigation
+(`location.replace`), so FULL on `/tasks` would last until the next refresh —
+and `requestFullscreen` needs a fresh tap, so the script cannot re-enter.
+Verified in a browser and confirmed by review. Salvador chose "both": a shell
+now, the installed app (B18-2) when the certificate lands.
+
+- `GET /kiosk[?project=…]` (behind `s.auth.Require`, `kiosk.go` +
+  `templates/kiosk.html`): a shell document holding
+  `<iframe id="board" src="/tasks?refresh=on[&project=…]">`. It reads nothing
+  and executes nothing; only the project filter is carried, query-escaped.
+- The shell shows one button, "Tap for full screen", which calls
+  `requestFullscreen` on the SHELL's document. The board then reloads inside the
+  iframe and the shell stays fullscreen (browser-tested across a reload). Leaving
+  fullscreen brings the button back; "stay in the window" dismisses it.
+- The board's FULL button (`data-kiosk="{{.KioskURL}}"`): framed by the shell it
+  toggles the shell's fullscreen (`window.top`, same origin — a tap in a frame
+  counts for its ancestors); anywhere else it `location.assign`s the shell.
+- Same rules as the board: no third-party URL, nothing stored, no fetch, no
+  inline handler, wake lock guarded and swallowed. Tests: `kiosk_test.go`.
+- Also found in implementation and fixed here: B13 alone does not save page 2 —
+  a 5 s reload always pre-empts a 9 s page turn from page 1 — so the reload loop
+  additionally waits for one full paging cycle (`cycleDone`). Worst-case
+  staleness is `longest panel's pages × 9 s + 5 s`, as B13 already stated.
+- `/static/` serves only real embedded files; a miss or a directory is a plain
+  404 with no cache header (review finding: an `immutable` 404 would be cached
+  for a year, and the open route should list nothing).
+
 ## Acceptance criteria
 
 ### Part 1 — pure Go display helpers (`internal/dashboard/display.go`, new)

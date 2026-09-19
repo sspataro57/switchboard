@@ -228,7 +228,7 @@
     <div class="tally">{{range .Tally.Items}}<span class="{{.Class}}"><b>{{.Count}}</b>{{.Label}}</span>{{end}}</div>
     <div class="clock" id="clock" aria-hidden="true"><span></span><span></span><i>:</i><span></span><span></span></div>
     <p class="muted"><a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">{{if not .AutoRefresh}}auto-refresh: turn on{{else}}auto-refresh: turn off{{end}}</a></p>
-    <button type="button" class="fs" id="fs">⛶ FULL</button>
+    <button type="button" class="fs" id="fs" data-kiosk="{{.KioskURL}}">⛶ FULL</button>
   </header>
   {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
   {{with .OrchAlert}}<p id="orchestrator-health" class="orch-bad">orchestrator {{.Verdict}}: backlog {{.Backlog}}, cursor {{.Cursor}} of {{.Head}} — {{if eq .Verdict "stalled"}}it is running but not draining events{{else}}lifecycle rules (Deliver tasks, unblocking, claim expiry) are not running{{end}}. <a href="/funnel">funnel</a></p>{{end}}
@@ -449,11 +449,17 @@
     clock();
     setInterval(clock, 5000);
 
-    // FULL: needs a tap, not a secure context.
+    // FULL. A reload ends a document's fullscreen and this page reloads itself,
+    // so the board never goes fullscreen on its own: inside the /kiosk shell it
+    // toggles the SHELL's fullscreen (the tap counts for the parent too);
+    // anywhere else it opens the shell.
     var fs = document.getElementById("fs");
     if (fs) fs.addEventListener("click", function () {
-      var root = document.documentElement;
-      if (document.fullscreenElement) { document.exitFullscreen(); return; }
+      var shell = null;
+      try { if (window.top !== window.self) shell = window.top.document; } catch (e) { shell = null; }
+      if (!shell) { location.assign(fs.getAttribute("data-kiosk")); return; }
+      if (shell.fullscreenElement) { shell.exitFullscreen(); return; }
+      var root = shell.documentElement;
       if (root.requestFullscreen) root.requestFullscreen().catch(function () {});
     });
 

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0b0c">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="icon" href="/static/icon-192.png">
+  <title>switchboard — full screen</title>
+  <style>
+    @font-face { font-family: "Barlow Condensed"; font-weight: 700; font-style: normal; font-display: swap; src: url(/static/fonts/barlowcondensed-700.woff2) format("woff2"); }
+    html, body { height: 100%; margin: 0; background: #0b0b0c; overflow: hidden; }
+    iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; background: #0b0b0c; }
+    #gate { position: fixed; inset: 0; z-index: 2; display: grid; place-content: center; justify-items: center; gap: 1.2rem;
+            background: rgba(11, 11, 12, .88); font-family: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif; text-transform: uppercase; }
+    #gate[hidden] { display: none; }
+    #enter { background: #f5c400; color: #111; border: 0; border-radius: .5rem; padding: 1.1rem 2.2rem; font: 700 2rem/1 "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+             letter-spacing: .1em; text-transform: uppercase; cursor: pointer; }
+    #skip, #gate a { background: none; border: 0; color: #77756c; font: 700 1rem "Barlow Condensed", "Arial Narrow", system-ui, sans-serif; letter-spacing: .12em;
+                     text-transform: uppercase; text-decoration: none; cursor: pointer; }
+    #skip:hover, #gate a:hover { color: #f1efe6; }
+  </style>
+</head>
+<body>
+  <iframe id="board" src="{{.BoardURL}}" title="switchboard board"></iframe>
+  <div id="gate">
+    <button type="button" id="enter">⛶ Tap for full screen</button>
+    <button type="button" id="skip">stay in the window</button>
+    <a href="{{.PlainURL}}">leave the full-screen shell</a>
+  </div>
+  <script>
+  (function () {
+    // The SHELL goes fullscreen, never the board: the board reloads itself
+    // every few seconds, and a reload ends its own document's fullscreen.
+    var gate = document.getElementById("gate");
+    var root = document.documentElement;
+    document.getElementById("enter").addEventListener("click", function () {
+      if (root.requestFullscreen) root.requestFullscreen().catch(function () {});
+      gate.hidden = true;
+    });
+    document.getElementById("skip").addEventListener("click", function () { gate.hidden = true; });
+    document.addEventListener("fullscreenchange", function () {
+      if (!document.fullscreenElement) gate.hidden = false; // left fullscreen: offer it again
+    });
+    // Keep the screen awake where the browser allows it (secure contexts only).
+    function awake() {
+      if (navigator.wakeLock && !document.hidden) {
+        navigator.wakeLock.request("screen").then(function () {}).catch(function () {});
+      }
+    }
+    document.addEventListener("visibilitychange", awake);
+    awake();
+  })();
+  </script>
+</body>
+</html>

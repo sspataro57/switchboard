@@ -70,6 +70,9 @@ type boardData struct {
 	Panes        []boardPane
 	Tally        boardTally
 	ProjectLabel string
+	// KioskURL is the full-screen shell for this project filter (B21): where the
+	// FULL button goes when the board is not already inside it.
+	KioskURL string
 	// AdvancedFilters are the active non-project filters, shown on the first
 	// line (L5); ClearAdvancedURL drops them, keeping project and refresh.
 	AdvancedFilters  []boardFilter
@@ -268,6 +271,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		RefreshMode:      refreshKey,
 		PageSeconds:      int(boardPageInterval / time.Second),
 		ProjectLabel:     projectLabel(r.URL.Query().Get("project")),
+		KioskURL:         kioskURL(r.URL.Query().Get("project")),
 	}
 	// SWT-57: the rows grouped by their light (unknown statuses land in
 	// "other"), with SWT-59's incoming section first; and the first line's

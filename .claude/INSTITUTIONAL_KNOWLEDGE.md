@@ -2405,6 +2405,10 @@ activity (SWT-45)".
 
 ## Board lights, auto-refresh and session signals (SWT-52, board-status-lights)
 
+> SWT-67: the one `<script>` now renders on EVERY board page and the reload loop arms from
+> `data-refresh="on"` (`if (!refreshOn) return;` in `arm()`), not from a template conditional. See
+> "Board departures view".
+
 - **The light is Go, not template.** `lightFor(status, lightFacts)` in
   `internal/dashboard/lights.go` is pure (no pgx, no `time`); the facts come from
   `boardLightFacts`, a SEPARATE read (the `reopenMarkers` precedent). `boardQuery`'s
@@ -2528,6 +2532,9 @@ activity (SWT-45)".
   any merge touching `skills/swb-status/`.
 
 ## Board layout (SWT-57, board-layout-compact)
+
+> SWT-67 restyled this page as a departures board. Section KEYS, order and membership are unchanged; the
+> titles, the row markup (grid rows, not a table) and the dropped cells changed. See "Board departures view".
 
 - **Sections come from the LIGHT, not the status** (`sections.go`, pure):
   blocked (red: session `needs_input` or worker `needs_feedback`, then grey
@@ -2784,3 +2791,33 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   76 files the whole mailbox under `personal` (Salvador: "everything from that
   email is personal"). Rules 1, 2, 63 and 68 outrank it; the 30-day try showed it
   lost to none of them.
+
+## Board departures view (SWT-67, board-departures)
+
+- **What it is.** `/tasks` is a dark split-flap departures board: two panes of panels that page instead of
+  scrolling, a sign header (tallies, clock, FULL), a ticker footer, and a machine-status list under 760px.
+  The accepted mock is `docs/tickets/board-departures-mock/`. Data truth did not move: `sections.go` and
+  `lights.go` decide; `display.go` holds the pure display helpers (panes, tallies, remarks, elapsed, hue).
+- **DOM order is not visual order.** Panes are a prefix/suffix split of `boardSectionOrder`; the drawn order
+  inside a pane is CSS `order` from `boardPanels`. `incoming` is first in the document and last on the left.
+  On the phone `.col-right > section { order: 10 !important }` beats the inline order.
+- **The template may not contain the word "incoming"** (`TestTasksTemplate_NoIncoming`), so the tally words
+  come from `boardTally.Items()`. Same reason the section titles live in Go.
+- **Fullscreen does not survive a reload**, and auto-refresh is a reload. FULL therefore opens `GET /kiosk`,
+  a shell that frames `/tasks?refresh=on`; the SHELL goes fullscreen. Never call `requestFullscreen` on the
+  board's own document. The installed app (manifest `display: fullscreen`) needs a trusted cert — kube
+  follow-up.
+- **Paging vs refresh.** Reloads wait for a full paging cycle (`cycleDone`) AND every panel on page 1, else
+  page 2 is never drawn (5 s reload vs 9 s turn). Staleness = longest panel's pages x 9 s + 5 s.
+- **Two layout landmines, both bitten:** measure a row with `offsetHeight`, never `getBoundingClientRect()`
+  (a row mid-flip is transformed nearly flat, so everything "fits" and paging silently turns off once
+  fonts load); and remove the `flip` class on `animationend` (an element with an animation in effect
+  becomes the containing block of its `position: fixed` popup).
+- **The time cell** shows five characters and clips from the left (`direction: rtl; width: 5ch`), so the
+  unchanged `YYYY-MM-DD` stamp reads `MM-DD`. Chromium-verified only.
+- **`/static/` is the second unauthenticated route** (after `/healthz`): embedded fonts, icons, manifest.
+  Browsers fetch those without credentials. It serves real files only; misses and directories are a bare
+  404 (an `immutable` 404 would be cached for a year). `.woff2`/`.webmanifest` need `mime.AddExtensionType`.
+  The route's exact spelling is pinned by a test, so headers are set by a wrapper around the mux.
+- **Verify UI work in a real browser** (Playwright is installed: `channel="chrome"`). Chrome's
+  `--screenshot`/`--dump-dom` with `--virtual-time-budget` hid both landmines above.

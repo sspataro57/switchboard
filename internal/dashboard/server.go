@@ -85,6 +85,8 @@ func (s *Server) Handler() http.Handler {
 	// SWT-10: full board, task detail, briefs, plan review, exports.
 	mux.Handle("GET /tasks", s.auth.Require(http.HandlerFunc(s.listTasks)))
 	mux.Handle("GET /tasks/{id}", s.auth.Require(http.HandlerFunc(s.showTask)))
+	// SWT-67 B21: the full-screen shell around the board (kiosk.go).
+	mux.Handle("GET /kiosk", s.auth.Require(http.HandlerFunc(s.showKiosk)))
 	mux.Handle("GET /briefs", s.auth.Require(http.HandlerFunc(s.listBriefs)))
 	// Ingestion visibility, split across two read-only pages (SWT-29):
 	// /sources answers "how much is stored, per account" (lifetime totals,
