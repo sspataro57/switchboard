@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b0b0c">
+<title>switchboard — board preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=B612+Mono:wght@400;700&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0b0c; --panel: #131315; --cell: #1b1b1e; --cell-hi: #232327; --seam: #050506;
+    --amber: #ffc62a; --amber-dim: #a8801a; --white: #f1efe6; --grey: #77756c;
+    --red: #ff3b30; --green: #2fe36b; --blue: #4aa3ff; --sign: #f5c400;
+    --mono: "B612 Mono", "DejaVu Sans Mono", ui-monospace, monospace;
+    --head: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+    --row: 2.15rem;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--white); }
+  body { font-family: var(--mono); display: flex; flex-direction: column; overflow: hidden;
+         background: radial-gradient(120% 80% at 50% 0%, #17171a 0%, var(--bg) 60%); }
+
+  /* ---------- header sign ---------- */
+  header { display: flex; align-items: center; gap: 1rem; padding: .55rem 1rem .5rem; flex: none; }
+  .sign { background: var(--sign); color: #111; border-radius: .35rem; width: 2.6rem; height: 2.6rem;
+          display: grid; place-items: center; flex: none; }
+  .sign svg { width: 1.8rem; height: 1.8rem; }
+  h1 { font: 700 2.1rem/1 var(--head); letter-spacing: .06em; margin: 0; text-transform: uppercase; }
+  h1 small { font-weight: 500; font-size: .95rem; color: var(--grey); letter-spacing: .12em; margin-left: .6rem; }
+  .spacer { flex: 1; }
+  .tally { display: flex; gap: .9rem; font: 600 1rem var(--head); letter-spacing: .08em; text-transform: uppercase; color: var(--grey); }
+  .tally b { font: 700 1.25rem var(--mono); margin-right: .3rem; }
+  .tally .t-input b { color: var(--red); } .tally .t-work b { color: var(--amber); }
+  .tally .t-in b { color: var(--blue); }   .tally .t-done b { color: var(--green); }
+  .clock { display: flex; gap: .18rem; align-items: center; }
+  .clock span { background: linear-gradient(#26262a 0 49%, var(--seam) 49% 52%, #1c1c1f 52%); color: var(--amber);
+                font: 700 1.7rem/1 var(--mono); padding: .3rem .32rem; border-radius: .2rem; min-width: 1.35rem; text-align: center; }
+  .clock i { color: var(--amber); font: 700 1.5rem var(--mono); font-style: normal; animation: blink 1s steps(1) infinite; }
+  button.fs { background: none; border: 1px solid #3a3a40; color: var(--grey); border-radius: .3rem; padding: .35rem .5rem; font: 600 .85rem var(--head); letter-spacing: .1em; cursor: pointer; }
+  button.fs:hover { color: var(--white); border-color: var(--grey); }
+
+  /* ---------- panels ---------- */
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1.45fr 1fr; gap: .7rem; padding: 0 .8rem .5rem; }
+  .col { display: flex; flex-direction: column; gap: .7rem; min-height: 0; }
+  .panel { background: var(--panel); border: 1px solid #222226; border-radius: .4rem; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .panel.grow { flex: 1; }
+  .panel h2 { margin: 0; display: flex; align-items: baseline; gap: .6rem; padding: .3rem .7rem; flex: none;
+              font: 700 1.15rem var(--head); letter-spacing: .14em; text-transform: uppercase; color: var(--sign);
+              border-bottom: 2px solid var(--sign); }
+  .panel h2 .n { color: var(--white); font: 700 1rem var(--mono); }
+  .panel h2 .pg { margin-left: auto; color: var(--grey); font: 400 .75rem var(--mono); letter-spacing: .05em; }
+  .panel.alarm h2 { color: var(--red); border-color: var(--red); }
+  .cols, .r { display: grid; grid-template-columns: 3.3rem 2.6rem minmax(0,1fr) 5.4rem 3.6rem 11.2rem; align-items: center; column-gap: .45rem; }
+  .cols { padding: .2rem .7rem; font: 600 .78rem var(--head); letter-spacing: .16em; color: var(--white); opacity: .75; text-transform: uppercase; flex: none; }
+  .rows { overflow: hidden; flex: 1; min-height: 0; }
+  #right .cols, #right .r { grid-template-columns: 3.3rem 2.6rem minmax(0,1fr) 5.4rem 0 5.6rem; }
+  #right .cols span:nth-child(5) { visibility: hidden; }
+
+  /* one row = one split-flap strip */
+  .r { height: var(--row); padding: 0 .7rem; text-decoration: none; color: var(--amber); font-size: .86rem; letter-spacing: .02em;
+       background: linear-gradient(var(--cell-hi) 0 48%, var(--seam) 48% 52%, var(--cell) 52%);
+       border-bottom: 2px solid var(--bg); text-transform: uppercase; white-space: nowrap; }
+  .r > * { overflow: hidden; text-overflow: ellipsis; }
+  .r:active { filter: brightness(1.5); }
+  .r .time, .r .id { font-weight: 700; }
+  .r .id { color: var(--white); }
+  .chip { font: 700 .72rem var(--head); letter-spacing: .1em; padding: .12rem .35rem; border-radius: .15rem; color: #fff; justify-self: start; max-width: 100%; }
+  .gate { background: var(--sign); color: #111; font-weight: 700; font-size: .8rem; padding: .1rem .3rem; border-radius: .12rem; justify-self: start; max-width: 100%; text-transform: none; }
+  .rem { font-weight: 700; display: flex; align-items: center; gap: .4rem; }
+  .dot { width: .7rem; height: .7rem; border-radius: 50%; flex: none; background: currentColor; box-shadow: 0 0 .5rem currentColor; }
+  .ring .dot { background: none; box-shadow: none; border: 2px solid currentColor; }
+  .s-input { color: var(--red); }   .s-input .rem { animation: blink 1.2s steps(1) infinite; }
+  .s-working .rem { color: var(--amber); } .s-stale .rem { color: var(--amber-dim); }
+  .s-next .rem { color: var(--blue); } .s-done .rem, .s-done { color: var(--green); }
+  .s-none .rem { color: var(--grey); } .s-none .title { color: #cdb76a; }
+  .s-done .title { opacity: .7; }
+  .p3 .id::after, .p2 .id::after { content: "▲"; color: var(--red); font-size: .6rem; margin-left: .2rem; vertical-align: .2rem; }
+  @keyframes blink { 50% { opacity: .25; } }
+  .flip { animation: flip .5s ease-out both; transform-origin: 50% 0; }
+  @keyframes flip { 0% { transform: rotateX(-88deg); filter: brightness(.3); } 100% { transform: none; } }
+  .rows { perspective: 60rem; }
+
+  /* ---------- ticker ---------- */
+  footer { flex: none; background: var(--sign); color: #111; font: 600 .95rem var(--head); letter-spacing: .08em; text-transform: uppercase;
+           padding: .25rem 1rem; display: flex; gap: 1.4rem; white-space: nowrap; overflow: hidden; }
+  footer .lg { display: inline-flex; align-items: center; gap: .3rem; }
+  footer .lg i { width: .65rem; height: .65rem; border-radius: 50%; display: inline-block; border: 2px solid #111; }
+
+  /* ---------- phone: machine-status look ---------- */
+  @media (max-width: 760px) {
+    body { overflow: auto; } html, body { height: auto; }
+    header { padding: .5rem .7rem; gap: .6rem; border-bottom: 2px solid var(--sign); }
+    h1 { font-size: 1.35rem; color: var(--sign); } h1 small, .tally, button.fs { display: none; }
+    .clock span { font-size: 1.15rem; min-width: 1rem; }
+    main { display: block; padding: 0 .5rem .5rem; } .col { display: contents; }
+    .panel { background: none; border: 0; margin-top: .6rem; border-radius: 0; }
+    .panel h2 { font-size: .95rem; border-bottom-width: 1px; padding-left: .2rem; }
+    .cols { display: none; }
+    .r { grid-template-columns: 1rem minmax(0,1fr) auto; grid-template-areas: "dot title el" "dot sub rem"; row-gap: .1rem;
+         height: auto; padding: .55rem .3rem; background: none; border-bottom: 1px solid #2a2a2e; text-transform: none; letter-spacing: 0; }
+    .r .time, .r .chip { display: none; }
+    .r .title { grid-area: title; color: var(--white); font: 600 1.12rem var(--head); letter-spacing: .03em; text-transform: uppercase; }
+    .r .id { grid-area: sub; font-size: .72rem; color: var(--grey); font-weight: 400; }
+    .r .gate { display: none; }
+    .r .rem { grid-area: rem; font-size: .72rem; justify-self: end; } .r .rem .t { display: none; } .r .rem .dot { display: none; }
+    .r .mdot { grid-area: dot; align-self: center; } .r .el { grid-area: el; font-size: .8rem; justify-self: end; color: var(--amber); }
+    #queue-panel .rows .r:nth-child(n+6) { display: none; }
+    footer { position: sticky; bottom: 0; font-size: .8rem; gap: .8rem; } footer .lg { display: none; }
+  }
+  @media (min-width: 761px) { .mdot, .el { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="sign"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.5 19h19v2h-19zM22.1 9.6c-.2-.8-1-1.3-1.8-1.1L15 10 8.1 3.5l-1.9.5 4.1 7.2-5 1.3-2-1.5-1.4.4 1.8 3.2.8 1.3 1.6-.4 5.3-1.4 4.4-1.2 5.3-1.4c.8-.2 1.3-1.1 1-1.9z"/></svg></div>
+  <h1>Switchboard<small>all projects</small></h1>
+  <div class="spacer"></div>
+  <div class="tally" id="tally"></div>
+  <div class="clock" id="clock"></div>
+  <button class="fs" id="fs">⛶ FULL</button>
+</header>
+<main>
+  <div class="col" id="left"></div>
+  <div class="col" id="right"></div>
+</main>
+<footer id="ticker"></footer>
+
+<script>
+const STALE = 2 * 3600, PAGE_MS = 9000;
+const REM = { input: "WAITING ON YOU", working: "IN PROGRESS", stale: "NO SIGNAL", next: "NEXT UP", done: "DONE", none: "QUEUED" };
+const RANK = { input: 0, stale: 1, working: 2, next: 3, done: 4, none: 5 };
+const now = () => Date.now() / 1000;
+const pad = n => String(n).padStart(2, "0");
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function light(t, heads) {
+  if (t.status === "closed") return "done";
+  if (t.status === "needs_feedback") return "input";
+  if (["claimed", "in_progress", "pr_open", "awaiting_ci", "awaiting_merge"].includes(t.status)) return "working";
+  if (t.ws === "needs_input") return "input";
+  if (t.ws === "working") return now() - t.ws_at > STALE ? "stale" : "working";
+  if (t.status === "ready" && heads.has(t.id)) return "next";
+  return "none";
+}
+function section(t) {
+  if (t.msg && t.light !== "done") return "incoming";
+  return { input: "blocked", working: "flight", stale: "flight", next: "queue", done: "done" }[t.light]
+      || (t.status === "holding" ? "holding" : "queue");
+}
+function when(ts) {
+  const d = new Date(ts * 1000), today = new Date().toDateString() === d.toDateString();
+  return today ? pad(d.getHours()) + ":" + pad(d.getMinutes()) : pad(d.getMonth() + 1) + "/" + pad(d.getDate());
+}
+function elapsed(ts) { const m = Math.max(0, Math.floor((now() - ts) / 60)); return pad(Math.floor(m / 60)) + ":" + pad(m % 60); }
+function hue(s) { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
+function code(p) { return p.length <= 8 ? p : p.slice(0, 7) + "…"; }
+
+function row(t) {
+  const remark = t.status === "holding" ? "HOLDING" : REM[t.light] + ((t.light === "working" || t.light === "input" || t.light === "stale") && t.ws_at ? " " + elapsed(t.ws_at) : "");
+  return `<a class="r s-${t.light} p${t.prio} ${t.light === "stale" || t.light === "none" ? "ring" : ""}" href="http://switchboard.home.arpa/tasks/${t.id}">
+    <span class="mdot dot" style="color:inherit"></span>
+    <span class="time">${when(t.upd)}</span><span class="id">${t.id}</span>
+    <span class="title">${esc(t.title)}</span>
+    <span class="chip" style="background:hsl(${hue(t.project)} 55% 34%)">${esc(code(t.project))}</span>
+    <span>${t.sess ? `<span class="gate">${esc(t.sess)}</span>` : ""}</span>
+    <span class="rem"><span class="dot"></span>${remark}</span>
+    <span class="el">${t.ws_at && t.light !== "done" && t.light !== "none" ? elapsed(t.ws_at) + " HRS" : ""}</span></a>`;
+}
+const COLS = `<div class="cols"><span>Time</span><span>Task</span><span>Description</span><span>Project</span><span>Gate</span><span>Remarks</span></div>`;
+
+function panel(id, title, tasks, opts = {}) {
+  const el = document.createElement("section");
+  el.className = "panel" + (opts.grow ? " grow" : "") + (opts.alarm ? " alarm" : ""); el.id = id + "-panel";
+  el.innerHTML = `<h2>${title} <span class="n">${tasks.length}</span><span class="pg"></span></h2>${COLS}<div class="rows"></div>`;
+  el._tasks = tasks; el._page = 0; el._fixed = opts.rows;
+  return el;
+}
+function paint(el, flip) {
+  const rows = el.querySelector(".rows"), phone = matchMedia("(max-width:760px)").matches;
+  const rowH = parseFloat(getComputedStyle(document.documentElement).fontSize) * 2.15 + 0;
+  const per = phone ? el._tasks.length : Math.max(1, el._fixed || Math.floor(rows.clientHeight / rowH));
+  const pages = Math.max(1, Math.ceil(el._tasks.length / per));
+  el._page %= pages;
+  const slice = el._tasks.slice(el._page * per, (el._page + 1) * per);
+  rows.innerHTML = slice.map(row).join("");
+  if (flip) [...rows.children].forEach((r, i) => { r.classList.add("flip"); r.style.animationDelay = i * 45 + "ms"; });
+  el.querySelector(".pg").textContent = pages > 1 ? `page ${el._page + 1}/${pages}` : "";
+  el._pages = pages;
+}
+
+fetch("data.json").then(r => r.json()).then(data => {
+  const heads = new Set();
+  for (const who of ["human", "claude"]) { const h = data.find(t => t.status === "ready" && t.who === who && !t.ws); if (h) heads.add(h.id); }
+  data.forEach(t => { t.light = light(t, heads); t.sec = section(t); });
+  const by = k => data.filter(t => t.sec === k).sort((a, b) => RANK[a.light] - RANK[b.light] || b.prio - a.prio || b.upd - a.upd);
+  const S = { incoming: by("incoming"), blocked: by("blocked"), flight: by("flight"), queue: by("queue"), holding: by("holding"), done: by("done") };
+
+  const left = document.getElementById("left"), right = document.getElementById("right"), panels = [];
+  const add = (col, p) => { col.appendChild(p); panels.push(p); };
+  if (S.blocked.length) add(left, panel("blocked", "Needs you", S.blocked, { alarm: true, rows: Math.min(S.blocked.length, 4) }));
+  if (S.flight.length) add(left, panel("flight", "In flight", S.flight, { rows: Math.min(S.flight.length, 6) }));
+  add(left, panel("incoming", "Arrivals — incoming", S.incoming, { grow: true }));
+  add(right, panel("queue", "Departures — queue", S.queue.concat(S.holding), { grow: true }));
+  if (S.done.length) add(right, panel("done", "Landed today", S.done, { rows: Math.min(S.done.length, 4) }));
+  panels.forEach(p => { if (p._fixed) p.querySelector(".rows").style.flex = "none"; });
+
+  const layout = flip => panels.forEach(p => paint(p, flip));
+  requestAnimationFrame(() => layout(true));
+  addEventListener("resize", () => layout(false));
+  setInterval(() => panels.forEach(p => { if (p._pages > 1) { p._page++; paint(p, true); } }), PAGE_MS);
+
+  document.getElementById("tally").innerHTML =
+    `<span class="t-input"><b>${S.blocked.length}</b>need you</span><span class="t-work"><b>${S.flight.length}</b>in flight</span>` +
+    `<span class="t-in"><b>${S.incoming.length}</b>incoming</span><span><b>${S.queue.length}</b>queued</span><span class="t-done"><b>${S.done.length}</b>done today</span>`;
+  const lg = (c, fill, t) => `<span class="lg"><i style="${fill ? "background:" + c + ";" : ""}border-color:${fill ? c : "#111"}"></i>${t}</span>`;
+  document.getElementById("ticker").innerHTML =
+    `<span>Overall · ${data.length - S.done.length} open · ${S.done.length} done today</span>` +
+    lg("#c4271d", 1, "waiting on you") + lg("#8a6200", 1, "in progress") + lg("#8a6200", 0, "no recent signal") +
+    lg("#1d5fb8", 1, "next up") + lg("#176b33", 1, "done") + `<span style="margin-left:auto">Preview · data from ${when(now())}</span>`;
+});
+
+function tick() { const d = new Date(), h = pad(d.getHours()), m = pad(d.getMinutes());
+  document.getElementById("clock").innerHTML = `<span>${h[0]}</span><span>${h[1]}</span><i>:</i><span>${m[0]}</span><span>${m[1]}</span>`; }
+tick(); setInterval(tick, 5000);
+document.getElementById("fs").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+</script>
+</body>
+</html>
