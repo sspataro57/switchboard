@@ -84,11 +84,56 @@ func lsProject(t *testing.T, ctx context.Context, pool *pgxpool.Pool, slug strin
 		 VALUES ($1,$1,$2,'manual','dashboard','/tmp/itest-lights','any') RETURNING id`, slug, lsClient)
 }
 
-// boardLight reads the light rendered before task id's link on a board page.
+// boardRow returns the ROW WRAPPER whose link points at /tasks/{id}: the
+// <div class="row s-…"> holding the anchor with its seven cells AND its sibling
+// <details class="row-verbs"> with the verbs. "" when the row is absent.
+//
+// board-departures (SWT-67, docs/tickets/board-departures_SPEC.md) Part 7: the
+// ONE row slicer of the board integration suites. boardLight, onBoard,
+// sessionTag, lyRowHTML, brrRow and the per-id "renders exactly once" counts all
+// go through it, so the row markup is spelled once here and a row's cells can
+// never be read out of a neighbouring row.
+func boardRow(body string, id int64) string {
+	anchor := `<a class="r" href="/tasks/` + strconv.FormatInt(id, 10) + `"`
+	i := strings.Index(body, anchor)
+	if i < 0 {
+		return ""
+	}
+	start := strings.LastIndex(body[:i], `<div class="row`)
+	if start < 0 {
+		return ""
+	}
+	depth, j := 0, start
+	for j < len(body) {
+		o := strings.Index(body[j:], "<div")
+		c := strings.Index(body[j:], "</div>")
+		if c < 0 {
+			return ""
+		}
+		if o >= 0 && o < c {
+			depth++
+			j += o + len("<div")
+			continue
+		}
+		depth--
+		j += c + len("</div>")
+		if depth == 0 {
+			return body[start:j]
+		}
+	}
+	return ""
+}
+
+// boardLight reads the light rendered in task id's row. SWT-52's markup is
+// byte-unchanged; SWT-67 moved it from the id cell into the row's `rem` cell,
+// so the anchor is the ROW, not the span's neighbour.
 func boardLight(body string, id int64) (class, label string, ok bool) {
-	ids := strconv.FormatInt(id, 10)
-	m := regexp.MustCompile(`<span class="light light-([a-z]+)" role="img" aria-label="([^"]*)" title="[^"]*"></span>\s*` +
-		`<a href="/tasks/` + ids + `">` + ids + `</a>`).FindStringSubmatch(body)
+	row := boardRow(body, id)
+	if row == "" {
+		return "", "", false
+	}
+	m := regexp.MustCompile(`<span class="light light-([a-z]+)" role="img" aria-label="([^"]*)" title="[^"]*"></span>`).
+		FindStringSubmatch(row)
 	if m == nil {
 		return "", "", false
 	}
@@ -96,7 +141,7 @@ func boardLight(body string, id int64) (class, label string, ok bool) {
 }
 
 func onBoard(body string, id int64) bool {
-	return strings.Contains(body, `href="/tasks/`+strconv.FormatInt(id, 10)+`"`)
+	return boardRow(body, id) != ""
 }
 
 // lightsExecutor is the production wiring (tools' queueMatrixExecutor shape):
@@ -129,7 +174,7 @@ func assertBoardLight(t *testing.T, step, body string, id int64, class, labelPre
 	t.Helper()
 	c, l, ok := boardLight(body, id)
 	if !ok {
-		t.Errorf("%s: task %d has no light span before its id\n%s", step, id, snippet(body))
+		t.Errorf("%s: task %d has no row, or its row has no light in the `rem` cell\n%s", step, id, snippet(body))
 		return
 	}
 	if c != class || !strings.HasPrefix(l, labelPrefix) {

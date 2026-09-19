@@ -59,12 +59,17 @@ func cleanupSessTag(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
-// sessionTag reads the tag rendered first in task id's title cell: its class
-// suffix, its RAW title attribute, and its (unescaped) text.
+// sessionTag reads the tag rendered in task id's row: its class suffix, its RAW
+// title attribute, and its (unescaped) text. SWT-67 Part 7: read inside
+// boardRow — the tag's markup is byte-unchanged, it just moved from the title
+// cell into its own Gate cell (B10).
 func sessionTag(body string, id int64) (class, rawTitle, text string, ok bool) {
-	ids := strconv.FormatInt(id, 10)
-	m := regexp.MustCompile(`<span class="session-tag session-([a-z]+)" title="([^"]*)">([^<]*)</span>\s*` +
-		`<a href="/tasks/` + ids + `">`).FindStringSubmatch(body)
+	row := boardRow(body, id)
+	if row == "" {
+		return "", "", "", false
+	}
+	m := regexp.MustCompile(`<span class="session-tag session-([a-z]+)" title="([^"]*)">([^<]*)</span>`).
+		FindStringSubmatch(row)
 	if m == nil {
 		return "", "", "", false
 	}
@@ -85,7 +90,7 @@ func assertTag(t *testing.T, step, body string, id int64, class, text string) {
 	t.Helper()
 	c, rawTitle, got, ok := sessionTag(body, id)
 	if !ok {
-		t.Errorf("%s: task %d has no session tag first in its title cell (S8)\n%s", step, id, snippet(body))
+		t.Errorf("%s: task %d has no session tag in its Gate cell (S8, SWT-67 B10)\n%s", step, id, snippet(body))
 		return
 	}
 	if c != class || got != text {

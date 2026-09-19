@@ -211,8 +211,9 @@ func TestBoardSections_IncomingFirstAndOrdered(t *testing.T) {
 		t.Errorf("boardSections = %q,\nwant %q\n(criterion 10: incoming first; light rank, then messages before PRs, then id DESC; "+
 			"every other section keeps L2)", s, "incoming:3,11,10,15,4,1,16,2 | blocked:14,7 | in_flight:9 | queue:5,6 | done:13,8 | other:12")
 	}
-	if len(got) == 0 || got[0].Key != "incoming" || got[0].Title != "incoming" {
-		t.Fatalf("the first section is not {incoming, incoming} (criterion 10, I3)")
+	if len(got) == 0 || got[0].Key != "incoming" || got[0].Title != "arrivals — incoming" {
+		// SWT-67 B3: the key is unchanged; the title follows the departures design.
+		t.Fatalf("the first section is not {incoming, arrivals — incoming} (criterion 10, I3)")
 	}
 	for _, r := range got[0].Tasks {
 		if r.ID == 3 && r.Light.Class != "input" {

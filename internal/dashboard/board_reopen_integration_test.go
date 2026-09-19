@@ -203,22 +203,10 @@ func (s *brrSuite) plainReopen(t *testing.T, ctx context.Context, bt brrTask) {
 	s.execute(t, ctx, brrHuman, bt.id, fmt.Sprintf(`{"task_id":%d,"reason":"mis-click"}`, bt.id))
 }
 
-// brrRow returns the <tr>...</tr> that renders a given title ("" if absent).
-func brrRow(body, title string) string {
-	i := strings.Index(body, ">"+title+"<")
-	if i < 0 {
-		return ""
-	}
-	start := strings.LastIndex(body[:i], "<tr")
-	if start < 0 {
-		start = 0
-	}
-	rest := body[start:]
-	if j := strings.Index(rest, "</tr>"); j >= 0 {
-		rest = rest[:j]
-	}
-	return rest
-}
+// brrRow returns the row that renders a given task ("" if absent). SWT-67
+// Part 7: the <tr> became a row wrapper, so this moves onto boardRow — the one
+// row slicer — and takes the task rather than its title.
+func brrRow(body string, bt brrTask) string { return boardRow(body, bt.id) }
 
 func TestBoardReopen_Integration_MarkerFollowsTheNewestDismissal(t *testing.T) {
 	ctx := context.Background()
@@ -248,7 +236,7 @@ func TestBoardReopen_Integration_MarkerFollowsTheNewestDismissal(t *testing.T) {
 
 	_, board := get(t, client, ts.URL+"/tasks?project="+brrSlug)
 
-	rowA := brrRow(board, a.title)
+	rowA := brrRow(board, a)
 	if rowA == "" {
 		t.Fatalf("the activity-reopened task is not on the default board\n%s", snippet(board))
 	}
@@ -256,7 +244,7 @@ func TestBoardReopen_Integration_MarkerFollowsTheNewestDismissal(t *testing.T) {
 		t.Errorf("the activity-reopened row does not show %q. The SPEC's 'usable alone': a dismissed task "+
 			"that comes back says so on the board\n%s", brrMarker+" (handled_elsewhere)", rowA)
 	}
-	rowB := brrRow(board, b.title)
+	rowB := brrRow(board, b)
 	if rowB == "" {
 		t.Fatalf("the plainly reopened task is not on the board")
 	}
@@ -266,7 +254,7 @@ func TestBoardReopen_Integration_MarkerFollowsTheNewestDismissal(t *testing.T) {
 	}
 
 	_, closedBoard := get(t, client, ts.URL+"/tasks?project="+brrSlug+"&status=closed")
-	rowC := brrRow(closedBoard, c.title)
+	rowC := brrRow(closedBoard, c)
 	if rowC == "" {
 		t.Fatalf("the re-dismissed task is not under ?status=closed")
 	}
@@ -278,7 +266,7 @@ func TestBoardReopen_Integration_MarkerFollowsTheNewestDismissal(t *testing.T) {
 	// human-stamped. No marker.
 	s.plainReopen(t, ctx, c)
 	_, board2 := get(t, client, ts.URL+"/tasks?project="+brrSlug)
-	rowC2 := brrRow(board2, c.title)
+	rowC2 := brrRow(board2, c)
 	if rowC2 == "" {
 		t.Fatalf("task C is not on the board after its plain reopen")
 	}

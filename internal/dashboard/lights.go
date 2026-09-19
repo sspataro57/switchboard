@@ -44,6 +44,10 @@ type lightFacts struct {
 	// midnight, else YYYY-MM-DD, in BoardTimeZone on the DB clock.
 	QueueRank    int
 	UpdatedStamp string
+	// StateAgeMinutes is display-only (SWT-67, board-departures): lightFor never
+	// reads it. Whole minutes since working_state_at on the DB clock, 0 when
+	// there is no signal; the row's elapsed HH:MM comes from it.
+	StateAgeMinutes int
 	// FromMessage and PRReview are display-only provenance facts (SWT-59,
 	// board-incoming-first): lightFor never reads them. FromMessage: the
 	// promoter created the task from an inbound email or Slack message (a

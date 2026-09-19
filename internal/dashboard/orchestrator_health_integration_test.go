@@ -307,7 +307,7 @@ func TestOrchestratorHealth_Integration_FailingQuery_InlineOnFunnel_NothingOnBoa
 	if !strings.Contains(funnel, "<h2>Connector health</h2>") {
 		t.Errorf("the funnel's other sections stopped rendering because the health query failed\n%s", snippet(funnel))
 	}
-	if !strings.Contains(board, "<h1>Board</h1>") {
+	if !strings.Contains(board, "<h1>Switchboard ") {
 		t.Fatalf("/tasks did not render the board\n%s", snippet(board))
 	}
 	for _, leak := range []string{ohBoardMarker, "section failed", "last_event_id", "not_running"} {

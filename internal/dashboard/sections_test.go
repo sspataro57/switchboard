@@ -57,8 +57,16 @@ func sectionIndex(key string) int {
 // docs/tickets/board-incoming-first_SPEC.md, I3): the SPEC's ONE amendment of an
 // existing test. boardSectionOrder gains incoming/incoming as its FIRST pair,
 // above blocked, so the six pairs become seven; the other six are unchanged.
+//
+// AMENDED AGAIN — deliberately — by board-departures (SWT-67,
+// docs/tickets/board-departures_SPEC.md, B3): the seven TITLES take the
+// departures wording. The KEYS and the ORDER are unchanged, which is the half
+// that matters: four test files read the keys, the <h2 id="section-{key}">
+// markup stays byte-unchanged, and boardPanes' split is a contiguous
+// prefix/suffix of this list.
 func TestBoardSectionOrder_SevenPairsInOrder(t *testing.T) {
-	want := "incoming/incoming, blocked/blocked, in_flight/in flight, queue/queue, holding/holding, done/done, other/other"
+	want := "incoming/arrivals — incoming, blocked/needs you, in_flight/in flight, " +
+		"queue/departures — queue, holding/holding, done/landed today, other/other"
 	var got []string
 	for _, s := range boardSectionOrder {
 		got = append(got, s.Key+"/"+s.Title)

@@ -50,12 +50,26 @@ type taskRow struct {
 	// "". It decides the board's first section. Board-only — never an export
 	// column.
 	Incoming string
+	// SWT-67 display fields, computed in Go by display.go's pure helpers.
+	// Board-only — never export columns. Remark is the Remarks words (the
+	// status survives here, B5); Elapsed is HH:MM since the session signal;
+	// ProjectHue colours the project chip; HighPriority shows the red mark.
+	Remark       string
+	Elapsed      string
+	ProjectHue   int
+	HighPriority bool
 }
 
 type boardData struct {
 	// Sections are the rows grouped by their light (SWT-57 L1), in
 	// boardSectionOrder, empty ones omitted.
 	Sections []boardSection
+	// SWT-67: Panes are the Sections split into the board's two columns
+	// (boardPanes); Tally counts what the board is showing (boardTallies);
+	// ProjectLabel names the project filter for the sign header.
+	Panes        []boardPane
+	Tally        boardTally
+	ProjectLabel string
 	// AdvancedFilters are the active non-project filters, shown on the first
 	// line (L5); ClearAdvancedURL drops them, keeping project and refresh.
 	AdvancedFilters  []boardFilter
@@ -77,6 +91,11 @@ type boardData struct {
 	RefreshToggleURL string
 	ReloadURL        string
 	RenderedAt       string
+	// SWT-67 B12: RefreshMode is "on" or "", the script's data-refresh — a data
+	// field, never a second {{if .AutoRefresh}}. PageSeconds comes from
+	// boardPageInterval, never from the request.
+	RefreshMode string
+	PageSeconds int
 }
 
 // BoardTimeZone is Salvador's day for the board (SWT-52 D5): a task closed
@@ -89,6 +108,11 @@ const BoardTimeZone = "America/New_York"
 // URL value: a caller-chosen refresh=0.1 would turn one tab into a query flood
 // against the shared pg-main.
 const boardRefreshInterval = 5 * time.Second
+
+// boardPageInterval is how long a panel shows one page of rows before flipping
+// to the next (SWT-67 B11). Fixed here and never a URL value, for the refresh
+// interval's reason: a caller-set 0.05 is an animation loop on a shared box.
+const boardPageInterval = 9 * time.Second
 
 // boardKeys is the ONE list of board URL keys (D15, criterion 30): the four
 // filters plus refresh. boardBack rebuilds a verb's redirect from the POSTed
@@ -206,7 +230,11 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			QueueRank:              f.QueueRank,
 			Updated:                f.UpdatedStamp,
 			Incoming:               incomingKind(f.FromMessage, f.PRReview),
+			ProjectHue:             projectHue(t.Project),
+			HighPriority:           t.Priority >= boardPriorityMark,
 		}
+		tr.Remark = remarkFor(tr.Light, t.Status)
+		tr.Elapsed = elapsedFor(tr.Light.Class, f.StateAgeMinutes)
 		if tr.Updated == "" {
 			tr.Updated = t.UpdatedAt // never a blank cell for a row that has a value
 		}
@@ -237,11 +265,16 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		RefreshToggleURL: toggle,
 		ReloadURL:        reload,
 		RenderedAt:       renderedAt,
+		RefreshMode:      refreshKey,
+		PageSeconds:      int(boardPageInterval / time.Second),
+		ProjectLabel:     projectLabel(r.URL.Query().Get("project")),
 	}
 	// SWT-57: the rows grouped by their light (unknown statuses land in
 	// "other"), with SWT-59's incoming section first; and the first line's
 	// advanced-filter marker.
 	data.Sections = boardSections(trs)
+	data.Panes = boardPanes(data.Sections)
+	data.Tally = boardTallies(data.Sections)
 	data.AdvancedFilters, data.ClearAdvancedURL = boardAdvanced(r.URL.Query())
 
 	prows, err := s.pool.Query(r.Context(), `SELECT slug FROM projects ORDER BY slug`)
@@ -341,7 +374,7 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	q, err := s.pool.Query(ctx,
 		`SELECT to_char(now() AT TIME ZONE $2, 'HH24:MI:SS'),
 		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today, f.session,
-		        f.updated, f.from_message, f.pr_review
+		        f.updated, f.from_message, f.pr_review, f.state_age_min
 		   FROM (SELECT 1) one
 		   LEFT JOIN (
 		     SELECT t.id, t.status,
@@ -358,6 +391,7 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		            COALESCE(t.working_state_at >= `+boardDayStart("$2")+`, false) AS state_today,
 		            COALESCE(t.working_state = 'working'
 		                     AND t.working_state_at < now() - make_interval(secs => $3), false) AS stale,
+		            COALESCE(GREATEST(0, FLOOR(EXTRACT(EPOCH FROM now() - t.working_state_at) / 60))::int, 0) AS state_age_min,
 		            CASE WHEN t.status = 'closed' THEN
 		                 COALESCE((SELECT d.reason_code FROM task_dismissals d
 		                            WHERE d.task_id = t.id AND d.reopened_at IS NULL
@@ -376,8 +410,9 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		var id *int64
 		var status, state, stateAt, dismissal, session, updated *string
 		var stateToday, stale, closedToday, fromMessage, prReview *bool
+		var stateAgeMin *int
 		if err := q.Scan(&renderedAt, &id, &status, &state, &stateAt, &stateToday, &stale, &dismissal, &closedToday,
-			&session, &updated, &fromMessage, &prReview); err != nil {
+			&session, &updated, &fromMessage, &prReview, &stateAgeMin); err != nil {
 			return nil, "", fmt.Errorf("scan light facts: %w", err)
 		}
 		if id == nil {
@@ -388,6 +423,7 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 			State: *state, StateAt: *stateAt, StateToday: *stateToday, Stale: *stale,
 			Session: *session, UpdatedStamp: *updated,
 			FromMessage: *fromMessage, PRReview: *prReview,
+			StateAgeMinutes: *stateAgeMin,
 		}
 		statusOf[*id] = *status
 		if *status == "ready" {
