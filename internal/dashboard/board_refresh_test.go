@@ -25,6 +25,13 @@ package dashboard
 // GREENFIELD NOTE — EXPECTED RED: boardRefreshInterval, boardKeys, the boardData
 // fields and boardRefreshURLs do not exist, so the package's test binary
 // compile-FAILS.
+//
+// AMENDED by board-departures (SWT-67, docs/tickets/board-departures_SPEC.md):
+// TestTasksTemplate_AutoRefreshToggleIndicatorAndOneScript keeps every
+// assertion — one script, the indicator's bytes, the toggle outside the block,
+// the hidden refresh input, the banned tokens, the one-onchange count — and
+// changes exactly two: the script now sits OUTSIDE {{if .AutoRefresh}} and
+// carries data-refresh and data-page-interval beside the two SWT-52 attributes.
 
 import (
 	"go/ast"
@@ -261,14 +268,27 @@ func TestTasksTemplate_AutoRefreshToggleIndicatorAndOneScript(t *testing.T) {
 	}
 
 	if n := strings.Count(s, "<script"); n != 1 {
-		t.Fatalf("tasks.html contains %d <script, want exactly ONE (criteria 7, 31)", n)
+		t.Fatalf("tasks.html contains %d <script, want exactly ONE (criteria 7, 31; SWT-67 criterion 27: splitting "+
+			"paging into a second block breaks the count two tests keep)", n)
 	}
-	if !strings.Contains(block, "<script") {
-		t.Fatalf("the one <script lies outside the %s block; it must render only when auto-refresh is on", cond)
+	// AMENDED — deliberately — by board-departures (SWT-67, B12): the ONE script
+	// moves OUT of the {{if .AutoRefresh}} block. The flip clock, the paging, the
+	// FULL button and the wake lock must run with auto-refresh OFF, and a second
+	// <script> would break the count above. The reload LOOP still arms only for
+	// refresh=on — from data-refresh, a DATA field, not a second {{if .AutoRefresh}}
+	// (the SWT-57 landmine: two structure tests take the FIRST one as the refresh
+	// block).
+	if strings.Contains(block, "<script") {
+		t.Errorf("the <script> is inside the %s block; B12 renders it always and arms the reload loop from "+
+			"data-refresh == \"on\"", cond)
 	}
-	for _, attr := range []string{`data-reload="{{.ReloadURL}}"`, `data-interval="{{.RefreshSeconds}}"`} {
-		if !strings.Contains(block, attr) {
-			t.Errorf("the %s block lacks %s: the script reads the server-rendered URL and interval (criterion 31)", cond, attr)
+	si := strings.Index(s, "<script")
+	tag := s[si : si+strings.Index(s[si:], ">")+1]
+	for _, attr := range []string{`data-reload="{{.ReloadURL}}"`, `data-interval="{{.RefreshSeconds}}"`,
+		`data-page-interval="{{.PageSeconds}}"`, `data-refresh="{{.RefreshMode}}"`} {
+		if !strings.Contains(tag, attr) {
+			t.Errorf("the <script> tag lacks %s: the script reads every knob from a server-rendered data attribute, "+
+				"never from the URL (criterion 31, SWT-67 criterion 27). Tag: %s", attr, tag)
 		}
 	}
 	i := strings.Index(s, "<script")

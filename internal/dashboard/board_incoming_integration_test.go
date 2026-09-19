@@ -269,8 +269,11 @@ func assertIncomingIDs(t *testing.T, step string, secs []lySection, names map[in
 		t.Errorf("%s: no section-incoming (sections: %s)", step, lyRender(secs, names))
 		return
 	}
-	if got, w := incNames(s.ids, names), incNames(want, names); got != w || s.count != len(want) || s.title != "incoming" {
-		t.Errorf("%s: incoming/%s(%d) = [%s], want incoming/incoming(%d) = [%s]", step, s.title, s.count, got, len(want), w)
+	// AMENDED — deliberately — by board-departures (SWT-67, B3): the TITLE only.
+	// The key, the membership and the order are unchanged.
+	const title = "arrivals — incoming"
+	if got, w := incNames(s.ids, names), incNames(want, names); got != w || s.count != len(want) || s.title != title {
+		t.Errorf("%s: incoming/%s(%d) = [%s], want incoming/%s(%d) = [%s]", step, s.title, s.count, got, title, len(want), w)
 	}
 }
 
@@ -299,7 +302,9 @@ func TestBoardIncoming_Integration_SectionAboveBlocked(t *testing.T) {
 	for _, sec := range secs {
 		shape = append(shape, sec.key+"/"+sec.title+"("+strconv.Itoa(sec.count)+")")
 	}
-	if got, want := strings.Join(shape, " | "), "incoming/incoming(4) | in_flight/in flight(1) | queue/queue(3) | done/done(1)"; got != want {
+	// AMENDED — deliberately — by SWT-67 B3: the titles only.
+	if got, want := strings.Join(shape, " | "), "incoming/arrivals — incoming(4) | in_flight/in flight(1) | "+
+		"queue/departures — queue(3) | done/landed today(1)"; got != want {
 		t.Errorf("sections =\n  %s\nwant\n  %s\n(criterion 15; full: %s)", got, want, lyRender(secs, names))
 	}
 	assertIncomingIDs(t, "default board", secs, names, s.m2, s.m3, s.m1, s.p1)
@@ -320,8 +325,7 @@ func TestBoardIncoming_Integration_SectionAboveBlocked(t *testing.T) {
 		t.Errorf("section-incoming (at %d) is not the first <h2 (at %d) on the page (criterion 15, I3)", inc, h2)
 	}
 	for id, name := range names {
-		re := regexp.MustCompile(`<span class="light light-[a-z]+" role="img" aria-label="[^"]*" title="[^"]*"></span>\s*` +
-			`<a href="/tasks/` + strconv.FormatInt(id, 10) + `">`)
+		re := regexp.MustCompile(`<a class="r" href="/tasks/` + strconv.FormatInt(id, 10) + `">`)
 		if n := len(re.FindAllString(body, -1)); n != 1 {
 			t.Errorf("row %s (task %d) renders %d times, want exactly once (criterion 15: the partition holds)", name, id, n)
 		}
@@ -380,7 +384,8 @@ func TestBoardIncoming_Integration_StatusFilterKeepsGrouping(t *testing.T) {
 	assertIncomingQueue(t, "?status=ready", secs, names, s.j1, s.j1, s.a1, s.s1)
 
 	closed := layoutSections(layoutBoard(t, client, ts.URL, "project="+incSlug+"&status=closed"))
-	if got := lyRender(closed, names); got != "done/done(1)=[M4]" {
-		t.Errorf("?status=closed sections = %s, want done/done(1)=[M4] (criterion 17)", got)
+	if got := lyRender(closed, names); got != "done/landed today(1)=[M4]" {
+		t.Errorf("?status=closed sections = %s, want done/landed today(1)=[M4] (criterion 17; SWT-67 B3 renamed the "+
+			"title, not the key)", got)
 	}
 }

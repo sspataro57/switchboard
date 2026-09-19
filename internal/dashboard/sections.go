@@ -19,17 +19,22 @@ import "sort"
 type boardSection struct {
 	Key, Title string
 	Tasks      []taskRow
+	// Class and Order are display-only (SWT-67): the panel's class names and its
+	// CSS order inside its pane. Set ONLY by boardPanes; boardSections leaves
+	// them zero.
+	Class string
+	Order int
 }
 
 // boardSectionOrder is the section order (SWT-57 L2, SWT-59 I3). Empty
 // sections are not rendered.
 var boardSectionOrder = []boardSection{
-	{Key: "incoming", Title: "incoming"},
-	{Key: "blocked", Title: "blocked"},
+	{Key: "incoming", Title: "arrivals — incoming"},
+	{Key: "blocked", Title: "needs you"},
 	{Key: "in_flight", Title: "in flight"},
-	{Key: "queue", Title: "queue"},
+	{Key: "queue", Title: "departures — queue"},
 	{Key: "holding", Title: "holding"},
-	{Key: "done", Title: "done"},
+	{Key: "done", Title: "landed today"},
 	{Key: "other", Title: "other"},
 }
 

@@ -120,8 +120,13 @@ func TestBoardRefresh_Integration_Rendering(t *testing.T) {
 	}
 
 	_, off := get(t, client, ts.URL+"/tasks?project="+rfSlug)
-	if strings.Contains(off, "<script") {
-		t.Errorf("the plain board renders a <script; the script renders only when refresh=on (criterion 37)")
+	// SWT-67 B12: the one script renders on every board page (the clock, the
+	// paging and FULL need it); the reload loop arms only from data-refresh="on".
+	if !strings.Contains(off, `data-refresh=""`) || strings.Contains(off, `data-refresh="on"`) {
+		t.Errorf("the plain board's script is armed; data-refresh is \"on\" only when refresh=on (criterion 37, B12)")
+	}
+	if !strings.Contains(on, `data-refresh="on"`) {
+		t.Errorf("the refresh=on board's script does not carry data-refresh=\"on\" (B12)")
 	}
 	if strings.Contains(off, `id="auto-refresh"`) {
 		t.Errorf("the plain board renders the indicator (criterion 37)")
@@ -131,7 +136,7 @@ func TestBoardRefresh_Integration_Rendering(t *testing.T) {
 		t.Errorf("plain toggle href = %q, want project=%s&refresh=on (criterion 37)", toggle, rfSlug)
 	}
 	// refresh=1 means OFF (D15).
-	if _, one := get(t, client, ts.URL+"/tasks?project="+rfSlug+"&refresh=1"); strings.Contains(one, "<script") {
+	if _, one := get(t, client, ts.URL+"/tasks?project="+rfSlug+"&refresh=1"); strings.Contains(one, `data-refresh="on"`) {
 		t.Errorf("refresh=1 turned auto-refresh on; only refresh=on counts (criterion 30)")
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io/fs"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,6 +24,20 @@ import (
 
 //go:embed templates/*.html
 var templateFS embed.FS
+
+// staticFS carries the board's vendored assets (SWT-67 B17): the fonts with
+// their licences, the icons and the web app manifest. Embedded, so the binary
+// still carries everything and nothing new lands in the image build.
+//
+//go:embed static
+var staticFS embed.FS
+
+func init() {
+	// Go's mime table has neither extension; without them the file server
+	// would sniff the fonts as octet-stream and the manifest as text/plain.
+	_ = mime.AddExtensionType(".woff2", "font/woff2")
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
 
 // Exec is the executor seam.
 type Exec interface {
@@ -51,12 +67,26 @@ func (s *Server) Handler() http.Handler {
 	})
 	s.auth.Routes(mux)
 
+	// The vendored assets are served WITHOUT a session, deliberately: a browser
+	// fetches a manifest, its icons and @font-face files without credentials,
+	// so s.auth.Require would 302 them to the login page and silently break the
+	// fonts and the install path. The bytes are public font files, two icons
+	// and a static manifest — no task data. fs.Sub over an embedded FS cannot
+	// traverse out of static/.
+	staticSub, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		panic(fmt.Sprintf("dashboard: static sub-FS: %v", err)) // embed guarantees the directory
+	}
+	mux.Handle("GET /static/{path...}", http.StripPrefix("/static/", http.FileServerFS(staticSub)))
+
 	mux.Handle("GET /", s.auth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/tasks", http.StatusFound)
 	})))
 	// SWT-10: full board, task detail, briefs, plan review, exports.
 	mux.Handle("GET /tasks", s.auth.Require(http.HandlerFunc(s.listTasks)))
 	mux.Handle("GET /tasks/{id}", s.auth.Require(http.HandlerFunc(s.showTask)))
+	// SWT-67 B21: the full-screen shell around the board (kiosk.go).
+	mux.Handle("GET /kiosk", s.auth.Require(http.HandlerFunc(s.showKiosk)))
 	mux.Handle("GET /briefs", s.auth.Require(http.HandlerFunc(s.listBriefs)))
 	// Ingestion visibility, split across two read-only pages (SWT-29):
 	// /sources answers "how much is stored, per account" (lifetime totals,
@@ -89,7 +119,33 @@ func (s *Server) Handler() http.Handler {
 	// Slack and the message is NOT there (SWT-12 criterion 12).
 	mux.Handle("POST /deliveries/{id}/mark-failed", s.auth.Require(s.action("mark_delivery_failed")))
 	mux.Handle("POST /flags/sending-frozen", s.auth.Require(http.HandlerFunc(s.actionFreeze)))
-	return mux
+	return staticCacheHeaders(mux, staticSub)
+}
+
+// staticCacheHeaders guards the /static/ prefix and passes every other request
+// through untouched. Only a real embedded FILE is served, with an immutable
+// Cache-Control (nothing under /static/ changes under its name: a font's
+// weight is in its filename and the set is replaced together). Anything else
+// under the prefix — a directory, a miss — is a plain 404 that carries no cache
+// header, so a probed-then-added name is never a year-long cached miss, and the
+// open route lists nothing.
+func staticCacheHeaders(next http.Handler, static fs.FS) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The board frames itself (/kiosk) and nothing else should: its POST
+		// verbs are one click each. SAMEORIGIN, never DENY — DENY breaks /kiosk.
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		if name, ok := strings.CutPrefix(r.URL.Path, "/static/"); ok {
+			fi, err := fs.Stat(static, name)
+			if err != nil || fi.IsDir() {
+				http.NotFound(w, r)
+				return
+			}
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 type deliveryRow struct {

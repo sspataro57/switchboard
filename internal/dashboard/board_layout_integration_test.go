@@ -112,8 +112,13 @@ func seedLayout(t *testing.T, ctx context.Context, pool *pgxpool.Pool) layoutSee
 }
 
 var (
-	lyH2    = regexp.MustCompile(`<h2 id="section-([a-z_]+)">([^<]*?) \((\d+)\)</h2>`)
-	lyRowID = regexp.MustCompile(`<span class="light light-[a-z]+" role="img" aria-label="[^"]*" title="[^"]*"></span>\s*<a href="/tasks/(\d+)">\d+</a>`)
+	// The <h2> is BYTE-UNCHANGED across SWT-67 (B3), which is why this still
+	// parses; only the TITLES change, and the page indicator is a sibling span
+	// outside the heading precisely so this regex keeps working.
+	lyH2 = regexp.MustCompile(`<h2 id="section-([a-z_]+)">([^<]*?) \((\d+)\)</h2>`)
+	// SWT-67: one row is one anchor of cells, so the row's id comes from the row
+	// link itself.
+	lyRowID = regexp.MustCompile(`<a class="r" href="/tasks/(\d+)">`)
 )
 
 type lySection struct {
@@ -159,20 +164,9 @@ func lyRender(secs []lySection, names map[int64]string) string {
 	return strings.Join(parts, " | ")
 }
 
-// lyRowHTML is task id's <tr> … </tr> on a board page, "" when absent.
-func lyRowHTML(body string, id int64) string {
-	ids := strconv.FormatInt(id, 10)
-	i := strings.Index(body, `<a href="/tasks/`+ids+`">`+ids+`</a>`)
-	if i < 0 {
-		return ""
-	}
-	start := strings.LastIndex(body[:i], "<tr")
-	end := strings.Index(body[i:], "</tr>")
-	if start < 0 || end < 0 {
-		return ""
-	}
-	return body[start : i+end]
-}
+// lyRowHTML is task id's row on a board page, "" when absent. SWT-67 Part 7: the
+// <tr> became a row wrapper, and every slicer goes through boardRow.
+func lyRowHTML(body string, id int64) string { return boardRow(body, id) }
 
 var lyAdvancedSummary = regexp.MustCompile(`(?s)<details class="advanced-filter">\s*(<summary[^>]*>)(.*?)</summary>`)
 
@@ -211,8 +205,11 @@ func TestBoardLayout_Integration_SectionsFollowTheLights(t *testing.T) {
 
 	body := layoutBoard(t, client, ts.URL, "project="+lySlug)
 	got := lyRender(layoutSections(body), names)
-	want := "blocked/blocked(3)=[A E B] | in_flight/in flight(2)=[D C] | queue/queue(2)=[Q2 Q1] | " +
-		"holding/holding(1)=[H] | done/done(1)=[X]"
+	// AMENDED — deliberately — by board-departures (SWT-67, B3): the TITLES take
+	// the departures wording. Membership, counts and row order are unchanged,
+	// which is what this test is about.
+	want := "blocked/needs you(3)=[A E B] | in_flight/in flight(2)=[D C] | queue/departures — queue(2)=[Q2 Q1] | " +
+		"holding/holding(1)=[H] | done/landed today(1)=[X]"
 	if got != want {
 		t.Errorf("sections =\n  %s\nwant\n  %s\n(criterion 19: red before grey in blocked; Q2 before Q1 — id order would "+
 			"put Q1 first, so the rank comes from Postgres; no section-other)", got, want)
@@ -221,8 +218,7 @@ func TestBoardLayout_Integration_SectionsFollowTheLights(t *testing.T) {
 		t.Errorf("the default board renders section-other; nothing seeded belongs there (criterion 19)")
 	}
 	for id, name := range names {
-		re := regexp.MustCompile(`<span class="light light-[a-z]+" role="img" aria-label="[^"]*" title="[^"]*"></span>\s*` +
-			`<a href="/tasks/` + strconv.FormatInt(id, 10) + `">`)
+		re := regexp.MustCompile(`<a class="r" href="/tasks/` + strconv.FormatInt(id, 10) + `">`)
 		if n := len(re.FindAllString(body, -1)); n != 1 {
 			t.Errorf("row %s (task %d) renders %d times, want exactly once (criterion 19: one section per task)", name, id, n)
 		}
@@ -243,12 +239,13 @@ func TestBoardLayout_Integration_SectionsFollowTheLights(t *testing.T) {
 			}
 		}
 	}
-	lastTable := strings.LastIndex(body, "</table>")
+	// SWT-67: there is no </table> any more; the last ROW is the anchor.
+	lastRow := strings.LastIndex(body, `<div class="row`)
 	legend := strings.Index(body, `id="light-legend"`)
 	note := strings.Index(body, "Queues are filters on the one tasks table")
-	if lastTable < 0 || legend < lastTable || note < lastTable {
-		t.Errorf("the legend (at %d) and the note (at %d) do not come after the last </table> (at %d) (criterion 19, L9)",
-			legend, note, lastTable)
+	if lastRow < 0 || legend < lastRow || note < lastRow {
+		t.Errorf("the legend (at %d) and the note (at %d) do not come after the last row (at %d) (criterion 19, L9)",
+			legend, note, lastRow)
 	}
 	top := strings.Index(body, `<div class="topbar">`)
 	blocked := strings.Index(body, `id="section-blocked"`)
@@ -272,7 +269,8 @@ func TestBoardLayout_Integration_StatusFilterKeepsGrouping(t *testing.T) {
 
 	body := layoutBoard(t, client, ts.URL, "project="+lySlug+"&status=ready")
 	got := lyRender(layoutSections(body), s.names())
-	want := "blocked/blocked(1)=[A] | in_flight/in flight(1)=[D] | queue/queue(2)=[Q2 Q1]"
+	// AMENDED — deliberately — by SWT-67 B3: the titles only.
+	want := "blocked/needs you(1)=[A] | in_flight/in flight(1)=[D] | queue/departures — queue(2)=[Q2 Q1]"
 	if got != want {
 		t.Errorf("?status=ready sections =\n  %s\nwant\n  %s\n(criterion 20, L3: a filter narrows; the sections still apply)", got, want)
 	}
@@ -374,7 +372,9 @@ func TestBoardLayout_Integration_UpdatedStampIsShortAndColumnFed(t *testing.T) {
 	defer ts.Close()
 
 	body := layoutBoard(t, client, ts.URL, "project="+lySlug)
-	cell := regexp.MustCompile(`<td class="muted" title="([^"]*)">([^<]*)</td>`)
+	// SWT-67 criterion 22: the `updated` stamp keeps its format and its raw title;
+	// the <td> is now the row's `time` cell.
+	cell := regexp.MustCompile(`<span class="time" title="([^"]*)">([^<]*)</span>`)
 	for _, row := range []struct {
 		name   string
 		id     int64
@@ -399,7 +399,7 @@ func TestBoardLayout_Integration_UpdatedStampIsShortAndColumnFed(t *testing.T) {
 		}
 		m := cell.FindStringSubmatch(tr)
 		if m == nil {
-			t.Errorf("%s has no updated cell <td class=\"muted\" title=\"…\">…</td> (criterion 22, L8)\n%s", row.name, tr)
+			t.Errorf("%s has no updated cell <span class=\"time\" title=\"…\">…</span> (criterion 22, L8)\n%s", row.name, tr)
 			continue
 		}
 		title, text := html.UnescapeString(m[1]), html.UnescapeString(m[2])

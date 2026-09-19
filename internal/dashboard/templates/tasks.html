@@ -2,43 +2,201 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0b0c">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="icon" href="/static/icon-192.png">
   <title>switchboard — board</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
-    h1 { font-size: 1.3rem; }
-    h2 { font-size: 1rem; margin: 1.4rem 0 .4rem; text-transform: uppercase; letter-spacing: .04em; color: #555; }
-    .flash { background: #fff8d0; border: 1px solid #d8c760; padding: .4rem .8rem; margin-bottom: 1rem; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ddd; padding: .4rem .6rem; text-align: left; font-size: .88rem; }
-    th { background: #f5f5f5; }
-    nav a { margin-right: .8rem; }
-    .headbar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1.2rem; margin-bottom: .4rem; }
-    .topbar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .9rem; margin: 0; }
-    .titlebar { display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem 1rem; }
-    .titlebar h1 { margin: .3rem 0 .5rem; }
-    .titlebar p { margin: 0; }
-    .topbar p { margin: 0; }
+    @font-face { font-family: "B612 Mono"; font-weight: 400; font-style: normal; font-display: swap; src: url(/static/fonts/b612mono-400.woff2) format("woff2"); }
+    @font-face { font-family: "B612 Mono"; font-weight: 700; font-style: normal; font-display: swap; src: url(/static/fonts/b612mono-700.woff2) format("woff2"); }
+    @font-face { font-family: "Barlow Condensed"; font-weight: 500; font-style: normal; font-display: swap; src: url(/static/fonts/barlowcondensed-500.woff2) format("woff2"); }
+    @font-face { font-family: "Barlow Condensed"; font-weight: 600; font-style: normal; font-display: swap; src: url(/static/fonts/barlowcondensed-600.woff2) format("woff2"); }
+    @font-face { font-family: "Barlow Condensed"; font-weight: 700; font-style: normal; font-display: swap; src: url(/static/fonts/barlowcondensed-700.woff2) format("woff2"); }
+    :root {
+      --bg: #0b0b0c; --panel: #131315; --cell: #1b1b1e; --cell-hi: #232327; --seam: #050506;
+      --amber: #ffc62a; --amber-dim: #a8801a; --white: #f1efe6; --grey: #77756c;
+      --red: #ff3b30; --green: #2fe36b; --blue: #4aa3ff; --sign: #f5c400;
+      --mono: "B612 Mono", "DejaVu Sans Mono", ui-monospace, monospace;
+      --head: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+      --row: 2.15rem;
+      --grid: 3.3rem 3.1rem minmax(0, 1fr) 5.4rem 3.6rem 8.6rem 3.3rem 1.6rem;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--white); }
+    body { font-family: var(--mono); display: flex; flex-direction: column;
+           background: radial-gradient(120% 80% at 50% 0%, #17171a 0%, var(--bg) 60%); }
+    a { color: inherit; }
+    .muted { color: var(--grey); font-size: .8rem; }
+
+    /* band 1: the chrome bar (nav + filters), small and dark */
+    .headbar { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem 1.2rem; padding: .25rem 1rem; flex: none;
+               font: 500 .85rem var(--head); letter-spacing: .08em; text-transform: uppercase; color: var(--grey); border-bottom: 1px solid #1d1d20; }
+    nav a { margin-right: .8rem; text-decoration: none; }
+    nav a:hover { color: var(--white); }
+    .topbar { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .9rem; margin: 0; }
     form.filters { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: 0; }
-    form.filters input, form.filters select { font: inherit; margin-right: .5rem; }
-    details.advanced-filter, details.row-verbs { position: relative; display: inline-block; }
+    form.filters input, form.filters select, .popup input, .popup select, .popup button, form.filters button {
+      font: inherit; background: #1b1b1e; color: var(--white); border: 1px solid #3a3a40; border-radius: .2rem; padding: .1rem .3rem; }
+    details.advanced-filter { position: relative; display: inline-block; }
     summary { cursor: pointer; white-space: nowrap; }
-    .popup { position: absolute; z-index: 10; background: #fff; border: 1px solid #bbb; padding: .5rem; box-shadow: 0 2px 6px rgba(0, 0, 0, .15); }
-    .row-verbs .popup { right: 0; }
-    .popup form { margin: .2rem 0; white-space: nowrap; }
-    .advanced-active { font-weight: bold; border: 1px solid #2f6fd6; border-radius: .3rem; padding: 0 .3rem; }
-    .muted { color: #777; font-size: .8rem; }
-    .orch-bad { background: #fde8e8; border: 1px solid #d66; color: #900; padding: .4rem .8rem; margin-bottom: 1rem; }
-    .light, .legend-light { display: inline-block; box-sizing: border-box; width: .8rem; height: .8rem; border-radius: 50%; margin-right: .35rem; vertical-align: -0.05rem; }
-    .light-done { background: #2e9d48; border: 2px solid #2e9d48; }
-    .light-working { background: #e8b90f; border: 2px solid #e8b90f; }
-    .light-stale { background: transparent; border: 2px solid #e8b90f; }
-    .light-input { background: #d63a2f; border: 2px solid #d63a2f; }
-    .light-next { background: #2f6fd6; border: 2px solid #2f6fd6; }
-    .light-none { background: transparent; border: 2px solid #9a9a9a; }
-    .session-tag { display: inline-block; max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; font-family: monospace; font-size: .8rem; padding: 0 .35rem; margin-right: .2rem; border: 1px solid #9a9a9a; border-radius: .6rem; }
-    .session-input { border-color: #d63a2f; color: #d63a2f; font-weight: bold; }
-    .session-stale { border-style: dashed; border-color: #e8b90f; }
-    .session-working { border-color: #e8b90f; }
+    .popup { position: absolute; z-index: 10; background: #1b1b1e; color: var(--white); border: 1px solid #55555c; border-radius: .3rem; padding: .6rem; box-shadow: 0 .4rem 1.4rem rgba(0, 0, 0, .7); }
+    .popup form { margin: .3rem 0; white-space: nowrap; }
+    .advanced-active { font-weight: bold; border: 1px solid var(--blue); border-radius: .3rem; padding: 0 .3rem; color: var(--white); }
+
+    /* band 2: the sign */
+    header.sign { display: flex; align-items: center; gap: .9rem; padding: .45rem 1rem; flex: none; }
+    .signblock { background: var(--sign); color: #111; border-radius: .35rem; width: 2.6rem; height: 2.6rem; display: grid; place-items: center; flex: none; }
+    .signblock svg { width: 1.8rem; height: 1.8rem; }
+    h1 { font: 700 2.1rem/1 var(--head); letter-spacing: .06em; margin: 0; text-transform: uppercase; white-space: nowrap; }
+    h1 small { font-weight: 500; font-size: .95rem; color: var(--grey); letter-spacing: .12em; margin-left: .6rem; }
+    .spacer { flex: 1; }
+    .tally { display: flex; gap: .9rem; white-space: nowrap; font: 600 1rem var(--head); letter-spacing: .08em; text-transform: uppercase; color: var(--grey); }
+    .tally b { font: 700 1.25rem var(--mono); margin-right: .3rem; color: var(--white); }
+    .tally .t-input b { color: var(--red); }
+    .tally .t-work b { color: var(--amber); }
+    .tally .t-in b { color: var(--blue); }
+    .tally .t-done b { color: var(--green); }
+    .clock { display: flex; gap: .18rem; align-items: center; }
+    .clock span { background: linear-gradient(#26262a 0 49%, var(--seam) 49% 52%, #1c1c1f 52%); color: var(--amber);
+                  font: 700 1.7rem/1 var(--mono); padding: .3rem .32rem; border-radius: .2rem; min-width: 1.35rem; text-align: center; }
+    .clock i { color: var(--amber); font: 700 1.5rem var(--mono); font-style: normal; animation: blink 1s steps(1) infinite; }
+    header.sign p { margin: 0; }
+    header.sign p a { font: 600 .8rem var(--head); letter-spacing: .1em; text-transform: uppercase; text-decoration: none; border: 1px solid #3a3a40; border-radius: .3rem; padding: .35rem .5rem; white-space: nowrap; }
+    button.fs { background: none; border: 1px solid #3a3a40; color: var(--grey); border-radius: .3rem; padding: .35rem .5rem; font: 600 .85rem var(--head); letter-spacing: .1em; cursor: pointer; white-space: nowrap; }
+    button.fs:hover, header.sign p a:hover { color: var(--white); border-color: var(--grey); }
+
+    /* band 3: receipts and alarms */
+    .flash { background: #2a2608; border: 1px solid var(--sign); color: var(--sign); padding: .4rem .8rem; margin: 0 .8rem .5rem; border-radius: .3rem; flex: none; }
+    .orch-bad { background: #2a0d0b; border: 1px solid var(--red); color: #ffb3ad; padding: .4rem .8rem; margin: 0 .8rem .5rem; border-radius: .3rem; flex: none; }
+
+    /* the two panes and their panels */
+    main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1.45fr 1fr; gap: .7rem; padding: 0 .8rem .5rem; }
+    main > p { padding: 1rem; }
+    .col { display: flex; flex-direction: column; gap: .7rem; min-height: 0; min-width: 0; }
+    .col:only-child { grid-column: 1 / -1; }
+    .panel { background: var(--panel); border: 1px solid #222226; border-radius: .4rem; display: flex; flex-direction: column; min-height: 0; flex: none; overflow: hidden; }
+    .panel.grow { flex: 1; min-height: 8rem; }
+    .panelhead { display: flex; align-items: baseline; gap: .6rem; padding: .3rem .7rem; flex: none; border-bottom: 2px solid var(--sign); }
+    h2 { margin: 0; font: 700 1.15rem var(--head); letter-spacing: .14em; text-transform: uppercase; color: var(--sign); }
+    .pg { margin-left: auto; color: var(--grey); font: 400 .75rem var(--mono); letter-spacing: .05em; }
+    .panel.alarm .panelhead { border-color: var(--red); }
+    .panel.alarm h2 { color: var(--red); }
+    .cols, .r { display: grid; grid-template-columns: var(--grid); align-items: center; column-gap: .45rem; }
+    .col-right { --grid: 3.3rem 3.1rem minmax(0, 1fr) 5.4rem 0 6.2rem 0 1.6rem; }
+    .col-right .cols span:nth-child(5), .col-right .gate, .col-right .el { visibility: hidden; }
+    .cols { padding: .2rem .7rem; font: 600 .78rem var(--head); letter-spacing: .16em; color: var(--white); opacity: .75; text-transform: uppercase; flex: none; }
+    .rows { overflow-y: auto; min-height: 0; max-height: calc(var(--row) * 4); }
+    .col-left .panel .rows { max-height: calc(var(--row) * 5); }
+    .panel.alarm .rows { max-height: calc(var(--row) * 4); }
+    .panel.grow .rows { flex: 1; max-height: none; }
+    body.paged { overflow: hidden; }
+    body.paged .rows { overflow: hidden; }
+
+    /* one row = one split-flap strip: a link of cells, with the verbs beside it */
+    .row { position: relative; height: var(--row); border-bottom: 2px solid var(--bg); color: var(--amber);
+           background: linear-gradient(var(--cell-hi) 0 48%, var(--seam) 48% 52%, var(--cell) 52%); }
+    .row[hidden] { display: none; }
+    .r { height: 100%; padding: 0 .7rem; text-decoration: none; color: inherit; font-size: .86rem; letter-spacing: .02em; white-space: nowrap; }
+    .r > * { overflow: hidden; text-overflow: ellipsis; }
+    .r:active { filter: brightness(1.5); }
+    .time, .id { font-weight: 700; }
+    /* The stamp is HH:MM or YYYY-MM-DD (SWT-57 L8, unchanged). The cell is five
+       characters wide and clips from the LEFT, so an older row reads MM-DD; the
+       full stamp stays in the title. */
+    .r > .time { direction: rtl; text-overflow: clip; text-align: left; width: 5ch; }
+    .id { color: var(--white); }
+    .prio { color: var(--red); font-size: .6rem; margin-left: .2rem; vertical-align: .2rem; }
+    .title { text-transform: uppercase; }
+    .title .muted { text-transform: none; }
+    .chip { font: 700 .72rem var(--head); letter-spacing: .1em; text-transform: uppercase; padding: .12rem .35rem; border-radius: .15rem; color: #fff;
+            justify-self: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; background: hsl(var(--chip-h, 0) 55% 34%); }
+    .session-tag { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+                   background: var(--sign); color: #111; font-weight: 700; font-size: .8rem; padding: .1rem .3rem; border-radius: .12rem; }
+    .session-input { background: var(--red); color: #fff; }
+    .session-stale { background: none; color: var(--amber-dim); border: 1px dashed var(--amber-dim); }
+    .session-working { background: var(--sign); }
+    .rem { font-weight: 700; text-transform: uppercase; display: flex; align-items: center; gap: .4rem; }
+    .el { font-weight: 700; text-align: right; }
+    .light, .legend-light, .mdot { display: inline-block; box-sizing: border-box; width: .7rem; height: .7rem; border-radius: 50%; flex: none; }
+    .light-done { background: var(--green); border: 2px solid var(--green); box-shadow: 0 0 .5rem var(--green); }
+    .light-working { background: var(--amber); border: 2px solid var(--amber); box-shadow: 0 0 .5rem var(--amber); }
+    .light-stale { background: transparent; border: 2px solid var(--amber-dim); }
+    .light-input { background: var(--red); border: 2px solid var(--red); box-shadow: 0 0 .5rem var(--red); }
+    .light-next { background: var(--blue); border: 2px solid var(--blue); box-shadow: 0 0 .5rem var(--blue); }
+    .light-none { background: transparent; border: 2px solid var(--grey); }
+    .s-input { color: var(--red); }
+    .s-input .rem { animation: blink 1.2s steps(1) infinite; }
+    .s-stale .rem, .s-stale .el { color: var(--amber-dim); }
+    .s-next .rem { color: var(--blue); }
+    .s-done { color: var(--green); }
+    .s-done .title { opacity: .7; }
+    .s-none .rem { color: var(--grey); }
+    .s-none .title { color: #cdb76a; }
+    details.row-verbs { position: absolute; right: 0; top: 0; height: 100%; width: 2rem; }
+    details.row-verbs > summary { list-style: none; height: 100%; display: grid; place-items: center; color: var(--grey); font-size: 1.1rem; }
+    details.row-verbs > summary::-webkit-details-marker { display: none; }
+    details.row-verbs > summary:hover, details.row-verbs[open] > summary { color: var(--white); }
+    /* the rows box clips, so an open row popup leaves it: a centred sheet */
+    details.row-verbs > .popup { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 94vw; font-size: .9rem; }
+    .popup-title { margin: 0 0 .4rem; color: var(--amber); font-weight: 700; text-transform: uppercase; max-width: 32rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    @keyframes blink { 50% { opacity: .25; } }
+    .flip { animation: flip .5s ease-out both; transform-origin: 50% 0; }
+    @keyframes flip { 0% { transform: rotateX(-88deg); filter: brightness(.3); } 100% { transform: none; filter: none; } }
+
+    /* the ticker */
+    footer.ticker { flex: none; background: var(--sign); color: #111; font: 600 .95rem var(--head); letter-spacing: .06em; text-transform: uppercase;
+                    padding: .2rem 1rem; display: flex; align-items: center; gap: 1.2rem; white-space: nowrap; }
+    footer.ticker p { margin: 0; }
+    footer.ticker .muted { color: #111; font-size: inherit; }
+    #light-legend { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-transform: none; font-weight: 500; letter-spacing: .02em; }
+    footer.ticker .legend-light { width: .65rem; height: .65rem; margin: 0 .25rem 0 .5rem; box-shadow: none; vertical-align: -.05rem; }
+    footer.ticker .light-done { background: #176b33; border-color: #176b33; }
+    footer.ticker .light-working { background: #8a6200; border-color: #8a6200; }
+    footer.ticker .light-stale { background: transparent; border-color: #8a6200; }
+    footer.ticker .light-input { background: #c4271d; border-color: #c4271d; }
+    footer.ticker .light-next { background: #1d5fb8; border-color: #1d5fb8; }
+    footer.ticker .light-none { background: transparent; border-color: #111; }
+    details.board-notes { position: relative; }
+    details.board-notes > .popup { right: 0; bottom: 140%; width: min(34rem, 90vw); white-space: normal; text-transform: none; font: 400 .85rem var(--mono); letter-spacing: 0; }
+    details.board-notes > .popup .muted { color: var(--white); }
+
+    @media (min-width: 761px) {
+      .mdot { display: none; }
+    }
+    /* the phone: a machine-status list */
+    @media (max-width: 760px) {
+      html, body { height: auto; }
+      body.paged { overflow: auto; }
+      .headbar { padding: .25rem .6rem; font-size: .75rem; }
+      header.sign { padding: .5rem .7rem; gap: .6rem; border-bottom: 2px solid var(--sign); flex-wrap: wrap; }
+      h1 { font-size: 1.35rem; color: var(--sign); }
+      h1 small, .tally, button.fs { display: none; }
+      .clock span { font-size: 1.15rem; min-width: 1rem; }
+      main { display: flex; flex-direction: column; padding: 0 .5rem .5rem; }
+      .col-right > section { order: 10 !important; }
+      .col { display: contents; }
+      .panel { background: none; border: 0; margin-top: .6rem; border-radius: 0; overflow: visible; }
+      .panelhead { border-bottom-width: 1px; padding-left: .2rem; }
+      h2 { font-size: .95rem; }
+      .cols { display: none; }
+      .rows, .col-left .panel .rows, .panel.alarm .rows { max-height: none; overflow: visible; }
+      .row { height: auto; background: none; border-bottom: 1px solid #2a2a2e; }
+      .r, .col-right .r { grid-template-columns: 1rem minmax(0, 1fr) auto 1.4rem; grid-template-areas: "dot title el ." "dot sub rem ."; row-gap: .1rem; padding: .55rem .3rem; letter-spacing: 0; }
+      .time, .chip, .gate { display: none; }
+      .title { grid-area: title; color: var(--white); font: 600 1.12rem var(--head); letter-spacing: .03em; }
+      .id { grid-area: sub; font-size: .72rem; color: var(--grey); font-weight: 400; }
+      .rem { grid-area: rem; font-size: .72rem; justify-self: end; }
+      .rem .light { display: none; }
+      .mdot { grid-area: dot; align-self: center; }
+      .el, .col-right .el { grid-area: el; font-size: .8rem; justify-self: end; color: var(--amber); visibility: visible; }
+      /* the right pane's grow panel is the queue (boardPanels): its top five */
+      .col-right .panel.grow .rows > .row:nth-child(n+6) { display: none; }
+      footer.ticker { position: sticky; bottom: 0; font-size: .8rem; gap: .8rem; }
+      #light-legend { display: none; }
+    }
   </style>
 </head>
 <body>
@@ -63,87 +221,40 @@
   {{if .AdvancedFilters}}<a id="advanced-clear" href="{{.ClearAdvancedURL}}">clear advanced</a>{{end}}
   </div>
   </div>
-  <div class="titlebar">
-  <h1>Board</h1>
-  <p class="muted"><a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">{{if not .AutoRefresh}}auto-refresh: turn on{{else}}auto-refresh: turn off{{end}}</a></p>
-  {{if .AutoRefresh}}
-  <p id="auto-refresh" class="muted">auto-refresh on (every {{.RefreshSeconds}} s, last refreshed {{.RenderedAt}})</p>
-  <script data-reload="{{.ReloadURL}}" data-interval="{{.RefreshSeconds}}">
-  (function () {
-    // SWT-52 D15: reload the board every data-interval seconds, but never while
-    // the tab is hidden, a form control has focus, or a control holds unsaved
-    // input. SWT-57 L6: nor while a popup (<details>) is open — the markup never
-    // renders one open, so an open one is one Salvador opened. A postponed
-    // reload is re-armed, never lost.
-    var me = document.currentScript;
-    var target = me.getAttribute("data-reload");
-    var ms = (parseInt(me.getAttribute("data-interval"), 10) || 5) * 1000;
-    var timer = null;
-    function dirty() {
-      var fields = document.querySelectorAll("form input, form textarea");
-      for (var i = 0; i < fields.length; i++) {
-        var f = fields[i];
-        if (f.type === "checkbox" || f.type === "radio") {
-          if (f.checked !== f.defaultChecked) return true;
-        } else if (f.value !== f.defaultValue) {
-          return true;
-        }
-      }
-      // A select is dirty when its selection differs from the one its markup
-      // selects: the last option marked selected, else the first option.
-      var selects = document.querySelectorAll("form select");
-      for (var j = 0; j < selects.length; j++) {
-        var opts = selects[j].options, want = 0;
-        for (var k = 0; k < opts.length; k++) {
-          if (opts[k].defaultSelected) want = k;
-        }
-        for (var m = 0; m < opts.length; m++) {
-          if (opts[m].selected !== (m === want)) return true;
-        }
-      }
-      return false;
-    }
-    function busy() {
-      if (document.hidden) return true;
-      if (document.querySelector("details[open]")) return true;
-      var a = document.activeElement;
-      if (a && a.form && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(a.tagName)) return true;
-      return dirty();
-    }
-    function tick() {
-      if (busy()) { arm(); return; }
-      location.replace(target);
-    }
-    function arm() {
-      clearTimeout(timer);
-      timer = setTimeout(tick, ms);
-    }
-    document.addEventListener("visibilitychange", arm);
-    arm();
-  })();
-  </script>
-  {{end}}
-  </div>
+  <header class="sign">
+    <div class="signblock"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2.5 19h19v2h-19zM22.1 9.6c-.2-.8-1-1.3-1.8-1.1L15 10 8.1 3.5l-1.9.5 4.1 7.2-5 1.3-2-1.5-1.4.4 1.8 3.2.8 1.3 1.6-.4 5.3-1.4 4.4-1.2 5.3-1.4c.8-.2 1.3-1.1 1-1.9z"/></svg></div>
+    <h1>Switchboard <small>{{.ProjectLabel}}</small></h1>
+    <div class="spacer"></div>
+    <div class="tally">{{range .Tally.Items}}<span class="{{.Class}}"><b>{{.Count}}</b>{{.Label}}</span>{{end}}</div>
+    <div class="clock" id="clock" aria-hidden="true"><span></span><span></span><i>:</i><span></span><span></span></div>
+    <p class="muted"><a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">{{if not .AutoRefresh}}auto-refresh: turn on{{else}}auto-refresh: turn off{{end}}</a></p>
+    <button type="button" class="fs" id="fs" data-kiosk="{{.KioskURL}}">⛶ FULL</button>
+  </header>
   {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
   {{with .OrchAlert}}<p id="orchestrator-health" class="orch-bad">orchestrator {{.Verdict}}: backlog {{.Backlog}}, cursor {{.Cursor}} of {{.Head}} — {{if eq .Verdict "stalled"}}it is running but not draining events{{else}}lifecycle rules (Deliver tasks, unblocking, claim expiry) are not running{{end}}. <a href="/funnel">funnel</a></p>{{end}}
 
+  <main>
+  {{range .Panes}}
+  <div class="col col-{{.Key}}">
   {{range .Sections}}
-  <h2 id="section-{{.Key}}">{{.Title}} ({{len .Tasks}})</h2>
-  <table>
-    <tr><th>id</th><th>title</th><th>status</th><th>project</th><th>sub</th><th>assignee</th><th>prio</th><th>order</th><th>parent</th><th>updated</th><th></th></tr>
+  <section class="{{.Class}}" style="order:{{.Order}}">
+    <div class="panelhead"><h2 id="section-{{.Key}}">{{.Title}} ({{len .Tasks}})</h2><span class="pg"></span></div>
+    <div class="cols"><span>Time</span><span>Task</span><span>Description</span><span>Project</span><span>Gate</span><span>Remarks</span><span></span><span></span></div>
+    <div class="rows">
     {{range .Tasks}}
-    <tr>
-      <td><span class="light light-{{.Light.Class}}" role="img" aria-label="{{.Light.Label}}" title="{{.Light.Label}}"></span><a href="/tasks/{{.ID}}">{{.ID}}</a></td>
-      <td>{{if .Light.Session}}<span class="session-tag session-{{.Light.Class}}" title="{{.Light.Label}}">{{.Light.Session}}</span> {{end}}<a href="/tasks/{{.ID}}">{{.Title}}</a>{{if .ReopenedAfterDismissal}} <span class="muted">reopened after dismissal ({{.ReopenedAfterDismissal}})</span>{{end}}</td>
-      <td class="muted">{{.Status}}</td>
-      <td>{{.Project}}</td>
-      <td>{{.Subproject}}</td>
-      <td>{{.AssigneeType}}{{if .WorkerType}} / {{.WorkerType}}{{end}}</td>
-      <td>{{.Priority}}</td>
-      <td>{{.PlanOrder}}</td>
-      <td>{{if .ParentID}}<a href="/tasks/{{.ParentID}}">{{.ParentID}}</a>{{end}}</td>
-      <td class="muted" title="{{.UpdatedAt}}">{{.Updated}}</td>
-      <td><details class="row-verbs"><summary>actions</summary><div class="popup">
+    <div class="row s-{{.Light.Class}}">
+      <a class="r" href="/tasks/{{.ID}}">
+        <span class="mdot light-{{.Light.Class}}"></span>
+        <span class="time" title="{{.UpdatedAt}}">{{.Updated}}</span>
+        <span class="id">{{.ID}}{{if .HighPriority}}<span class="prio" role="img" aria-label="priority {{.Priority}}" title="priority {{.Priority}}">▲</span>{{end}}</span>
+        <span class="title">{{.Title}}{{if .ReopenedAfterDismissal}} <span class="muted">reopened after dismissal ({{.ReopenedAfterDismissal}})</span>{{end}}</span>
+        <span class="chip" style="--chip-h:{{.ProjectHue}}">{{.Project}}</span>
+        <span class="gate">{{if .Light.Session}}<span class="session-tag session-{{.Light.Class}}" title="{{.Light.Label}}">{{.Light.Session}}</span>{{end}}</span>
+        <span class="rem"><span class="light light-{{.Light.Class}}" role="img" aria-label="{{.Light.Label}}" title="{{.Light.Label}}"></span>{{.Remark}}</span>
+        <span class="el">{{.Elapsed}}</span>
+      </a>
+      <details class="row-verbs"><summary aria-label="actions">⋯</summary><div class="popup">
+        <p class="popup-title">{{.ID}} · {{.Title}}</p>
         <form class="inline" method="post" action="/tasks/{{.ID}}/dismiss">
           <input type="hidden" name="project" value="{{index $.Filters "project"}}">
           <input type="hidden" name="status" value="{{index $.Filters "status"}}">
@@ -170,15 +281,20 @@
           <button>Done</button>
         </form>
         {{end}}
-      </div></details></td>
-    </tr>
+      </div></details>
+    </div>
     {{end}}
-  </table>
+    </div>
+  </section>
+  {{end}}
+  </div>
   {{else}}
   <p class="muted">No tasks match the filters.</p>
   {{end}}
+  </main>
 
-  <p class="muted">Queues are filters on the one tasks table. Tasks closed today stay (green) until midnight America/New_York; dismissed tasks leave at once; ?status=closed shows every closed task.</p>
+  <footer class="ticker">
+    <span>Overall · {{.Tally.Open}} open · {{.Tally.DoneToday}} done today</span>
   <p class="muted" id="light-legend">Lights:
     <span class="legend-light light-done"></span>green: done ·
     <span class="legend-light light-working"></span>yellow: in progress ·
@@ -187,5 +303,176 @@
     <span class="legend-light light-next"></span>blue: next in queue ·
     <span class="legend-light light-none"></span>grey ring: not queued (holding, blocked, queued behind another, or dismissed). Hover a light for its reason.
     A red or yellow light shows its Claude session's name at the start of the title: reply in that session.</p>
+    {{if .AutoRefresh}}<p id="auto-refresh" class="muted">auto-refresh on (every {{.RefreshSeconds}} s, last refreshed {{.RenderedAt}})</p>{{end}}
+    <details class="board-notes"><summary>notes</summary><div class="popup">
+  <p class="muted">Queues are filters on the one tasks table. Tasks closed today stay (green) until midnight America/New_York; dismissed tasks leave at once; ?status=closed shows every closed task.</p>
+    </div></details>
+  </footer>
+  <script data-reload="{{.ReloadURL}}" data-interval="{{.RefreshSeconds}}" data-page-interval="{{.PageSeconds}}" data-refresh="{{.RefreshMode}}">
+  (function () {
+    // SWT-67: the board's one script. It runs on every board page: the wall
+    // clock, the panel paging, the FULL button and the wake lock need no
+    // auto-refresh. The reload loop (SWT-52 D15, SWT-57 L6) arms only when
+    // data-refresh is "on": never while the tab is hidden, a form control has
+    // focus or holds unsaved input, a popup is open — or (B13) a panel has not
+    // finished showing its pages. A postponed reload is re-armed, never lost.
+    var me = document.currentScript;
+    var target = me.getAttribute("data-reload");
+    var ms = (parseInt(me.getAttribute("data-interval"), 10) || 5) * 1000;
+    var pageMs = (parseInt(me.getAttribute("data-page-interval"), 10) || 9) * 1000;
+    var refreshOn = me.getAttribute("data-refresh") === "on";
+    var timer = null;
+    var phone = window.matchMedia("(max-width: 760px)");
+    var panels = [];
+    var cycleDone = true;
+    var ticks = 0;
+    var longest = 1;
+    function dirty() {
+      var fields = document.querySelectorAll("form input, form textarea");
+      for (var i = 0; i < fields.length; i++) {
+        var f = fields[i];
+        if (f.type === "checkbox" || f.type === "radio") {
+          if (f.checked !== f.defaultChecked) return true;
+        } else if (f.value !== f.defaultValue) {
+          return true;
+        }
+      }
+      // A select is dirty when its selection differs from the one its markup
+      // selects: the last option marked selected, else the first option.
+      var selects = document.querySelectorAll("form select");
+      for (var j = 0; j < selects.length; j++) {
+        var opts = selects[j].options, want = 0;
+        for (var k = 0; k < opts.length; k++) {
+          if (opts[k].defaultSelected) want = k;
+        }
+        for (var m = 0; m < opts.length; m++) {
+          if (opts[m].selected !== (m === want)) return true;
+        }
+      }
+      return false;
+    }
+    function pageCycleBusy() {
+      // Paging at 9 s and reloads at 5 s: a reload before the last page was
+      // drawn would make every page but the first unreachable.
+      if (!cycleDone) return true;
+      for (var i = 0; i < panels.length; i++) {
+        if (panels[i].page !== 1) return true;
+      }
+      return false;
+    }
+    function busy() {
+      if (document.hidden) return true;
+      if (document.querySelector("details[open]")) return true;
+      var a = document.activeElement;
+      if (a && a.form && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(a.tagName)) return true;
+      if (pageCycleBusy()) return true;
+      return dirty();
+    }
+    function tick() {
+      if (busy()) { arm(); return; }
+      location.replace(target);
+    }
+    function arm() {
+      if (!refreshOn) return;
+      clearTimeout(timer);
+      timer = setTimeout(tick, ms);
+    }
+    document.addEventListener("visibilitychange", arm);
+    arm();
+
+    // Paging shows and hides the rows the server rendered; it builds none.
+    function show(p, flip) {
+      var start = (p.page - 1) * p.per;
+      for (var i = 0; i < p.rows.length; i++) {
+        var r = p.rows[i];
+        r.hidden = i < start || i >= start + p.per;
+        r.classList.remove("flip");
+        if (!r.hidden && flip) {
+          void r.offsetWidth;
+          r.style.animationDelay = ((i - start) * 45) + "ms";
+          r.classList.add("flip");
+        }
+      }
+      p.pg.textContent = p.pages > 1 ? "page " + p.page + "/" + p.pages : "";
+    }
+    function layout(flip) {
+      longest = 1;
+      for (var i = 0; i < panels.length; i++) {
+        var p = panels[i];
+        for (var j = 0; j < p.rows.length; j++) p.rows[j].hidden = false;
+        var h = p.rows.length ? p.rows[0].offsetHeight : 0; // offsetHeight: a row mid-flip is transformed nearly flat
+        p.per = phone.matches || !h ? p.rows.length || 1 : Math.max(1, Math.floor((p.box.clientHeight + 1) / h));
+        p.pages = Math.max(1, Math.ceil(p.rows.length / p.per));
+        if (p.page > p.pages) p.page = 1;
+        if (p.pages > longest) longest = p.pages;
+        show(p, flip);
+      }
+      ticks = 0;
+      cycleDone = longest < 2;
+    }
+    function turn() {
+      if (document.hidden || document.querySelector("details[open]")) return;
+      ticks++;
+      var home = ticks >= longest; // the longest panel is back on its first page
+      for (var i = 0; i < panels.length; i++) {
+        var p = panels[i];
+        if (p.pages < 2) continue;
+        p.page = home ? 1 : (p.page % p.pages) + 1;
+        show(p, true);
+      }
+      if (home) { ticks = 0; cycleDone = true; }
+    }
+    // A finished flip leaves its class behind, and a row with an animation in
+    // effect becomes the containing block of its fixed popup. Drop the class.
+    document.addEventListener("animationend", function (e) {
+      if (e.target.classList && e.target.classList.contains("flip")) e.target.classList.remove("flip");
+    });
+    var boxes = document.querySelectorAll(".panel");
+    for (var b = 0; b < boxes.length; b++) {
+      var box = boxes[b].querySelector(".rows");
+      if (!box) continue;
+      panels.push({ box: box, pg: boxes[b].querySelector(".pg"), rows: box.querySelectorAll(".row"), page: 1, pages: 1, per: 1 });
+    }
+    document.body.classList.add("paged");
+    layout(true);
+    window.addEventListener("resize", function () { layout(false); });
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { layout(false); });
+    setInterval(turn, pageMs);
+
+    // The wall clock: the only device clock on the page (B14).
+    var digits = document.querySelectorAll("#clock span");
+    function two(n) { return (n < 10 ? "0" : "") + n; }
+    function clock() {
+      var d = new Date(), s = two(d.getHours()) + two(d.getMinutes());
+      for (var i = 0; i < digits.length && i < 4; i++) digits[i].textContent = s.charAt(i);
+    }
+    clock();
+    setInterval(clock, 5000);
+
+    // FULL. A reload ends a document's fullscreen and this page reloads itself,
+    // so the board never goes fullscreen on its own: inside the /kiosk shell it
+    // toggles the SHELL's fullscreen (the tap counts for the parent too);
+    // anywhere else it opens the shell.
+    var fs = document.getElementById("fs");
+    if (fs) fs.addEventListener("click", function () {
+      var shell = null;
+      try { if (window.top !== window.self) shell = window.top.document; } catch (e) { shell = null; }
+      if (!shell) { location.assign(fs.getAttribute("data-kiosk")); return; }
+      if (shell.fullscreenElement) { shell.exitFullscreen(); return; }
+      var root = shell.documentElement;
+      if (root.requestFullscreen) root.requestFullscreen().catch(function () {});
+    });
+
+    // Keep the screen awake where the browser allows it (secure contexts only);
+    // anywhere else this is silently nothing.
+    function awake() {
+      if (navigator.wakeLock && !document.hidden) {
+        navigator.wakeLock.request("screen").then(function () {}).catch(function () {});
+      }
+    }
+    document.addEventListener("visibilitychange", awake);
+    awake();
+  })();
+  </script>
 </body>
 </html>

@@ -283,29 +283,54 @@ func tasksHTML(t *testing.T) string {
 
 const lightSpan = `<span class="light light-{{.Light.Class}}" role="img" aria-label="{{.Light.Label}}" title="{{.Light.Label}}"></span>`
 
-func TestTasksTemplate_LightSpanBeforeTheID(t *testing.T) {
+// REWRITTEN — not deleted — by board-departures (SWT-67,
+// docs/tickets/board-departures_SPEC.md, criterion 23): the light span's MARKUP
+// is byte-unchanged, it still appears exactly ONCE, and its actions still
+// reference only .Light.Class and .Light.Label. What moves is WHERE it sits. The
+// row is no longer a table: it is one anchor of seven cells (B4), and the light
+// opens the `rem` cell immediately before {{.Remark}} — the light and the words
+// that replace the dropped status column (B5) read as one phrase.
+func TestTasksTemplate_LightSpanInTheRemarkCell(t *testing.T) {
 	s := tasksHTML(t)
 	block, ok := templateBlockAfter(s, "{{range .Tasks}}")
 	if !ok {
 		t.Fatalf("tasks.html has no {{range .Tasks}} … {{end}} block")
 	}
-	const idLink = `<a href="/tasks/{{.ID}}">{{.ID}}</a>`
-	i := strings.Index(block, lightSpan)
-	j := strings.Index(block, idLink)
+	ri := strings.Index(block, `<span class="rem"`)
+	if ri < 0 {
+		t.Fatalf("the per-task range has no `rem` cell (criterion 23 / B4 cell 7). Row:\n%s", block)
+	}
+	re, ok := elementEnd(block, ri, "span")
+	if !ok {
+		t.Fatalf("the `rem` cell <span> is never closed")
+	}
+	cell := block[ri:re]
+	i := strings.Index(cell, lightSpan)
 	if i < 0 {
-		t.Fatalf("the per-task range has no light span %s (criterion 7)", lightSpan)
+		t.Fatalf("the `rem` cell has no light span %s (criterion 23)\ncell: %s", lightSpan, cell)
 	}
-	if j < 0 || i > j {
-		t.Fatalf("the light span does not sit BEFORE the id link %s (criterion 7: 'before the id')", idLink)
+	if open := strings.Index(cell, ">") + 1; strings.TrimSpace(cell[open:i]) != "" {
+		t.Errorf("the light span is not the FIRST thing in the `rem` cell; before it: %q (criterion 23)", cell[open:i])
 	}
-	if between := strings.TrimSpace(block[i+len(lightSpan) : j]); between != "" {
-		t.Errorf("between the light span and the id link: %q, want nothing — the light is in the id cell, right "+
-			"before the id", between)
+	rem := strings.Index(cell, "{{.Remark}}")
+	if rem < 0 || rem < i {
+		t.Fatalf("the `rem` cell does not render {{.Remark}} after the light span (criterion 23)\ncell: %s", cell)
+	}
+	if between := strings.TrimSpace(cell[i+len(lightSpan) : rem]); between != "" {
+		t.Errorf("between the light span and {{.Remark}}: %q, want nothing — the light is the remark's bullet "+
+			"(criterion 23)", between)
 	}
 	if n := strings.Count(s, `class="light `); n != 1 {
 		t.Errorf("tasks.html has %d light spans, want exactly 1 (in the per-task range)", n)
 	}
-	// Criterion 8: the span's attributes reference only .Light.Class/.Light.Label.
+	// It MOVED: the id cell is no longer the light's home (B4's cell table).
+	if ii := strings.Index(block, `<span class="id"`); ii >= 0 {
+		if ie, ok := elementEnd(block, ii, "span"); ok && strings.Contains(block[ii:ie], `class="light `) {
+			t.Errorf("the light span is still inside the id cell; criterion 23 puts it in the `rem` cell")
+		}
+	}
+	// Criterion 8 (SWT-52), unchanged: the span's attributes reference only
+	// .Light.Class/.Light.Label.
 	for _, m := range regexp.MustCompile(`\{\{([^}]*)\}\}`).FindAllStringSubmatch(lightSpan, -1) {
 		if a := strings.TrimSpace(m[1]); a != ".Light.Class" && a != ".Light.Label" {
 			t.Errorf("light span references %q", a)
@@ -460,20 +485,34 @@ func TestBoardLightFacts_FirstStatementSelectsTheSession(t *testing.T) {
 	}
 }
 
-// Criterion 18: the tag is the first thing in the TITLE cell, inside
-// {{if .Light.Session}}, and references only .Light.Session/.Class/.Label.
-func TestTasksTemplate_SessionTagFirstInTitleCell(t *testing.T) {
+// Criterion 18: the tag is inside {{if .Light.Session}} and references only
+// .Light.Session/.Class/.Label.
+//
+// REWRITTEN — not deleted — by board-departures (SWT-67, criterion 24): the
+// tag's MARKUP is byte-unchanged (class, title and text all still come from
+// .Light), it still renders exactly once and only inside {{if .Light.Session}};
+// it moves out of the title cell into its OWN Gate cell (B10). The right pane
+// hides that column in CSS — the value stays in the markup, so the SWT-56 CSS
+// rules and the integration helper keep their anchors.
+func TestTasksTemplate_SessionTagIsTheGateCell(t *testing.T) {
 	s := tasksHTML(t)
 	block, ok := templateBlockAfter(s, "{{range .Tasks}}")
 	if !ok {
 		t.Fatalf("tasks.html has no {{range .Tasks}} … {{end}} block")
 	}
-	tag := regexp.MustCompile(`<td>\{\{if \.Light\.Session\}\}<span class="session-tag session-\{\{\.Light\.Class\}\}" ` +
-		`title="\{\{\.Light\.Label\}\}">\{\{\.Light\.Session\}\}</span>\s*\{\{end\}\}<a href="/tasks/\{\{\.ID\}\}">\{\{\.Title\}\}</a>`)
+	tag := regexp.MustCompile(`<span class="gate">\s*\{\{if \.Light\.Session\}\}\s*` +
+		`<span class="session-tag session-\{\{\.Light\.Class\}\}" title="\{\{\.Light\.Label\}\}">\{\{\.Light\.Session\}\}</span>` +
+		`\s*\{\{end\}\}\s*</span>`)
 	m := tag.FindString(block)
 	if m == "" {
-		t.Fatalf("the per-task range has no S8 session tag first in the title cell, before the title link, inside "+
-			"{{if .Light.Session}} (criterion 18). Block:\n%s", block)
+		t.Fatalf("the per-task range has no S8 session tag in its own `gate` cell, inside {{if .Light.Session}} "+
+			"(criterion 24 / B10). Row:\n%s", block)
+	}
+	// It MOVED: the title cell carries the title and the reopen note, nothing else.
+	if ti := strings.Index(block, `<span class="title"`); ti >= 0 {
+		if te, ok := elementEnd(block, ti, "span"); ok && strings.Contains(block[ti:te], "session-tag") {
+			t.Errorf("the session tag is still inside the title cell; criterion 24 gives it the Gate cell")
+		}
 	}
 	for _, a := range regexp.MustCompile(`\{\{([^}]*)\}\}`).FindAllStringSubmatch(m, -1) {
 		switch strings.TrimSpace(a[1]) {
