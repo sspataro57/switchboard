@@ -527,6 +527,69 @@ lock.
 disagreed with the value actually used. `RefetchTarget.AccountID` was selected and unused for
 exactly one review cycle.
 
+### A later ticket voids an earlier one's containment argument without touching its code (SWT-68)
+**Location:** `internal/promote/promote.go` (the review lane) vs
+`internal/dashboard/board.go:386` + `internal/dashboard/sections.go:63`, found 2026-09-19
+(`docs/bugs/receipts-become-tasks_DIAGNOSIS.md`)
+
+SWT-30 criterion 8 argued that a non-whitelisted verdict is SAFE because it lands in a
+`holding` "human-review lane, **never a live task**". That is a claim about VISIBILITY, and it
+was true when written. SWT-59 (board-incoming-first) then made `board.go` compute
+`from_message` as `cp.action IN ('task','review')` and `sections.go` put every such row in the
+board's **FIRST** section, "arrivals — incoming", whatever its status. The promoter's code
+never changed, its tests stayed green, and its review lane became the loudest place on the
+board. Measured: 14 of the 17 rows the promoter put in the "review lane" were dismissed
+`not_actionable` by hand — the quiet sink was being worked like a queue.
+Consequence for SWT-68: "narrow the kind whitelist so receipts go to `holding`" moves the rows
+zero pixels and does not satisfy "not on the board". Creating NOTHING needs a new
+`classify_promotions.action` value — the live CHECK is `('task','review','attached')`, so a
+migration — plus the matching edit to `board.go:386`, or the new value silently drops out of
+the incoming section.
+**Rule: a containment argument that rests on where a row is DISPLAYED is not enforced by the
+package that makes the row.** When a SPEC says "this lands somewhere quiet", grep the dashboard
+for the column or action value it names, and re-grep it when a board ticket ships. A status is
+a contract; a section is a decision another package makes about your rows.
+
+### The classify lane's only gate is a boolean the same model authored (SWT-68)
+**Location:** `internal/classify/prompt.go` + `internal/promote/store.go:294`, same bug
+
+`promote.Decide` branches on `Kind` alone and the SPEC calls that fine, because
+`fields->>'actionable' = 'true'` is the inbox's WHERE clause. So the entire deterministic
+defence against a wrong verdict is ONE boolean written by the model that also chose the kind —
+and the schema deliberately has NO confidence field (prompt.go:23-29: qwen3:8b returns 0.95 for
+everything it flags, true and false positives identical). When `actionable` is wrong, a live
+`ready` task is created with nothing left to stop it. 19 PayPal receipts did exactly that;
+measured pipeline precision over all 37 auto-created tasks is 0.24 at best, against an eval
+baseline of 0.50 precision that was known and accepted before the promoter was wired.
+**Two rules.** (1) Before wiring an auto-create on a classifier output, look up the lane's
+MEASURED precision in `docs/runbooks/local-classifier.md` and say out loud what it costs per
+pass — 0.50 precision plus auto-create means half the board is noise. (2) **Do not "fix" this
+by adding `require actionable AND kind in whitelist` to the decision function**: both conjuncts
+are already true for every row production produces, so it is an inert predicate that goes green
+on a hand-written fixture and changes nothing — the SWT-18 constant-discriminator landmine in
+yet another costume.
+Also from this bug: the `kind` enum (`payment_due | deadline | appointment | action_required |
+informational`) has no member for "money moved, nothing to do", so a receipt has nowhere correct
+to go and the prompt's standing tie-break ("RECALL IS THE OBJECTIVE … when torn, answer true")
+decides it. **When a closed enum is missing the case that dominates a new sender family, the
+model does not abstain — it picks the nearest wrong member.** The enum is SHARED
+(`classify.ActionabilityContract`, asserted `LanePersonal.Contract == LaneResidue.Contract`), so
+adding a member is a two-lane change and stales the residue's 874-label baseline (~2.9 h to
+re-run) as well as the personal lane's 280 (~21-36 min).
+
+### `task_dismissals` reason codes are training labels nothing reads (SWT-68)
+**Location:** `internal/promote/outcomes.go:92-131`, `cmd/classify/main.go:182`
+
+`promote.InquiryOutcomes` is the ONLY consumer of dismissal reason codes, and it hard-codes
+`r.worker_type = 'classify_inquiry'`; `parsePromoteFlags` refuses `--outcomes` on any lane but
+inquiry. So the personal lane's dismissals — 28 `not_actionable` as of 2026-09-19 — are written
+by the dashboard and read by nobody. Anyone quoting personal-lane precision is computing it by
+hand in psql.
+Second gap in the same signal: **the board's Done button writes no `task_dismissals` row at
+all**, so precision measured from dismissals undercounts. On SWT-68's 19-row set, 6 were closed
+with Done and 13 dismissed — a third of the false positives are invisible to any
+dismissal-based readout.
+
 ---
 
 ## The seven invariants (review checklist form)

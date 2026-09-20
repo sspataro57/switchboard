@@ -460,6 +460,24 @@ file is safe to commit while the mail never leaves the machine.
 | 2026-08-31 | 280 | 35         | 0.94   | 0.50      | 7.2 s          | qwen3:8b |
 | 2026-09-02 | 874 | 34         | 0.59   | 0.28      | 11.9 s         | qwen3:8b |
 | 2026-09-07 | 280 | 35         | 0.57   | 0.67      | 31.3 s         | qwen3:8b (think:true) |
+| 2026-09-19 | 300 | 37         | 0.95   | 0.55      | 9.9 s          | qwen3:8b, prompt classify-v2 |
+
+**2026-09-19, classify-v2 (SWT-68, receipts-become-tasks).** The set grew by 20 owner-blanket rows: 18
+receipts, autopay notices and refunds that v1 turned into tasks (`not`), plus two `actionable` controls — the
+Citi "payment due date is approaching" bill and a "your recurring payment will occur tomorrow" reminder (the
+original set already labels that shape actionable, and the owner closed his with Done, not Dismiss). v2 adds
+the money clauses: a bill or a minimum payment is `payment_due`, due date ahead or already passed, unless the
+mail says it was already paid or authorized, or will be charged automatically. Result: 35 of 37 real asks
+caught (the same two misses as before), 15 of the 18 receipt rows no longer flagged, false positives on the
+original 280 down from 33 to 26. Still flagged: an invoice copy, a Pay-in-4 schedule saying "due today", one
+PayPal "authorized" receipt the model reads as pending.
+Two REJECTED drafts are the lesson. "Must still pay BY HAND" plus "when your reason says no action is
+required, answer false" fixed 17 of 19 and lost three real "minimum payment due" card bills. A clause for
+"a payment you already scheduled" flipped a labelled-actionable reminder to `not`. Measure every wording on
+the labelled positives before trusting it: asking the model for its verdict and reason on the stored
+`ai_runs.input->>'user_prompt'` of the labelled ids takes about 8 minutes and shows WHY it flags. The
+verdicts move a little between wordings on unrelated rows (temperature 0 does not make an 8B model stable
+across prompts), so only the full run is a measurement.
 
 **Below 120 scored labels, `classify eval` prints COUNTS and
 `INDICATIVE ONLY — this is not a measurement` on every lane (SWT-33)** — so a
