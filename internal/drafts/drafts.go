@@ -99,7 +99,12 @@ type DeliverTask struct {
 
 	// The Redo inputs (SWT-43): the parent's newest rejected delivery with a
 	// redraft requested. RedraftOf is 0 for a first draft.
-	RedraftOf     int64
+	RedraftOf int64
+	// RedraftCc (SWT-69 D9) is the rejected draft's Cc. A Redo throws away the
+	// WORDS; the Cc is routing, so the new draft keeps it. Carried here, in
+	// deterministic Go — the model never sees or chooses a recipient, and the
+	// executor never adds one by itself.
+	RedraftCc     []string
 	RejectedBody  string
 	RejectionNote string // "" when he gave no reason
 }
@@ -280,11 +285,55 @@ func Run(ctx context.Context, store Store, router *provider.Router, exec Executo
 		if dt.Channel == "gmail" {
 			args["subject"] = draft.Subject
 			args["thread_id"] = *dt.ThreadID
+			if len(dt.RedraftCc) > 0 {
+				args["cc"] = dt.RedraftCc
+			}
 		} else {
 			args["target_ref"] = dt.TargetRef
 		}
 		rawArgs, _ := json.Marshal(args)
-		if _, err := exec.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: Actor, Args: rawArgs}); err != nil {
+		_, derr := exec.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: Actor, Args: rawArgs})
+		// SWT-69: an INHERITED Cc can have become the message's To since the
+		// rejected draft was written (Katie was Cc'd, then Katie replied). Nobody
+		// typed that Cc in this pass, so narrow it and try again rather than
+		// failing the same redo on every pass. Bounded by the list's length; the
+		// model is not called again.
+		var dropped []string
+		for tries := len(dt.RedraftCc); derr != nil && tries > 0; tries-- {
+			var collision *tools.CcCollisionError
+			if !errors.As(derr, &collision) {
+				break
+			}
+			kept := make([]string, 0, len(dt.RedraftCc))
+			for _, a := range dt.RedraftCc {
+				if !strings.EqualFold(a, collision.Addr) {
+					kept = append(kept, a)
+				}
+			}
+			if len(kept) == len(dt.RedraftCc) {
+				break // no progress: the refusal names an address this list does not hold
+			}
+			dropped = append(dropped, collision.Addr+" (now the "+collision.Field+")")
+			dt.RedraftCc = kept
+			if len(kept) > 0 {
+				args["cc"] = kept
+			} else {
+				delete(args, "cc")
+			}
+			rawArgs, _ = json.Marshal(args)
+			_, derr = exec.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: Actor, Args: rawArgs})
+		}
+		if derr == nil && len(dropped) > 0 {
+			// Said out loud: a recipient Salvador may have typed himself just left
+			// the Cc, and the failed audit row alone would not tell him.
+			msg, _ := json.Marshal("redraft: dropped from the Cc because it repeats the message's own recipient: " +
+				strings.Join(dropped, ", "))
+			if _, lerr := exec.Execute(ctx, executor.Call{Tool: "task_append_log", Actor: Actor,
+				Args: []byte(fmt.Sprintf(`{"task_id":%d,"message":%s,"kind":"draft_note"}`, dt.DeliverTaskID, msg))}); lerr != nil {
+				slog.Warn("append cc-drop log failed", "task", dt.DeliverTaskID, "err", lerr)
+			}
+		}
+		if err := derr; err != nil {
 			if errors.Is(err, tools.ErrDeliveryBlocksDraft) {
 				// SWT-43 review (Codex): another drafts pass drafted this task
 				// first (DeliverTasks is a read, not a claim), or a delivery

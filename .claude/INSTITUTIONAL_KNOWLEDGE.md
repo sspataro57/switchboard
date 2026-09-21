@@ -2890,3 +2890,32 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   frames the board.
 - **Verify UI work in a real browser** (Playwright is installed: `channel="chrome"`). Chrome's
   `--screenshot`/`--dump-dom` with `--virtual-time-budget` hid both landmines above.
+
+## Cc on gmail deliveries (SWT-69, gmail-delivery-cc)
+
+- **Ability only.** `draft_delivery` / `update_delivery` take `cc` (gmail only); `deliveries.cc TEXT[] NOT NULL
+  DEFAULT '{}'` (0038). Nothing in switchboard adds a Cc by itself — the owner refused a standing rule ("just
+  allow claude to do it"); habits like "always Cc Katie on Rochester mail" live in that repo's session
+  instructions. Any plain address is accepted because every gmail delivery is approve-first; **revisit before
+  any gmail category becomes auto-send.**
+- **What lands:** the address only (a display name would be model-chosen words on a client-visible header),
+  domain lower-cased, LOCAL PART AS GIVEN, deduped, at most 10 (`tools.MaxCcAddresses`, pinned to the CHECK),
+  never the message's own From or To. An address that needs a quoted local part is refused: `"a,b"@x` unquotes
+  to a comma-bearing address, and commas are the separator in the hash, the header and the envelope parse.
+- **The approval hash covers the Cc** (`DeliveryContentHash(subject, body, cc)`, always with the trailing
+  field). A page rendered before a deploy refuses its Approve once; reload.
+- **The send re-reads `d.cc` under the phase-1 lock** and DROPS (never refuses) a Cc that now equals the
+  re-resolved To/From; `delivery_sent`'s payload records what went out whenever a Cc was approved.
+- **A redo inherits the Cc in the drafts worker** (deterministic Go, the model never sees a recipient). If an
+  inherited address has since become the To, `draft_delivery` returns `*tools.CcCollisionError` and the worker
+  narrows the list and drafts again without re-asking the model. Without that, the same redo fails every pass.
+- **pgx:** a nil `[]string` encodes as SQL NULL and the column is NOT NULL — every write path binds a non-nil
+  slice.
+- **Nothing rejects unknown tool args**, so a STALE `ops-mcp-user` binary silently drops a `cc` the session
+  passed and the session will say it Cc'd someone. The dashboard (no Cc line) is what catches it. After any
+  merge touching `internal/mcpserver` or `internal/tools`: `go install ./cmd/ops-mcp-user` on `main`, here
+  and on 192.168.50.30, then open new sessions.
+- **The dashboard Cc box:** an emptied box CLEARS (forwarded whenever the POST has the key), but an input that
+  parses to zero addresses (`undisclosed-recipients:;`) is not a clear — it falls through to the executor.
+- **Test idiom:** `args->'cc' IS NOT NULL` matches JSON `null`. Use
+  `jsonb_typeof(args->'cc') = 'array' AND args->'cc' <> '[]'::jsonb`.

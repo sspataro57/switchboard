@@ -160,7 +160,7 @@ func TestDashboard_Integration_DeliveryDestinationAndContentBoundApprove(t *test
 
 	// ---- fix 1: the form carries the hash of what was rendered ------------
 	shown := hashIn(t, g)
-	if want := tools.DeliveryContentHash("Re: Invoice 42 question", "Paid today."); shown != want {
+	if want := tools.DeliveryContentHash("Re: Invoice 42 question", "Paid today.", nil); shown != want {
 		t.Fatalf("rendered content_hash = %q, want tools.DeliveryContentHash of the rendered subject/body %q", shown, want)
 	}
 

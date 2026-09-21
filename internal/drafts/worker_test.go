@@ -447,6 +447,12 @@ func redraftDeliverTask() drafts.DeliverTask {
 	d.RedraftOf = 4242
 	d.RejectedBody = "Hi team, apologies for the delay on this, we sincerely regret the inconvenience caused."
 	d.RejectionNote = "shorter, no apology"
+	// gmail-delivery-cc (SWT-69) D9: the rejected row's Cc travels with the
+	// redraft. Reject-with-redraft throws away the WORDS; the Cc is ROUTING,
+	// and Salvador's Redo note is about the text — so losing Katie on a
+	// redraft would be a silent, invisible change of recipients. The store's
+	// LATERAL selects it beside the body and the note.
+	d.RedraftCc = []string{"kevans@cecollaboratory.com"}
 	return d
 }
 
@@ -602,14 +608,60 @@ func TestDrafts_Redraft_DraftsThroughTheSameCall(t *testing.T) {
 	if kb["expect_task_status"] != "done_locally" {
 		t.Errorf("redraft expect_task_status = %v, want done_locally (D7: the only status a draft can land on)", kb["expect_task_status"])
 	}
+	// AMENDED by gmail-delivery-cc (SWT-69) D9 — not weakened. `cc` is the ONE
+	// permitted extra key: this criterion's point is that the new row carries
+	// no LINK BACK to the rejected row, and a cc is not such a link (it is a
+	// recipient list, indistinguishable from one the caller typed). Every other
+	// extra key is still a failure, and the count below still pins it to
+	// exactly one.
 	for k := range kb {
+		if k == "cc" {
+			continue
+		}
 		if _, ok := ka[k]; !ok {
 			t.Errorf("the redraft's draft_delivery carries %q, which a first draft does not. Criterion 24: the new "+
 				"row carries no link back to the rejected row", k)
 		}
 	}
-	if len(ka) != len(kb) {
-		t.Errorf("draft_delivery arg keys differ: first draft %v, redraft %v", ka, kb)
+	if _, ok := ka["cc"]; ok {
+		t.Errorf("a FIRST draft passed cc %v; there is nothing to inherit, and switchboard never adds a "+
+			"recipient on its own (D1)", ka["cc"])
+	}
+	if len(kb) != len(ka)+1 {
+		t.Errorf("draft_delivery arg keys differ by more than the inherited cc: first draft %v, redraft %v", ka, kb)
+	}
+	// D9's value: the rejected row's Cc, carried forward verbatim. Dropping the
+	// inheritance in drafts.Run turns this red (SPEC mutation 11).
+	want := redraftDeliverTask().RedraftCc
+	got, _ := kb["cc"].([]any)
+	if len(got) != len(want) {
+		t.Fatalf("redraft draft_delivery cc = %v, want %v (the rejected row's Cc — losing it silently changes "+
+			"who receives the message, and nothing on the dashboard would say so)", kb["cc"], want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("redraft cc[%d] = %v, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// D9's other half: a rejected row with NO Cc adds no key at all. Passing
+// "cc": [] would be harmless today but would make "the redraft carries exactly
+// the first draft's keys" untrue for every ordinary Redo.
+func TestDrafts_Redraft_NoCcOnTheRejectedRowPassesNoCcKey(t *testing.T) {
+	dt := redraftDeliverTask()
+	dt.RedraftCc = nil
+	_, _, redo := runOneDraft(t, dt)
+	calls := redo.callsTo("draft_delivery")
+	if len(calls) != 1 {
+		t.Fatalf("draft_delivery calls = %d, want 1", len(calls))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(calls[0].Args, &m); err != nil {
+		t.Fatalf("draft_delivery args: %v", err)
+	}
+	if v, ok := m["cc"]; ok {
+		t.Errorf("a redraft of a row with no Cc passed cc = %v; it must pass no cc key at all", v)
 	}
 }
 
@@ -768,5 +820,79 @@ func TestDrafts_ABlockingDeliveryRefusalIsASkip(t *testing.T) {
 				t.Errorf("Run = %v, stats %+v; any other draft_delivery refusal is still an error", err, stats)
 			}
 		})
+	}
+}
+
+// SWT-69 review: an INHERITED Cc can have become the message's To since the
+// rejected draft was written (Katie was Cc'd, then Katie replied, then Redo).
+// draft_delivery refuses a Cc that repeats the To, and nobody typed that Cc in
+// this pass, so the worker narrows the inherited list and drafts again — once
+// per colliding address, without calling the model again — instead of failing
+// the same redo on every pass.
+type collidingExec struct {
+	fakeExec
+	collide map[string]bool // lower-cased addresses draft_delivery refuses
+}
+
+func (e *collidingExec) Execute(ctx context.Context, call executor.Call) (executor.Result, error) {
+	if call.Tool == "draft_delivery" {
+		var a struct {
+			Cc []string `json:"cc"`
+		}
+		_ = json.Unmarshal(call.Args, &a)
+		for _, addr := range a.Cc {
+			if e.collide[strings.ToLower(addr)] {
+				e.calls = append(e.calls, call)
+				return executor.Result{}, fmt.Errorf("tool draft_delivery: %w",
+					&tools.CcCollisionError{Addr: addr, Field: "To"})
+			}
+		}
+	}
+	return e.fakeExec.Execute(ctx, call)
+}
+
+func TestDrafts_Redraft_AnInheritedCcThatBecameTheToIsDropped(t *testing.T) {
+	dt := redraftDeliverTask()
+	dt.RedraftCc = []string{"kevans@cecollaboratory.com", "billing@acme.example"}
+	store := &fakeStore{tasks: []drafts.DeliverTask{dt}}
+	prov := &fakeProvider{scripts: []scriptedResp{{resp: okDraft("Re: login broken", "Fix is live on staging.")}}}
+	exec := &collidingExec{collide: map[string]bool{"kevans@cecollaboratory.com": true}}
+	stats, err := drafts.Run(context.Background(), store, provider.NewRouter(prov, nil, 0), exec, defaultCfg())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if stats.Errors != 0 {
+		t.Errorf("stats.Errors = %d, want 0: a collision on an inherited Cc is narrowed, not failed", stats.Errors)
+	}
+	if len(prov.requests) != 1 {
+		t.Errorf("provider calls = %d, want 1: the retry re-sends the same draft, it does not re-ask the model", len(prov.requests))
+	}
+	calls := exec.callsTo("draft_delivery")
+	if len(calls) != 2 {
+		t.Fatalf("draft_delivery calls = %d, want 2 (the refusal, then the narrowed retry)", len(calls))
+	}
+	var last struct {
+		Cc []string `json:"cc"`
+	}
+	if err := json.Unmarshal(calls[1].Args, &last); err != nil {
+		t.Fatalf("retry args: %v", err)
+	}
+	if len(last.Cc) != 1 || last.Cc[0] != "billing@acme.example" {
+		t.Errorf("the retry's cc = %v, want [billing@acme.example]: only the colliding address is dropped", last.Cc)
+	}
+
+	// Every inherited address collides: the retry passes no cc key at all.
+	exec2 := &collidingExec{collide: map[string]bool{"kevans@cecollaboratory.com": true, "billing@acme.example": true}}
+	prov2 := &fakeProvider{scripts: []scriptedResp{{resp: okDraft("Re: login broken", "Fix is live on staging.")}}}
+	if _, err := drafts.Run(context.Background(), &fakeStore{tasks: []drafts.DeliverTask{dt}}, provider.NewRouter(prov2, nil, 0), exec2, defaultCfg()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	c2 := exec2.callsTo("draft_delivery")
+	var m map[string]any
+	if err := json.Unmarshal(c2[len(c2)-1].Args, &m); err != nil {
+		t.Fatalf("final args: %v", err)
+	}
+	if _, ok := m["cc"]; ok {
+		t.Errorf("the final retry still passes cc = %v; with every inherited address dropped there is no cc key", m["cc"])
 	}
 }

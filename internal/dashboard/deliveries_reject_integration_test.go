@@ -258,7 +258,7 @@ func TestDeliveriesReject_Integration_DenyAndRedoThroughTheHandler(t *testing.T)
 	// ---- SWT-43 review fix 5: the verdict is bound to the words shown ------------
 	stale := drafted("DDASH stale body")
 	shown := hashShown(stale)
-	if want := tools.DeliveryContentHash("Re: login broken", "DDASH stale body"); shown != want {
+	if want := tools.DeliveryContentHash("Re: login broken", "DDASH stale body", nil); shown != want {
 		t.Fatalf("the reject form's content_hash = %q, want tools.DeliveryContentHash of the rendered words %q", shown, want)
 	}
 	// An edit lands after the render (a session's update_delivery).

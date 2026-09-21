@@ -13,6 +13,16 @@ It serves fifteen tools: `project_list`, `task_list`, `task_get_next`, `task_dis
 `task_close`, `task_mark_delivered`, `create_task`, `task_append_log`,
 `task_set_priority`, `task_signal`, `task_context`, `mail_list_attachments`, `mail_read_attachment`, `draft_delivery` and `update_delivery`.
 
+**Cc on an email reply (SWT-69).** `draft_delivery` takes an optional `cc`: a list of email
+addresses, gmail only, at most 10, one address per entry. Any valid address is accepted (Salvador
+approves every email and the dashboard shows the Cc beside From and To); a display name is
+dropped, only the address is kept; a Cc equal to the message's From or To is refused.
+`update_delivery` takes the same `cc` on a drafted row: a list REPLACES the current one, `[]`
+CLEARS it, and leaving `cc` out keeps it. Switchboard never adds a Cc by itself — a habit such as
+"always Cc Katie on Rochester mail" belongs in that repo's own session instructions. The argument
+ships in the binary, so it exists only after the re-install below (`go install
+./cmd/ops-mcp-user` on `main`, here and on 192.168.50.30) and only in sessions opened after it.
+
 ## Fresh install (once, from `main`)
 
 ```bash

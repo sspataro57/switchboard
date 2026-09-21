@@ -265,14 +265,14 @@ func TestRejectDelivery_Integration_ContentBound(t *testing.T) {
 
 	const subject = "itest-deny subject" // rjFixture.row's subject
 	id := f.row(t, ctx, rjSpec{channel: "gmail", status: "drafted", body: "itest-deny bound body"})
-	shown := tools.DeliveryContentHash(subject, "itest-deny bound body")
+	shown := tools.DeliveryContentHash(subject, "itest-deny bound body", nil)
 
 	// An edit lands after the page rendered (a session's update_delivery).
 	if _, err := f.ex.Execute(ctx, executor.Call{Tool: "update_delivery", Actor: rjActor,
 		Args: []byte(`{"delivery_id":` + itoa(id) + `,"body":"planted words"}`)}); err != nil {
 		t.Fatalf("update_delivery: %v", err)
 	}
-	current := tools.DeliveryContentHash(subject, "planted words")
+	current := tools.DeliveryContentHash(subject, "planted words", nil)
 
 	before := f.fingerprint(t, ctx, id)
 	_, err := f.rejectRaw(ctx, rjActor, map[string]any{

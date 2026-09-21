@@ -95,6 +95,11 @@ type draftDeliveryArgs struct {
 	// RFC3339. Calendar-only: they add no rule to any other channel.
 	Start string `json:"start,omitempty"`
 	End   string `json:"end,omitempty"`
+	// Cc (SWT-69) is the gmail reply's carbon-copy list, as the drafter asked
+	// for it. Absent, null and [] all mean "no Cc". gmail only; any valid
+	// address (Salvador approves every email); stored normalized (NormalizeCc).
+	// Switchboard never adds one by itself.
+	Cc []string `json:"cc,omitempty"`
 	// ExpectTaskStatus (SWT-37, Q1 = b) is the task status the caller READ
 	// before composing the draft. The handler re-checks it under the task row
 	// lock and refuses on a mismatch, closing the read-then-write window. The
@@ -133,6 +138,17 @@ func validateDraftDelivery(args []byte) error {
 	// the caller was never going to be allowed to satisfy.
 	if a.RequireChannel != "" && a.Channel != a.RequireChannel {
 		return fmt.Errorf("channel %q is refused here: this caller drafts %s deliveries only", a.Channel, a.RequireChannel)
+	}
+	// SWT-69 D3: before any other channel rule. The other channels have no
+	// carbon copy and their send paths would silently drop it; dropping a
+	// recipient the caller asked for is worse than refusing.
+	if len(a.Cc) > 0 {
+		if a.Channel != "gmail" {
+			return fmt.Errorf("cc is refused on a %s delivery: only a gmail delivery can carry a Cc", a.Channel)
+		}
+		if _, err := NormalizeCc(a.Cc); err != nil {
+			return err
+		}
 	}
 	if a.ExpectTaskStatus != "" && !slices.Contains(taskStatuses, a.ExpectTaskStatus) {
 		return fmt.Errorf("expect_task_status %q is not a task status", a.ExpectTaskStatus)
@@ -276,6 +292,7 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 	var fromAccountID *int64
 	var targetClientRef *string
 	var startsAt, endsAt *time.Time
+	cc := []string{} // never nil: deliveries.cc is NOT NULL, and a nil slice encodes as SQL NULL
 	if a.Channel == "calendar" {
 		// SWT-28 criteria 11-12: the account is resolved SERVER-SIDE from
 		// target_ref (never caller-chosen), matched case-insensitively, and
@@ -448,6 +465,24 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		}
 		fromAccountID = &acctID
 
+		// SWT-69: what LANDS is the normalized list, and a Cc may never repeat
+		// the message's own From or To (D7). To is the sender of the thread's
+		// latest inbound message, the value ResolveGmailRoute sends to.
+		if len(a.Cc) > 0 {
+			if cc, err = NormalizeCc(a.Cc); err != nil {
+				return nil, err
+			}
+			to := ""
+			if m, merr := latestInboundMessage(ctx, pool, *a.ThreadID); merr == nil {
+				to = m.sender
+			} else if !errors.Is(merr, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("resolve reply target for thread %d: %w", *a.ThreadID, merr)
+			}
+			if addr, field := ccCollision(cc, email, to); addr != "" {
+				return nil, &CcCollisionError{Addr: addr, Field: field}
+			}
+		}
+
 		// SWT-61: the reply's SUBJECT is resolved server-side too, for the same
 		// reason From is — the caller cannot choose it and cannot omit it. The
 		// fill lives HERE, in the executor, so it covers EVERY caller
@@ -542,13 +577,13 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
 			                         from_account_id, thread_id, target_client_ref, created_by,
-			                         starts_at, ends_at)
-			 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9, $10, $11)
+			                         starts_at, ends_at, cc)
+			 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9, $10, $11, $12)
 			 RETURNING id`,
 			a.TaskID, a.Channel, a.TargetRef,
 			google.ScrubAIAttribution(a.Body), google.ScrubAIAttribution(a.Subject),
 			fromAccountID, a.ThreadID, targetClientRef, executor.ActorFrom(ctx),
-			startsAt, endsAt).Scan(&deliveryID); err != nil {
+			startsAt, endsAt, cc).Scan(&deliveryID); err != nil {
 			return fmt.Errorf("insert delivery: %w", err)
 		}
 		return nil
@@ -719,6 +754,10 @@ type updateDeliveryArgs struct {
 	DeliveryID int64   `json:"delivery_id"`
 	Subject    *string `json:"subject,omitempty"`
 	Body       *string `json:"body,omitempty"`
+	// Cc (SWT-69 D6): absent or null = unchanged, [] = clear, [...] = replace
+	// wholesale. A pointer so the three cases are distinguishable; JSON null
+	// unmarshals to a nil pointer and so reads as absent.
+	Cc *[]string `json:"cc,omitempty"`
 	// RequireOwnDraft (SWT-44 review) is pinned to "true" by the user-scope MCP
 	// profile (mcpserver.userProfilePins, after injectWorkerID, by overwrite):
 	// the caller edits only drafts whose created_by is its own actor. The actor
@@ -746,8 +785,13 @@ func validateUpdateDelivery(args []byte) error {
 	if a.DeliveryID == 0 {
 		return errors.New("missing delivery_id")
 	}
-	if a.Subject == nil && a.Body == nil {
-		return errors.New("nothing to update (subject or body required)")
+	if a.Subject == nil && a.Body == nil && a.Cc == nil {
+		return errors.New("nothing to update (subject, body or cc required)")
+	}
+	if a.Cc != nil {
+		if _, err := NormalizeCc(*a.Cc); err != nil {
+			return err
+		}
 	}
 	// SWT-44 review: a present body must say something — an empty one would
 	// sit in the approval queue as a blank email. subject "" stays legal HERE
@@ -779,14 +823,23 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 			return nil, fmt.Errorf("delivery %d: body is empty once attribution lines are removed; a delivery must say something", a.DeliveryID)
 		}
 	}
+	cc := []string{} // never nil: the column is NOT NULL
+	if a.Cc != nil {
+		var err error
+		if cc, err = NormalizeCc(*a.Cc); err != nil {
+			return nil, err
+		}
+	}
 	// One transaction, the delivery row locked: the drafted and ownership checks
 	// and the write see the same row, so neither an approve nor a re-draft can
 	// slip between them.
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
 		var status, channel, createdBy string
+		var fromAccountID, threadID *int64
 		if err := tx.QueryRow(ctx,
-			`SELECT status, channel, COALESCE(created_by,'') FROM deliveries WHERE id=$1 FOR UPDATE`,
-			a.DeliveryID).Scan(&status, &channel, &createdBy); err != nil {
+			`SELECT status, channel, COALESCE(created_by,''), from_account_id, thread_id
+			   FROM deliveries WHERE id=$1 FOR UPDATE`,
+			a.DeliveryID).Scan(&status, &channel, &createdBy, &fromAccountID, &threadID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("delivery %d not found", a.DeliveryID)
 			}
@@ -816,13 +869,39 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 					"(created by its actor, gmail only); change it on the dashboard", a.DeliveryID, createdBy, actor)
 			}
 		}
+		// SWT-69: a Cc exists on gmail only (D3), and may never repeat the
+		// message's own From or To (D7) — checked under the same lock, against
+		// the same To the send resolves.
+		if len(cc) > 0 {
+			if channel != "gmail" {
+				return fmt.Errorf("delivery %d is a %s delivery: only a gmail delivery can carry a Cc", a.DeliveryID, channel)
+			}
+			from, to := "", ""
+			if fromAccountID != nil {
+				if err := tx.QueryRow(ctx, `SELECT account_email FROM source_accounts WHERE id=$1`, *fromAccountID).
+					Scan(&from); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+					return fmt.Errorf("resolve from account for delivery %d: %w", a.DeliveryID, err)
+				}
+			}
+			if threadID != nil {
+				m, merr := latestInboundMessage(ctx, tx, *threadID)
+				if merr != nil && !errors.Is(merr, pgx.ErrNoRows) {
+					return fmt.Errorf("resolve reply target for delivery %d: %w", a.DeliveryID, merr)
+				}
+				to = m.sender
+			}
+			if addr, field := ccCollision(cc, from, to); addr != "" {
+				return &CcCollisionError{Addr: addr, Field: field}
+			}
+		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE deliveries SET
 			   subject = CASE WHEN $2 THEN NULLIF($3,'') ELSE subject END,
 			   body    = CASE WHEN $4 THEN $5 ELSE body END,
+			   cc      = CASE WHEN $6 THEN $7::text[] ELSE cc END,
 			   updated_at = now()
 			 WHERE id=$1`,
-			a.DeliveryID, a.Subject != nil, subject, a.Body != nil, body); err != nil {
+			a.DeliveryID, a.Subject != nil, subject, a.Body != nil, body, a.Cc != nil, cc); err != nil {
 			return fmt.Errorf("update delivery %d: %w", a.DeliveryID, err)
 		}
 		return nil
@@ -860,13 +939,18 @@ func validateDeliveryIDOnly(args []byte) error {
 // a NUL, then the body. The NUL keeps words from moving across the
 // subject/body boundary under the same hash. A NULL subject is "", the
 // dashboard's COALESCE and approve_delivery's.
-func DeliveryContentHash(subject, body string) string {
-	sum := sha256.Sum256([]byte(subject + "\x00" + body))
+//
+// SWT-69 D8: the Cc is part of what Salvador approves, so it is part of the
+// hash; otherwise a Cc added between the page render and the Approve click
+// would pass the check that exists to catch exactly that. A comma separates the
+// addresses because NormalizeCc lets no stored address contain one.
+func DeliveryContentHash(subject, body string, cc []string) string {
+	sum := sha256.Sum256([]byte(subject + "\x00" + body + "\x00" + strings.Join(cc, ",")))
 	return hex.EncodeToString(sum[:])
 }
 
 // approveDeliveryArgs binds the human gate to what the approver saw (SWT-44
-// review). The dashboard renders DeliveryContentHash(subject, body) into the
+// review). The dashboard renders DeliveryContentHash(subject, body, cc) into the
 // Approve form and posts it back as ExpectContentHash; an edit landing between
 // the render and the click (a session's update_delivery) then makes the
 // approve refuse instead of passing words nobody read. Omitted = the old
@@ -916,10 +1000,11 @@ func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 		}
 		var status, channel, subject, body string
 		var extID *string
+		var cc []string
 		if err := tx.QueryRow(ctx,
-			`SELECT status, channel, sent_external_id, COALESCE(subject,''), COALESCE(body,'')
+			`SELECT status, channel, sent_external_id, COALESCE(subject,''), COALESCE(body,''), cc
 			   FROM deliveries WHERE id=$1 FOR UPDATE`,
-			a.DeliveryID).Scan(&status, &channel, &extID, &subject, &body); err != nil {
+			a.DeliveryID).Scan(&status, &channel, &extID, &subject, &body, &cc); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("delivery %d not found", a.DeliveryID)
 			}
@@ -944,7 +1029,7 @@ func approveDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]by
 		}
 		// Compared under the FOR UPDATE lock update_delivery also takes, so no
 		// edit can land between this check and the status write below.
-		if a.ExpectContentHash != "" && a.ExpectContentHash != DeliveryContentHash(subject, body) {
+		if a.ExpectContentHash != "" && a.ExpectContentHash != DeliveryContentHash(subject, body, cc) {
 			return fmt.Errorf("delivery %d changed since it was shown to you; reload and review it again", a.DeliveryID)
 		}
 		// approval_source records WHICH authority let this row out (SWT-12).
@@ -1030,13 +1115,14 @@ func rejectDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 		var status, channel, subject, body string
 		var extID, stored *string
 		var confirmed, redraftRequested, sendFailed bool
+		var cc []string
 		if err := tx.QueryRow(ctx,
 			`SELECT status, channel, sent_external_id, confirmed_at IS NOT NULL,
 			        redraft_requested_at IS NOT NULL, rejection_note,
-			        COALESCE(subject,''), COALESCE(body,''), error IS NOT NULL
+			        COALESCE(subject,''), COALESCE(body,''), error IS NOT NULL, cc
 			   FROM deliveries WHERE id=$1 FOR UPDATE`,
 			a.DeliveryID).Scan(&status, &channel, &extID, &confirmed, &redraftRequested, &stored,
-			&subject, &body, &sendFailed); err != nil {
+			&subject, &body, &sendFailed, &cc); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("delivery %d not found", a.DeliveryID)
 			}
@@ -1048,7 +1134,7 @@ func rejectDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 		// SWT-43 review: bound to the words shown (SWT-44's content hash),
 		// compared under this row lock, which update_delivery also takes, so no
 		// edit lands between the check and the verdict.
-		if a.ExpectContentHash != "" && a.ExpectContentHash != DeliveryContentHash(subject, body) {
+		if a.ExpectContentHash != "" && a.ExpectContentHash != DeliveryContentHash(subject, body, cc) {
 			return fmt.Errorf("delivery %d changed since it was shown to you; reload and review it again", a.DeliveryID)
 		}
 		// D7: a draft can only be written for done_locally work (draft_delivery's
@@ -1187,7 +1273,9 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 			subject   *string
 			threadID  *int64
 			fromEmail string
+			cc        []string
 		}
+		sentCc  []string // the Cc actually put on the wire (D7's send-time drop applied)
 		msg     google.OutboundMessage
 		gThread string
 		msgID   string
@@ -1202,11 +1290,11 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		var sendEnabled *bool
 		err := tx.QueryRow(ctx,
 			`SELECT d.task_id, d.channel, d.body, d.subject, d.thread_id, d.status,
-			        d.sent_external_id, d.from_account_id, a.send_enabled, COALESCE(a.account_email,'')
+			        d.sent_external_id, d.from_account_id, a.send_enabled, COALESCE(a.account_email,''), d.cc
 			 FROM deliveries d LEFT JOIN source_accounts a ON a.id = d.from_account_id
 			 WHERE d.id=$1 FOR UPDATE OF d`,
 			a.DeliveryID).Scan(&d.taskID, &d.channel, &d.body, &d.subject, &d.threadID,
-			&status, &extID, &fromAcct, &sendEnabled, &d.fromEmail)
+			&status, &extID, &fromAcct, &sendEnabled, &d.fromEmail, &d.cc)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("delivery %d not found", a.DeliveryID)
 		}
@@ -1280,8 +1368,14 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 			return fmt.Errorf("delivery %d has an empty subject: a gmail reply must carry one, and filling it "+
 				"here would send words nobody approved (edit the draft, or re-draft it)", a.DeliveryID)
 		}
+		// SWT-69: the APPROVED Cc, read under this same lock. The To is
+		// re-resolved at send (a newer inbound message can change it after
+		// approval), so a Cc that now equals the To or the From is DROPPED, not
+		// refused: dropping only narrows who receives it, refusing would wedge an
+		// approved delivery over a duplicate. What went out is recorded below.
+		sentCc = ccWithout(d.cc, d.fromEmail, to)
 		msg = google.OutboundMessage{
-			From: d.fromEmail, To: to, Subject: subject, Body: d.body,
+			From: d.fromEmail, To: to, Cc: sentCc, Subject: subject, Body: d.body,
 			MessageID: msgID, InReplyTo: inReplyTo, References: refs, Date: time.Now(),
 		}
 
@@ -1333,8 +1427,9 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		a.DeliveryID); err != nil {
 		return nil, fmt.Errorf("finalize sent: %w", err)
 	}
-	if _, err := insertTaskEvent(ctx, pool, d.taskID, "delivery_sent",
-		map[string]any{"delivery_id": a.DeliveryID, "channel": d.channel, "sent_external_id": msgID}); err != nil {
+	sentPayload := map[string]any{"delivery_id": a.DeliveryID, "channel": d.channel, "sent_external_id": msgID}
+	recordSentCc(sentPayload, d.cc, sentCc)
+	if _, err := insertTaskEvent(ctx, pool, d.taskID, "delivery_sent", sentPayload); err != nil {
 		return nil, err
 	}
 	return marshalResult(map[string]any{"delivery_id": a.DeliveryID, "status": "sent", "sent_external_id": msgID})

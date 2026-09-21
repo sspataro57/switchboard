@@ -6,6 +6,12 @@ package tools
 // directly (package tools), so an accepted case never reaches a handler that
 // would dereference a nil pool.
 //
+// AMENDED — not loosened — by gmail-delivery-cc (SWT-69) D8: DeliveryContentHash
+// takes the delivery's cc as a third argument, so every call here passes nil
+// ("no Cc", the shape these fixtures have). The cc half of the hash — that
+// adding, removing or reordering a Cc changes it — is TestDeliveryContentHash_
+// CoversTheCc in cc_test.go. The properties below are unchanged.
+//
 // MUTATIONS THAT MUST TURN THIS FILE RED:
 //   - drop the NUL separator from DeliveryContentHash → the boundary row.
 //   - drop the require_channel check from validateDraftDelivery → every
@@ -20,19 +26,21 @@ import (
 )
 
 func TestDeliveryContentHash_IsSHA256OfSubjectNULBody(t *testing.T) {
-	sum := sha256.Sum256([]byte("Re: invoice\x00Thanks, attached."))
-	if got, want := DeliveryContentHash("Re: invoice", "Thanks, attached."), hex.EncodeToString(sum[:]); got != want {
-		t.Errorf("DeliveryContentHash = %s, want sha256(subject + NUL + body) = %s", got, want)
+	// SWT-69 D8: the hash always carries the Cc field, empty here, so a body
+	// cannot stand in for a Cc across the boundary.
+	sum := sha256.Sum256([]byte("Re: invoice\x00Thanks, attached.\x00"))
+	if got, want := DeliveryContentHash("Re: invoice", "Thanks, attached.", nil), hex.EncodeToString(sum[:]); got != want {
+		t.Errorf("DeliveryContentHash = %s, want sha256(subject + NUL + body + NUL + cc) = %s", got, want)
 	}
 	// The separator is the point: without it, moving words across the
 	// subject/body boundary would keep the hash and pass a changed draft.
-	if DeliveryContentHash("ab", "c") == DeliveryContentHash("a", "bc") {
+	if DeliveryContentHash("ab", "c", nil) == DeliveryContentHash("a", "bc", nil) {
 		t.Error("DeliveryContentHash(ab, c) == DeliveryContentHash(a, bc): subject and body must be separated")
 	}
 }
 
 func TestValidateApproveDelivery_ContentHashShape(t *testing.T) {
-	good := DeliveryContentHash("s", "b")
+	good := DeliveryContentHash("s", "b", nil)
 	for _, tc := range []struct {
 		args string
 		ok   bool

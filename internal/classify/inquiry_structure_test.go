@@ -150,7 +150,12 @@ func TestMigrationLedger_Learns0024(t *testing.T) {
 	// one-line ownership notes (34: chat-on-closed-task, 35: treetop-pr-review-
 	// tasks) sit above the marker and pushed "SWT-33", 2958 bytes back, out of a
 	// 3000-byte window. The ledger itself still owns 24; only the reach changed.
-	start := i - 4000
+	//
+	// WIDENED again, 4000 → 4800, by gmail-delivery-cc (SWT-69): 38's ownership
+	// note (deliveries.cc) is six lines above the marker and pushed "24 is
+	// SWT-33" back past 4000. Same fix as last time, same reason — the reach,
+	// not the rule.
+	start := i - 4800
 	if start < 0 {
 		start = 0
 	}

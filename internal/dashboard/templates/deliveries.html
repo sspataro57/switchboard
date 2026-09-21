@@ -62,7 +62,7 @@
       <td>{{.Channel}}</td>
       {{/* SWT-44: where the send would go, before approval. Gmail's comes from
            tools.ResolveGmailRoute, the send path's own resolution. */}}
-      <td>{{if eq .Channel "gmail"}}{{if .From}}<div>From: {{.From}}</div><div>To: {{.To}}</div><div class="muted">Thread: {{.ThreadSubject}}</div>{{end}}{{else}}{{.TargetRef}}{{end}}</td>
+      <td>{{if eq .Channel "gmail"}}{{if .From}}<div>From: {{.From}}</div><div>To: {{.To}}</div><div class="muted">Thread: {{.ThreadSubject}}</div>{{end}}{{if .Cc}}<div>Cc: {{.CcText}}</div>{{end}}{{else}}{{.TargetRef}}{{end}}</td>
       <td>{{if .StartsAt}}{{.StartsAt}} → {{.EndsAt}}{{end}}</td>
       <td class="status-{{.Status}}">{{.Status}}
         {{if .SentAt}}<div class="muted">sent {{.SentAt}}</div>{{end}}
@@ -83,6 +83,7 @@
         {{if eq .Status "drafted"}}
         <form method="post" action="/deliveries/{{.ID}}/edit">
           <input type="text" name="subject" value="{{.Subject}}" placeholder="subject">
+          {{if eq .Channel "gmail"}}<input type="text" name="cc" value="{{.CcText}}" placeholder="cc (comma-separated; empty clears)">{{end}}
           <textarea name="body">{{.Body}}</textarea>
           <button>Save edit</button>
         </form>

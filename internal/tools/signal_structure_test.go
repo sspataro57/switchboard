@@ -74,8 +74,12 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		// AMENDED — not deleted — by microsoft-oauth-mail (SWT-66): 0037 widens
 		// source_accounts.auth_type to include 'xoauth2', guarded by
 		// TestMigration0037_Integration_AppliesTwiceAndConstrainsAuthType.
-		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail)", e.Name())
+		// AMENDED — not deleted — by gmail-delivery-cc (SWT-69): 0038 adds
+		// deliveries.cc and its two CHECKs, guarded by
+		// TestMigration0038_CcColumnAndChecks and
+		// TestMigration0038_Integration_DeliveryCcShape.
+		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {
