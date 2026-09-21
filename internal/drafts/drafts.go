@@ -292,7 +292,33 @@ func Run(ctx context.Context, store Store, router *provider.Router, exec Executo
 			args["target_ref"] = dt.TargetRef
 		}
 		rawArgs, _ := json.Marshal(args)
-		if _, err := exec.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: Actor, Args: rawArgs}); err != nil {
+		_, err = exec.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: Actor, Args: rawArgs})
+		// SWT-69: an INHERITED Cc can have become the message's To since the
+		// rejected draft was written (Katie was Cc'd, then Katie replied). Nobody
+		// typed that Cc in this pass, so narrow it and try again rather than
+		// failing the same redo on every pass. Bounded by the list's length; the
+		// model is not called again.
+		for tries := len(dt.RedraftCc); err != nil && tries > 0; tries-- {
+			var collision *tools.CcCollisionError
+			if !errors.As(err, &collision) {
+				break
+			}
+			kept := make([]string, 0, len(dt.RedraftCc))
+			for _, a := range dt.RedraftCc {
+				if !strings.EqualFold(a, collision.Addr) {
+					kept = append(kept, a)
+				}
+			}
+			dt.RedraftCc = kept
+			if len(kept) > 0 {
+				args["cc"] = kept
+			} else {
+				delete(args, "cc")
+			}
+			rawArgs, _ = json.Marshal(args)
+			_, err = exec.Execute(ctx, executor.Call{Tool: "draft_delivery", Actor: Actor, Args: rawArgs})
+		}
+		if err != nil {
 			if errors.Is(err, tools.ErrDeliveryBlocksDraft) {
 				// SWT-43 review (Codex): another drafts pass drafted this task
 				// first (DeliverTasks is a read, not a claim), or a delivery

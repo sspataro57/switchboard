@@ -479,7 +479,7 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 				return nil, fmt.Errorf("resolve reply target for thread %d: %w", *a.ThreadID, merr)
 			}
 			if addr, field := ccCollision(cc, email, to); addr != "" {
-				return nil, fmt.Errorf("cc %s is already this message's %s: a Cc cannot repeat the From or the To", addr, field)
+				return nil, &CcCollisionError{Addr: addr, Field: field}
 			}
 		}
 
@@ -891,7 +891,7 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 				to = m.sender
 			}
 			if addr, field := ccCollision(cc, from, to); addr != "" {
-				return fmt.Errorf("cc %s is already this message's %s: a Cc cannot repeat the From or the To", addr, field)
+				return &CcCollisionError{Addr: addr, Field: field}
 			}
 		}
 		if _, err := tx.Exec(ctx,
@@ -1428,8 +1428,11 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		return nil, fmt.Errorf("finalize sent: %w", err)
 	}
 	sentPayload := map[string]any{"delivery_id": a.DeliveryID, "channel": d.channel, "sent_external_id": msgID}
-	if len(sentCc) > 0 {
-		sentPayload["cc"] = sentCc // who it actually went to, after the send-time drop (SWT-69 D14)
+	if len(d.cc) > 0 {
+		// Who it actually went to, after the send-time drop (SWT-69 D14). Written
+		// whenever a Cc was APPROVED, even when the drop emptied it: "approved
+		// with Katie, sent to nobody extra" must not read like "no Cc was set".
+		sentPayload["cc"] = sentCc
 	}
 	if _, err := insertTaskEvent(ctx, pool, d.taskID, "delivery_sent", sentPayload); err != nil {
 		return nil, err

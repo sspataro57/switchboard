@@ -362,7 +362,10 @@ func splitCcInput(v string) []string {
 	if strings.TrimSpace(v) == "" {
 		return out
 	}
-	if list, err := mail.ParseAddressList(v); err == nil {
+	// An empty parse is NOT a clear: RFC 5322 group syntax
+	// ("undisclosed-recipients:;") parses to zero addresses with no error, and
+	// forwarding that as [] would wipe the list behind a success flash.
+	if list, err := mail.ParseAddressList(v); err == nil && len(list) > 0 {
 		for _, a := range list {
 			out = append(out, a.Address)
 		}

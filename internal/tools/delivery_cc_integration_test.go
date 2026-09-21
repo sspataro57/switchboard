@@ -420,7 +420,7 @@ func TestUpdateDelivery_Integration_CcReplaceClearUnchangedAndDraftedOnly(t *tes
 	var n int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM audit_events WHERE actor=$1 AND tool='update_delivery'
-		   AND args->'cc' IS NOT NULL`,
+		   AND jsonb_typeof(args->'cc') = 'array' AND args->'cc' <> '[]'::jsonb`,
 		delActor).Scan(&n); err != nil {
 		t.Fatalf("count update_delivery audit rows: %v", err)
 	}

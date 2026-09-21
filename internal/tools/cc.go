@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
+	"unicode/utf8"
 )
 
 // MaxCcAddresses caps a delivery's Cc list (D5). More than ten carbon copies is
@@ -79,12 +80,11 @@ func NormalizeCc(in []string) ([]string, error) {
 // badRune is the whole rune at byte offset i, so a refusal shows "é" rather
 // than half of it.
 func badRune(s string, i int) string {
-	for start := i; start >= 0; start-- {
-		if r := []rune(s[start:]); len(r) > 0 && r[0] != '�' {
-			return string(r[0])
-		}
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
 	}
-	return s[i : i+1]
+	r, _ := utf8.DecodeRuneInString(s[i:])
+	return string(r)
 }
 
 // ccAddressOf is the address part of a From/To value for the collision rule
@@ -125,4 +125,14 @@ func ccWithout(cc []string, from, to string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// CcCollisionError is the refusal for a Cc that repeats the message's own From
+// or To (D7). Typed so the drafts worker can recognise it on a redo: the Cc it
+// inherits was typed by nobody in that pass, so it narrows the list and tries
+// again instead of failing the same draft on every pass.
+type CcCollisionError struct{ Addr, Field string }
+
+func (e *CcCollisionError) Error() string {
+	return fmt.Sprintf("cc %s is already this message's %s: a Cc cannot repeat the From or the To", e.Addr, e.Field)
 }
