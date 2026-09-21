@@ -1352,9 +1352,18 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   at 192.168.50.51, resolved on the LAN by a pfSense host override. Nothing gates
   paths in front of the app. `OIDC_ISSUER` is still unset, so the dashboard runs
   the dev-login stub: **anyone on the LAN who reaches `/dev/login` gets a session,
-  and the dashboard performs approvals and sends.** The LAN is the only gate. A
-  trusted cert is planned as `switchboard.sspataro.com` (cert-manager
-  `letsencrypt-prod`, DNS-01, LAN-only like n8n) — that does not add auth.
+  and the dashboard performs approvals and sends.** The LAN is the only gate.
+  **HTTPS since 2026-09-21:** `https://switchboard.sspataro.com`, a second Ingress
+  (`ops/dashboard-tls`) beside the http one — they must be SEPARATE objects, because
+  ingress-nginx turns ssl-redirect on for a whole Ingress once it has a tls block
+  and the home.arpa host would 308 to a certless URL. The certificate is an
+  explicit `Certificate` (`ops/wildcard-sspataro`, `*.sspataro.com`, DNS-01,
+  auto-renewed), NOT the `cert-manager.io/cluster-issuer` annotation: the
+  annotation would put the hostname in the SAN list and so in the public CT logs,
+  which the owner chose the wildcard to avoid. LAN-only: no public A record; the
+  name resolves through a pfSense host override to 192.168.50.51. HTTPS is what
+  makes the board installable (manifest `display: fullscreen`) and the wake lock
+  work. None of this adds auth.
   Still not deployed: triage, drafts, fleetd, hooksd. **orchestratord IS deployed**
   (SWT-41, 2026-09-12, image 0.7.9): Deployment `orchestratord` in `ops`
   (`kube/switchboard/orchestrator.yaml`, replicas 1, Recreate, liveness `/healthz`
