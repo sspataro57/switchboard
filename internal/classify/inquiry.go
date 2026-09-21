@@ -29,7 +29,12 @@ import (
 // InquiryPromptVersion stamps every inquiry ai_runs.input, distinct from the
 // other lanes' stamps: without it, two runs that disagree are indistinguishable
 // from a model that drifted.
-const InquiryPromptVersion = "inquiry-v1"
+//
+// inquiry-v2 (SWT-70): the SYSTEM prompt is unchanged; what changed is the user
+// prompt — quoted reply history is cut from the target and from each context
+// message (StripQuotedHistory). The version moves because the same message now
+// yields a different prompt, and a v1 and a v2 verdict must be tellable apart.
+const InquiryPromptVersion = "inquiry-v2"
 
 // InquirySchemaName is this contract's structured-output name.
 const InquirySchemaName = "inquiry_verdict"
@@ -181,7 +186,9 @@ func renderInquiryUser(m PendingMessage) string {
 			if c.Direction == "outbound" {
 				tag = "me:"
 			}
-			body := strings.Join(strings.Fields(c.BodyText), " ")
+			// SWT-70: each prior message's NEW text only. Its quoted history is
+			// the messages above it in this same transcript, a second time.
+			body := strings.Join(strings.Fields(StripQuotedHistory(c.BodyText)), " ")
 			if len(body) > inquiryContextBodyMax {
 				body = strings.ToValidUTF8(body[:inquiryContextBodyMax], "") + " …"
 			}
@@ -189,6 +196,10 @@ func renderInquiryUser(m PendingMessage) string {
 		}
 		b.WriteString("\nThe message to decide on:\n")
 	}
+	// SWT-70: the target is judged on its NEW text. A reply carries the whole
+	// earlier conversation under it, and the model judged that instead (a
+	// delivered request read as the promise quoted below it). m is a copy.
+	m.BodyText = StripQuotedHistoryOf(m.Subject, m.BodyText)
 	b.WriteString(renderMessage(m))
 	return b.String()
 }

@@ -35,7 +35,7 @@ package classify_test
 //	type Lane struct { Name, WorkerType, System, PromptVersion, LabelsPath string; Contract Contract }
 //
 //	var  LaneInquiry Lane
-//	const InquiryPromptVersion = "inquiry-v1"
+//	const InquiryPromptVersion = "inquiry-v2" (SWT-70: quoted history cut from the user prompt)
 //	const InquirySystemPrompt  = `…`
 //	var   InquiryVerdictSchema json.RawMessage
 //
@@ -189,8 +189,9 @@ func TestLaneInquiry_ValuesAndTheThirdSpelling(t *testing.T) {
 			"others (SWT-23 criterion 11's defect, third instance)",
 			classify.LaneInquiry.WorkerType, "classify_inquiry")
 	}
-	if classify.InquiryPromptVersion != "inquiry-v1" {
-		t.Errorf("classify.InquiryPromptVersion = %q, want \"inquiry-v1\"", classify.InquiryPromptVersion)
+	// SWT-70 moved it: the user prompt's rendering changed (quoted history is cut).
+	if classify.InquiryPromptVersion != "inquiry-v2" {
+		t.Errorf("classify.InquiryPromptVersion = %q, want \"inquiry-v2\"", classify.InquiryPromptVersion)
 	}
 	if classify.LaneInquiry.PromptVersion != classify.InquiryPromptVersion {
 		t.Errorf("LaneInquiry.PromptVersion = %q, want %q — one spelling, or the stamp in ai_runs.input "+
