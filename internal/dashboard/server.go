@@ -174,6 +174,10 @@ type deliveryRow struct {
 	// edit form's one text input.
 	Cc     []string
 	CcText string
+	// SentCopyIngested (SWT-71): the message this row composed, by its own
+	// Message-ID, is in the ingested mailbox — the proof send_delivery needs to
+	// FINISH a row stuck in `sending`. A body-prefix confirmation is not it.
+	SentCopyIngested bool
 	// ContentHash is tools.DeliveryContentHash of the Subject/Body this page
 	// renders. The Approve form posts it back as expect_content_hash, so an
 	// edit made after the page loaded (a session's update_delivery) makes the
@@ -238,7 +242,9 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	             COALESCE(d.sent_at::text,''), COALESCE(d.confirmed_at::text,''), COALESCE(d.error,''),
 	             COALESCE(d.starts_at::text,''), COALESCE(d.ends_at::text,''),
 	             d.from_account_id, d.thread_id, COALESCE(d.target_ref,''),
-	             COALESCE(d.rejection_note,''), d.redraft_requested_at IS NOT NULL, d.cc
+	             COALESCE(d.rejection_note,''), d.redraft_requested_at IS NOT NULL, d.cc,
+	             EXISTS (SELECT 1 FROM normalized_messages nm
+	                      WHERE nm.external_message_id = d.sent_external_id AND nm.direction = 'outbound')
 	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id`
 	args := []any{}
 	if status != "" {
@@ -263,7 +269,7 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&d.ID, &d.TaskID, &d.TaskTitle, &d.Channel, &d.Status,
 			&d.Subject, &d.Body, &d.CreatedBy, &d.SentAt, &d.ConfirmedAt, &d.Error,
 			&d.StartsAt, &d.EndsAt, &ref.fromAcct, &ref.threadID, &d.TargetRef,
-			&d.RejectionNote, &d.RedraftRequested, &d.Cc); err != nil {
+			&d.RejectionNote, &d.RedraftRequested, &d.Cc, &d.SentCopyIngested); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

@@ -144,7 +144,7 @@ var agentTools = []Tool{
 	},
 	{
 		Name:        "send_delivery",
-		Description: "Send an APPROVED delivery to the client-visible surface. HUMAN IDENTITIES ONLY — an autonomous worker identity is denied by policy. There is no compose-and-send: draft, approve and send are three separate calls.",
+		Description: "Send an APPROVED delivery to the client-visible surface. (On a gmail delivery stuck in `sending` whose own copy has re-entered the mailbox sync, it FINISHES the record instead and sends nothing: the result says recovered.) HUMAN IDENTITIES ONLY — an autonomous worker identity is denied by policy. There is no compose-and-send: draft, approve and send are three separate calls.",
 		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"}},"required":["delivery_id"]}`),
 	},
 	{

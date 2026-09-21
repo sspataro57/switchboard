@@ -29,15 +29,41 @@ Nothing owned that transition afterwards: `mark_delivery_sent` is the assisted t
 
 ## Fix
 
-`finishConfirmedSend` (internal/tools/delivery.go), called first in `sendDelivery`'s transaction:
-a gmail row that is `sending`, carries a `sent_external_id` AND is confirmed becomes `sent` with
-`sent_at` from the confirmation; the caller emits `delivery_sent` with `recovered: true`, so R8
-fires. No transport call. It runs before the closed-task guard, because closing the task after
-"reply sent" is exactly what happened here. An unconfirmed `sending` row still gets the
-invariant-4 refusal: nothing proves it left, and it is never sent twice. The dashboard shows
-"Finish: it was sent" on such a row (it posts to the same send route).
+`finishConfirmedSend` (internal/tools/delivery.go), called first in `sendDelivery`'s transaction.
+A gmail row that is `sending`, carries a `sent_external_id`, is confirmed AND whose composed
+message — by that Message-ID — is in the ingested mailbox becomes `sent`, with `sent_at` from the
+confirmation. No transport call. An unconfirmed `sending` row still gets the invariant-4 refusal:
+nothing proves it left, and it is never sent twice. The dashboard shows "Finish: it was sent" on a
+row that meets the same proof (it posts to the same send route).
 
-Regression test: `internal/tools/delivery_sending_recover_integration_test.go`.
+Decisions taken in review (adversarial pass, 2026-09-21), each pinned by a test:
+
+- **Only the strong proof finishes a row.** `confirmed_at` has two producers: the exact Message-ID
+  match, and the sink's body-prefix belt, which matches any message of the same mailbox that opens
+  with the same 120 characters. Finishing on the belt could record "sent" for a message that never
+  left, terminally. So the finish also requires the own copy in `normalized_messages`.
+- **Phase 2 never overwrites a finished row.** A finish can now land while the original send is
+  still in flight. All three phase-2 writes are conditional on `status='sending'`, and the rejection
+  branch clears the Message-ID only while the row is unconfirmed. Otherwise an in-flight failure
+  would write `failed` over a delivery R8 had processed, or clear the id and re-open a resend.
+- **On a task closed since, a log event is written instead of `delivery_sent`.** The finish runs
+  ahead of the closed-task guard (closing the task after "reply sent" is exactly what happened
+  here), but R8 would change nothing on a closed task and would still record its
+  `delivery_lifecycle` dedup key, muting a later real delivery if the task were reopened — SWT-28's
+  calendar trap. On an open task it emits `delivery_sent` with `recovered: true`, so R8 advances
+  the work.
+- **The event is written inside the transaction.** A finished row without its event could never be
+  finished again.
+
+Tests: `internal/tools/delivery_sending_recover_integration_test.go` (the proof ladder, the closed
+task, the in-flight race, each proven under mutation) and
+`internal/dashboard/deliveries_finish_integration_test.go` (the button's two column-fed conditions).
+
+Policy is inherited: `send_delivery` is human-only and freeze-gated, so a stuck row cannot be
+finished while sending is frozen. Safe direction; noted.
+
+This bug went straight to a fix on the owner's "fix it now"; there is no separate REPRO or
+DIAGNOSIS file — this file carries both.
 
 Not done here: an automatic finish when the confirmation arrives. The orchestrator could execute
 `send_delivery` on a `delivery_confirmed` event for a `sending` row; that is a rule change with a

@@ -120,10 +120,10 @@
           <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-sent"><button>It's in Slack</button></form>
           <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-failed"><button>Not in Slack</button></form>
           {{end}}
-          {{if and (eq .Channel "gmail") .ConfirmedAt}}
-          {{/* SWT-71: the send never reported back, but the message's own copy
-               re-entered the mailbox sync, so it left. Send FINISHES it: no email
-               is sent again. */}}
+          {{if and (eq .Channel "gmail") .ConfirmedAt .SentCopyIngested}}
+          {{/* SWT-71: the send never reported back, but the message's own copy (by
+               its Message-ID) re-entered the mailbox sync, so it left. Send
+               FINISHES the record: no email is sent again. */}}
           <form class="inline" method="post" action="/deliveries/{{.ID}}/send"><button>Finish: it was sent</button></form>
           {{end}}
         {{end}}
