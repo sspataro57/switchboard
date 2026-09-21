@@ -1428,12 +1428,7 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		return nil, fmt.Errorf("finalize sent: %w", err)
 	}
 	sentPayload := map[string]any{"delivery_id": a.DeliveryID, "channel": d.channel, "sent_external_id": msgID}
-	if len(d.cc) > 0 {
-		// Who it actually went to, after the send-time drop (SWT-69 D14). Written
-		// whenever a Cc was APPROVED, even when the drop emptied it: "approved
-		// with Katie, sent to nobody extra" must not read like "no Cc was set".
-		sentPayload["cc"] = sentCc
-	}
+	recordSentCc(sentPayload, d.cc, sentCc)
 	if _, err := insertTaskEvent(ctx, pool, d.taskID, "delivery_sent", sentPayload); err != nil {
 		return nil, err
 	}

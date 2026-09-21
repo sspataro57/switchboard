@@ -136,3 +136,17 @@ type CcCollisionError struct{ Addr, Field string }
 func (e *CcCollisionError) Error() string {
 	return fmt.Sprintf("cc %s is already this message's %s: a Cc cannot repeat the From or the To", e.Addr, e.Field)
 }
+
+// recordSentCc puts who the message actually went to on the delivery_sent
+// payload (D14), after the send-time drop. Written whenever a Cc was APPROVED,
+// even when the drop emptied it — as [] — so "approved with Katie, sent to
+// nobody extra" never reads like "no Cc was set". No key when none was approved.
+func recordSentCc(payload map[string]any, approved, sent []string) {
+	if len(approved) == 0 {
+		return
+	}
+	if sent == nil {
+		sent = []string{}
+	}
+	payload["cc"] = sent
+}

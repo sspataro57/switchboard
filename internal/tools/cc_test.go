@@ -402,3 +402,25 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// D14 (amended in review): the sent record carries cc whenever one was
+// APPROVED — as [] when the send-time drop emptied it — and no key otherwise.
+func TestRecordSentCc(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		approved, sent []string
+		want           string
+	}{
+		{"no Cc approved", nil, nil, `{}`},
+		{"approved and sent", []string{"a@x.io"}, []string{"a@x.io"}, `{"cc":["a@x.io"]}`},
+		{"approved, the drop emptied it", []string{"a@x.io"}, []string{}, `{"cc":[]}`},
+		{"approved, nil sent set", []string{"a@x.io"}, nil, `{"cc":[]}`},
+	} {
+		p := map[string]any{}
+		recordSentCc(p, tc.approved, tc.sent)
+		got, _ := json.Marshal(p)
+		if string(got) != tc.want {
+			t.Errorf("%s: payload = %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}

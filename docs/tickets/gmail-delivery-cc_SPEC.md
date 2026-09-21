@@ -205,8 +205,16 @@ caller's `cc` for `draft_delivery` and `update_delivery` (the executor stores
 `Call.Args` verbatim), so those two need no code to be audited — only a test that
 pins it. `send_delivery`'s audit args are `{delivery_id}` and cannot carry it, so
 the `delivery_sent` task event payload (delivery.go:1336-1338) gains
-`"cc": [...]` when the sent Cc set is non-empty — the post-hoc record of who the
-message actually went to after D7's send-time drop.
+`"cc": [...]` **whenever a Cc was approved** — `[]` when D7's send-time drop
+emptied it — the post-hoc record of who the message actually went to. (Amended in
+review, 2026-09-21: the first wording wrote the key only for a non-empty sent
+set, which made "approved with Katie, sent to nobody extra" read exactly like
+"no Cc was ever set".) Also from review: a redo whose inherited Cc has since
+become the To gets `*tools.CcCollisionError` from `draft_delivery`; the drafts
+worker narrows the list, drafts again without re-asking the model, and says so on
+the Deliver task. The dashboard's Cc box treats an input that parses to ZERO
+addresses as not-a-clear. `serve.go`'s Instructions tell a session to pass `cc`
+only when asked.
 
 ## What a known-address check could have seen (recorded, since D2 closes it)
 
@@ -278,8 +286,8 @@ artefact of the ingestion schema. D2 rejects it.
     `sent_external_id` still refuses forever (delivery.go:1216-1218). A test
     re-runs `send_delivery` on a sent row with a Cc and gets the invariant-4
     refusal.
-16. The `delivery_sent` task event payload carries `"cc"` when the sent set is
-    non-empty (D14), and `audit_events.args` carries `cc` for `draft_delivery`
+16. The `delivery_sent` task event payload carries `"cc"` whenever a Cc was
+    approved, `[]` if the send-time drop emptied it (D14, amended), and `audit_events.args` carries `cc` for `draft_delivery`
     and `update_delivery` (pinned, no new code).
 17. The MCP schemas for `draft_delivery` and `update_delivery`
     (internal/mcpserver/schemas.go:64-74) gain a `cc` array-of-string property
