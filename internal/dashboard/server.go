@@ -244,7 +244,8 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	             d.from_account_id, d.thread_id, COALESCE(d.target_ref,''),
 	             COALESCE(d.rejection_note,''), d.redraft_requested_at IS NOT NULL, d.cc,
 	             EXISTS (SELECT 1 FROM normalized_messages nm
-	                      WHERE nm.external_message_id = d.sent_external_id AND nm.direction = 'outbound')
+	                      WHERE nm.channel = 'gmail' AND nm.external_message_id = d.sent_external_id
+	                        AND nm.direction = 'outbound')
 	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id`
 	args := []any{}
 	if status != "" {

@@ -52,6 +52,15 @@ Decisions taken in review (adversarial pass, 2026-09-21), each pinned by a test:
   `delivery_lifecycle` dedup key, muting a later real delivery if the task were reopened — SWT-28's
   calendar trap. On an open task it emits `delivery_sent` with `recovered: true`, so R8 advances
   the work.
+- **The proof is scoped to `channel='gmail'`** (second review): "one normalized row per Message-ID" is a
+  gmail-only partial UNIQUE index, so without the predicate the proof rests on nothing the schema
+  enforces — and the planner cannot use that index (34 ms seq scan vs 0.06 ms, measured on production).
+- **A definite rejection on a still-`sending` row is always recorded**, even if the body-prefix belt
+  stamped `confirmed_at` mid-send; only the Message-ID is kept in that case. gmail has no reconciler,
+  so a skipped write would have been a silent wedge.
+- A recovered row's `sent_at` is the ingested copy's own instant (the true send time); the
+  `delivery_sent` payload carries the APPROVED Cc, since the died send's record of what went on the
+  wire is lost with it.
 - **The event is written inside the transaction.** A finished row without its event could never be
   finished again.
 

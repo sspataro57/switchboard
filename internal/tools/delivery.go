@@ -779,13 +779,27 @@ func finishConfirmedSend(ctx context.Context, tx pgx.Tx, deliveryID int64) (*con
 		return nil, err
 	}
 	var messageID string
+	var cc []string
+	// channel='gmail' on the copy is load-bearing twice: "one normalized row per
+	// Message-ID" is a gmail-only partial UNIQUE index, so without it the proof
+	// rests on nothing the schema enforces — and it is what lets the planner use
+	// that index (measured on production: 34 ms seq scan vs 0.06 ms).
+	// sent_at is the copy's own instant, the true send time; the confirmation
+	// instant is only the fallback.
 	err = tx.QueryRow(ctx,
-		`UPDATE deliveries d SET status='sent', sent_at=COALESCE(d.sent_at, d.confirmed_at), error=NULL, updated_at=now()
+		`UPDATE deliveries d
+		    SET status='sent', error=NULL, updated_at=now(),
+		        sent_at=COALESCE(d.sent_at,
+		                         (SELECT nm.sent_at FROM normalized_messages nm
+		                           WHERE nm.channel='gmail' AND nm.external_message_id = d.sent_external_id
+		                             AND nm.direction = 'outbound' LIMIT 1),
+		                         d.confirmed_at)
 		  WHERE d.id=$1 AND d.channel='gmail' AND d.status='sending'
 		    AND d.sent_external_id IS NOT NULL AND d.confirmed_at IS NOT NULL
 		    AND EXISTS (SELECT 1 FROM normalized_messages nm
-		                 WHERE nm.external_message_id = d.sent_external_id AND nm.direction = 'outbound')
-		 RETURNING d.sent_external_id`, deliveryID).Scan(&messageID)
+		                 WHERE nm.channel='gmail' AND nm.external_message_id = d.sent_external_id
+		                   AND nm.direction = 'outbound')
+		 RETURNING d.sent_external_id, d.cc`, deliveryID).Scan(&messageID, &cc)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -798,8 +812,12 @@ func finishConfirmedSend(ctx context.Context, tx pgx.Tx, deliveryID int64) (*con
 			"kind": "delivery_finished", "delivery_id": deliveryID, "sent_external_id": messageID,
 			"message": fmt.Sprintf("delivery %d finished from its confirmation: the message had left, the send never reported back", deliveryID)})
 	} else {
-		_, err = insertTaskEvent(ctx, tx, taskID, "delivery_sent", map[string]any{
-			"delivery_id": deliveryID, "channel": "gmail", "sent_external_id": messageID, "recovered": true})
+		// The APPROVED Cc: the send that died would have recorded what went on the
+		// wire after its send-time drop; that record is lost with it.
+		payload := map[string]any{
+			"delivery_id": deliveryID, "channel": "gmail", "sent_external_id": messageID, "recovered": true}
+		recordSentCc(payload, cc, cc)
+		_, err = insertTaskEvent(ctx, tx, taskID, "delivery_sent", payload)
 	}
 	if err != nil {
 		return nil, err
@@ -1499,9 +1517,15 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 			// while this call is in flight; writing `failed` over that would undo a
 			// delivery R8 already processed, and clearing the id would re-open a
 			// resend. A confirmed row never loses its id.
+			// The FAILURE is recorded whenever the row is still `sending`; the id is
+			// cleared only while the row is unconfirmed. (A belt-confirmed row that
+			// then gets a definite rejection must not be left silently `sending`:
+			// gmail has no reconciler to notice it.)
 			_, _ = pool.Exec(ctx,
-				`UPDATE deliveries SET status='failed', sent_external_id=NULL, error=$2, updated_at=now()
-				  WHERE id=$1 AND status='sending' AND confirmed_at IS NULL`,
+				`UPDATE deliveries
+				    SET status='failed', error=$2, updated_at=now(),
+				        sent_external_id = CASE WHEN confirmed_at IS NULL THEN NULL ELSE sent_external_id END
+				  WHERE id=$1 AND status='sending'`,
 				a.DeliveryID, err.Error())
 		} else {
 			// Ambiguous transport error: the send MAY have gone through —

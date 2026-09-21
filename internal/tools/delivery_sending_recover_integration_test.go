@@ -139,11 +139,12 @@ func TestSendDelivery_Integration_FinishesAConfirmedSendingRow(t *testing.T) {
 	var status string
 	var sentAtIsConfirmedAt bool
 	if err := pool.QueryRow(ctx,
-		`SELECT status, sent_at = confirmed_at FROM deliveries WHERE id=$1`, id).Scan(&status, &sentAtIsConfirmedAt); err != nil {
+		`SELECT d.status, d.sent_at = (SELECT nm.sent_at FROM normalized_messages nm WHERE nm.external_message_id = d.sent_external_id)
+		   FROM deliveries d WHERE d.id=$1`, id).Scan(&status, &sentAtIsConfirmedAt); err != nil {
 		t.Fatalf("read row: %v", err)
 	}
 	if status != "sent" || !sentAtIsConfirmedAt {
-		t.Errorf("row = status %q, sent_at==confirmed_at %v; want sent, sent_at taken from the confirmation", status, sentAtIsConfirmedAt)
+		t.Errorf("row = status %q, sent_at==the copy's sent_at %v; want sent, with the TRUE send instant from the ingested copy", status, sentAtIsConfirmedAt)
 	}
 	var payload []byte
 	if err := pool.QueryRow(ctx,
@@ -226,18 +227,43 @@ func TestSendDelivery_Integration_FinishOnAClosedTaskWritesALogNotDeliverySent(t
 }
 
 // finishingSender plays the race the review named: the send is in flight (row
-// `sending`), the own copy is ingested and a Finish lands, and only THEN does the
-// transport return. Whatever it returns, phase 2 must not overwrite the finished
-// row: no `failed` over `sent`, no cleared Message-ID, no second event.
+// `sending`), the own copy is ingested and confirmed, a REAL Finish lands through
+// the executor — and only then does the transport return. Whatever it returns,
+// phase 2 must not overwrite the finished row: no `failed` over `sent`, no
+// cleared Message-ID, and exactly one delivery_sent.
 type finishingSender struct {
+	t      *testing.T
 	pool   *pgxpool.Pool
+	ex     *executor.Executor
+	fx     delFixture
 	id     int64
 	result error
 }
 
 func (f *finishingSender) Send(ctx context.Context, _ string, _ []byte, _ string) (string, error) {
-	_, _ = f.pool.Exec(ctx,
-		`UPDATE deliveries SET status='sent', sent_at=now(), confirmed_at=now() WHERE id=$1`, f.id)
+	var mid string
+	if err := f.pool.QueryRow(ctx, `SELECT sent_external_id FROM deliveries WHERE id=$1`, f.id).Scan(&mid); err != nil {
+		f.t.Fatalf("read the reserved Message-ID mid-send: %v", err)
+	}
+	var rawID int64
+	if err := f.pool.QueryRow(ctx,
+		`INSERT INTO raw_source_items (source_account_id, external_id, raw_json, content_hash)
+		 VALUES ($1,$2,'{}','itest-del-stuck-hash') RETURNING id`, f.fx.accountID, stuckRaw).Scan(&rawID); err != nil {
+		f.t.Fatalf("seed raw mid-send: %v", err)
+	}
+	if _, err := f.pool.Exec(ctx,
+		`INSERT INTO normalized_messages
+		   (raw_source_item_id, thread_id, direction, external_message_id, sent_at, body_text, subject, sender, channel)
+		 VALUES ($1,$2,'outbound',$3, now(), 'draft body', 'Re: login broken', 'itest-del-a@example.com', 'gmail')`,
+		rawID, f.fx.threadID, mid); err != nil {
+		f.t.Fatalf("ingest the own copy mid-send: %v", err)
+	}
+	if _, err := f.pool.Exec(ctx, `UPDATE deliveries SET confirmed_at=now() WHERE id=$1`, f.id); err != nil {
+		f.t.Fatalf("confirm mid-send: %v", err)
+	}
+	if err := sendErr(ctx, f.ex, f.id); err != nil {
+		f.t.Fatalf("the Finish that lands mid-send = %v, want it to finish", err)
+	}
 	return "", f.result
 }
 
@@ -254,8 +280,20 @@ func TestSendDelivery_Integration_AnInFlightSendNeverOverwritesAFinishedRow(t *t
 			ctx := context.Background()
 			pool := newToolsPool(t, ctx)
 			defer pool.Close()
+			cleanMid := func() {
+				for _, q := range []string{
+					`DELETE FROM normalized_messages WHERE raw_source_item_id IN (SELECT id FROM raw_source_items WHERE external_id='` + stuckRaw + `')`,
+					`DELETE FROM raw_source_items WHERE external_id='` + stuckRaw + `'`,
+				} {
+					if _, err := pool.Exec(ctx, q); err != nil {
+						t.Fatalf("cleanup %q: %v", q, err)
+					}
+				}
+			}
+			cleanMid()
 			cleanupDeliveryData(t, ctx, pool)
 			defer cleanupDeliveryData(t, ctx, pool)
+			defer cleanMid()
 
 			fx := seedDeliveryFixture(t, ctx, pool)
 			ex := deliveryExecutor(pool)
@@ -264,7 +302,7 @@ func TestSendDelivery_Integration_AnInFlightSendNeverOverwritesAFinishedRow(t *t
 				t.Fatalf("draft: %v", err)
 			}
 			approve(t, ctx, ex, id)
-			tools.SetGmailSender(&finishingSender{pool: pool, id: id, result: tc.result})
+			tools.SetGmailSender(&finishingSender{t: t, pool: pool, ex: ex, fx: fx, id: id, result: tc.result})
 			_ = sendErr(ctx, ex, id)
 
 			var status string
@@ -278,9 +316,57 @@ func TestSendDelivery_Integration_AnInFlightSendNeverOverwritesAFinishedRow(t *t
 					"untouched (sent, id kept) — `failed` here undoes a delivery R8 processed, and a cleared id "+
 					"re-opens a resend", status, hasID)
 			}
-			if n := countEvents(t, ctx, pool, fx.parentID, "delivery_sent"); n > 1 {
-				t.Errorf("delivery_sent events = %d, want at most 1", n)
+			if n := countEvents(t, ctx, pool, fx.parentID, "delivery_sent"); n != 1 {
+				t.Errorf("delivery_sent events = %d, want exactly 1 (the finish's; the in-flight send must add none)", n)
 			}
 		})
+	}
+}
+
+// A definite rejection on a row that is still `sending` is ALWAYS recorded, even
+// when the body-prefix belt has stamped confirmed_at in the meantime: gmail has no
+// reconciler, so a skipped write would be a silent wedge. Only the Message-ID is
+// kept in that case.
+type beltThenRejectSender struct {
+	pool *pgxpool.Pool
+	id   int64
+}
+
+func (r *beltThenRejectSender) Send(ctx context.Context, _ string, _ []byte, _ string) (string, error) {
+	_, _ = r.pool.Exec(ctx, `UPDATE deliveries SET confirmed_at=now() WHERE id=$1`, r.id) // the belt, mid-send
+	return "", &google.SendRejectedError{Status: 400, Body: "rejected"}
+}
+
+func TestSendDelivery_Integration_ARejectionOnABeltConfirmedRowIsStillRecorded(t *testing.T) {
+	ctx := context.Background()
+	pool := newToolsPool(t, ctx)
+	defer pool.Close()
+	cleanupDeliveryData(t, ctx, pool)
+	defer cleanupDeliveryData(t, ctx, pool)
+
+	fx := seedDeliveryFixture(t, ctx, pool)
+	ex := deliveryExecutor(pool)
+	id, err := draftGmailCc(t, ctx, ex, fx.parentID, fx.threadID, `[]`)
+	if err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	approve(t, ctx, ex, id)
+	tools.SetGmailSender(&beltThenRejectSender{pool: pool, id: id})
+	if err := sendErr(ctx, ex, id); err == nil {
+		t.Fatalf("a rejected send returned no error")
+	}
+	var status, errText string
+	var hasID bool
+	if err := pool.QueryRow(ctx,
+		`SELECT status, COALESCE(error,''), sent_external_id IS NOT NULL FROM deliveries WHERE id=$1`, id).
+		Scan(&status, &errText, &hasID); err != nil {
+		t.Fatalf("read row: %v", err)
+	}
+	if status != "failed" || errText == "" {
+		t.Errorf("row = status %q, error %q; want failed with the rejection recorded — a skipped write leaves it "+
+			"silently `sending` on a channel with no reconciler", status, errText)
+	}
+	if !hasID {
+		t.Errorf("the Message-ID was cleared on a CONFIRMED row; a confirmed row never loses its id")
 	}
 }
