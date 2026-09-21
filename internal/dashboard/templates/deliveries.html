@@ -120,6 +120,12 @@
           <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-sent"><button>It's in Slack</button></form>
           <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-failed"><button>Not in Slack</button></form>
           {{end}}
+          {{if and (eq .Channel "gmail") .ConfirmedAt}}
+          {{/* SWT-71: the send never reported back, but the message's own copy
+               re-entered the mailbox sync, so it left. Send FINISHES it: no email
+               is sent again. */}}
+          <form class="inline" method="post" action="/deliveries/{{.ID}}/send"><button>Finish: it was sent</button></form>
+          {{end}}
         {{end}}
         {{/* SWT-43: Deny = rejected, no new draft; Redo = rejected, and the drafts
              worker writes a fresh one using the reason. Refusals (e.g. a failed
