@@ -117,7 +117,7 @@ func TestValidateRejectDelivery_Accepts(t *testing.T) {
 // to reload for the wrong reason. MUTATION: drop the shape check → the "abc"
 // and upper-case rows go red.
 func TestValidateRejectDelivery_ContentHashShape(t *testing.T) {
-	good := DeliveryContentHash("s", "b")
+	good := DeliveryContentHash("s", "b", nil)
 	for _, tc := range []struct {
 		args string
 		ok   bool

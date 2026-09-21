@@ -99,7 +99,12 @@ type DeliverTask struct {
 
 	// The Redo inputs (SWT-43): the parent's newest rejected delivery with a
 	// redraft requested. RedraftOf is 0 for a first draft.
-	RedraftOf     int64
+	RedraftOf int64
+	// RedraftCc (SWT-69 D9) is the rejected draft's Cc. A Redo throws away the
+	// WORDS; the Cc is routing, so the new draft keeps it. Carried here, in
+	// deterministic Go — the model never sees or chooses a recipient, and the
+	// executor never adds one by itself.
+	RedraftCc     []string
 	RejectedBody  string
 	RejectionNote string // "" when he gave no reason
 }
@@ -280,6 +285,9 @@ func Run(ctx context.Context, store Store, router *provider.Router, exec Executo
 		if dt.Channel == "gmail" {
 			args["subject"] = draft.Subject
 			args["thread_id"] = *dt.ThreadID
+			if len(dt.RedraftCc) > 0 {
+				args["cc"] = dt.RedraftCc
+			}
 		} else {
 			args["target_ref"] = dt.TargetRef
 		}

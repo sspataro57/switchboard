@@ -47,7 +47,7 @@ func TestApproveDelivery_Integration_ContentBound(t *testing.T) {
 
 	// draftGmail writes subject "Re: login broken", body "draft body".
 	id := draftGmail(t, ctx, ex, fx.parentID, fx.threadID)
-	shown := tools.DeliveryContentHash("Re: login broken", "draft body")
+	shown := tools.DeliveryContentHash("Re: login broken", "draft body", nil)
 
 	// An edit lands between the render and the click (a session's
 	// update_delivery, say).
@@ -77,7 +77,7 @@ func TestApproveDelivery_Integration_ContentBound(t *testing.T) {
 
 	// The hash of the CURRENT words approves.
 	callOK(t, ctx, ex, delActor, "approve_delivery",
-		`{"delivery_id":`+itoa(id)+`,"expect_content_hash":"`+tools.DeliveryContentHash("Re: login broken", "planted words")+`"}`)
+		`{"delivery_id":`+itoa(id)+`,"expect_content_hash":"`+tools.DeliveryContentHash("Re: login broken", "planted words", nil)+`"}`)
 	if s := deliveryStatus(t, ctx, pool, id); s != "approved" {
 		t.Errorf("approve with the current hash left status %q, want approved", s)
 	}
@@ -99,7 +99,7 @@ func TestApproveDelivery_Integration_ContentBound(t *testing.T) {
 	}
 	mustUnmarshal(t, out2, &d2)
 	callOK(t, ctx, ex, delActor, "approve_delivery",
-		`{"delivery_id":`+itoa(d2.DeliveryID)+`,"expect_content_hash":"`+tools.DeliveryContentHash("", "draft body")+`"}`)
+		`{"delivery_id":`+itoa(d2.DeliveryID)+`,"expect_content_hash":"`+tools.DeliveryContentHash("", "draft body", nil)+`"}`)
 	if s := deliveryStatus(t, ctx, pool, d2.DeliveryID); s != "approved" {
 		t.Errorf("approve of a subject-less draft with hash(\"\", body) left status %q, want approved", s)
 	}

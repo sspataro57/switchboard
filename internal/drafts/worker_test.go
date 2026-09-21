@@ -447,6 +447,12 @@ func redraftDeliverTask() drafts.DeliverTask {
 	d.RedraftOf = 4242
 	d.RejectedBody = "Hi team, apologies for the delay on this, we sincerely regret the inconvenience caused."
 	d.RejectionNote = "shorter, no apology"
+	// gmail-delivery-cc (SWT-69) D9: the rejected row's Cc travels with the
+	// redraft. Reject-with-redraft throws away the WORDS; the Cc is ROUTING,
+	// and Salvador's Redo note is about the text — so losing Katie on a
+	// redraft would be a silent, invisible change of recipients. The store's
+	// LATERAL selects it beside the body and the note.
+	d.RedraftCc = []string{"kevans@cecollaboratory.com"}
 	return d
 }
 
@@ -602,14 +608,60 @@ func TestDrafts_Redraft_DraftsThroughTheSameCall(t *testing.T) {
 	if kb["expect_task_status"] != "done_locally" {
 		t.Errorf("redraft expect_task_status = %v, want done_locally (D7: the only status a draft can land on)", kb["expect_task_status"])
 	}
+	// AMENDED by gmail-delivery-cc (SWT-69) D9 — not weakened. `cc` is the ONE
+	// permitted extra key: this criterion's point is that the new row carries
+	// no LINK BACK to the rejected row, and a cc is not such a link (it is a
+	// recipient list, indistinguishable from one the caller typed). Every other
+	// extra key is still a failure, and the count below still pins it to
+	// exactly one.
 	for k := range kb {
+		if k == "cc" {
+			continue
+		}
 		if _, ok := ka[k]; !ok {
 			t.Errorf("the redraft's draft_delivery carries %q, which a first draft does not. Criterion 24: the new "+
 				"row carries no link back to the rejected row", k)
 		}
 	}
-	if len(ka) != len(kb) {
-		t.Errorf("draft_delivery arg keys differ: first draft %v, redraft %v", ka, kb)
+	if _, ok := ka["cc"]; ok {
+		t.Errorf("a FIRST draft passed cc %v; there is nothing to inherit, and switchboard never adds a "+
+			"recipient on its own (D1)", ka["cc"])
+	}
+	if len(kb) != len(ka)+1 {
+		t.Errorf("draft_delivery arg keys differ by more than the inherited cc: first draft %v, redraft %v", ka, kb)
+	}
+	// D9's value: the rejected row's Cc, carried forward verbatim. Dropping the
+	// inheritance in drafts.Run turns this red (SPEC mutation 11).
+	want := redraftDeliverTask().RedraftCc
+	got, _ := kb["cc"].([]any)
+	if len(got) != len(want) {
+		t.Fatalf("redraft draft_delivery cc = %v, want %v (the rejected row's Cc — losing it silently changes "+
+			"who receives the message, and nothing on the dashboard would say so)", kb["cc"], want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("redraft cc[%d] = %v, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// D9's other half: a rejected row with NO Cc adds no key at all. Passing
+// "cc": [] would be harmless today but would make "the redraft carries exactly
+// the first draft's keys" untrue for every ordinary Redo.
+func TestDrafts_Redraft_NoCcOnTheRejectedRowPassesNoCcKey(t *testing.T) {
+	dt := redraftDeliverTask()
+	dt.RedraftCc = nil
+	_, _, redo := runOneDraft(t, dt)
+	calls := redo.callsTo("draft_delivery")
+	if len(calls) != 1 {
+		t.Fatalf("draft_delivery calls = %d, want 1", len(calls))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(calls[0].Args, &m); err != nil {
+		t.Fatalf("draft_delivery args: %v", err)
+	}
+	if v, ok := m["cc"]; ok {
+		t.Errorf("a redraft of a row with no Cc passed cc = %v; it must pass no cc key at all", v)
 	}
 }
 

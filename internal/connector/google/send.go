@@ -26,6 +26,10 @@ type OutboundMessage struct {
 	From, To, Subject, Body, MessageID, InReplyTo string
 	References                                    []string
 	Date                                          time.Time
+	// Cc (SWT-69) is the approved carbon-copy list, addresses only. There is no
+	// Bcc field and the builder writes no Bcc header, ever: a recipient nobody
+	// can see on the message is not something an approval can cover.
+	Cc []string
 }
 
 // aiAttributionMarkers are scrubbed from outbound bodies (invariant 6 belt —
@@ -81,6 +85,13 @@ func BuildOutboundMIME(msg OutboundMessage) ([]byte, error) {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "From: %s\r\n", msg.From)
 	fmt.Fprintf(&b, "To: %s\r\n", msg.To)
+	if len(msg.Cc) > 0 {
+		cc, err := ccHeader(msg.Cc)
+		if err != nil {
+			return nil, err
+		}
+		b.WriteString(cc)
+	}
 	fmt.Fprintf(&b, "Subject: %s\r\n", msg.Subject)
 	fmt.Fprintf(&b, "Date: %s\r\n", date.Format(time.RFC1123Z))
 	fmt.Fprintf(&b, "Message-ID: %s\r\n", msg.MessageID)
@@ -227,4 +238,40 @@ func (s *GmailSender) Send(ctx context.Context, userID string, rawMIME []byte, t
 		return "", fmt.Errorf("parse send response: %w", err)
 	}
 	return out.ID, nil
+}
+
+// ccHeader renders the Cc header: addresses joined with ", ", folded at a comma
+// with CRLF + one space (RFC 5322 §2.2.3) once a line would pass 78 characters.
+// A FLOOR like the Subject's: any byte outside printable ASCII is an error, not
+// a written header — a CR or LF here would be a second header of the caller's
+// choosing. tools.NormalizeCc is the validation; this keeps the transport safe
+// for a caller that skipped it.
+func ccHeader(cc []string) (string, error) {
+	var b strings.Builder
+	line := "Cc: "
+	for i, a := range cc {
+		if a == "" {
+			return "", fmt.Errorf("outbound message: a Cc address is empty")
+		}
+		for j := 0; j < len(a); j++ {
+			if a[j] < 0x21 || a[j] > 0x7E || a[j] == ',' {
+				return "", fmt.Errorf("outbound message: Cc address %q is not a plain printable-ASCII address", a)
+			}
+		}
+		piece := a
+		if i < len(cc)-1 {
+			piece += ","
+		}
+		if line != "Cc: " && len(line)+1+len(piece) > 78 {
+			b.WriteString(line + "\r\n")
+			line = " " + piece
+			continue
+		}
+		if line != "Cc: " {
+			line += " "
+		}
+		line += piece
+	}
+	b.WriteString(line + "\r\n")
+	return b.String(), nil
 }

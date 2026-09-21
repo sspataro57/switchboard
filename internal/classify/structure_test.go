@@ -1201,13 +1201,19 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// xoauth2 row must carry a refresh token), named by its SPEC's data-model
 		// section as 0037_microsoft_oauth_mail.sql. Its own guard is
 		// internal/connector/google TestMigration0037_Integration_AppliesTwiceAndConstrainsAuthType.
+		// 38 is SWT-69's (gmail-delivery-cc: deliveries.cc TEXT[] NOT NULL
+		// DEFAULT '{}' with deliveries_cc_gmail_check and
+		// deliveries_cc_shape_check), named by its SPEC's data-model section as
+		// 0038_delivery_cc.sql. Its own guards are internal/tools
+		// TestMigration0038_CcColumnAndChecks (the file) and
+		// TestMigration0038_Integration_DeliveryCcShape (the applied schema).
 		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
 		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
 		// asserts only its own file; the numbers nobody owns are caught HERE,
 		// because the migrate runner keys on schema_migrations.version with NO
 		// checksum — a stray or edited file is skipped SILENTLY and the schema
 		// diverges with no error anywhere.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 {
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

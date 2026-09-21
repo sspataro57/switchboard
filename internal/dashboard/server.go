@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"strings"
 	"time"
@@ -168,6 +169,11 @@ type deliveryRow struct {
 	// SWT-43: set on rejected rows only.
 	RejectionNote    string
 	RedraftRequested bool
+	// Cc (SWT-69) is the gmail row's carbon-copy list, shown beside From/To so
+	// Salvador approves the recipients he sees. CcText is the same list as the
+	// edit form's one text input.
+	Cc     []string
+	CcText string
 	// ContentHash is tools.DeliveryContentHash of the Subject/Body this page
 	// renders. The Approve form posts it back as expect_content_hash, so an
 	// edit made after the page loaded (a session's update_delivery) makes the
@@ -232,7 +238,7 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	             COALESCE(d.sent_at::text,''), COALESCE(d.confirmed_at::text,''), COALESCE(d.error,''),
 	             COALESCE(d.starts_at::text,''), COALESCE(d.ends_at::text,''),
 	             d.from_account_id, d.thread_id, COALESCE(d.target_ref,''),
-	             COALESCE(d.rejection_note,''), d.redraft_requested_at IS NOT NULL
+	             COALESCE(d.rejection_note,''), d.redraft_requested_at IS NOT NULL, d.cc
 	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id`
 	args := []any{}
 	if status != "" {
@@ -257,11 +263,12 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 		if err := rows.Scan(&d.ID, &d.TaskID, &d.TaskTitle, &d.Channel, &d.Status,
 			&d.Subject, &d.Body, &d.CreatedBy, &d.SentAt, &d.ConfirmedAt, &d.Error,
 			&d.StartsAt, &d.EndsAt, &ref.fromAcct, &ref.threadID, &d.TargetRef,
-			&d.RejectionNote, &d.RedraftRequested); err != nil {
+			&d.RejectionNote, &d.RedraftRequested, &d.Cc); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		d.ContentHash = tools.DeliveryContentHash(d.Subject, d.Body)
+		d.CcText = strings.Join(d.Cc, ", ")
+		d.ContentHash = tools.DeliveryContentHash(d.Subject, d.Body, d.Cc)
 		data.Deliveries = append(data.Deliveries, d)
 		refs = append(refs, ref)
 	}
@@ -334,8 +341,39 @@ func (s *Server) actionEdit(w http.ResponseWriter, r *http.Request) {
 	if v := r.PostFormValue("subject"); v != "" {
 		payload["subject"] = v
 	}
+	// SWT-69 D10: unlike body and subject above, cc is forwarded whenever the
+	// POST CONTAINS the key, and an emptied box means "clear". For words, an
+	// empty box keeping the old value is a known residual (SWT-61); for a
+	// recipient list it would be worse — Salvador deletes Katie from the box,
+	// the save succeeds, and the email goes to her anyway.
+	if r.PostForm.Has("cc") {
+		payload["cc"] = splitCcInput(r.PostFormValue("cc"))
+	}
 	raw, _ := json.Marshal(payload)
 	s.execute(w, r, "update_delivery", string(raw))
+}
+
+// splitCcInput turns the edit form's one text box into cc entries. A proper
+// address list ("Name <a@x>, b@y") is parsed as one; anything else is split on
+// commas, semicolons and line breaks and handed over as typed, so the executor's
+// own validation names what is wrong. Always non-nil: an empty box is "clear".
+func splitCcInput(v string) []string {
+	out := []string{}
+	if strings.TrimSpace(v) == "" {
+		return out
+	}
+	if list, err := mail.ParseAddressList(v); err == nil {
+		for _, a := range list {
+			out = append(out, a.Address)
+		}
+		return out
+	}
+	for _, part := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' || r == '\n' || r == '\r' }) {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // actionReject is Deny (redraft=false) and Redo (redraft=true). The note is

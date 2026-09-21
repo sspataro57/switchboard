@@ -80,12 +80,13 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 	                WHERE task_id = t.parent_id AND event_type='done_local'
 	                ORDER BY id DESC LIMIT 1),''),
 	             (p.ai_locality = 'local_only'),
-	             COALESCE(rj.id, 0), COALESCE(rj.body,''), COALESCE(rj.rejection_note,'')
+	             COALESCE(rj.id, 0), COALESCE(rj.body,''), COALESCE(rj.rejection_note,''),
+	             COALESCE(rj.cc, '{}')
 	      FROM tasks t
 	      JOIN tasks parent ON parent.id = t.parent_id
 	      JOIN projects p ON p.id = t.project_id
 	      LEFT JOIN LATERAL (
-	        SELECT d.id, d.body, d.rejection_note FROM deliveries d
+	        SELECT d.id, d.body, d.rejection_note, d.cc FROM deliveries d
 	         WHERE d.task_id = t.parent_id AND d.status = 'rejected' AND d.redraft_requested_at IS NOT NULL
 	         ORDER BY d.id DESC LIMIT 1) rj ON true
 	      WHERE t.title LIKE 'Deliver #%' AND t.status IN ('ready','holding')
@@ -113,7 +114,7 @@ func (s *PGStore) DeliverTasks(ctx context.Context, cfg Config) ([]DeliverTask, 
 		if err := rows.Scan(&dt.DeliverTaskID, &dt.ParentTaskID, &dt.ProjectSlug,
 			&dt.ParentTitle, &dt.ClientName, &channelCfg, &hasSendFrom,
 			&dt.ParentSummary, &dt.ProjectLocalOnly,
-			&dt.RedraftOf, &dt.RejectedBody, &dt.RejectionNote); err != nil {
+			&dt.RedraftOf, &dt.RejectedBody, &dt.RejectionNote, &dt.RedraftCc); err != nil {
 			return nil, fmt.Errorf("scan deliver task: %w", err)
 		}
 		pending = append(pending, dt)
