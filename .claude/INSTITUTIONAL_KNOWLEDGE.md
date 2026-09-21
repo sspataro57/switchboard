@@ -2907,6 +2907,13 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   The route's exact spelling is pinned by a test, so headers are set by a wrapper around the mux.
 - **Every dashboard response carries `X-Frame-Options: SAMEORIGIN`** (the mux wrapper). Never `DENY`: `/kiosk`
   frames the board.
+- **The installed app (SWT-72).** The manifest is `static/manifest-v2.webmanifest`, `start_url: /tasks?refresh=on`,
+  `id: /tasks`. Because `/static/` is `immutable` for a year, a CHANGED asset must ship under a NEW name and the
+  old name must go (a test pins it) — otherwise no browser ever fetches the change. Keep `id` stable and Chrome
+  treats a manifest change as an UPDATE of the installed app (start_url and manifest URL are both update
+  triggers), but it lands on a day-ish, multi-launch lag; uninstall + reinstall is the only instant path.
+  Rough edge: the nav's `Board` link is plain `/tasks`, so navigating away and back inside the app drops
+  auto-refresh until relaunch.
 - **Verify UI work in a real browser** (Playwright is installed: `channel="chrome"`). Chrome's
   `--screenshot`/`--dump-dom` with `--virtual-time-budget` hid both landmines above.
 
