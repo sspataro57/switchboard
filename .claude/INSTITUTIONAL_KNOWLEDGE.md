@@ -2919,3 +2919,24 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   parses to zero addresses (`undisclosed-recipients:;`) is not a clear — it falls through to the executor.
 - **Test idiom:** `args->'cc' IS NOT NULL` matches JSON `null`. Use
   `jsonb_typeof(args->'cc') = 'array' AND args->'cc' <> '[]'::jsonb`.
+
+## Inquiry lane judges a reply on its NEW text (SWT-70, inquiry-reads-quoted-history)
+
+- **The bite:** a client reply that DELIVERED requested material was judged `fyi, no reply needed`; no task was
+  created and the owner noticed it missing. The new text was 6% of the body handed to the model; the rest was
+  the quoted conversation, and the model summarised the quoted previous message. Replaying the stored prompt
+  reproduced it 5/5; cutting at the first quote separator flipped it 5/5.
+- **The fix:** `classify.StripQuotedHistory[Of]` (pure) cuts quoted reply history from the inquiry prompt's
+  target and from each context message. Guards: under 20 characters of new text keeps the body whole (inline
+  reply); a FORWARD (body marker or Fwd:/FW:/RV: subject) is never cut — its header block looks like a reply's
+  but what follows is the payload. Only the inquiry lane uses it. `inquiry-v2` marks the renderer change; the
+  eval checkpoint key fingerprints the SYSTEM prompt only, so a renderer change without a version bump would
+  silently reuse stale checkpoints.
+- **Production mail is CRLF** (92% of collaboratory bodies). Line-anchored patterns match only because `\s*`
+  before `$` absorbs the `\r`. Fixtures must include CRLF, and must assert the separator LINE is gone — another
+  pattern a few lines down will still cut the history and hide a broken one.
+- **Measure text handling by running the shipped function over production bodies in Go**, not with Postgres
+  regex: `((^|\n)[ \t]*>[^\n]*\n){3,}` returns false in Postgres ARE on bodies that plainly match.
+- Measured 2026-09-21: 118 of 8,097 inbound gmail bodies (60 days) are cut; no bottom-posted reply among them;
+  Slack and Jira bodies are never cut. The inquiry eval set is tiny (3 positives): it is a regression guard,
+  not a recall measurement, and 20 of its 62 labels are excluded for subject-hash drift (pre-existing).

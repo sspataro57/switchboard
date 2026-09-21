@@ -60,5 +60,14 @@ inquiry verdict keeps it), so message 385428 keeps its v1 verdict; its task was 
 
 - A reply typed BELOW the quote with a long greeting above it would be cut to the greeting. The
   20-character floor covers the common inline shape, not that one.
+  Measured in review against production (the shipped function run over the bodies): of 8,097 inbound
+  gmail bodies in 60 days the stripper cuts 118 (on-wrote 56, From:/Sent: 33, quoted block 15,
+  underscore rule 10, dashed 4); none is a bottom-posted reply — the 4 with prose after the last quoted
+  line are signatures or disclaimers, and the 9 cut to under 60 characters are genuine one-line acks.
+  No missed reply separator was found; every uncut body carrying one is a forward or under the floor.
+  Slack and Jira bodies (1,302): 0 cuts. Cost: 3 ms per 40 KB body.
+- A forward marker ANYWHERE in the body keeps it whole, so a reply whose quoted chain contains an old
+  forward is not stripped; `[EXT] FW:` / `Re: FW:` subjects are not seen as forwards (0 in 60 days).
+  Both fail safe: the body is kept whole, which is the old behaviour.
 - Signatures and legal disclaimers above the separator still reach the model.
 - The eval set is small (3 positives). It guards against a regression, it does not measure recall.
