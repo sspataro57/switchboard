@@ -649,8 +649,8 @@ func TestBoardDepartures_Integration_AssetsAreSelfHostedAndOpen(t *testing.T) {
 		}
 	}
 	// The manifest is reachable at the exact path the <head> links.
-	if !refs["/static/manifest.webmanifest"] {
-		t.Errorf("the page does not link /static/manifest.webmanifest (criterion 17): %v", refs)
+	if !refs["/static/manifest-v2.webmanifest"] {
+		t.Errorf("the page does not link /static/manifest-v2.webmanifest (criterion 17): %v", refs)
 	}
 }
 

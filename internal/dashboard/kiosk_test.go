@@ -132,7 +132,7 @@ func TestKioskTemplate_Contract(t *testing.T) {
 		`<button type="button" id="enter"`,
 		"requestFullscreen",
 		"fullscreenchange",
-		`<link rel="manifest" href="/static/manifest.webmanifest">`,
+		`<link rel="manifest" href="/static/manifest-v2.webmanifest">`,
 		`<meta name="theme-color" content="#0b0b0c">`,
 	} {
 		if !strings.Contains(s, want) {

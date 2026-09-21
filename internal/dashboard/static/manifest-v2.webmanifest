@@ -2,7 +2,7 @@
   "name": "switchboard",
   "short_name": "switchboard",
   "id": "/tasks",
-  "start_url": "/tasks",
+  "start_url": "/tasks?refresh=on",
   "scope": "/",
   "display": "fullscreen",
   "display_override": ["fullscreen", "standalone"],

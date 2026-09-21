@@ -352,7 +352,7 @@ func TestTasksTemplate_HeadMetasAndManifest(t *testing.T) {
 		`<meta name="theme-color" content="#0b0b0c">`,
 		`<meta name="mobile-web-app-capable" content="yes">`,
 		`<meta name="apple-mobile-web-app-capable" content="yes">`,
-		`<link rel="manifest" href="/static/manifest.webmanifest">`,
+		`<link rel="manifest" href="/static/manifest-v2.webmanifest">`,
 	} {
 		if n := strings.Count(head, want); n != 1 {
 			t.Errorf("tasks.html's <head> carries %s %d time(s), want exactly 1 (criterion 17 / B18: the manifest and "+
@@ -829,9 +829,9 @@ func TestStaticManifest_IsAFullScreenManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fs.Sub(staticFS, \"static\"): %v", err)
 	}
-	raw, err := fs.ReadFile(sub, "manifest.webmanifest")
+	raw, err := fs.ReadFile(sub, "manifest-v2.webmanifest")
 	if err != nil {
-		t.Fatalf("the embedded static FS has no manifest.webmanifest: %v (criterion 32)", err)
+		t.Fatalf("the embedded static FS has no manifest-v2.webmanifest: %v (criterion 32)", err)
 	}
 	var m struct {
 		Display         string   `json:"display"`
@@ -856,8 +856,11 @@ func TestStaticManifest_IsAFullScreenManifest(t *testing.T) {
 	if !contains(m.DisplayOverride, "fullscreen") {
 		t.Errorf("manifest display_override = %v, want it to contain \"fullscreen\" (criterion 32)", m.DisplayOverride)
 	}
-	if m.StartURL != "/tasks" {
-		t.Errorf("manifest start_url = %q, want \"/tasks\" (criterion 32: the board IS the app)", m.StartURL)
+	// SWT-72: the INSTALLED app is a wall display, so it starts on the refreshing
+	// board. refresh=on is the one value that turns auto-refresh on (D15). The id
+	// stays "/tasks", so an already-installed app is UPDATED, not duplicated.
+	if m.StartURL != "/tasks?refresh=on" {
+		t.Errorf("manifest start_url = %q, want \"/tasks?refresh=on\" (the installed board starts refreshing)", m.StartURL)
 	}
 	if m.Scope != "/" {
 		t.Errorf("manifest scope = %q, want \"/\" (criterion 32)", m.Scope)
@@ -891,4 +894,29 @@ func contains(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// SWT-72. Everything under /static/ is served `immutable` for a year, so an
+// asset that changes must ship under a NEW name or no installed browser ever
+// fetches it again. The manifest changed (start_url), so its file name moved,
+// and the old name must be gone — a stale copy left behind would keep serving
+// the old start_url to anything that still links it.
+func TestStaticManifest_ChangedManifestShipsUnderANewName(t *testing.T) {
+	sub, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		t.Fatalf("fs.Sub: %v", err)
+	}
+	if _, err := fs.ReadFile(sub, "manifest.webmanifest"); err == nil {
+		t.Errorf("static/manifest.webmanifest still exists beside manifest-v2.webmanifest: browsers hold the old " +
+			"name `immutable` for a year, so it must not keep answering")
+	}
+	for _, tmpl := range []string{"templates/tasks.html", "templates/kiosk.html"} {
+		raw, err := templateFS.ReadFile(tmpl)
+		if err != nil {
+			t.Fatalf("read %s: %v", tmpl, err)
+		}
+		if n := strings.Count(string(raw), `<link rel="manifest" href="/static/manifest-v2.webmanifest">`); n != 1 {
+			t.Errorf("%s links the v2 manifest %d time(s), want exactly 1", tmpl, n)
+		}
+	}
 }
