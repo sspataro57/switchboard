@@ -2940,3 +2940,24 @@ did not author, from the GitHub notification mail he already receives. Runbook:
 - Measured 2026-09-21: 118 of 8,097 inbound gmail bodies (60 days) are cut; no bottom-posted reply among them;
   Slack and Jira bodies are never cut. The inquiry eval set is tiny (3 positives): it is a regression guard,
   not a recall measurement, and 20 of its 62 labels are excluded for subject-hash drift (pre-existing).
+
+## A gmail send that died mid-flight (SWT-71, gmail-sending-stuck)
+
+- `sendDelivery` commits `sending` + the reserved Message-ID BEFORE the network call (invariant 4). A process
+  death after the call (a dashboard roll mid-send, 2026-09-18, delivery 45) leaves the row `sending` forever:
+  the gmail sink stamps `confirmed_at` when the copy re-enters and DELIBERATELY promotes nothing (no
+  `delivery_sent` would be emitted, so R8 would never fire).
+- `send_delivery` now FINISHES such a row (`finishConfirmedSend`): no transport call; status sent; the event
+  in the same tx. The dashboard shows "Finish: it was sent". Four rules, each bitten in review:
+  - **`confirmed_at` is not proof by itself.** It has two producers; the body-prefix belt matches any message
+    of the same mailbox with the same opening 120 characters. Require the own copy by Message-ID in
+    `normalized_messages` before treating a send as having left.
+  - **Every phase-2 write is conditional on `status='sending'`**, and the rejection branch clears the id only
+    while unconfirmed. Any new path that can move a row out of `sending` makes unconditional finalizes a bug.
+  - **Never emit `delivery_sent` for a closed task.** `task_mark_delivered` treats closed as a successful
+    no-op, so R8 "succeeds", records `delivery_lifecycle` keyed on task id only, and mutes a later real
+    delivery after a reopen. Same shape as the SWT-28 calendar skip. Write a `log` event instead.
+  - Put the event INSIDE the tx when the path allows it: a finished row with no event has no verb left.
+- `send_guard_structure_test.go` requires each send path to CALL `refuseClosedTask`; it cannot see an early
+  return placed in front of it. `finishConfirmedSend` is the one such exception and sends nothing.
+- Dev lesson: splicing new declarations between a function and its doc comment silently re-binds the comment.

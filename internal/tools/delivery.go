@@ -694,7 +694,10 @@ func refuseThreadOutsideTaskProject(ctx context.Context, tx pgx.Tx, taskID, thre
 }
 
 // refuseClosedTask SHARE-locks the delivery's TASK row and refuses a closed
-// task (SWT-37, Codex re-review). It runs FIRST in every approve, send and
+// task (SWT-37, Codex re-review). (One exception runs ahead of it in
+// sendDelivery: finishConfirmedSend, SWT-71, which sends nothing — it finishes
+// the record of a gmail message that already left, and a task closed since then
+// must not strand that row.) It runs FIRST in every approve, send and
 // prefill transaction. Both orderings of the draft/close race then end
 // refused: a close that commits first makes the draft refuse, and a draft that
 // commits first can no longer be approved or sent once the task is closed.
@@ -738,6 +741,88 @@ func lockDeliveryTask(ctx context.Context, tx pgx.Tx, deliveryID int64) (taskID 
 		return 0, "", fmt.Errorf("lock task of delivery %d: %w", deliveryID, err)
 	}
 	return taskID, status, nil
+}
+
+// confirmedSend is a send finished from its confirmation (SWT-71).
+type confirmedSend struct {
+	taskID     int64
+	messageID  string
+	taskClosed bool
+}
+
+// finishConfirmedSend finishes a gmail send that already left. A send whose
+// process died after the network call leaves the row `sending` with its
+// Message-ID reserved; when that message's own copy re-enters ingestion the
+// gmail sink stamps confirmed_at and deliberately promotes nothing (a promotion
+// there would emit no delivery_sent and R8 would never fire). This is the path
+// that owns the transition: status sent, sent_at from the confirmation, and the
+// task event — all in the caller's transaction, so a finished row can never be
+// left without its event (it could not be finished twice).
+//
+// The proof it accepts is the STRONG one only: the message we composed, by its
+// own Message-ID, is in the ingested mailbox. confirmed_at alone is not enough
+// — the sink's body-prefix belt also stamps it, from any message of the same
+// mailbox that opens with the same 120 characters, and finishing on that could
+// record "sent" for a message that never left, terminally.
+//
+// On an open task it emits delivery_sent (recovered: true) so R8 advances the
+// work. On a task CLOSED since, it writes a log event instead: R8 would change
+// nothing there, yet would record its delivery_lifecycle dedup key and mute a
+// later real delivery if the task were reopened (SWT-28's calendar trap).
+//
+// It returns nil for every other row — including an unconfirmed `sending` one,
+// which nothing proves left and which is never sent twice. Task row locked
+// first: the one task → delivery lock order.
+func finishConfirmedSend(ctx context.Context, tx pgx.Tx, deliveryID int64) (*confirmedSend, error) {
+	taskID, taskStatus, err := lockDeliveryTask(ctx, tx, deliveryID)
+	if err != nil {
+		return nil, err
+	}
+	var messageID string
+	var cc []string
+	// channel='gmail' on the copy is load-bearing twice: "one normalized row per
+	// Message-ID" is a gmail-only partial UNIQUE index, so without it the proof
+	// rests on nothing the schema enforces — and it is what lets the planner use
+	// that index (measured on production: 34 ms seq scan vs 0.06 ms).
+	// sent_at is the copy's own instant, the true send time; the confirmation
+	// instant is only the fallback.
+	err = tx.QueryRow(ctx,
+		`UPDATE deliveries d
+		    SET status='sent', error=NULL, updated_at=now(),
+		        sent_at=COALESCE(d.sent_at,
+		                         (SELECT nm.sent_at FROM normalized_messages nm
+		                           WHERE nm.channel='gmail' AND nm.external_message_id = d.sent_external_id
+		                             AND nm.direction = 'outbound' LIMIT 1),
+		                         d.confirmed_at)
+		  WHERE d.id=$1 AND d.channel='gmail' AND d.status='sending'
+		    AND d.sent_external_id IS NOT NULL AND d.confirmed_at IS NOT NULL
+		    AND EXISTS (SELECT 1 FROM normalized_messages nm
+		                 WHERE nm.channel='gmail' AND nm.external_message_id = d.sent_external_id
+		                   AND nm.direction = 'outbound')
+		 RETURNING d.sent_external_id, d.cc`, deliveryID).Scan(&messageID, &cc)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("finish confirmed send %d: %w", deliveryID, err)
+	}
+	done := &confirmedSend{taskID: taskID, messageID: messageID, taskClosed: taskStatus == "closed"}
+	if done.taskClosed {
+		_, err = insertTaskEvent(ctx, tx, taskID, "log", map[string]any{
+			"kind": "delivery_finished", "delivery_id": deliveryID, "sent_external_id": messageID,
+			"message": fmt.Sprintf("delivery %d finished from its confirmation: the message had left, the send never reported back", deliveryID)})
+	} else {
+		// The APPROVED Cc: the send that died would have recorded what went on the
+		// wire after its send-time drop; that record is lost with it.
+		payload := map[string]any{
+			"delivery_id": deliveryID, "channel": "gmail", "sent_external_id": messageID, "recovered": true}
+		recordSentCc(payload, cc, cc)
+		_, err = insertTaskEvent(ctx, tx, taskID, "delivery_sent", payload)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return done, nil
 }
 
 func splitGmailThreadKey(key string) (email, gmailThreadID string, err error) {
@@ -1275,14 +1360,26 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 			fromEmail string
 			cc        []string
 		}
-		sentCc  []string // the Cc actually put on the wire (D7's send-time drop applied)
-		msg     google.OutboundMessage
-		gThread string
-		msgID   string
+		sentCc []string // the Cc actually put on the wire (D7's send-time drop applied)
+		// recovered (SWT-71): this call FINISHED a send that had already left — a
+		// `sending` row whose own copy re-entered ingestion — instead of sending.
+		recovered bool
+		msg       google.OutboundMessage
+		gThread   string
+		msgID     string
 	)
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
 		var status string
 		var extID *string
+		// SWT-71, before the closed-task guard: finishing a send that already left
+		// is record-keeping, and a task closed since then — "reply sent" is a
+		// common reason to close it — must not strand the row.
+		if done, err := finishConfirmedSend(ctx, tx, a.DeliveryID); err != nil {
+			return err
+		} else if done != nil {
+			recovered, msgID = true, done.messageID
+			return nil
+		}
 		if err := refuseClosedTask(ctx, tx, a.DeliveryID); err != nil {
 			return err
 		}
@@ -1397,11 +1494,17 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		return nil, err
 	}
 
+	if recovered {
+		// Finished from its confirmation, event included, inside the transaction.
+		return marshalResult(map[string]any{"delivery_id": a.DeliveryID, "status": "sent",
+			"sent_external_id": msgID, "recovered": true})
+	}
+
 	// Phase 2: the network call, then finalize sent | failed.
 	raw, err := google.BuildOutboundMIME(msg)
 	if err != nil {
-		_, _ = pool.Exec(ctx, `UPDATE deliveries SET status='failed', error=$2, updated_at=now() WHERE id=$1`,
-			a.DeliveryID, err.Error())
+		_, _ = pool.Exec(ctx, `UPDATE deliveries SET status='failed', error=$2, updated_at=now()
+			 WHERE id=$1 AND status='sending'`, a.DeliveryID, err.Error())
 		return nil, fmt.Errorf("build outbound message: %w", err)
 	}
 	if _, err := gmailSender.Send(ctx, d.fromEmail, raw, gThread); err != nil {
@@ -1409,23 +1512,42 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		if errors.As(err, &rejected) {
 			// Definite rejection: clear the reserved Message-ID so
 			// approve_delivery's failed->approved retry path is reachable.
+			// SWT-71: every phase-2 write is conditional on the row STILL being
+			// `sending`. A finish (finishConfirmedSend) can now move it to `sent`
+			// while this call is in flight; writing `failed` over that would undo a
+			// delivery R8 already processed, and clearing the id would re-open a
+			// resend. A confirmed row never loses its id.
+			// The FAILURE is recorded whenever the row is still `sending`; the id is
+			// cleared only while the row is unconfirmed. (A belt-confirmed row that
+			// then gets a definite rejection must not be left silently `sending`:
+			// gmail has no reconciler to notice it.)
 			_, _ = pool.Exec(ctx,
-				`UPDATE deliveries SET status='failed', sent_external_id=NULL, error=$2, updated_at=now() WHERE id=$1`,
+				`UPDATE deliveries
+				    SET status='failed', error=$2, updated_at=now(),
+				        sent_external_id = CASE WHEN confirmed_at IS NULL THEN NULL ELSE sent_external_id END
+				  WHERE id=$1 AND status='sending'`,
 				a.DeliveryID, err.Error())
 		} else {
 			// Ambiguous transport error: the send MAY have gone through —
 			// keep the id; never risk a double send (invariant 4).
 			_, _ = pool.Exec(ctx,
-				`UPDATE deliveries SET status='failed', error=$2, updated_at=now() WHERE id=$1`,
+				`UPDATE deliveries SET status='failed', error=$2, updated_at=now()
+				  WHERE id=$1 AND status='sending'`,
 				a.DeliveryID, err.Error())
 		}
 		return nil, fmt.Errorf("gmail send: %w", err)
 	}
 
-	if _, err := pool.Exec(ctx,
-		`UPDATE deliveries SET status='sent', sent_at=now(), error=NULL, updated_at=now() WHERE id=$1`,
-		a.DeliveryID); err != nil {
+	tag, err := pool.Exec(ctx,
+		`UPDATE deliveries SET status='sent', sent_at=now(), error=NULL, updated_at=now()
+		  WHERE id=$1 AND status='sending'`, a.DeliveryID)
+	if err != nil {
 		return nil, fmt.Errorf("finalize sent: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Already finished from its confirmation while this call was in flight
+		// (SWT-71): that path wrote the row and its event. One event per send.
+		return marshalResult(map[string]any{"delivery_id": a.DeliveryID, "status": "sent", "sent_external_id": msgID})
 	}
 	sentPayload := map[string]any{"delivery_id": a.DeliveryID, "channel": d.channel, "sent_external_id": msgID}
 	recordSentCc(sentPayload, d.cc, sentCc)
