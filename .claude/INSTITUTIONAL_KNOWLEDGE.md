@@ -1363,7 +1363,17 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   which the owner chose the wildcard to avoid. LAN-only: no public A record; the
   name resolves through a pfSense host override to 192.168.50.51. HTTPS is what
   makes the board installable (manifest `display: fullscreen`) and the wake lock
-  work. None of this adds auth.
+  work. None of this adds auth. **Installed and confirmed full-screen on the
+  tablet 2026-09-21.**
+  **LAN DNS for `*.sspataro.com` is the PI-HOLE, not pfSense** (bit 2026-09-21):
+  devices use Pi-hole v6, an app on the TrueNAS box, admin at
+  `http://192.168.50.20:20720/admin` (port 80 there is TrueNAS). It forwards
+  `home.arpa` to pfSense but sends `sspataro.com` to public DNS, where LAN-only
+  hosts deliberately do not exist — so a pfSense Unbound `local-data` line alone
+  is not enough. Add a Pi-hole **Settings → Local DNS Records** entry (how
+  `n8n.sspataro.com` works). A failed lookup is negative-cached for up to 30 min
+  (Cloudflare SOA minimum 1800); "Restart DNS resolver" is under Settings →
+  System, Expert mode only.
   Still not deployed: triage, drafts, fleetd, hooksd. **orchestratord IS deployed**
   (SWT-41, 2026-09-12, image 0.7.9): Deployment `orchestratord` in `ops`
   (`kube/switchboard/orchestrator.yaml`, replicas 1, Recreate, liveness `/healthz`
