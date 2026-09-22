@@ -119,10 +119,16 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 // SWT-56 (signal-session-name) criteria 27 and 34: task_context — a session in
 // any repo reads one task's full document, READ-ONLY by the profile pin
 // {worker_id:"", require_read_only:"true"} plus the handler flag. Fifteen in all.
+//
+// activity-resurfaces (SWT-72) D6/criterion 23: task_requeue — the third review
+// verb, so `swb requeue <id>` clears a surfaced row from any repo's session
+// (and lifts a holding ask to ready). No pin: humanOnly already refuses every
+// worker shape. SIXTEEN in all.
 var wantUserProfileTools = []string{
 	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
 	"task_append_log", "task_close", "task_context", "task_dismiss",
-	"task_get_next", "task_list", "task_mark_delivered", "task_set_priority", "task_signal", "update_delivery",
+	"task_get_next", "task_list", "task_mark_delivered", "task_requeue", "task_set_priority", "task_signal",
+	"update_delivery",
 }
 
 func TestReadProfile_ListsExactlyTheQueueReads(t *testing.T) {
@@ -361,9 +367,10 @@ func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 		checked++
 	}
 	// SWT-52 criterion 24: the control checked fourteen tools; SWT-56 criterion
-	// 34: fifteen (task_context).
-	if len(wantUserProfileTools) != 15 {
-		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 15 (SWT-56)", len(wantUserProfileTools))
+	// 34: fifteen (task_context); SWT-72 criterion 23: sixteen (task_requeue).
+	if len(wantUserProfileTools) != 16 {
+		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 16 (SWT-72 criterion 23)",
+			len(wantUserProfileTools))
 	}
 	if checked != len(wantUserProfileTools) {
 		t.Fatalf("POSITIVE CONTROL FAILED: checked %d user-profile tools, want %d", checked, len(wantUserProfileTools))

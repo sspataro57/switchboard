@@ -247,7 +247,7 @@
         <span class="mdot light-{{.Light.Class}}"></span>
         <span class="time" title="{{.UpdatedAt}}">{{.Updated}}</span>
         <span class="id">{{.ID}}{{if .HighPriority}}<span class="prio" role="img" aria-label="priority {{.Priority}}" title="priority {{.Priority}}">▲</span>{{end}}</span>
-        <span class="title">{{.Title}}{{if .ReopenedAfterDismissal}} <span class="muted">reopened after dismissal ({{.ReopenedAfterDismissal}})</span>{{end}}</span>
+        <span class="title">{{.Title}}{{if .ReopenedAfterDismissal}} <span class="muted">reopened after dismissal ({{.ReopenedAfterDismissal}})</span>{{end}}{{if .NeedsReview}}{{if .ActivityFrom}} <span class="muted">from {{.ActivityFrom}}</span>{{end}}{{end}}</span>
         <span class="chip" style="--chip-h:{{.ProjectHue}}">{{.Project}}</span>
         <span class="gate">{{if .Light.Session}}<span class="session-tag session-{{.Light.Class}}" title="{{.Light.Label}}">{{.Light.Session}}</span>{{end}}</span>
         <span class="rem"><span class="light light-{{.Light.Class}}" role="img" aria-label="{{.Light.Label}}" title="{{.Light.Label}}"></span>{{.Remark}}</span>
@@ -279,6 +279,24 @@
           <input type="hidden" name="refresh" value="{{index $.Filters "refresh"}}">
           <input type="text" name="note" placeholder="note (optional)">
           <button>Done</button>
+        </form>
+        {{end}}
+        {{if .NeedsReview}}
+        <form class="inline" method="post" action="/tasks/{{.ID}}/requeue">
+          <input type="hidden" name="project" value="{{index $.Filters "project"}}">
+          <input type="hidden" name="status" value="{{index $.Filters "status"}}">
+          <input type="hidden" name="assignee_type" value="{{index $.Filters "assignee_type"}}">
+          <input type="hidden" name="subproject" value="{{index $.Filters "subproject"}}">
+          <input type="hidden" name="refresh" value="{{index $.Filters "refresh"}}">
+          <select name="priority">
+            <option value="">priority: unchanged</option>
+            <option value="0">0 normal</option>
+            <option value="1">1 elevated</option>
+            <option value="2">2 high</option>
+            <option value="3">3 urgent</option>
+          </select>
+          <input type="text" name="note" placeholder="note (optional)">
+          <button>Requeue</button>
         </form>
         {{end}}
       </div></details>

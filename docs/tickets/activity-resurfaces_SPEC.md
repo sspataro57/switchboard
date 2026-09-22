@@ -257,6 +257,13 @@ on the next reconciler tick (criterion 24).
 
 ### D6 — The verb: `task_requeue {task_id, priority?, note?}`, humanOnly, both MCP profiles, and it lifts `holding → ready` (OQ-1 = **B**)
 
+> *Correction (implementation, 2026-09-22):* `inquiryCreateStatus` is `"ready"` (flipped
+> 2026-09-18, `internal/promote/inquiry.go:85`), so a D11 ask is created **ready / action `task`**,
+> not `holding` / `review` as this section, D11's table, criterion 13 and criterion 42 say. The
+> code uses `actionForStatus(inquiryCreateStatus)`, never a literal, so it follows the constant.
+> The `holding → ready` lift is still right for the review lane's `holding` tasks; it is just not
+> what an ask needs today.
+
 - **Effect**, one transaction under `lockTask`:
   1. refuse a **closed** task by name (`task_reopen` is the verb for that);
   2. `reviewed_at = now()` — unconditional, so a double-tap is a clean no-op;
@@ -790,6 +797,11 @@ summary; assert none of them as a frozen literal in any test.
 - **0e. `EXPLAIN (ANALYZE, BUFFERS)`** of the new first statement with a realistic id array. Expected:
   the `nm` join is an index scan on `normalized_messages_pkey`, no sequential scan of
   `normalized_messages`, total time of today's order (prod 2026-09-15: 0.60 ms). Record both timings.
+  **Measured 2026-09-22 (prod, read-only, 97 open ids; the join emulated on
+  `surfaced_by_message_id` since 0039 was not yet applied — same PK shape):** Nested Loop Left
+  Join → Seq Scan on `tasks` (453 rows, 55 buffers) → Memoize → `Index Scan using
+  normalized_messages_pkey` (9 misses, 88 hits, 24 buffers). Planning 2.4 ms, execution 1.9 ms.
+  No sequential scan of `normalized_messages`. Gate passed.
 - **0f. D12's frequency:** over 30 days, inbound Slack/gmail messages from the inquiry-armed
   project's counterparties whose latest LIVE capture decision is `task_log` onto an OPEN task — the
   asks a key-matching rule swallows before the inquiry lane can see them. Not a gate; it decides

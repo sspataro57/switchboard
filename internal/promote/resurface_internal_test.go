@@ -37,21 +37,25 @@ func rsVerdict() Verdict {
 
 func TestInquiryBody_LoggedOnClosedTaskIsTheLastLineAndOnlyWhenSet(t *testing.T) {
 	v := rsVerdict()
-	base := inquiryBody(v)
+	base := inquiryBody(v, 0)
 	if strings.Contains(base, "logged_on_closed_task") {
 		t.Errorf("a verdict with LoggedOnTaskID 0 carries the logged_on_closed_task line; every existing body must "+
 			"stay byte-identical (C8's exact-text tests):\n%s", base)
 	}
-	if !strings.HasSuffix(base, "verdict: asks Salvador directly\n") {
-		t.Fatalf("CONTROL: the body's last line is no longer `verdict: …`:\n%s", base)
+	// AMENDED — not deleted — by activity-resurfaces (SWT-72) criterion 15: the
+	// C-D9 fixed list gained ONE line after `verdict`, `related_task`. CC6's own
+	// line is an APPENDIX to that list and stays last when set, which is what
+	// the assertion below still proves.
+	if !strings.HasSuffix(base, "related_task: (none)\n") {
+		t.Fatalf("CONTROL: the fixed list's last line is no longer `related_task: …` (SWT-72 criterion 15):\n%s", base)
 	}
 
 	v.LoggedOnTaskID = 57
-	got := inquiryBody(v)
+	got := inquiryBody(v, 0)
 	if want := base + "logged_on_closed_task: 57\n"; got != want {
 		t.Errorf("inquiryBody with LoggedOnTaskID 57 =\n%s\nwant\n%s(CC6: the existing body, then ONE line, LAST)", got, want)
 	}
-	if bodyFor(v) != got {
+	if bodyFor(v, 0) != got {
 		t.Errorf("bodyFor(inquiry verdict) does not return inquiryBody's text")
 	}
 }

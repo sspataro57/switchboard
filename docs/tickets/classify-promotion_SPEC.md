@@ -7,6 +7,9 @@
 Q2 = verdict-clock-only confirm the assumptions this SPEC was written against.
 Q3 flipped: the attach lookup considers only OPEN tasks — a thread whose task
 is already `closed`/`delivered` gets a NEW task (criterion 9).
+*Amended 2026-09-22 (SWT-72, activity-resurfaces D11):* Q3's "a thread yields at
+most one open task" now holds for the PERSONAL lane only; an inquiry-lane ask is
+always its own task (`Decision.RelatedTaskID`, body line `related_task: N`).
 
 ## Source
 

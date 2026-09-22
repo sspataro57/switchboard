@@ -114,6 +114,11 @@ type Decision struct {
 	Status            string
 	TaskID            int64
 	ReopenDismissalID int64
+	// RelatedTaskID (SWT-72 D11) is set on the INQUIRY CREATE only: the
+	// thread's open task the ask would have been piled onto. The new task's
+	// body names it (`related_task: N`) and it gets an ids-only pointer log;
+	// it is neither a parent nor a dependency.
+	RelatedTaskID int64
 }
 
 // open reports whether a task can still absorb a follow-up. Q3's answer is
@@ -133,10 +138,12 @@ func open(status string) bool {
 //  3. a whitelisted kind (payment_due|deadline) -> ready task
 //  4. anything else -> holding, the review lane
 //
-// On the INQUIRY lane (SWT-40 C-D8) rules 1 and 2 are unchanged, and a create
-// uses inquiryCreateStatus ("holding" under O7, action review) instead of rules
+// On the INQUIRY lane (SWT-40 C-D8) rule 2 is unchanged, and a create uses
+// inquiryCreateStatus ("holding" under O7, action review) instead of rules
 // 3-4: the personal whitelist is the personal lane's autonomy argument and
-// never applies to an inquiry verdict, whatever its kind string says.
+// never applies to an inquiry verdict, whatever its kind string says. Rule 1
+// is REPLACED for that lane (SWT-72 D11): an ask with an open thread task is
+// a create carrying RelatedTaskID, never an attach.
 //
 // Pure: a function of (verdict, existing task) with zero I/O, unit-tested with
 // no pgx, no net and no provider (invariant 7). The attach rule is evaluated
@@ -144,6 +151,14 @@ func open(status string) bool {
 // create a second task, however whitelisted its kind.
 func Decide(v Verdict, existing *ExistingTask) Decision {
 	if existing != nil && open(existing.Status) {
+		// SWT-72 D11 (owner decision, 2026-09-22): an inquiry ask is ALWAYS
+		// its own task, whatever is open on the thread — an attach was a
+		// silent log line nobody saw. The relationship is carried, not
+		// enforced: RelatedTaskID, for the body line and the pointer log.
+		if v.Lane == LaneInquiry {
+			return Decision{Action: actionForStatus(inquiryCreateStatus), Status: inquiryCreateStatus,
+				RelatedTaskID: existing.ID}
+		}
 		return Decision{Action: "attached", TaskID: existing.ID}
 	}
 	if existing != nil && existing.DismissalID != 0 {

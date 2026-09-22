@@ -159,6 +159,7 @@ type RulesStats struct {
 	Resurfaced      int
 	PRAuthorSkipped int
 	PRClosed        int
+	Activity        int // SWT-72: task_log attaches that marked activity on an OPEN task
 }
 
 // RulesMode reads CAPTURE_RULES_MODE. Anything that is not exactly "live" —
@@ -500,6 +501,22 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 				return stats, err
 			}
 			stats.Appended++
+			// SWT-72 D3/D7: the attach is activity on the task — a comment, a
+			// direct email, a Slack message — and the board puts it in INCOMING
+			// for review. Log first, THEN the mark (a crash between the two
+			// leaves today's behaviour); a closed target is skipped by the tool,
+			// so the revive and reopen below keep their SWT-45/SWT-36 meaning.
+			// The ONE exclusion is the merged/closed PR notice: the next call
+			// closes the task, and surfacing a row to close it is noise.
+			if !decision.prClose {
+				marked, err := markRuleActivity(ctx, ex, cfg.Actor, pm, *decision.taskID, *decision.extSystem, *decision.extKey)
+				if err != nil {
+					return stats, err
+				}
+				if marked {
+					stats.Activity++
+				}
+			}
 			// SWT-36 D10 / SWT-45 J9: log first, THEN the reopen — a crash
 			// between the two leaves exactly today's behaviour (logged, still
 			// closed). The revive handles an open dismissal itself, so it takes
@@ -1635,6 +1652,39 @@ func closeRuleTask(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 		return false, fmt.Errorf("close review task %d on PR #%d %s (message %d): %w", taskID, prNumber, state, pm.msg.ID, err)
 	}
 	return true, nil
+}
+
+// markRuleActivity is task_mark_activity (SWT-72 D3) through the executor as
+// the configured capture:{connector} actor, after appendRuleLog on the same
+// message: ids only — the handler reads the message direction and the task's
+// status under the row lock, and answers marked:true or a skip (closed task,
+// same message again). Channel-, rule- and assignee-blind on purpose
+// (criterion 10): the hook sits in the one task_log branch every connector and
+// every rule kind funnel through. Fails the pass on error, the linkRuleRef
+// policy.
+func markRuleActivity(ctx context.Context, ex *executor.Executor, actor string,
+	pm pendingMessage, taskID int64, system, key string) (bool, error) {
+	args, err := json.Marshal(map[string]any{
+		"task_id":    taskID,
+		"message_id": pm.msg.ID,
+		"reason":     fmt.Sprintf("capture: activity on %s %s, message %d", system, key, pm.msg.ID),
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal task_mark_activity args for task %d: %w", taskID, err)
+	}
+	res, err := ex.Execute(ctx, executor.Call{
+		Tool: "task_mark_activity", Actor: actor, Args: args, TaskID: &taskID,
+	})
+	if err != nil {
+		return false, fmt.Errorf("mark activity on task %d (message %d): %w", taskID, pm.msg.ID, err)
+	}
+	var out struct {
+		Marked bool `json:"marked"`
+	}
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		return false, fmt.Errorf("parse task_mark_activity result for task %d: %w", taskID, err)
+	}
+	return out.Marked, nil
 }
 
 // markRuleSurfaced is task_mark_surfaced (SWT-45 J7) through the executor, for

@@ -99,6 +99,11 @@ var humanOnly = map[string]bool{
 	// rule that needs it (triage escalation, say) must move it to mcpHumanOnly
 	// deliberately. Not send-shaped: nothing leaves the system.
 	"task_set_priority": true,
+	// SWT-72 D6: requeueing is reviewing — and it can lift a status and raise
+	// a priority, so it is choosing work. humanOnly, NOT mcpHumanOnly: no spine
+	// caller requeues (capture marks activity, it never reviews it). Not
+	// send-shaped: nothing leaves the system.
+	"task_requeue": true,
 	// SWT-41 D1: moving the orchestrator cursor forward DISCARDS lifecycle
 	// events — a human decision, audited, never an automated caller's (the
 	// orchestrator included). humanOnly, NOT mcpHumanOnly, and not MCP-listed:

@@ -178,6 +178,10 @@ QUEUE" now reads "…unless the head is incoming".
 
 ### I5 — Order within incoming: attention, then messages before PRs, then newest first
 
+*Amended 2026-09-22 (SWT-72, activity-resurfaces D5):* a third kind `activity` (rank 2) and two
+more keys — after the light rank, needs-review rows lead; among two needs-review rows the later
+`activity_at` first, else id DESC. With no needs-review row the order below is unchanged.
+
 The order has three keys:
 1. Light rank, as L2: input, stale, working, next, done, none. A red row leads.
 2. Kind: `message` before `pr_review`, the owner's own order ("emails or slacks… same thing with
@@ -276,7 +280,9 @@ They are excluded by I4's rule. They stay in done or other, exactly as SWT-57 pl
    - the second statement is byte-unchanged;
    - `boardLightFacts` (and what it reaches) never mentions `source_thread_id`,
      `surfaced_by_message_id`, `normalized_messages` or `'attached'`, per I1 and I7 (structure
-     test);
+     test); *amended 2026-09-22 (SWT-72 criterion 28):* the `normalized_messages` ban is narrowed
+     to allow exactly one PK `LEFT JOIN … ON nm.id = t.activity_by_message_id` — a primary-key
+     lookup per displayed row, never the `thread_id` scan I7 forbids;
    - `TestBoardLightFacts_IsASeparateRead`, `…FirstStatementSelectsTheSession`,
      `…FirstStatementFormatsTheUpdatedStamp`, `TestBoard_NoGoClockFeedsVisibilityOrALight` and
      `TestBoardRefresh_Integration_NoExtraQueries` pass unchanged.

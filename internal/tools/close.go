@@ -122,7 +122,11 @@ func closeTransition(ctx context.Context, tx pgx.Tx, taskID int64, to, reason st
 	                          working_state = NULL, working_state_at = NULL, working_session = NULL WHERE id=$1`
 	args := []any{taskID, to}
 	if to == "closed" {
+		// SWT-72 D8: a close is a review. reviewed_at is stamped here (and only
+		// here, never on the reopen) so a later reopen or revive does not bring
+		// the row back into INCOMING with stale unreviewed activity.
 		update = `UPDATE tasks SET status=$2, updated_at=now(), closed_at=now(), closed_from_status=$3,
+		                          reviewed_at=now(),
 		                          working_state = NULL, working_state_at = NULL, working_session = NULL WHERE id=$1`
 		args = append(args, status)
 	}

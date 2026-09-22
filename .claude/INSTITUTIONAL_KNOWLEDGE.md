@@ -2987,3 +2987,52 @@ did not author, from the GitHub notification mail he already receives. Runbook:
 - `send_guard_structure_test.go` requires each send path to CALL `refuseClosedTask`; it cannot see an early
   return placed in front of it. `finishConfirmedSend` is the one such exception and sends nothing.
 - Dev lesson: splicing new declarations between a function and its doc comment silently re-binds the comment.
+
+## Activity resurfaces an open task, and an ask is always its own task (SWT-72, activity-resurfaces)
+
+- **The trigger.** Katie's Jira comments, José's direct mail (rule 75, `body_regex` on a `WEB-NNNNN` key)
+  and Slack DMs all landed as `task_log` lines on OPEN tasks sitting in QUEUE — invisible. Salvador:
+  "when there is a comment we need to move to incoming to review even if the review is to put it back on
+  the q"; "those messages to create it's own tasks even if they require action on other tasks".
+- **Three columns, not `surfaced_at`.** `tasks.activity_at` / `activity_by_message_id` / `reviewed_at`
+  (0039). `surfaced_at` (0030) is READ by the Jira ticket-status reconciler's J11 hold; reusing it would
+  have held every commented-on closed ticket's task open forever (≈ the open jira-keyed tasks whose ticket
+  is Done). The new pair is board-facing only; `internal/orchestrator` and `internal/ticketstatus` never
+  mention it (structure tests).
+- **Two tools.** `task_mark_activity {task_id, message_id, reason}` — spine-facing (capture as
+  `capture:{connector}`, promote as `promote:{lane}`), off BOTH MCP profiles (F7: absence is the boundary),
+  not humanOnly; errors on a non-inbound message (invariant 5), SKIPS a closed task (so SWT-45 revive and
+  SWT-36 reopen, which run after it, keep their meaning), same-message no-op, writes nothing else (no event,
+  no `updated_at`). `task_requeue {task_id, priority?, note?}` — humanOnly (interactive `mcp:manual:salvo`,
+  dashboard, opsctl pass; workers refused), both MCP profiles, `swb requeue <id>`; refuses closed by name,
+  stamps `reviewed_at`, lifts `holding → ready` only, priority through the SHARED `applyPriority` (omitted =
+  unchanged — never default to 0), one `reviewed` event. A close stamps `reviewed_at` too (close update
+  only, never the reopen).
+- **"Needs review" is `activity_at > reviewed_at`** on an open task — monotone stamps, never a cleared
+  column, so a later message re-surfaces and a double-tap is a no-op.
+- **The hook is channel-, rule- and assignee-blind**: it sits in `EvaluateRules`' single `task_log` branch
+  (after `appendRuleLog`, before revive/reopen) and in the promoter's `attached` branch. The ONE exclusion is
+  `decision.prClose` (the next call closes the task). A claude task in flight surfaces too and keeps its
+  yellow light (`lightFor` never reads the four display-only facts).
+- **D11: an inquiry ask ALWAYS becomes its own task.** `Decide` on `LaneInquiry` with an OPEN thread task
+  returns a create with `RelatedTaskID`; rule 2 (dismissed → attach + reopen) is unchanged. The link is
+  the body's LAST fixed line `related_task: N` (or `(none)`) plus an ids-only `task_append_log` on N
+  (`promote: ask #<new> created from this thread (message M)`) — no message text, which is what makes it
+  safe on a claude task; it is deliberately NOT an activity mark. Not `parent_id`, not a dependency.
+  C-D13 (`claude_task`) narrows to the dismissed path, spelled as one call to the pure `Decide`. A thread
+  may now hold several open tasks (`source_thread_id` was built for it; `threadTask` takes the oldest).
+- **D12 boundary.** Capture decides first and a live decision is forever, so a message a rule files onto an
+  OPEN task never reaches the inquiry lane (`replyfold.InquiryEligibleLatestSQL`). A client ask quoting a
+  ticket key therefore SURFACES that ticket's task (with the sender) instead of becoming its own task. If
+  that swallows real asks, fix the RULES, not this path.
+- **Board.** `incomingKind(fromMessage, prReview, activity)`, `incomingRank` message 0 / pr_review 1 /
+  activity 2; the incoming comparator is light rank → needs-review first → kind → `ActivityStamp` DESC
+  (a Postgres `to_char … .US` string in BoardTimeZone) → id DESC. Remark from the message's CHANNEL
+  (`new comment` / `new email` / `new slack` / `new message`), no stored discriminator. The facts come
+  from `boardLightFacts`' first statement via a PK `LEFT JOIN normalized_messages`; `boardQuery` and the
+  exports are untouched.
+- **Residual (measured 2026-09-22):** 10–30 attaches onto open tasks on a busy day = that many Requeue
+  taps; `Anonymous (JIRA)` (his own edits) 4 of ~160. Suppressing own edits is future work.
+- **Dev lesson:** the old inquiry integration tests pinned the attach; three of them plus a helper that
+  counts audit rows suite-wide (`assertClaudeGated`) needed amending — a new test that creates a task must
+  use a fresh suite before calling it.

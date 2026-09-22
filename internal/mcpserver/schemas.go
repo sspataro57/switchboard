@@ -192,6 +192,21 @@ var agentTools = []Tool{
 			"Human sessions only: a worker console is refused by policy.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"priority":{"type":"integer","minimum":0,"maximum":3,"description":"0 normal, 1 elevated, 2 high, 3 urgent"},"reason":{"type":"string","description":"optional: why, in Salvador's words"}},"required":["task_id","priority"]}`),
 	},
+	// SWT-72 (activity-resurfaces) D6: the third review verb beside Dismiss and
+	// Done. Listing it removes the transport allowlist as a refusal for worker
+	// consoles, so policy.humanOnly (rule human_only) is what keeps a worker
+	// from choosing its own work. The priority bounds and level names must
+	// equal tools.PriorityMin / PriorityMax / PriorityLevels (TestTaskRequeueSchema).
+	{
+		Name: "task_requeue",
+		Description: "Review a task that new activity (a comment, an email, a Slack message) put in INCOMING and send it " +
+			"back to the queue: the review is recorded, a holding task becomes ready, every other status is left alone, " +
+			"and nothing is sent. Omit priority to leave it unchanged; give one on the absolute scale 0 normal, " +
+			"1 elevated, 2 high, 3 urgent to reorder it (\"low priority\" is 0). Refuses a closed task (task_reopen is " +
+			"the verb for that). Returns status and priority {from, to, changed}. Human sessions only: a worker console " +
+			"is refused by policy.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"priority":{"type":"integer","minimum":0,"maximum":3,"description":"optional: 0 normal, 1 elevated, 2 high, 3 urgent; omitted = unchanged"},"note":{"type":"string","description":"optional: why it goes back, in Salvador's words"}},"required":["task_id"]}`),
+	},
 	// SWT-52 (board-status-lights) D7/D13: a session's state signal on a HUMAN
 	// task, so the board's light is truthful. Listing it removes the transport
 	// allowlist as a refusal for worker consoles, so policy.humanOnly (rule

@@ -201,6 +201,14 @@ func formatPromoteStats(lane promote.Lane, dryRun bool, st promote.Stats) (strin
 		"review": st.Review, "attached": st.Attached, "lost_claims": st.Lost,
 		"reopened": st.Reopened,
 	}
+	// SWT-72: the two new counters appear only when non-zero, so the personal
+	// lane's quiet line stays byte-identical (C1).
+	if st.Activity > 0 {
+		m["activity"] = st.Activity
+	}
+	if st.Related > 0 {
+		m["related"] = st.Related
+	}
 	if lane == promote.LaneInquiry {
 		gated := map[string]int{}
 		for _, r := range promote.InquiryGateReasons() {

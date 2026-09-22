@@ -105,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 	// handler (board.go) rebuilds the filter query itself — criterion 17.
 	mux.Handle("POST /tasks/{id}/dismiss", s.auth.Require(http.HandlerFunc(s.dismissTaskAction)))
 	mux.Handle("POST /tasks/{id}/close", s.auth.Require(http.HandlerFunc(s.closeTaskAction)))
+	mux.Handle("POST /tasks/{id}/requeue", s.auth.Require(http.HandlerFunc(s.requeueTaskAction)))
 	mux.Handle("POST /plans/{id}/approve", s.auth.Require(s.planAction("approve_plan_import")))
 	mux.Handle("POST /plans/{id}/reject", s.auth.Require(s.planAction("reject_plan_import")))
 	mux.Handle("GET /export/tasks.csv", s.auth.Require(http.HandlerFunc(s.exportCSV)))

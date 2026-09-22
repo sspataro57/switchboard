@@ -113,6 +113,22 @@ func (t boardTally) Items() []boardTallyItem {
 	}
 }
 
+// activityRemark is the Remarks words for a row with unreviewed activity
+// (SWT-72 D5), from the surfacing message's channel — real data, never a
+// stored discriminator. Never empty. listTasks overrides remarkFor with it
+// when NeedsReview is set; remarkFor itself is unchanged.
+func activityRemark(channel string) string {
+	switch channel {
+	case "jira":
+		return "new comment"
+	case "gmail":
+		return "new email"
+	case "slack":
+		return "new slack"
+	}
+	return "new message"
+}
+
 // remarkFor is B7's table: the Remarks words for a light and a status,
 // lowercase and never empty. B5: the status column is gone, so the status
 // survives here.

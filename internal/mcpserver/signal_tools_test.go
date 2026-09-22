@@ -120,12 +120,12 @@ func TestTaskSignalSchema(t *testing.T) {
 func TestTaskSignal_ListedInBothProfiles(t *testing.T) {
 	full := mcpserver.New(&fakeExec{}, testWorkerID).ListTools()
 	user := mcpserver.NewWithProfile(&fakeExec{}, "manual:salvo", mcpserver.ProfileUser).ListTools()
-	if len(full) != 27 {
-		t.Errorf("the full profile lists %d tools, want 27 (26 → 27, criterion 23)", len(full))
+	if len(full) != 28 {
+		t.Errorf("the full profile lists %d tools, want 28 (26 → 27 criterion 23; 27 → 28 with SWT-72's task_requeue)", len(full))
 	}
 	// SWT-56 criterion 27: task_context makes the user profile fifteen.
-	if len(user) != 15 {
-		t.Errorf("the user profile lists %d tools, want 15 (14 → 15, SWT-56 criterion 27)", len(user))
+	if len(user) != 16 {
+		t.Errorf("the user profile lists %d tools, want 16 (14 → 15 SWT-56 criterion 27; 15 → 16 with SWT-72's task_requeue)", len(user))
 	}
 	find := func(ts []mcpserver.Tool) *mcpserver.Tool {
 		for i := range ts {

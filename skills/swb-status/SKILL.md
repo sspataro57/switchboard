@@ -93,6 +93,7 @@ one of its tools.
    | `swb start <id>` | `task_signal` with `working`, `session` |
    | `swb stop <id>`  | `task_signal` with `clear`              |
    | `swb done <id>`  | `task_close`                            |
+   | `swb requeue <id> [level]` | `task_requeue` — back to the queue, reviewed; priority only if he named one ("low" = 0), else omit it |
 
 8. **If the `ops` tools are missing** (check `/mcp`), say so once and carry on.
    This skill does nothing without the server.

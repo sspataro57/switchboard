@@ -65,6 +65,8 @@ type Stats struct {
 	Attached   int // log appends onto an open (or dismissed) task
 	Lost       int // claims lost to a concurrent or earlier row
 	Reopened   int // dismissed tasks task_reopen answered reopened:true for (SWT-36)
+	Activity   int // attaches task_mark_activity answered marked:true for (SWT-72 D3)
+	Related    int // inquiry creates that carried a RelatedTaskID and its pointer log (SWT-72 D11)
 	// Gated counts the inquiry lane's gated verdicts by reason, every reason
 	// present (zeros included); nil on the personal lane.
 	Gated map[string]int
@@ -196,6 +198,16 @@ func act(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, v Verdi
 		if err := recordTask(ctx, pool, promoID, d.TaskID); err != nil {
 			return err
 		}
+		// SWT-72 D3: the attach is activity on the task; the board puts it in
+		// INCOMING. Lane-agnostic: the tool skips a closed target, which is
+		// what the inquiry lane's remaining attach (a dismissed task) always is.
+		marked, err := markVerdictActivity(ctx, ex, v, d.TaskID)
+		if err != nil {
+			return err
+		}
+		if marked {
+			stats.Activity++
+		}
 		// SWT-36 D10: the log line first, then the guarded reopen — a
 		// crash between the two leaves exactly today's behaviour. The task
 		// id is recorded BEFORE the reopen for the ordering reason below:
@@ -224,6 +236,15 @@ func act(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, v Verdi
 		}
 		if err := setProvenance(ctx, ex, v, taskID); err != nil {
 			return err
+		}
+		// SWT-72 D11: the other half of the link — an ids-only pointer on
+		// the thread's old task. Last, so a crash before it leaves a task
+		// whose body already names the related one.
+		if d.RelatedTaskID != 0 {
+			if err := appendRelatedPointer(ctx, ex, v, d.RelatedTaskID, taskID); err != nil {
+				return err
+			}
+			stats.Related++
 		}
 	}
 	count(stats, d)
@@ -450,6 +471,12 @@ func decisionReason(v Verdict, d Decision, existing, finished *ExistingTask) str
 			"thread's task %d is %s; created a new task (Q3: a thread yields at most one open task)",
 			finished.ID, finished.Status))
 	}
+	// SWT-72 D11: the inquiry lane's create-instead-of-attach.
+	if d.RelatedTaskID != 0 {
+		parts = append(parts, fmt.Sprintf(
+			"thread's open task %d; created its own task (owner decision 2026-09-22: an ask is always its own task)",
+			d.RelatedTaskID))
+	}
 	return strings.Join(parts, "; ")
 }
 
@@ -490,7 +517,7 @@ func createVerdictTask(ctx context.Context, ex *executor.Executor, v Verdict, d 
 	args, err := json.Marshal(map[string]any{
 		"project":       v.ProjectSlug,
 		"title":         taskTitle(v),
-		"body":          bodyFor(v),
+		"body":          bodyFor(v, d.RelatedTaskID),
 		"assignee_type": "human", // D6: personal has client NULL, so no worker queue can see it anyway
 		"priority":      0,
 		"status":        d.Status,
@@ -531,6 +558,58 @@ func appendVerdictLog(ctx context.Context, ex *executor.Executor, v Verdict, tas
 		Tool: "task_append_log", Actor: actorFor(v.Lane), Args: args, TaskID: &taskID,
 	}); err != nil {
 		return fmt.Errorf("promote: append log to task %d (message %d): %w", taskID, v.MessageID, err)
+	}
+	return nil
+}
+
+// markVerdictActivity is task_mark_activity (SWT-72 D3) through the executor
+// as the lane's actor, after appendVerdictLog on the same message: ids only —
+// the handler reads the message direction and the task's status under the row
+// lock and answers marked:true or a skip (closed task, same message again).
+// One lane-agnostic call site: the closed-task skip in the tool is what makes
+// the inquiry lane's dismissed-task attach a no-op.
+func markVerdictActivity(ctx context.Context, ex *executor.Executor, v Verdict, taskID int64) (bool, error) {
+	args, err := json.Marshal(map[string]any{
+		"task_id":    taskID,
+		"message_id": v.MessageID,
+		"reason":     fmt.Sprintf("promote: %s verdict attached (message %d)", v.Kind, v.MessageID),
+	})
+	if err != nil {
+		return false, fmt.Errorf("promote: marshal task_mark_activity args for task %d: %w", taskID, err)
+	}
+	res, err := ex.Execute(ctx, executor.Call{Tool: "task_mark_activity", Actor: actorFor(v.Lane), Args: args, TaskID: &taskID})
+	if err != nil {
+		return false, fmt.Errorf("promote: mark activity on task %d (message %d): %w", taskID, v.MessageID, err)
+	}
+	var out struct {
+		Marked bool `json:"marked"`
+	}
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		return false, fmt.Errorf("promote: parse task_mark_activity result for task %d: %w", taskID, err)
+	}
+	return out.Marked, nil
+}
+
+// appendRelatedPointer is SWT-72 D11's pointer on the thread's OLD task: one
+// task_append_log through the executor, IDS ONLY — no title, no sender, no
+// message text — which is what makes it safe on a claude task, whose log feeds
+// a worker prompt (the C-D13 worry). Deliberately NOT an activity mark: the new
+// task is the thing to look at, and surfacing the old one too would double the
+// rows on the board.
+func appendRelatedPointer(ctx context.Context, ex *executor.Executor, v Verdict, relatedTaskID, newTaskID int64) error {
+	args, err := json.Marshal(map[string]any{
+		"task_id": relatedTaskID,
+		"kind":    "log",
+		"message": fmt.Sprintf("promote: ask #%d created from this thread (message %d)", newTaskID, v.MessageID),
+	})
+	if err != nil {
+		return fmt.Errorf("promote: marshal pointer log args for task %d: %w", relatedTaskID, err)
+	}
+	if _, err := ex.Execute(ctx, executor.Call{
+		Tool: "task_append_log", Actor: actorFor(v.Lane), Args: args, TaskID: &relatedTaskID,
+	}); err != nil {
+		return fmt.Errorf("promote: append pointer log to task %d (ask #%d, message %d): %w",
+			relatedTaskID, newTaskID, v.MessageID, err)
 	}
 	return nil
 }
