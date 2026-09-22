@@ -419,7 +419,9 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	rows, err := s.pool.Query(ctx,
 		// COALESCE because body is nullable (0001) and scanning NULL into a string
 		// errors, which would fail the export rather than just this match (SWT-16).
-		`SELECT id, task_id, COALESCE(body,'') FROM deliveries
+		// status is read HERE, by the same read the decision is made on, and the
+		// promotion below is guarded on that value (SWT-71 rule 1, SWT-76 D7).
+		`SELECT id, task_id, COALESCE(body,''), status FROM deliveries
 		 WHERE channel='slack_reply' AND status IN ('sending','sent')
 		   AND sent_external_id IS NULL
 		   AND confirmed_at IS NULL AND target_ref=$1
@@ -430,24 +432,26 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	}
 	defer rows.Close()
 	var deliveryID, taskID int64
+	var deliveryStatus string
 	matches := 0
 	messagePrefix := normalizedPrefix(message.BodyText, slackMatchPrefixLen)
 	for rows.Next() {
 		var id, task int64
-		var body string
-		if err := rows.Scan(&id, &task, &body); err != nil {
+		var body, status string
+		if err := rows.Scan(&id, &task, &body, &status); err != nil {
 			return fmt.Errorf("scan Slack delivery candidate: %w", err)
 		}
 		if normalizedPrefix(body, slackMatchPrefixLen) == messagePrefix {
 			matches++
 			if deliveryID == 0 {
-				deliveryID, taskID = id, task
+				deliveryID, taskID, deliveryStatus = id, task, status
 			}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate Slack delivery candidates: %w", err)
 	}
+	rows.Close()
 	if deliveryID == 0 {
 		return nil
 	}
@@ -458,18 +462,36 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 		// forever; the reconciler flags both for a human instead.
 		return nil
 	}
-	// Promote a crashed 'sending' row to 'sent' and backfill sent_at, while
-	// leaving an already-'sent' row's timestamp alone. The guards are unchanged:
-	// sent_external_id IS NULL means this never overwrites an id, so re-running
-	// (including --all) is idempotent and emits no duplicate event.
-	tag, err := s.pool.Exec(ctx,
+
+	// Promote a crashed or QUEUED 'sending' row to 'sent' and backfill sent_at,
+	// while leaving an already-'sent' row's timestamp alone. The guards are
+	// unchanged: sent_external_id IS NULL means this never overwrites an id, so
+	// re-running (including --all) is idempotent and emits no duplicate event.
+	//
+	// SWT-76 D7, SWT-71's four rules: the promotion and its events commit in
+	// ONE transaction (a crash between them used to lose the event, and for a
+	// queued send that event is the only thing that moves the task); the
+	// UPDATE is guarded on the status the SELECT read, so the events branch on
+	// the value that LANDS; and the events differ by that value —
+	//   status was 'sending' -> delivery_confirmed AND delivery_sent
+	//                           {recovered:true}: the sender never reported the
+	//                           click (a queued send, a crashed sender), so this
+	//                           is the delivery_sent orchestrator R8 keys on;
+	//   status was 'sent'    -> delivery_confirmed only: its delivery_sent fired
+	//                           at the click and R8 already ran.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin Slack delivery confirmation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx,
 		`UPDATE deliveries
 		    SET sent_external_id=$2, confirmed_at=now(),
 		        status='sent',
 		        sent_at=COALESCE(sent_at, now()),
 		        updated_at=now()
-		 WHERE id=$1 AND sent_external_id IS NULL AND confirmed_at IS NULL`,
-		deliveryID, message.ExternalMessageID)
+		 WHERE id=$1 AND sent_external_id IS NULL AND confirmed_at IS NULL AND status=$3`,
+		deliveryID, message.ExternalMessageID, deliveryStatus)
 	if err != nil {
 		return fmt.Errorf("confirm Slack delivery %d: %w", deliveryID, err)
 	}
@@ -479,10 +501,46 @@ func (s *PGSink) confirmDelivery(ctx context.Context, message NormalizedMessage)
 	payload, _ := json.Marshal(map[string]any{
 		"delivery_id": deliveryID, "matched_message_id": message.ExternalMessageID,
 	})
-	if _, err := s.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO task_events (task_id, event_type, payload)
 		 VALUES ($1,'delivery_confirmed',$2)`, taskID, payload); err != nil {
 		return fmt.Errorf("insert Slack delivery_confirmed event: %w", err)
+	}
+	if deliveryStatus == "sending" {
+		// Lock order: delivery, THEN task, and the task status is read WITHOUT
+		// a row lock. Every path that touches both (mark_delivery_sent/failed,
+		// the gmail loop-closure sink, the Upwork reconciler, and this one)
+		// locks the delivery and then inserts a task_events row, which takes
+		// FOR KEY SHARE on the parent task. refuseClosedTask is the one path
+		// that goes task -> delivery, and it takes FOR SHARE precisely so that
+		// cycle stays open (internal/tools/delivery.go, refuseClosedTask). A
+		// share or update lock on the task row here would close it into a
+		// deadlock.
+		var taskStatus string
+		if err := tx.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, taskID).Scan(&taskStatus); err != nil {
+			return fmt.Errorf("read task %d for Slack delivery %d: %w", taskID, deliveryID, err)
+		}
+		eventType := "delivery_sent"
+		event := map[string]any{"delivery_id": deliveryID, "channel": "slack_reply", "recovered": true,
+			"matched_message_id": message.ExternalMessageID}
+		if taskStatus == "closed" {
+			// The SWT-28 calendar trap: R8 would "succeed" through
+			// task_mark_delivered's closed no-op, record its delivery_lifecycle
+			// key against the task id, and mute a later real delivery after a
+			// reopen. The arrival is RECORDED; the lifecycle event is withheld.
+			eventType = "log"
+			event = map[string]any{"kind": "delivery_finished", "delivery_id": deliveryID, "channel": "slack_reply",
+				"matched_message_id": message.ExternalMessageID, "note": "task closed before the send was confirmed"}
+		}
+		raw, _ := json.Marshal(event)
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO task_events (task_id, event_type, payload) VALUES ($1,$2,$3)`,
+			taskID, eventType, raw); err != nil {
+			return fmt.Errorf("insert Slack %s event: %w", eventType, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit Slack delivery confirmation %d: %w", deliveryID, err)
 	}
 	return nil
 }

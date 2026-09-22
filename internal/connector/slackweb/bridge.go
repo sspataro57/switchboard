@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 const maxBridgeOutputBytes = 64 << 20
@@ -90,16 +91,20 @@ func (b *CommandBridge) Draft(ctx context.Context, targetURL, text string) error
 // post-click crash the way an HTTP status can, so only two things are DEFINITE
 // here: input this method rejected itself, and a leaf that answered sent:false.
 // A non-zero exit stays untyped and therefore ambiguous.
-func (b *CommandBridge) Send(ctx context.Context, targetURL, text string) error {
+//
+// SWT-76 D10: the subprocess transport has no queue and structurally cannot
+// answer 202, so maxQueue is ignored and a completed send is a zero
+// SendOutcome — Queued is never true here.
+func (b *CommandBridge) Send(ctx context.Context, targetURL, text string, _ time.Duration) (SendOutcome, error) {
 	if targetURL == "" || text == "" {
-		return &SendRejectedError{Body: "Slack send requires target URL and text"}
+		return SendOutcome{}, &SendRejectedError{Body: "Slack send requires target URL and text"}
 	}
 	in, err := json.Marshal(map[string]string{"target_url": targetURL, "text": text})
 	if err != nil {
-		return &SendRejectedError{Body: fmt.Sprintf("marshal Slack send request: %v", err)}
+		return SendOutcome{}, &SendRejectedError{Body: fmt.Sprintf("marshal Slack send request: %v", err)}
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return &SendRejectedError{Body: "context already done before dispatch: " + ctxErr.Error()}
+		return SendOutcome{}, &SendRejectedError{Body: "context already done before dispatch: " + ctxErr.Error()}
 	}
 	out, err := b.run(ctx, "send", in)
 	if err != nil {
@@ -111,11 +116,11 @@ func (b *CommandBridge) Send(ctx context.Context, targetURL, text string) error 
 		var startErr *exec.Error
 		var pathErr *fs.PathError
 		if errors.As(err, &startErr) || errors.As(err, &pathErr) {
-			return &SendRejectedError{Body: "bridge never started (never dispatched): " + err.Error()}
+			return SendOutcome{}, &SendRejectedError{Body: "bridge never started (never dispatched): " + err.Error()}
 		}
-		return err
+		return SendOutcome{}, err
 	}
-	return checkSendResult(out)
+	return SendOutcome{}, checkSendResult(out)
 }
 
 func (b *CommandBridge) run(ctx context.Context, operation string, stdin []byte) ([]byte, error) {
@@ -164,7 +169,7 @@ func (b *cappedBuffer) Write(p []byte) (int, error) {
 // constructed bridge serve drafting and sending in the same process.
 type DeliveryBridge interface {
 	Draft(ctx context.Context, targetURL, text string) error
-	Send(ctx context.Context, targetURL, text string) error
+	Send(ctx context.Context, targetURL, text string, maxQueue time.Duration) (SendOutcome, error)
 }
 
 // NewDeliveryBridgeFromEnv picks the transport the same way the connector's own

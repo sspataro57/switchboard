@@ -68,6 +68,7 @@
         {{if .SentAt}}<div class="muted">sent {{.SentAt}}</div>{{end}}
         {{if .ConfirmedAt}}<div class="muted">confirmed {{.ConfirmedAt}}</div>{{end}}
         {{if .Error}}<div class="muted">err: {{.Error}}</div>{{end}}
+        {{if .QueuedAt}}<div class="muted">{{if .ConfirmedAt}}was {{end}}queued on the bridge (job {{.QueueJobID}}) {{if .ConfirmedAt}}at{{else}}since{{end}} {{.QueuedAt}}</div>{{end}}
         {{if eq .Status "rejected"}}
           {{if .RejectionNote}}<div class="muted">reason: {{.RejectionNote}}</div>{{end}}
           {{if .RedraftRequested}}<div class="muted">redraft requested</div>{{end}}
@@ -116,9 +117,13 @@
         {{if eq .Status "sending"}}
           {{if eq .Channel "slack_reply"}}
           {{/* The click may or may not have landed and nothing retries it: a
-               human looks in Slack and resolves it either way. */}}
+               human looks in Slack and resolves it either way. While the send
+               attempt's lease holds (SWT-76: a queued send the leaf may still
+               click) only "It's in Slack" is offered — recording a send that
+               happened is always safe; declaring one failed is not, and
+               mark_delivery_failed would refuse anyway. */}}
           <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-sent"><button>It's in Slack</button></form>
-          <form class="inline" method="post" action="/deliveries/{{.ID}}/mark-failed"><button>Not in Slack</button></form>
+          {{if not .LeaseHeld}}<form class="inline" method="post" action="/deliveries/{{.ID}}/mark-failed"><button>Not in Slack</button></form>{{end}}
           {{end}}
           {{if and (eq .Channel "gmail") .ConfirmedAt .SentCopyIngested}}
           {{/* SWT-71: the send never reported back, but the message's own copy (by

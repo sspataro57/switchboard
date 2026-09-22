@@ -3205,3 +3205,43 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   per account) are crashed CronJob pods from before the pass bound, not a live problem.
 - **Dev lesson.** A unit test that ends "after N shared sleeps across four goroutines" is a scheduling
   lottery — one goroutine can burn all N before another runs once. End it on a per-goroutine condition.
+
+## Slack sends queue behind a busy browser (SWT-76, slack-send-queue)
+
+- **What it is.** An approved `slack_reply` that meets a busy browser on the mini (a rotation export, an
+  overrun) is no longer 503'd into `failed`: switchboard sends `max_queue_ms` (10 min) and the leaf
+  answers **202 + job id** (accepted, clicks in the next gap, ahead of the next sweep) instead. The row
+  stays `sending` with its attempt UNSETTLED — no new status (D4) — plus `send_queued_at` /
+  `send_queue_job_id` (0042) and `error=NULL` (re-arms the reconciler's fire-once marker). The export's
+  body-prefix match confirms it exactly as a synchronous send; a `log {kind:delivery_queued}` event
+  records the acceptance. 503 still means a definite pre-click refusal (estimate over the bound, or four
+  sends already waiting) and lands in `failed`, re-approvable, as SWT-75 D7 left it.
+- **The presence of `max_queue_ms` is the version gate** (D12). The leaf only ever answers 202 to a
+  request that carries it, so an old switchboard image is safe against the new leaf and the two halves
+  needed no deploy ordering. `SLACK_SEND_QUEUE_MAX_WAIT=off` (dashboard/opsctl env) omits it and is the
+  no-roll rollback; `0` and garbage fall back to the default, larger values are clamped and logged —
+  `sendQueueMaxWait + sendQueueClickAllowance <= sendAttemptLease` (10m + 2m ≤ 15m) is asserted by a
+  unit test, because the lease is the only thing stopping a human from failing (and re-approving) a
+  send the leaf may still click.
+- **The latent R8 gap this fixed (D7).** `confirmDelivery` promoted a `sending` row to `sent` emitting
+  only `delivery_confirmed`, which nothing reads; R8 keys on `delivery_sent`. Rare before (a crashed
+  sender), every queued send afterwards. Now: status is read in the candidate SELECT, the promotion
+  UPDATE is guarded `AND status=$3`, the events go in ONE transaction, and a `sending` row's promotion
+  emits `delivery_sent {recovered:true}` — unless the task is `closed`, which gets `log
+  {kind:delivery_finished}` instead (the SWT-28 calendar trap: R8's closed no-op would record the
+  lifecycle key and mute a real delivery after a reopen). Pre-check 0b on prod found no stranded rows — because prod has NO `slack_reply` rows at all (0a): the
+  gap was structural only, and the feature has not yet met real data.
+  The task status is read WITHOUT a row lock: lock order is delivery → task everywhere but
+  `refuseClosedTask` (task → delivery, FOR SHARE) and a share lock here would close that cycle. A
+  structure test bans the literal, so do not name the banned lock form even in a comment.
+- **Two horizons, nothing resends.** A queued row that is never confirmed resolves by a human at the lease
+  (15 min: `mark_delivery_failed` refuses inside it, the dashboard hides "Not in Slack" while
+  `LeaseHeld`; `mark_delivery_sent` is permitted throughout) or at `ReconcileUnconfirmed` (three ROTATION
+  passes; watch passes never count). No status endpoint, no timeout-to-failed, no replay after a bridge
+  restart (the queue is memory; the leaf logs every lost send with its job id). Named residual: the
+  reconciler's floor is the enqueue instant, so a queued row can be flagged after two real passes.
+- **Dev lessons.** `SendOutcome` lives in `slackweb`, not `tools` (tools imports slackweb — the SPEC's
+  placement was an import cycle). The classify migration ledger has two window guards: 0034's reads only
+  3000 chars above the marker and the notes 35–41 already fill them, so 42's note sits ABOVE 34's with a
+  remark saying why. `internal/classify` lines that contain a banned regex's literal fail structure tests
+  even inside comments.

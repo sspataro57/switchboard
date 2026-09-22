@@ -180,6 +180,16 @@ type deliveryRow struct {
 	// Message-ID, is in the ingested mailbox — the proof send_delivery needs to
 	// FINISH a row stuck in `sending`. A body-prefix confirmation is not it.
 	SentCopyIngested bool
+	// QueuedAt / QueueJobID (SWT-76): the leaf ACCEPTED this send (202) while
+	// its browser was busy and will click it in the next gap; the row is
+	// 'sending' with its attempt unsettled, and the next export confirms it.
+	// LeaseHeld is true while that attempt is younger than the send lease:
+	// mark_delivery_failed refuses inside it, so "Not in Slack" is not offered
+	// (a button that can only error teaches distrust); "It's in Slack" stays,
+	// because recording a send that happened is always safe.
+	QueuedAt   string
+	QueueJobID string
+	LeaseHeld  bool
 	// ContentHash is tools.DeliveryContentHash of the Subject/Body this page
 	// renders. The Approve form posts it back as expect_content_hash, so an
 	// edit made after the page loaded (a session's update_delivery) makes the
@@ -247,7 +257,9 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	             COALESCE(d.rejection_note,''), d.redraft_requested_at IS NOT NULL, d.cc,
 	             EXISTS (SELECT 1 FROM normalized_messages nm
 	                      WHERE nm.channel = 'gmail' AND nm.external_message_id = d.sent_external_id
-	                        AND nm.direction = 'outbound')
+	                        AND nm.direction = 'outbound'),
+	             COALESCE(d.send_queued_at::text,''), COALESCE(d.send_queue_job_id,''),
+	             d.send_attempted_at, d.send_settled_at
 	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id`
 	args := []any{}
 	if status != "" {
@@ -269,13 +281,18 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var d deliveryRow
 		var ref routeRef
+		var attemptedAt, settledAt *time.Time
 		if err := rows.Scan(&d.ID, &d.TaskID, &d.TaskTitle, &d.Channel, &d.Status,
 			&d.Subject, &d.Body, &d.CreatedBy, &d.SentAt, &d.ConfirmedAt, &d.Error,
 			&d.StartsAt, &d.EndsAt, &ref.fromAcct, &ref.threadID, &d.TargetRef,
-			&d.RejectionNote, &d.RedraftRequested, &d.Cc, &d.SentCopyIngested); err != nil {
+			&d.RejectionNote, &d.RedraftRequested, &d.Cc, &d.SentCopyIngested,
+			&d.QueuedAt, &d.QueueJobID, &attemptedAt, &settledAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// The lease comparison lives here, beside the query: a template cannot
+		// do time arithmetic, and the constant is the send path's own.
+		d.LeaseHeld = settledAt == nil && attemptedAt != nil && time.Since(*attemptedAt) < tools.SendAttemptLease
 		d.CcText = strings.Join(d.Cc, ", ")
 		d.ContentHash = tools.DeliveryContentHash(d.Subject, d.Body, d.Cc)
 		data.Deliveries = append(data.Deliveries, d)
@@ -465,12 +482,30 @@ func (s *Server) executeTo(w http.ResponseWriter, r *http.Request, tool, args, b
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	_, err := s.ex.Execute(ctx, executor.Call{Tool: tool, Actor: actor, Args: []byte(args)})
+	out, err := s.ex.Execute(ctx, executor.Call{Tool: tool, Actor: actor, Args: []byte(args)})
 	flash := tool + " ok"
 	if err != nil {
 		flash = err.Error()
+	} else if tool == "send_delivery" {
+		flash = sendFlash(out.Output, flash)
 	}
 	http.Redirect(w, r, back+"?flash="+template.URLQueryEscaper(flash), http.StatusSeeOther)
+}
+
+// sendFlash reads send_delivery's result: a Slack send the leaf QUEUED (SWT-76)
+// is a success that leaves the row in 'sending', and "send_delivery ok" would
+// not say why. Any other result keeps the default.
+func sendFlash(output []byte, fallback string) string {
+	var r struct {
+		DeliveryID int64  `json:"delivery_id"`
+		Queued     bool   `json:"queued"`
+		JobID      string `json:"job_id"`
+	}
+	if err := json.Unmarshal(output, &r); err != nil || !r.Queued {
+		return fallback
+	}
+	return fmt.Sprintf("delivery %d queued on the bridge (job %s): the browser was busy; the leaf clicks it in "+
+		"the next gap and the next export confirms it", r.DeliveryID, r.JobID)
 }
 
 func jsonNum(s string) json.Number { return json.Number(s) }
