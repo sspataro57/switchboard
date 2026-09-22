@@ -51,9 +51,25 @@ type channelRow struct {
 	NewestMsg string
 }
 
+// slackWatchRow is one slack_watch row for the read-only panel (SWT-75
+// criterion 28): the only place the watch list is visible without psql, since
+// the tools are humanOnly and off every MCP profile. Editing is
+// `opsctl slack-watch`.
+type slackWatchRow struct {
+	ID           int64
+	Label        string
+	Workspace    string
+	Conversation string
+	Enabled      bool
+	// LastRead is when the ROTATION last read the conversation ("" when never):
+	// from sync_runs, the same number the rotation's own ordering uses.
+	LastRead string
+}
+
 type sourcesPage struct {
-	Sources  []sourceRow
-	Channels []channelRow
+	Sources    []sourceRow
+	Channels   []channelRow
+	SlackWatch []slackWatchRow
 	// Totals are the headline numbers; a zero here is the fastest possible
 	// "nothing is being ingested" signal.
 	TotalRaw      int
@@ -137,6 +153,16 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// SWT-75 criterion 28: the Slack watch list (slackwatch.go — its "last
+	// read" reads run rows, which this file must not name: connector health
+	// belongs to /funnel).
+	watch, err := s.slackWatchRows(ctx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	page.SlackWatch = watch
 
 	if err := s.tmpl.ExecuteTemplate(w, "sources.html", page); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

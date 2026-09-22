@@ -134,6 +134,12 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// priority, lifts holding -> ready. humanOnly (rule human_only).
 		// MCP-listed in both profiles. See requeue.go.
 		{"task_requeue", validateRequeue, requeueTask},
+		// SWT-75 D2: the Slack watch list. humanOnly and off both MCP profiles
+		// (the capture_rule_add reasoning: browser time is scarce and shared).
+		// See slackwatch.go.
+		{"slack_watch_add", validateSlackWatchAdd, slackWatchAdd},
+		{"slack_watch_set_enabled", validateSlackWatchSetEnabled, slackWatchSetEnabled},
+		{"slack_watch_list", validateSlackWatchList, slackWatchList},
 		// SWT-38 C5/C6: reorder any task on the 0..3 scale. humanOnly (rule
 		// human_only): no spine caller writes priority after creation, so every
 		// automated caller is refused. MCP-listed in both profiles. See priority.go.

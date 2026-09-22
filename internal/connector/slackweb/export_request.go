@@ -7,6 +7,7 @@ package slackweb
 // then the rest oldest-visited first, and defers what the budget cannot reach.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -21,6 +22,10 @@ type ExportRequest struct {
 	Known            map[string][]KnownConversation `json:"known,omitempty"`
 	BudgetMS         int                            `json:"budget_ms,omitempty"`
 	MaxConversations int                            `json:"max_conversations,omitempty"`
+	// Targets (SWT-75 D1): read EXACTLY these conversation ids per workspace,
+	// with no enumeration and no rotation. Mutually exclusive with Known on
+	// the leaf. Never set by the rotation; set only by BuildTargetedRequest.
+	Targets map[string][]string `json:"targets,omitempty"`
 }
 
 // KnownConversation is one conversation switchboard knows, keyed under its
@@ -117,6 +122,73 @@ func BuildExportRequest(rows []KnownConversationRow, budget ExportBudget) (Expor
 		req.Known[r.WorkspaceID] = append(req.Known[r.WorkspaceID], k)
 	}
 	return req, dropped
+}
+
+// WatchRow is one slack_watch row as the sink loads it (SWT-75 D2).
+// LastReadAt comes from sync_runs (the latest ROTATION run whose stats.read
+// lists the conversation), like KnownConversationRow's — never from a column.
+type WatchRow struct {
+	ID             int64
+	WorkspaceID    string
+	ConversationID string
+	Label          string
+	Enabled        bool
+	LastReadAt     time.Time
+}
+
+// BuildTargetedRequest is BuildExportRequest's twin for a targeted pass: the
+// /export body carries `targets` + budget_ms + max_conversations (= the number
+// of ids sent) and NO known — the leaf refuses the two together, and `known`
+// alone would run a full export every minute. A disabled row is not a target;
+// a row failing the leaf's id rules is returned as dropped so the caller can
+// log it by name (D2 moved the silent drop into a database CHECK, so this
+// should never fire in production); a conversation is listed once. Zero
+// fields are omitted on the wire: the leaf 500s on budget_ms: 0.
+func BuildTargetedRequest(rows []WatchRow, budgetMS int) (ExportRequest, []WatchRow) {
+	req := ExportRequest{BudgetMS: budgetMS}
+	var dropped []WatchRow
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if !r.Enabled {
+			continue
+		}
+		if !leafWorkspaceIDRule.MatchString(r.WorkspaceID) || !leafConversationIDRule.MatchString(r.ConversationID) {
+			dropped = append(dropped, r)
+			continue
+		}
+		key := r.WorkspaceID + "/" + r.ConversationID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if req.Targets == nil {
+			req.Targets = map[string][]string{}
+		}
+		req.Targets[r.WorkspaceID] = append(req.Targets[r.WorkspaceID], r.ConversationID)
+		req.MaxConversations++
+	}
+	return req, dropped
+}
+
+// ErrNotTargeted: the leaf answered a targeted request without
+// coverage.mode "targeted" on every workspace — an older leaf that ignored the
+// field and ran a FULL export (SWT-75 D8). Nothing may be ingested from it.
+var ErrNotTargeted = errors.New(`Slack bridge did not honour targets (coverage.mode is not "targeted")`)
+
+// CheckTargetedMode refuses a response that does not report mode "targeted"
+// for EVERY workspace it returned. A missing coverage block, a missing mode,
+// or one workspace answering "full" all fail: each is exactly what an old leaf
+// or a partially deployed one would produce.
+func CheckTargetedMode(exported Export) error {
+	for _, ws := range exported.Workspaces {
+		if ws.Coverage == nil {
+			return fmt.Errorf("workspace %s: no coverage block: %w", ws.ID, ErrNotTargeted)
+		}
+		if ws.Coverage.Mode != CoverageModeTargeted {
+			return fmt.Errorf("workspace %s: coverage.mode %q: %w", ws.ID, ws.Coverage.Mode, ErrNotTargeted)
+		}
+	}
+	return nil
 }
 
 // slackTS renders t in Slack ts form: epoch seconds with six fractional digits.

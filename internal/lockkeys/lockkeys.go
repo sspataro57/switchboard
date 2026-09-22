@@ -9,3 +9,10 @@ package lockkeys
 // a session lock for its lifetime; orchestrator_cursor_advance takes it as a
 // transaction lock, so it refuses while an engine runs.
 const Orchestrator int64 = 0x5157_0005 // "switchboard step 5"
+
+// SlackWatch is the resident Slack watcher's single-instance lock (SWT-75
+// D9): connector-slackweb-watch holds it as a session lock for its lifetime
+// (a second replica stands by rather than crashing), and the one-shot
+// connector-slackweb CronJob probes it at startup and stands down while it is
+// held (D4: the CronJob is a net, never a co-worker on the mini's one browser).
+const SlackWatch int64 = 0x5157_0011

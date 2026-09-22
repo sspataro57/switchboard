@@ -28,3 +28,4 @@
 # eval progress checkpoints + the classify cmd binary
 *.progress
 /classify
+/slackweb

@@ -305,9 +305,14 @@ func TestConnectorMainsAnnounceCapturedAfterTheirPass(t *testing.T) {
 					t.Errorf("%s: AnnounceCaptured has %d args, want (ctx, broker, connector, stats)", where, len(a.Args))
 					continue
 				}
-				if lit, ok := a.Args[2].(*ast.BasicLit); !ok || lit.Value != strconv.Quote(connector) {
-					t.Errorf("%s: AnnounceCaptured's connector argument must be the literal %q (the wake's source and "+
-						"the spine client id switchboard-capture-%s)", where, connector, connector)
+				// AMENDED 2026-09-22 (SWT-75 D9): a connector's resident watcher announces
+				// its targeted pass as "<connector>-watch", its own client id, so it can
+				// never kick the CronJob's off the broker. Still a literal, still the
+				// wake's true source.
+				lit, ok := a.Args[2].(*ast.BasicLit)
+				if !ok || (lit.Value != strconv.Quote(connector) && lit.Value != strconv.Quote(connector+"-watch")) {
+					t.Errorf("%s: AnnounceCaptured's connector argument must be the literal %q or %q (the wake's source and "+
+						"the spine client id switchboard-capture-%s)", where, connector, connector+"-watch", connector)
 				}
 				if id, ok := a.Args[3].(*ast.Ident); !ok || id.Name != statsName {
 					t.Errorf("%s: AnnounceCaptured must be passed the stats capture.EvaluateRules returned (%q)", where, statsName)

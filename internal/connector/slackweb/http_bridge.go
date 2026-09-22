@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // HTTPBridge talks to the connector's bridge server instead of spawning it.
@@ -111,7 +113,8 @@ func (b *HTTPBridge) post(ctx context.Context, path string, body []byte) ([]byte
 		if len(snippet) > 200 {
 			snippet = snippet[:200]
 		}
-		return nil, &bridgeStatusError{status: response.StatusCode, path: path, snippet: snippet}
+		return nil, &bridgeStatusError{status: response.StatusCode, path: path, snippet: snippet,
+			retryAfter: retryAfterHeader(response.Header.Get("Retry-After"))}
 	}
 	if int64(len(out)) > b.maxBytes {
 		return nil, fmt.Errorf("Slack bridge %s output exceeded %d bytes", path, b.maxBytes)
@@ -128,6 +131,15 @@ func (b *HTTPBridge) Export(ctx context.Context, req ExportRequest) (Export, err
 	}
 	out, err := b.post(ctx, "/export", body)
 	if err != nil {
+		// SWT-75 criterion 14: the leaf's 503 is its browser queue refusing a
+		// second sweep (job-queue.ts:144-152), thrown BEFORE any browser work.
+		// It is a typed busy signal with the leaf's own Retry-After, so the
+		// watch loop sleeps for as long as the queue asked and skips — never
+		// a failure, never a guess.
+		var status *bridgeStatusError
+		if errors.As(err, &status) && status.status == http.StatusServiceUnavailable {
+			return Export{}, &BridgeBusyError{RetryAfter: status.retryAfter, Body: status.snippet}
+		}
 		return Export{}, err
 	}
 	var exported Export
@@ -187,13 +199,40 @@ func (e *SendRejectedError) Error() string {
 	return fmt.Sprintf("Slack send rejected (%d): %s", e.Status, e.Body)
 }
 
+// ErrBridgeBusy is the sentinel every *BridgeBusyError matches: the bridge's
+// queue refused the export before any browser work (SWT-75 D3/criterion 14).
+var ErrBridgeBusy = errors.New("Slack bridge busy")
+
+// BridgeBusyError is /export's 503 with the leaf's Retry-After (zero when the
+// header was absent or unparseable).
+type BridgeBusyError struct {
+	RetryAfter time.Duration
+	Body       string
+}
+
+func (e *BridgeBusyError) Error() string {
+	return fmt.Sprintf("Slack bridge busy (retry after %s): %s", e.RetryAfter, e.Body)
+}
+
+func (e *BridgeBusyError) Is(target error) bool { return target == ErrBridgeBusy }
+
+// retryAfterHeader parses a delay-seconds Retry-After; anything else is zero.
+func retryAfterHeader(v string) time.Duration {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Second
+}
+
 // bridgeStatusError carries the HTTP status out of post so Send can tell a
 // definite refusal from an ambiguous one. Its message is unchanged from the
 // untyped error it replaced, so Export/Draft callers see the same text.
 type bridgeStatusError struct {
-	status  int
-	path    string
-	snippet string
+	status     int
+	path       string
+	snippet    string
+	retryAfter time.Duration
 }
 
 func (e *bridgeStatusError) Error() string {
@@ -217,8 +256,14 @@ func (b *HTTPBridge) Send(ctx context.Context, targetURL, text string) error {
 	}
 	out, err := b.post(ctx, "/send", in)
 	if err != nil {
+		// SWT-75 D7: 503 (and 429) are DEFINITE too. The leaf's 503 is
+		// QueueFullError, thrown inside JobQueue.run before the job function is
+		// called (job-queue.ts:144-152) — provably pre-click, like the 4xx cases.
+		// A 500 stays ambiguous: it can come from browser work that already
+		// pressed Send.
 		var status *bridgeStatusError
-		if errors.As(err, &status) && status.status >= 400 && status.status < 500 {
+		if errors.As(err, &status) && ((status.status >= 400 && status.status < 500) ||
+			status.status == http.StatusServiceUnavailable) {
 			return &SendRejectedError{Status: status.status, Body: status.snippet}
 		}
 		// A failure to establish the connection at all is provably pre-click: no
