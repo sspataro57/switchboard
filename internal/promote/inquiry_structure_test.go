@@ -237,7 +237,11 @@ func TestMigrationLedger_Learns0031(t *testing.T) {
 	if i < 0 {
 		t.Fatalf("the migration ledger marker is gone; REWRITE the guard, never delete it")
 	}
-	start, end := max(i-3000, 0), min(i+1800, len(src))
+	// WIDENED 3000 -> 3800 by slack-watch-sweep (SWT-75), the same way
+	// TestMigrationLedger_Learns0024 has been widened three times: 41's
+	// ownership note sits immediately above the marker and pushed "31 is SWT-40
+	// Part C" out of a 3000-byte window. The reach, not the rule.
+	start, end := max(i-3800, 0), min(i+1800, len(src))
 	ledger := src[start:end]
 	if !regexp.MustCompile(`n\s*!=\s*31\b`).MatchString(ledger) {
 		t.Errorf("the ledger does not accept 31 (`n != 31`); 0031_inquiry_promotion.sql would be flagged as unowned")

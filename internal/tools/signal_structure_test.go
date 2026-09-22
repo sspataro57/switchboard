@@ -82,8 +82,12 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		// tasks.activity_at, activity_by_message_id and reviewed_at, guarded by
 		// TestMigration0039_ActivityReviewColumns and
 		// TestMigration0039_Integration_ActivityColumns.
-		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces)", e.Name())
+		// AMENDED — not deleted — by slack-watch-sweep (SWT-75): 0041 creates
+		// slack_watch, guarded by TestMigration0041_SlackWatchTable and
+		// TestMigration0041_Integration_SlackWatchShape. 0040 is comms-inbox's
+		// (SWT-74) and is deliberately not exempted here until that file exists.
+		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 41 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 41: slack-watch-sweep)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {

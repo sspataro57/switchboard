@@ -3044,3 +3044,55 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   sequence for an overriding create is `create_task, link_external_ref, task_set_source_thread,
   task_mark_activity, task_mark_surfaced`. Test fixtures that seed a rule-created task strip the seed's
   `task_mark_activity` audit row (and its `policy_decisions` child first — FK).
+
+## Slack watch sweep (SWT-75, slack-watch-sweep)
+
+- **Two cadences, one caller.** `connector-slackweb-watch` (Deployment, `slackweb --watch`) runs a TARGETED
+  pass every minute — the enabled `slack_watch` rows as the leaf's `targets` (~18 s per read, no
+  enumeration) — and the full export (today's one-shot sequence, byte for byte) every 30 min, strictly
+  sequentially. The Mac mini has one browser and one queue; two schedulers would 503 each other all day.
+  The `connector-slackweb` CronJob stays as a 2-hourly NET and stands down at startup while the watcher
+  holds `lockkeys.SlackWatch` (`slack watch is live; skipping this pass`, exit 0).
+- **The watch list is data**: `slack_watch` (0041), edited only by `opsctl slack-watch add|list|disable`
+  → `slack_watch_*` tools (humanOnly, off both MCP profiles: pointing the shared browser at a
+  conversation is a human decision). The watcher reads the table directly on EVERY pass (never a
+  startup snapshot), like capture reads `capture_rules`. Rows are turned off, never deleted. Both id
+  CHECKs are the leaf's own regexes, in the DB, because `BuildExportRequest` silently drops a bad id.
+- **Phase discipline (D6).** A targeted pass writes `sync_runs.stats->>'phase' = 'slack_web_watch'`;
+  `ReconcileUnconfirmed` and `KnownConversations` filter on `slack_web` — without that a delivery into a
+  watched DM is flagged "unconfirmed after 3 passes" three minutes after the click, and the watched DMs pin
+  themselves to the back of the rotation forever. A quiet targeted pass writes NO run row
+  (`WriteRunRow`: only raw movement, a failure, or the first success after one); liveness is
+  `/healthz`'s job, not `/funnel`'s.
+- **The leaf's rules the loop lives by.** A disconnecting `/export` caller KILLS the bridge process
+  (`monitorAbandonedExport`), so the Go context is the leaf's `budget_ms` + `SLACK_BRIDGE_GRACE`, never
+  shorter. A second concurrent export is 503 + Retry-After (`maxSweepDepth: 0`) — a TYPED `ErrBridgeBusy`
+  here, a skipped pass that sleeps `min(Retry-After, interval)`. Any other bridge error is a skipped pass
+  too, counted, never a dead process: restarting a pod cannot fix Chrome. `coverage.mode: "targeted"` is
+  the ONLY proof the leaf honoured `targets` (an old leaf ignores unknown keys and would answer every
+  minute with a 15-minute full export); a response without it is refused before anything is ingested.
+- **`/healthz :8093`** = a pass COMPLETED within 3 × interval AND the lock is alive. Deliberately blind
+  to the bridge being reachable. "standby" is its own word (a second replica losing the race is correct;
+  a lost lock is a restart).
+- **D7 shipped:** `HTTPBridge.Send` now treats 503/429 as DEFINITE refusals (`SendRejectedError`) — the
+  leaf's 503 is thrown before any browser work — so a send that meets a busy browser goes back to
+  `failed` instead of wedging in `sending`. 500 and a mid-response EOF stay ambiguous. **This holds only
+  while nothing sits between switchboard and the leaf** (today: direct to 192.168.50.130:8787). Put a
+  proxy or TLS terminator in front of the bridge and an infrastructure 503 after a real click becomes a
+  re-approvable `failed` row — a double-send. Revisit the mapping the day that topology changes.
+- **A whole-pass targeted failure** (export error, refused non-targeted answer) writes ONE `sync_runs`
+  error row per targeted workspace, only when that workspace's last row is not already an error; a busy
+  503 writes nothing. A non-targeted answer also stands targeted passes down until the next completed
+  rotation (D8), so an old leaf costs one full export per half hour, not one per minute.
+- **Pipeline guard amended:** `AnnounceCaptured`'s connector literal may be `"<connector>-watch"` (its own
+  MQTT client id). The rotation announces as `"slackweb"`, the targeted pass as `"slackweb-watch"`.
+- **Rollback levers, mildest first:** `opsctl slack-watch disable`; `SLACK_WATCH_INTERVAL=180s` or `=0`
+  (rotation only) on the Deployment; scale it to 0 and put the CronJob back on `*/30`.
+- **`/funnel` shows the `slack_web_watch` phase as stale on quiet nights** by design: it groups by
+  (account, phase) with a flat 3 h staleness rule, and a quiet targeted pass writes no row. Read the
+  watcher's liveness from `/healthz` / its log, not from that row; a per-phase exemption is future work.
+- **Dev lessons:** the repo forbids a second spelling of the slack thread key in SQL — even a test
+  fixture's `thread_key LIKE 'slack:…'` (delete threads by message id in one statement instead);
+  `/sources`' Go file must not name `sync_runs` (connector health belongs to `/funnel`), so the watch
+  panel's "last read" lives in its own file; a smoke seed left in the shared scratch DB fails unrelated
+  suites that count globally — clean it before the sweep.

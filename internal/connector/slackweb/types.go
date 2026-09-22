@@ -72,7 +72,24 @@ type Coverage struct {
 	DeferredCount   int  `json:"deferred_count"`
 	BudgetExhausted bool `json:"budget_exhausted"`
 	ElapsedMS       int  `json:"elapsed_ms"`
+	// Mode is "targeted" when the leaf read exactly the caller's `targets`
+	// (SWT-75 D1) and "full" when it enumerated; absent from an older leaf.
+	// It is the ONLY proof a targeted request was honoured (D8).
+	Mode string `json:"mode,omitempty"`
 }
+
+// The sync_runs phases (stats->>'phase') and the leaf's coverage modes.
+const (
+	// PhaseSlackWeb is the rotation/full export: the literal every run row has
+	// carried since SWT-12, and the ONLY phase ReconcileUnconfirmed and
+	// KnownConversations read (SWT-75 D6).
+	PhaseSlackWeb = "slack_web"
+	// PhaseSlackWebWatch is a targeted watch pass (SWT-75 D6): invisible to
+	// every existing sync_runs consumer.
+	PhaseSlackWebWatch   = "slack_web_watch"
+	CoverageModeTargeted = "targeted"
+	CoverageModeFull     = "full"
+)
 
 // reportsCoverage says whether the leaf sent any coverage field at all. An old
 // leaf sends none, and its run keeps today's meaning.

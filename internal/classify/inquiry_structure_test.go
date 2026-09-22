@@ -155,7 +155,12 @@ func TestMigrationLedger_Learns0024(t *testing.T) {
 	// note (deliveries.cc) is six lines above the marker and pushed "24 is
 	// SWT-33" back past 4000. Same fix as last time, same reason — the reach,
 	// not the rule.
-	start := i - 4800
+	//
+	// WIDENED again, 4800 → 5600, by slack-watch-sweep (SWT-75): 41's ownership
+	// note (the slack_watch table, plus the line recording that 0040 belongs to
+	// comms-inbox and is deliberately NOT accepted) sits immediately above the
+	// marker. Third time, same reason — the reach, not the rule.
+	start := i - 5600
 	if start < 0 {
 		start = 0
 	}

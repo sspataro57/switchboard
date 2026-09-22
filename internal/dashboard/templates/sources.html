@@ -91,5 +91,27 @@
     Outbound messages are our own sends re-entering through ingestion — they close
     delivery loops and are never re-triaged.
   </p>
+
+  <h2>Slack watch</h2>
+  <table>
+    <tr><th class="num">Id</th><th>Label</th><th>Workspace</th><th>Conversation</th><th>Enabled</th><th>Last read</th></tr>
+    {{range .SlackWatch}}
+    <tr>
+      <td class="num">{{.ID}}</td>
+      <td>{{.Label}}</td>
+      <td>{{.Workspace}}</td>
+      <td>{{.Conversation}}</td>
+      <td>{{if .Enabled}}yes{{else}}off{{end}}</td>
+      <td>{{.LastRead}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="6" class="muted">Nothing watched. Add a conversation with <code>opsctl slack-watch add</code>.</td></tr>
+    {{end}}
+  </table>
+  <p class="muted">
+    The resident watcher reads these conversations about every minute; the full export
+    still covers everything every half hour. "Last read" is the full export's last visit.
+    Edit with <code>opsctl slack-watch add|disable</code>.
+  </p>
 </body>
 </html>
