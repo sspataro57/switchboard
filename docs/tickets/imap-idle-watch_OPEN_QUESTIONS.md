@@ -33,7 +33,9 @@ the CronJob but move it to `0 */2 * * *` (or `*/30`), so it is a safety net rath
 most of the mail is instant, and a wedged watcher costs at most one net interval. It carries B's
 split-brain risk at lower volume.
 
-**Answer:** _A / B / B with a reduced schedule (say which)_
+**Answer:** **B with a reduced schedule — every 2 hours** (`0 */2 * * *`). Salvador, 2026-09-22:
+"move it to every 2 hours to catch misses." Folded into the SPEC (status line, D3, rollout 5.3,
+rollback, future work).
 
 ---
 

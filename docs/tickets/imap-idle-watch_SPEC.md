@@ -2,10 +2,10 @@
 
 # imap-idle-watch — mail arrives in seconds: the resident IMAP IDLE watcher becomes the live mail path
 
-**STATUS: PROVISIONAL.** One open question (`docs/tickets/imap-idle-watch_OPEN_QUESTIONS.md`): whether
-`connector-google`'s CronJob is SUSPENDED when the Deployment goes live, or kept as belt-and-braces
-beside it. The body is written for **A (suspend)** and names, in D3 and in the rollout, the exact
-change for B. Everything else is decided under "Decisions" with its rationale.
+**STATUS: ANSWERED** (Salvador, 2026-09-22: "move it to every 2 hours to catch misses"). OQ-1 =
+**B-reduced**: when the Deployment goes live, `connector-google`'s CronJob is NOT suspended; its
+schedule moves from `*/10 * * * *` to `0 */2 * * *` — a safety net that catches a wedged or
+crash-looping watcher within two hours, not a co-worker. D3 and the rollout are written for that.
 
 **Evidence status.** Every code and doc fact below was read in this worktree (branch
 `ticket-comms-inbox`, at `6fa8f02`) and is cited file:line. Cluster facts come from the handoff
@@ -199,18 +199,26 @@ connections and, worse, both would be resolving the MSN credential — see D5. N
 `terminationGracePeriodSeconds: 120`, so a pass in flight gets to finish or be cancelled cleanly
 (SIGTERM already cancels the context, `watch.go:67`).
 
-### D3 — The CronJob stops fetching mail (OQ-1 = A, provisional)
+### D3 — The CronJob keeps running, every 2 hours, as the safety net (OQ-1 = B-reduced)
 
-With the Deployment live, `connector-google`'s `*/10` tick would do byte-identical work to the
-in-process reconcile sweep, on the same accounts, taking the same per-account locks — every tick either
-duplicating the sweep or counting `accounts_busy`. Its calendar phase is a no-op (see "What exists").
-So **suspend it** (`suspend: true`), keep the manifest, and let the sweep carry the belt-and-braces
-role it was designed for (`watch.go:32-35`, rule 2). Rollback is `suspend: false` — one patch, no image.
+Salvador, 2026-09-22: "move it to every 2 hours to catch misses." With the Deployment live,
+`connector-google`'s tick does byte-identical work to the in-process reconcile sweep, on the same
+accounts, taking the same per-account locks — so at `*/10` every tick would duplicate the sweep or
+count `accounts_busy`. At `0 */2 * * *` it is a net, not a co-worker: a wedged or crash-looping
+watcher costs at most two hours of latency and never a loss of ingestion, which is the failure mode
+cron is genuinely good at. Its calendar phase is a no-op (see "What exists").
 
-**If OQ-1 = B** (keep it running), the only change to this SPEC is the rollout table: `connector-google`
-stays unsuspended and both processes coexist, which the per-account lock makes SAFE but wasteful; D5's
-analysis is what that safety rests on, and criterion 21's overlap test is then load-bearing rather than
-a regression guard.
+What this costs, and what makes it safe: two processes can hold the same per-account lock in turn,
+so an every-2h tick that lands during a watch pass counts `accounts_busy` and does nothing — fine.
+The MSN refresh token is redeemed by two processes; D5's analysis (one connection per lock
+acquisition) is what makes that safe, so criterion 21's overlap test and criterion 8/22 are
+LOAD-BEARING, not regression guards. And the two workloads must carry the SAME env (the parity
+table in the rollout): drift in `CAPTURE_RULES_MODE`, `CAPTURE_RULES_SINCE` or
+`MAIL_MAX_MESSAGE_BYTES` would give two behaviours on one mailbox depending on which process won
+the lock. The rollout's parity check is therefore a gate, not advice.
+
+Rollback of the whole ticket is: scale the Deployment to 0 and put the CronJob back on `*/10` —
+one patch each, no image.
 
 **Not proposed either way:** narrowing `connector-google` to `--calendar-only`. `connector-gcal` already
 owns the calendar phase with the Pipedream transport and its own schedule; a second calendar workload
@@ -695,8 +703,9 @@ verification 4 described and nobody has run since):
    connector-google). Nothing behaves differently yet: the new code runs only under `--watch`.
 3. Hand over `docs/runbooks/HANDOFF-kube-imap-idle-watch.md`. The kube session creates
    `deployment/connector-google-watch` (D2) with the env-parity table's variables, then — **and only
-   after** `/healthz` is 200 and one wake has been observed in its logs — patches
-   `cronjob/connector-google` to `suspend: true` (OQ-1 = A; under B, nothing is suspended).
+   after** `/healthz` is 200 and one wake has been observed in its logs — changes
+   `cronjob/connector-google`'s schedule from `*/10 * * * *` to `0 */2 * * *` (OQ-1 = B-reduced;
+   never suspended).
    **Order matters:** the Deployment first, verified, then the CronJob off. Never the reverse; a gap
    with neither running is a mail outage nobody would notice for ten minutes.
 4. **Post-roll smoke:** repeat 0a's query over the following day — p50 should collapse to seconds for
@@ -712,8 +721,8 @@ an invariant, so aim for one process per account" analysis with the credential.g
 healthy-looking no-op); `/healthz` semantics and what it deliberately ignores; the `imap_idle` phase and
 its recovery row.
 
-**7. Rollback:** `kubectl -n ops patch cronjob connector-google -p '{"spec":{"suspend":false}}'` and
-scale `deployment/connector-google-watch` to 0. Mail ingestion returns to `*/10` within ten minutes,
+**7. Rollback:** `kubectl -n ops patch cronjob connector-google -p '{"spec":{"schedule":"*/10 * * * *"}}'`
+and scale `deployment/connector-google-watch` to 0. Mail ingestion returns to `*/10` within ten minutes,
 with no data loss: the cursors, the raw rows and the locks are the same in both modes. Nothing about
 the schema or the db changes, so there is nothing to un-apply.
 
@@ -728,5 +737,5 @@ the schema or the db changes, so there is nothing to un-apply.
   Future work on notification).
 - **A dial/read deadline on the IMAP connection** (`imap.go:339` uses `client.DialTLS` with no
   timeout). D6 bounds the pass, which is enough; bounding the socket is the narrower fix.
-- **Retire the CronJob manifest entirely** once the watcher has run unattended for a few weeks (if
-  OQ-1 = A keeps it suspended, this is the cleanup ticket).
+- **Retire or further reduce the CronJob** once the watcher has run unattended for a few weeks
+  (Salvador chose the 2-hour net deliberately; revisit with data, not by default).
