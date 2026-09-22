@@ -221,6 +221,13 @@ confirmed is resolved by a human, at one of two moments:
    Look in Slack, then `mark_delivery_sent` or `mark_delivery_failed`. The job id on the row is
    what to grep the mini's log for (`Queued send expired …`, `Waiting send lost …`).
 
+**Do not replace `connector-slackweb-watch` while a send is queued.** The send waits behind the
+watcher's rotation export; replacing that pod drops the export's HTTP connection, the leaf kills its own
+process (abandoned-export remedy) and every waiting send is lost — legibly, never replayed. Check
+`/status`'s `send_queue.waiting` (or `SELECT count(*) FROM deliveries WHERE status='sending' AND
+send_queued_at IS NOT NULL AND send_settled_at IS NULL`) is 0 before a roll; the dashboard pod holds
+nothing and is safe.
+
 **A bridge restart loses the queue.** It is in memory on purpose — a replayed job cannot know
 whether the click landed before the crash — so on SIGTERM, a stale-job kill or an abandoned-export
 kill the leaf logs every waiting send at `error` with its job id and does not run it. The row is

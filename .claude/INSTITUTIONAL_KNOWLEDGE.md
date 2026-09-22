@@ -3240,6 +3240,16 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   passes; watch passes never count). No status endpoint, no timeout-to-failed, no replay after a bridge
   restart (the queue is memory; the leaf logs every lost send with its job id). Named residual: the
   reconciler's floor is the enqueue instant, so a queued row can be flagged after two real passes.
+- **A queued send dies with the rotation it waits behind — and a ROLL of `connector-slackweb-watch` is
+  what ends rotations.** First live smoke (delivery 57, 2026-09-22 20:52Z): queued behind a rotation,
+  then the 0.7.44 roll replaced the watcher pod at 20:58:45Z, the export's HTTP caller disconnected, the
+  leaf killed its own process (abandoned-export remedy) and logged `Waiting send lost … reason:
+  abandoned-export` — never clicked, never replayed, resolved by hand after the lease. So: a `sending`
+  row with `send_queued_at` set is safe to roll the DASHBOARD over (no pod holds it) but NOT safe to
+  replace `connector-slackweb-watch` or run the one-shot `connector-slackweb` while the leaf's `/status`
+  shows `send_queue.waiting > 0` — check `SELECT count(*) FROM deliveries WHERE status='sending' AND
+  send_queued_at IS NOT NULL AND send_settled_at IS NULL` = 0 first, or wait. The kube session has the
+  rule.
 - **Dev lessons.** `SendOutcome` lives in `slackweb`, not `tools` (tools imports slackweb — the SPEC's
   placement was an import cycle). The classify migration ledger has two window guards: 0034's reads only
   3000 chars above the marker and the notes 35–41 already fill them, so 42's note sits ABOVE 34's with a
