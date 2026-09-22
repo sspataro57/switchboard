@@ -718,7 +718,10 @@ func TestCaptureRevive_Integration_CreationByAnOverridingRuleSurfaces(t *testing
 		got = append(got, tool)
 	}
 	rows.Close()
-	want := "create_task,link_external_ref,task_set_source_thread,task_mark_surfaced"
+	// AMENDED 2026-09-22 (swb #491): the create path also marks activity, after
+	// provenance and BEFORE surfacing, so a first email lands in INCOMING;
+	// surfacing is still last.
+	want := "create_task,link_external_ref,task_set_source_thread,task_mark_activity,task_mark_surfaced"
 	if strings.Join(got, ",") != want {
 		t.Errorf("capture's executor calls for a first overriding email = %v, want [%s] in that order, all as %s "+
 			"(criterion 22). Surfacing LAST: a crash before it degrades to today (J7's crash window)", got, want, crvActor)

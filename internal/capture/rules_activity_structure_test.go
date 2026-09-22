@@ -91,10 +91,19 @@ func TestCaptureActivity_ThePRCloseExclusionIsSpelledOnce(t *testing.T) {
 	if body == "" {
 		t.Fatalf("internal/capture/rules_store.go declares no EvaluateRules")
 	}
-	i := strings.Index(body, "markRuleActivity(")
-	if i < 0 {
-		t.Fatalf("EvaluateRules never calls markRuleActivity (criterion 8)")
+	// AMENDED 2026-09-22 (SWT-72 follow-up, swb #491): the create path
+	// (actionTask) marks the new task too, so the call this test is about is
+	// the one INSIDE the actionTaskLog branch — look there, not at the first
+	// occurrence in the function.
+	logBranch := strings.Index(body, "case actionTaskLog:")
+	if logBranch < 0 {
+		t.Fatalf("EvaluateRules has no actionTaskLog branch")
 	}
+	rel := strings.Index(body[logBranch:], "markRuleActivity(")
+	if rel < 0 {
+		t.Fatalf("EvaluateRules' actionTaskLog branch never calls markRuleActivity (criterion 8)")
+	}
+	i := logBranch + rel
 	// The call must be GUARDED by the prClose flag, and must come AFTER
 	// appendRuleLog (D3's ordering: a crash between them degrades to today).
 	logAt := strings.Index(body, "appendRuleLog(")
