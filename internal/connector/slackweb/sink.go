@@ -34,6 +34,7 @@ func (s *PGSink) KnownConversations(ctx context.Context) ([]KnownConversationRow
 		    FROM sync_runs r
 		    JOIN source_accounts a ON a.id = r.source_account_id AND a.provider = $1
 		   WHERE r.status IN ('ok','partial') AND r.started_at > now() - interval '30 days'
+		     AND COALESCE(r.stats->>'phase', $2) = $2
 		), visited AS (
 		  SELECT runs.source_account_id, rd.conversation_id, runs.started_at
 		    FROM runs CROSS JOIN LATERAL jsonb_array_elements_text(runs.stats->'read') AS rd(conversation_id)
@@ -55,7 +56,7 @@ func (s *PGSink) KnownConversations(ctx context.Context) ([]KnownConversationRow
 		  LEFT JOIN last_read lr ON lr.source_account_id = c.source_account_id
 		                        AND lr.conversation_id = split_part(c.external_id, ':', 2)
 		 WHERE c.external_id LIKE 'conversation:%'
-		 ORDER BY 1, 2`, Provider)
+		 ORDER BY 1, 2`, Provider, PhaseSlackWeb)
 	if err != nil {
 		return nil, fmt.Errorf("load known Slack conversations: %w", err)
 	}
@@ -121,15 +122,125 @@ func (s *PGSink) EnsureAccount(ctx context.Context, workspace Workspace) (int64,
 	return id, nil
 }
 
-func (s *PGSink) StartRun(ctx context.Context, accountID int64, startedAt time.Time) (int64, error) {
+// StartRun opens a run row under the given phase (SWT-75 D6): PhaseSlackWeb
+// for the rotation (the literal every historical row carries),
+// PhaseSlackWebWatch for a targeted pass. Both readers filter on it.
+func (s *PGSink) StartRun(ctx context.Context, accountID int64, startedAt time.Time, phase string) (int64, error) {
+	if phase == "" {
+		phase = PhaseSlackWeb
+	}
+	stats, _ := json.Marshal(map[string]string{"phase": phase})
 	var id int64
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO sync_runs (source_account_id, started_at, status, stats)
-		 VALUES ($1, $2, 'running', '{"phase":"slack_web"}') RETURNING id`, accountID, startedAt).Scan(&id)
+		 VALUES ($1, $2, 'running', $3::jsonb) RETURNING id`, accountID, startedAt, stats).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert Slack sync run: %w", err)
 	}
 	return id, nil
+}
+
+// The optional Sink extensions the watch path relies on, pinned so a rename
+// cannot silently turn D6's recovery row or criterion 7's error row inert.
+var (
+	_ lastRunStatusReader = (*PGSink)(nil)
+	_ passFailureRecorder = (*PGSink)(nil)
+)
+
+// RecordPassFailure writes one error run row for a workspace whose targeted
+// pass failed before any workspace loop ran (criterion 7) — unless the
+// workspace's latest run under that phase is ALREADY an error, so a leaf that
+// stays broken costs one row, not one per minute. The workspace must have a
+// slack_web account (a targeted request only names such workspaces).
+func (s *PGSink) RecordPassFailure(ctx context.Context, workspaceID string, startedAt time.Time, phase, errMsg string) error {
+	accountEmail := strings.ToLower(workspaceID) + "@slack-web.local"
+	var accountID int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT id FROM source_accounts WHERE provider=$1 AND account_email=$2`, Provider, accountEmail).Scan(&accountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("find account for %s: %w", workspaceID, err)
+	}
+	prev, err := s.LastRunStatus(ctx, accountID, phase)
+	if err != nil {
+		return err
+	}
+	if prev == "error" {
+		return nil
+	}
+	stats, _ := json.Marshal(map[string]string{"phase": phase})
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO sync_runs (source_account_id, started_at, finished_at, status, stats, error)
+		 VALUES ($1, $2, now(), 'error', $3::jsonb, $4)`, accountID, startedAt, stats, errMsg); err != nil {
+		return fmt.Errorf("record failed %s run for %s: %w", phase, workspaceID, err)
+	}
+	return nil
+}
+
+// LastRunStatus is the account's latest run status under a phase ("" when
+// none): WriteRunRow's "first success after a failure" input.
+func (s *PGSink) LastRunStatus(ctx context.Context, accountID int64, phase string) (string, error) {
+	var status string
+	err := s.pool.QueryRow(ctx,
+		`SELECT status FROM sync_runs
+		  WHERE source_account_id = $1 AND COALESCE(stats->>'phase', $3) = $2
+		  ORDER BY started_at DESC, id DESC LIMIT 1`, accountID, phase, PhaseSlackWeb).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read last %s run: %w", phase, err)
+	}
+	return status, nil
+}
+
+// WatchTargets reads the ENABLED slack_watch rows whose workspace this
+// switchboard has already ingested — a slack_web source_accounts row exists
+// for it, so the leaf can open it — with when the ROTATION last read each
+// (SWT-75 D2, criterion 6). Read on every pass, never cached: `opsctl
+// slack-watch add` takes effect on the next minute (criterion 16). A missing
+// table is an ERROR naming it, never an empty list that reads as "nothing is
+// watched".
+func (s *PGSink) WatchTargets(ctx context.Context) ([]WatchRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		WITH last_read AS (
+		  SELECT r.source_account_id, rd.conversation_id, max(r.started_at) AS at
+		    FROM sync_runs r
+		    CROSS JOIN LATERAL jsonb_array_elements_text(r.stats->'read') AS rd(conversation_id)
+		   WHERE r.status IN ('ok','partial') AND COALESCE(r.stats->>'phase', $2) = $2
+		     AND jsonb_typeof(r.stats->'read') = 'array'
+		     AND r.started_at > now() - interval '30 days'
+		   GROUP BY 1, 2
+		)
+		SELECT w.id, w.workspace_id, w.conversation_id, w.label, w.enabled, lr.at
+		  FROM slack_watch w
+		  JOIN source_accounts a ON a.provider = $1
+		                        AND a.account_email = lower(w.workspace_id) || '@slack-web.local'
+		  LEFT JOIN last_read lr ON lr.source_account_id = a.id AND lr.conversation_id = w.conversation_id
+		 WHERE w.enabled
+		 ORDER BY w.workspace_id, w.id`, Provider, PhaseSlackWeb)
+	if err != nil {
+		return nil, fmt.Errorf("load slack_watch targets: %w", err)
+	}
+	defer rows.Close()
+	var out []WatchRow
+	for rows.Next() {
+		var r WatchRow
+		var at *time.Time
+		if err := rows.Scan(&r.ID, &r.WorkspaceID, &r.ConversationID, &r.Label, &r.Enabled, &at); err != nil {
+			return nil, fmt.Errorf("scan slack_watch row: %w", err)
+		}
+		if at != nil {
+			r.LastReadAt = *at
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate slack_watch rows: %w", err)
+	}
+	return out, nil
 }
 
 func (s *PGSink) FinishRun(ctx context.Context, runID int64, status string, stats Stats, errMsg string) error {

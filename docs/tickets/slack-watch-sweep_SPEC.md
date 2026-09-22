@@ -831,6 +831,17 @@ isolated database:
   released) — the loser gets 503, skips, and the loop survives.
 - `Ctrl-C` exits 0 with the lock released. Drop the database afterwards.
 
+**Measured 2026-09-22 12:44–12:47 EDT (scratch db `ops_swt72`, the REAL mini bridge, shadow capture,
+rotation disabled):** `opsctl slack-watch add` ×2 and `list` through the executor as opsctl:salvo; a bad
+id (`t0360b84u`/`XYZ`) refused by Postgres (`slack_watch_conversation_id_check`). Startup line
+`slack watch: interval=60s rotation=24h budget=150s targets=2 mode=shadow horizon=0s health=:8094`.
+Pass 1 met the CronJob's running export: `bridge busy; pass skipped retry_after=2m0s sleep=1m0s`
+(typed 503, bounded by the interval). Pass 2 (12:46): both DMs read — `conversations_seen:2,
+messages_seen:322, raw_inserted:324`, normalize 324, capture shadow `considered:150`, announce as
+`slackweb-watch`; two `sync_runs` rows with `phase: slack_web_watch`. Pass 3: José unchanged (161
+rows, NO run row), Katie `raw_updated:163` (one row). `/healthz` 200 at 25 s. Per-pass cost ≈ 40 s for
+two DMs, as 0d predicted. Gate passed.
+
 **6. Deploy — leaf first, then migration, then image, then workload; manifests belong to the kube
 session.**
 

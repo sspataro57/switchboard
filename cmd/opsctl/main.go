@@ -39,7 +39,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules|ticket-status|route-candidates|mail> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules|slack-watch|ticket-status|route-candidates|mail> [flags]")
 		os.Exit(2)
 	}
 
@@ -114,6 +114,16 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case "slack-watch":
+		// SWT-75: the Slack watch list. Every subcommand is a tool call through
+		// the executor (slack_watch_add / slack_watch_set_enabled /
+		// slack_watch_list), audited as opsctl:$USER — never a direct write, so
+		// audit_events can answer "who pointed the browser at this conversation".
+		if len(os.Args) < 3 {
+			err = fmt.Errorf("usage: opsctl slack-watch <add|list|disable> [flags] (also: enable --id N)")
+			break
+		}
+		toolName, args, err = parseSlackWatch(os.Args[2], os.Args[3:])
 	case "mail":
 		// Its own path with its own deadline, like `capture-rules run`: a 100 MiB
 		// IMAP fetch does not fit the 30s tool deadline, and the pass is a

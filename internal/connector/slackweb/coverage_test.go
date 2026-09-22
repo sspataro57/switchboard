@@ -124,11 +124,13 @@ func (s *swt39Sink) EnsureAccount(_ context.Context, workspace slackweb.Workspac
 	return s.nextID, nil
 }
 
-func (s *swt39Sink) StartRun(_ context.Context, accountID int64, _ time.Time) (int64, error) {
+func (s *swt39Sink) StartRun(_ context.Context, accountID int64, _ time.Time, _ string) (int64, error) {
 	s.nextID++
 	s.runAccount[s.nextID] = accountID
 	return s.nextID, nil
 }
+
+func (s *swt39Sink) WatchTargets(context.Context) ([]slackweb.WatchRow, error) { return nil, nil }
 
 func (s *swt39Sink) RawHash(_ context.Context, accountID int64, externalID string) (string, bool, error) {
 	h, ok := s.stored[fmt.Sprint(accountID, "/", externalID)]

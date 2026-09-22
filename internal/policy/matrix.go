@@ -104,6 +104,13 @@ var humanOnly = map[string]bool{
 	// caller requeues (capture marks activity, it never reviews it). Not
 	// send-shaped: nothing leaves the system.
 	"task_requeue": true,
+	// SWT-75 D2: pointing the Mac mini's one browser at a conversation is a
+	// human decision (opsctl, audited as opsctl:$USER). The watcher itself reads
+	// the table directly, as capture reads capture_rules, and calls none of
+	// these. humanOnly, NOT mcpHumanOnly; not send-shaped.
+	"slack_watch_add":         true,
+	"slack_watch_set_enabled": true,
+	"slack_watch_list":        true,
 	// SWT-41 D1: moving the orchestrator cursor forward DISCARDS lifecycle
 	// events — a human decision, audited, never an automated caller's (the
 	// orchestrator included). humanOnly, NOT mcpHumanOnly, and not MCP-listed:

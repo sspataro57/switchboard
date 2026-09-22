@@ -39,10 +39,13 @@ func (s *fakeSink) EnsureAccount(_ context.Context, workspace slackweb.Workspace
 	}
 	return 7, nil
 }
-func (s *fakeSink) StartRun(_ context.Context, _ int64, _ time.Time) (int64, error) { return 9, nil }
+func (s *fakeSink) StartRun(_ context.Context, _ int64, _ time.Time, _ string) (int64, error) {
+	return 9, nil
+}
 func (s *fakeSink) KnownConversations(context.Context) ([]slackweb.KnownConversationRow, error) {
 	return nil, nil
 }
+func (s *fakeSink) WatchTargets(context.Context) ([]slackweb.WatchRow, error) { return nil, nil }
 func (s *fakeSink) RawHash(_ context.Context, _ int64, externalID string) (string, bool, error) {
 	h, ok := s.stored[externalID]
 	return h, ok, nil

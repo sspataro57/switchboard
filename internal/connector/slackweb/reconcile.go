@@ -119,8 +119,9 @@ func ReconcileUnconfirmed(ctx context.Context, sink *PGSink, passes int) (int, e
 			   JOIN source_accounts a ON a.id = r.source_account_id
 			  WHERE a.provider=$1 AND a.account_email=$2
 			    AND r.status IN ('ok','partial') AND r.started_at > $3
+			    AND COALESCE(r.stats->>'phase', $5) = $5
 			    AND (NOT (r.stats ? 'read') OR (r.stats->'read') ? $4)`,
-			Provider, accountEmail, c.since, target.ConversationID).Scan(&observed); err != nil {
+			Provider, accountEmail, c.since, target.ConversationID, PhaseSlackWeb).Scan(&observed); err != nil {
 			return flagged, fmt.Errorf("count export passes for %s: %w", accountEmail, err)
 		}
 		if observed < passes {

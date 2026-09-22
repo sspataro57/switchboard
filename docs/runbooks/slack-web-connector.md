@@ -84,6 +84,57 @@ go run ./cmd/connectors/slackweb --normalize-only
 
 Use `--all` with `--normalize-only` for an intentional full normalization replay.
 
+## 4b. The resident watcher (SWT-75): José and Katie every minute
+
+`slackweb --watch` stays resident: a TARGETED pass of the `slack_watch` conversations about
+every minute (the leaf reads exactly those ids, ~18 s each, no enumeration) and the full export
+every 30 minutes, strictly one after the other — the mini has one browser and one queue. On the
+cluster it is `deployment/connector-slackweb-watch`; the `connector-slackweb` CronJob stays as a
+2-hourly net and stands down (`slack watch is live; skipping this pass`) while the watcher holds
+advisory lock `0x5157_0011`.
+
+The watch list is data, edited only through the executor (humanOnly, off every MCP profile):
+
+```bash
+OPS_ACTOR=... opsctl slack-watch add --workspace T0360B84U --conversation DSAV4HJ2F --label "José (DM)"
+opsctl slack-watch add --workspace T0HPR78RX --conversation D04F7LXRB8B --label "Katie (DM)"
+opsctl slack-watch list            # id, workspace, conversation, label, enabled, last_read_at
+opsctl slack-watch disable --id 3  # turned off, never deleted; `add` the same pair re-enables it
+```
+
+Conversation ids come from `normalized_threads.thread_key` (`slack:{ws}:{conv}`); a workspace
+must already have a `slack_web` source_accounts row (one full export) or its rows are not swept.
+Bad ids fail in Postgres (the leaf's own regexes are the table's CHECKs). `/sources` shows the
+list with "last read" (the full export's last visit). A row added takes effect on the next minute.
+
+Knobs (`--watch` only; junk falls back to the default):
+
+| env | default | effect |
+|---|---|---|
+| `SLACK_WATCH_INTERVAL` | 60s | targeted cadence; **`0` turns targeted passes off** (rotation only) |
+| `SLACK_ROTATION_INTERVAL` | 30m | full-export cadence |
+| `SLACK_WATCH_BUDGET_MS` | 150000 | the leaf's budget per targeted pass (the only bound that stops browser work cleanly) |
+| `SLACK_BRIDGE_GRACE` | 120s | added to the budget for the Go context — never shorter: a disconnecting `/export` caller kills the bridge |
+| `SLACK_WATCH_HEALTH_ADDR` | :8093 | `GET /healthz`: 200 iff a pass completed within 3 × interval and the lock is held |
+
+What a targeted pass writes: raw rows through the same path as the full export, a `sync_runs`
+row with `phase: slack_web_watch` **only when something moved or failed** (a quiet watcher writes
+nothing — liveness is `/healthz`), then normalize → capture → the `captured` wake as connector
+`slackweb-watch`. It never runs the unconfirmed-send reconciler or the outbound observer; those
+belong to the rotation, and `ReconcileUnconfirmed` / `KnownConversations` only count
+`slack_web` runs.
+
+Failure is a skipped pass, never a dead process: the leaf's 503 (a rotation or an interactive
+read holds the queue) sleeps `min(Retry-After, interval)`; a 500, an EOF or a killed bridge is
+logged and counted (`Skipped`). A response without `coverage.mode: "targeted"` — an old leaf —
+is refused before anything is ingested. The watcher refuses to START without
+`SLACK_WEB_BRIDGE_URL` (the local CommandBridge discards the request) and with
+`CAPTURE_RULES_MODE=live` under a 2h `CAPTURE_RULES_SINCE`. Its one startup line:
+`slack watch: interval=60s rotation=30m budget=150s targets=2 mode=live horizon=720h health=:8093`.
+
+Also shipped with it: a Slack send that meets a busy bridge (503/429) is now a DEFINITE refusal —
+the delivery row returns to `failed` and can be re-approved — instead of wedging in `sending`.
+
 ## 5. Draft a Slack reply
 
 The destination must be the canonical URL of the source conversation or thread:
