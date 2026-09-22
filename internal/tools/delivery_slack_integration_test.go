@@ -49,6 +49,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -89,14 +90,16 @@ type fakeSlackSender struct {
 	err            error // what the bridge "returns"
 }
 
-func (f *fakeSlackSender) Send(ctx context.Context, targetURL, text string) error {
+// 2026-09-22 (SWT-76): re-signatured for the queued outcome; this fake never
+// queues, so it returns a zero SendOutcome and its assertions are unchanged.
+func (f *fakeSlackSender) Send(ctx context.Context, targetURL, text string, _ time.Duration) (slackweb.SendOutcome, error) {
 	f.calls++
 	f.lastTarget, f.lastText = targetURL, text
 	_ = f.pool.QueryRow(ctx,
 		`SELECT status, sent_external_id IS NULL FROM deliveries
 		  WHERE channel='slack_reply' AND target_ref=$1 AND status='sending'
 		  ORDER BY id DESC LIMIT 1`, targetURL).Scan(&f.preSendStatus, &f.preSendExtNull)
-	return f.err
+	return slackweb.SendOutcome{}, f.err
 }
 
 // ---- fixtures ------------------------------------------------------------------

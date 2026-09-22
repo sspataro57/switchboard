@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -70,11 +72,65 @@ func SetSlackDrafter(d SlackDrafter) { slackDrafter = d }
 // approval, because the assisted tier required remote-desktopping into the Mac
 // mini to press the button.
 //
-// A browser click reserves no external id, so Send returns nothing to record.
-// The delivery's sent_external_id stays NULL and the next connector export
-// stamps it by matching the body prefix — see slackweb.PGSink.confirmDelivery.
+// A browser click reserves no external id, so a completed Send returns a zero
+// SendOutcome. The delivery's sent_external_id stays NULL and the next
+// connector export stamps it by matching the body prefix — see
+// slackweb.PGSink.confirmDelivery.
+//
+// SWT-76: maxQueue is the caller's bound on how long the leaf may hold the
+// send queued behind a busy browser (max_queue_ms on the wire). Queued=true
+// means the leaf ACCEPTED the send (HTTP 202) and will click it in the next
+// gap; the row stays 'sending' with its attempt unsettled and the export
+// confirms it exactly as a synchronous send. The bound is passed explicitly
+// rather than read from the environment inside the bridge so the one place
+// that owns the lease arithmetic (sendSlackReply) is the one place that
+// computes it (D3).
 type SlackSender interface {
-	Send(ctx context.Context, targetURL, text string) error
+	Send(ctx context.Context, targetURL, text string, maxQueue time.Duration) (slackweb.SendOutcome, error)
+}
+
+// sendQueueMaxWait is how long a queued Slack send may wait on the leaf, and
+// sendQueueClickAllowance is the time the click itself then needs. Their sum
+// must fit inside sendAttemptLease (SWT-76 D3): the lease is the ONLY thing
+// stopping a human from declaring a queued send failed while the leaf may
+// still click it, and a `failed` row is re-approvable. A unit test asserts
+// the inequality.
+const (
+	sendQueueMaxWait        = 10 * time.Minute
+	sendQueueClickAllowance = 2 * time.Minute
+)
+
+// SendAttemptLease is sendAttemptLease for readers outside the package (the
+// dashboard hides "Not in Slack" while it holds).
+const SendAttemptLease = sendAttemptLease
+
+// slackSendQueueMaxWait is the max_queue_ms sendSlackReply puts in the
+// request: sendQueueMaxWait, or SLACK_SEND_QUEUE_MAX_WAIT (a Go duration)
+// CLAMPED to it — a larger value would let the leaf hold a send past the
+// moment mark_delivery_failed becomes permitted. Unparseable or non-positive
+// falls back. The one spelling that is not a duration, "off", is the no-roll
+// rollback: 0 omits max_queue_ms from the request and the leaf never queues
+// (D12's version gate, from our side).
+func slackSendQueueMaxWait() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("SLACK_SEND_QUEUE_MAX_WAIT"))
+	if raw == "" {
+		return sendQueueMaxWait
+	}
+	if strings.EqualFold(raw, "off") {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		slog.Warn("SLACK_SEND_QUEUE_MAX_WAIT is not a positive duration; using the default",
+			"value", raw, "default", sendQueueMaxWait)
+		return sendQueueMaxWait
+	}
+	if d > sendQueueMaxWait {
+		slog.Warn("SLACK_SEND_QUEUE_MAX_WAIT clamped: the bound must fit inside the send attempt lease",
+			"value", raw, "clamped_to", sendQueueMaxWait, "lease", sendAttemptLease)
+		return sendQueueMaxWait
+	}
+	return d
 }
 
 var slackSender SlackSender
@@ -2039,9 +2095,14 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		//
 		// The timestamp is read back and every phase-2 write is fenced on it, so a
 		// late-returning attempt cannot overwrite the outcome of a newer one.
+		// send_queued_at / send_queue_job_id are cleared too (SWT-76): they
+		// belong to THIS attempt, and a row re-approved after a queued attempt
+		// was dropped and failed would otherwise carry a job id naming a click
+		// that never happened.
 		if err := tx.QueryRow(ctx,
 			`UPDATE deliveries
-			    SET status='sending', send_attempted_at=now(), send_settled_at=NULL, updated_at=now()
+			    SET status='sending', send_attempted_at=now(), send_settled_at=NULL,
+			        send_queued_at=NULL, send_queue_job_id=NULL, updated_at=now()
 			  WHERE id=$1
 			 RETURNING send_attempted_at`, deliveryID).Scan(&attemptedAt); err != nil {
 			return fmt.Errorf("mark sending: %w", err)
@@ -2052,7 +2113,8 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		return nil, err
 	}
 
-	sendErr := slackSender.Send(ctx, targetRef, google.ScrubAIAttribution(body))
+	maxQueue := slackSendQueueMaxWait()
+	outcome, sendErr := slackSender.Send(ctx, targetRef, google.ScrubAIAttribution(body), maxQueue)
 
 	// Constructed AFTER the call, never before: WithTimeout fixes an absolute
 	// deadline at creation, so a window opened up-front would already be spent by
@@ -2094,6 +2156,47 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 				"delivery %d is stuck in sending with no diagnostic", sendErr, err, deliveryID)
 		}
 		return nil, fmt.Errorf("slack send (outcome unknown, delivery %d left sending): %w", deliveryID, sendErr)
+	}
+
+	if outcome.Queued {
+		// SWT-76 D4: the leaf ACCEPTED the send (202) and will click it in the
+		// next gap. The row stays 'sending' and the attempt stays UNSETTLED —
+		// that is what keeps it un-re-approvable and keeps mark_delivery_failed
+		// refusing for the lease. Only the acceptance is recorded, and
+		// error=NULL is not tidiness: it re-arms ReconcileUnconfirmed's
+		// fire-once marker for this new attempt. Fenced like every phase-2
+		// write, so a row another actor resolved meanwhile is left alone.
+		queuedAt := outcome.QueuedAt
+		if queuedAt.IsZero() {
+			queuedAt = time.Now().UTC()
+		}
+		tag, err := pool.Exec(settleCtx,
+			`UPDATE deliveries SET send_queued_at=$4, send_queue_job_id=$2, error=NULL, updated_at=now()
+			 WHERE id=$1`+fenceArg3, deliveryID, outcome.JobID, attemptedAt, queuedAt)
+		if err != nil {
+			return nil, fmt.Errorf("slack send queued on the bridge (job %q) but recording it failed (%v); "+
+				"delivery %d is in sending without its queue record — do NOT re-approve", outcome.JobID, err, deliveryID)
+		}
+		if tag.RowsAffected() == 0 {
+			return nil, fmt.Errorf("slack send was queued on the bridge (job %q) but delivery %d was resolved by "+
+				"another actor first; the leaf may still click it — check the channel and do NOT re-approve",
+				outcome.JobID, deliveryID)
+		}
+		// A `log` event, not delivery_sent: nothing has left yet, and
+		// delivery_sent drives orchestrator R8. The export's confirmation emits
+		// it later (slackweb.PGSink.confirmDelivery, D7). Not in one
+		// transaction with the UPDATE above, unlike the sink's promotion: this
+		// event carries no lifecycle, the row itself is the record, and the
+		// success branch below has the same shape.
+		if _, err := insertTaskEvent(settleCtx, pool, taskID, "log", map[string]any{
+			"kind": "delivery_queued", "delivery_id": deliveryID, "channel": "slack_reply",
+			"job_id": outcome.JobID, "queued_at": queuedAt.Format(time.RFC3339),
+			"max_queue_ms": maxQueue.Milliseconds(), "expires_in_ms": outcome.ExpiresIn.Milliseconds(),
+		}); err != nil {
+			return nil, err
+		}
+		return marshalResult(map[string]any{"delivery_id": deliveryID, "status": "sending", "queued": true,
+			"job_id": outcome.JobID, "queued_at": queuedAt.Format(time.RFC3339)})
 	}
 
 	tag, err := pool.Exec(settleCtx,

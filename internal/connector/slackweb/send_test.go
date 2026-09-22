@@ -1,3 +1,4 @@
+// 2026-09-22 (SWT-76): every bridge.Send call gained the maxQueue argument (0 = never queue) and the SendOutcome return; assertions unchanged.
 package slackweb
 
 // Unit tests for the SWT-12 bridge `send` operation on BOTH transports
@@ -56,7 +57,7 @@ const sendTarget = "https://app.slack.com/client/T1/C1"
 
 func TestCommandBridgeSendAcceptsOnlyExactSendResult(t *testing.T) {
 	bridge := stubBridge(t, "printf '%s' "+shellQuote(`{"drafted":false,"target_url":"`+sendTarget+`","sent":true}`))
-	if err := bridge.Send(context.Background(), sendTarget, "hi"); err != nil {
+	if _, err := bridge.Send(context.Background(), sendTarget, "hi", 0); err != nil {
 		t.Fatalf("Send({drafted:false,sent:true}) = %v, want nil", err)
 	}
 }
@@ -77,7 +78,7 @@ func TestCommandBridgeSendRejectsAnythingElse(t *testing.T) {
 		payload := payload
 		t.Run(name, func(t *testing.T) {
 			bridge := stubBridge(t, "printf '%s' "+shellQuote(payload))
-			if err := bridge.Send(context.Background(), sendTarget, "hi"); err == nil {
+			if _, err := bridge.Send(context.Background(), sendTarget, "hi", 0); err == nil {
 				t.Fatalf("Send accepted %s; only {drafted:false, sent:true} is a send", payload)
 			}
 		})
@@ -86,10 +87,10 @@ func TestCommandBridgeSendRejectsAnythingElse(t *testing.T) {
 
 func TestCommandBridgeSendRequiresTargetAndText(t *testing.T) {
 	bridge := stubBridge(t, "printf '%s' "+shellQuote(`{"drafted":false,"sent":true}`))
-	if err := bridge.Send(context.Background(), "", "hi"); err == nil {
+	if _, err := bridge.Send(context.Background(), "", "hi", 0); err == nil {
 		t.Fatal("Send accepted an empty target URL")
 	}
-	if err := bridge.Send(context.Background(), sendTarget, ""); err == nil {
+	if _, err := bridge.Send(context.Background(), sendTarget, "", 0); err == nil {
 		t.Fatal("Send accepted empty text")
 	}
 }
@@ -105,14 +106,14 @@ case "$1:$line" in
   *) printf 'bad argv or stdin: %s %s' "$1" "$line" >&2; exit 3 ;;
 esac
 `)
-	if err := bridge.Send(context.Background(), sendTarget, "hello"); err != nil {
+	if _, err := bridge.Send(context.Background(), sendTarget, "hello", 0); err != nil {
 		t.Fatalf("Send = %v, want the stub to have seen argv 'send' and the JSON request", err)
 	}
 }
 
 func TestCommandBridgeSendSurfacesStderrOnFailure(t *testing.T) {
 	bridge := stubBridge(t, `printf 'SLACK_CONNECTOR_UNATTENDED_SEND is not enabled' >&2; exit 1`)
-	err := bridge.Send(context.Background(), sendTarget, "hi")
+	_, err := bridge.Send(context.Background(), sendTarget, "hi", 0)
 	if err == nil || !strings.Contains(err.Error(), "UNATTENDED_SEND") {
 		t.Fatalf("Send error = %v, want the leaf's stderr surfaced", err)
 	}
@@ -135,7 +136,7 @@ func TestHTTPBridgeSendPostsToSendRouteWithBearer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := bridge.Send(context.Background(), sendTarget, "hello"); err != nil {
+	if _, err := bridge.Send(context.Background(), sendTarget, "hello", 0); err != nil {
 		t.Fatalf("Send = %v, want nil", err)
 	}
 	if gotPath != "/send" {
@@ -167,7 +168,7 @@ func TestHTTPBridgeSendRejectsAnythingButAnExactSendResult(t *testing.T) {
 			}))
 			defer server.Close()
 			bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
-			if err := bridge.Send(context.Background(), sendTarget, "hi"); err == nil {
+			if _, err := bridge.Send(context.Background(), sendTarget, "hi", 0); err == nil {
 				t.Fatalf("Send accepted %s; only {drafted:false, sent:true} is a send", payload)
 			}
 		})
@@ -189,7 +190,7 @@ func TestHTTPBridgeSendClassifies4xxAsDefiniteRejection(t *testing.T) {
 			defer server.Close()
 			bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
 
-			err := bridge.Send(context.Background(), sendTarget, "hi")
+			_, err := bridge.Send(context.Background(), sendTarget, "hi", 0)
 			if err == nil {
 				t.Fatalf("Send on HTTP %d = nil error", status)
 			}
@@ -217,7 +218,7 @@ func TestHTTPBridgeSendLeaves5xxAndTransportErrorsAmbiguous(t *testing.T) {
 		defer server.Close()
 		bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
 
-		err := bridge.Send(context.Background(), sendTarget, "hi")
+		_, err := bridge.Send(context.Background(), sendTarget, "hi", 0)
 		if err == nil {
 			t.Fatal("Send on HTTP 500 = nil error")
 		}
@@ -243,7 +244,7 @@ func TestHTTPBridgeSendLeaves5xxAndTransportErrorsAmbiguous(t *testing.T) {
 		defer server.Close()
 		bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
 
-		err := bridge.Send(context.Background(), sendTarget, "hi")
+		_, err := bridge.Send(context.Background(), sendTarget, "hi", 0)
 		if err == nil {
 			t.Fatal("Send against a broken response = nil error")
 		}
@@ -268,7 +269,7 @@ func TestHTTPBridgeSendClassifiesPreDispatchFailuresAsDefinite(t *testing.T) {
 		bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
 		server.Close() // no TCP session is possible, so the request never left
 
-		err := bridge.Send(context.Background(), sendTarget, "hi")
+		_, err := bridge.Send(context.Background(), sendTarget, "hi", 0)
 		var rejected *SendRejectedError
 		if !errors.As(err, &rejected) {
 			t.Fatalf("dial failure = %v (%T), want *SendRejectedError: without a TCP session the request "+
@@ -285,7 +286,7 @@ func TestHTTPBridgeSendClassifiesPreDispatchFailuresAsDefinite(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		err := bridge.Send(ctx, sendTarget, "hi")
+		_, err := bridge.Send(ctx, sendTarget, "hi", 0)
 		var rejected *SendRejectedError
 		if !errors.As(err, &rejected) {
 			t.Fatalf("pre-cancelled context = %v (%T), want *SendRejectedError: nothing was dispatched", err, err)
@@ -301,10 +302,10 @@ func TestHTTPBridgeSendRequiresTargetAndText(t *testing.T) {
 	defer server.Close()
 	bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
 
-	if err := bridge.Send(context.Background(), "", "hi"); err == nil {
+	if _, err := bridge.Send(context.Background(), "", "hi", 0); err == nil {
 		t.Error("Send accepted an empty target URL")
 	}
-	if err := bridge.Send(context.Background(), sendTarget, ""); err == nil {
+	if _, err := bridge.Send(context.Background(), sendTarget, "", 0); err == nil {
 		t.Error("Send accepted empty text")
 	}
 }
@@ -327,7 +328,7 @@ func TestSendIsNotARelaxationOfDraft(t *testing.T) {
 		defer server.Close()
 		bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
 
-		if err := bridge.Send(context.Background(), sendTarget, "hi"); err != nil {
+		if _, err := bridge.Send(context.Background(), sendTarget, "hi", 0); err != nil {
 			t.Fatalf("Send = %v, want nil", err)
 		}
 		if err := bridge.Draft(context.Background(), sendTarget, "hi"); err == nil {
@@ -341,7 +342,7 @@ func TestSendIsNotARelaxationOfDraft(t *testing.T) {
 	t.Run("command: distinct argv, opposite guards", func(t *testing.T) {
 		// One stub answering both operations with a send result.
 		bridge := stubBridge(t, "printf '%s' "+shellQuote(`{"drafted":false,"sent":true}`))
-		if err := bridge.Send(context.Background(), sendTarget, "hi"); err != nil {
+		if _, err := bridge.Send(context.Background(), sendTarget, "hi", 0); err != nil {
 			t.Fatalf("Send = %v, want nil", err)
 		}
 		if err := bridge.Draft(context.Background(), sendTarget, "hi"); err == nil {

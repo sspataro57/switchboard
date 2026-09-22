@@ -84,7 +84,7 @@ go run ./cmd/connectors/slackweb --normalize-only
 
 Use `--all` with `--normalize-only` for an intentional full normalization replay.
 
-## 4b. The resident watcher (SWT-75): José and Katie every minute
+## 4b. The resident watcher (SWT-75): José and Katie every minute (live at every 3 min since 2026-09-22)
 
 `slackweb --watch` stays resident: a TARGETED pass of the `slack_watch` conversations about
 every minute (the leaf reads exactly those ids, ~18 s each, no enumeration) and the full export
@@ -181,6 +181,51 @@ go run ./cmd/opsctl call --tool mark_delivery_sent --args '{"delivery_id":456}'
 - If browser export fails, inspect the TypeScript connector diagnostics directory. It contains sanitized visible-page artifacts but can still include client content.
 - If prefill finds an existing composer draft, it refuses to overwrite it. Resolve the draft manually and retry.
 - If a Slack selector changes, update `slackconnector/src/slack/selectors.ts` and its fixture/parser tests; Activity/search and virtualized message rows are the likeliest maintenance points.
+
+## What happens when the browser is busy (SWT-76)
+
+The mini has one browser, and since SWT-75 it is busy a good share of the day (a targeted
+pass every 3 min, a rotation export every 30 min). An approved `slack_reply` sent through
+`send_delivery` now has three outcomes at the leaf, decided **before any browser work**:
+
+| leaf answer | meaning | the delivery row |
+|---|---|---|
+| **200** `{sent:true}` | the browser was free; the click happened | `sent` at once, `delivery_sent` emitted (unchanged) |
+| **202** `{queued:true, job_id, …}` | the browser was busy; the leaf ACCEPTED the send and clicks it in the next gap, ahead of the next sweep | stays `sending`, attempt unsettled, `send_queued_at` + `send_queue_job_id` set, `error` NULL; a `log` event `delivery_queued`; the dashboard row reads **queued on the bridge (job …)** and the flash says so |
+| **503** + `Retry-After` | a definite pre-click refusal: the estimated wait exceeds the bound, or four sends already wait | `failed`, re-approvable (today's SWT-75 behaviour) |
+
+The 202 is only possible because switchboard sends `max_queue_ms` (10 min, derived from the
+15-minute send lease: `sendQueueMaxWait + sendQueueClickAllowance <= sendAttemptLease`). An old
+switchboard sends nothing and gets 200/503 exactly as before; `SLACK_SEND_QUEUE_MAX_WAIT=off` on
+the dashboard/opsctl is the no-roll way back to that (a larger value is clamped to 10 min).
+
+**A queued row is confirmed exactly like a synchronous one**: the next export that reads the
+conversation sees our own message, `confirmDelivery` stamps `sent_external_id` + `confirmed_at`,
+promotes the row to `sent` and — because the row was still `sending` — emits `delivery_sent
+{recovered:true}` in the same transaction, so orchestrator R8 moves the work task to `delivered`
+and closes its Deliver task. (Before SWT-76 that promotion emitted only `delivery_confirmed`,
+which nothing reads; a task whose send was confirmed that way sat at `done_locally` forever.)
+
+**Two horizons, and nothing ever resends.** There is no job status endpoint and no
+timeout that turns a queued row into `failed`: a `failed` row is re-approvable, and re-approving
+a click that DID land is a double post into a client conversation. A queued row that never gets
+confirmed is resolved by a human, at one of two moments:
+
+1. **The lease — 15 min from `send_attempted_at`.** Inside it `mark_delivery_failed` refuses
+   (the leaf may still click: 10 min queue + the click itself) and the dashboard hides "Not in
+   Slack"; `mark_delivery_sent` ("It's in Slack") is permitted throughout, because recording a
+   send that visibly happened is always safe. After it, both verbs work.
+2. **`ReconcileUnconfirmed`** — after three ROTATION passes that read the conversation without
+   seeing the message (targeted watch passes never count), the row is flagged
+   `unconfirmed after 3 export passes …` with a `delivery_unconfirmed` event and moves nowhere.
+   Look in Slack, then `mark_delivery_sent` or `mark_delivery_failed`. The job id on the row is
+   what to grep the mini's log for (`Queued send expired …`, `Waiting send lost …`).
+
+**A bridge restart loses the queue.** It is in memory on purpose — a replayed job cannot know
+whether the click landed before the crash — so on SIGTERM, a stale-job kill or an abandoned-export
+kill the leaf logs every waiting send at `error` with its job id and does not run it. The row is
+then simply an unconfirmed `sending` row and resolves through the two horizons above. Nothing
+replays it, nothing resends it.
 
 ## Tests
 

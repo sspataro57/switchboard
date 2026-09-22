@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -83,17 +84,21 @@ func TokenFromEnv() (string, error) {
 	return strings.TrimSpace(os.Getenv("SLACK_WEB_BRIDGE_TOKEN")), nil
 }
 
-func (b *HTTPBridge) post(ctx context.Context, path string, body []byte) ([]byte, error) {
+// post returns the body AND the status: 200 and 202 are both success (SWT-76
+// D10 — a 202 is the leaf ACCEPTING a send, and only Send may interpret it;
+// Export and Draft refuse it through requireOK). Everything else is a
+// bridgeStatusError carrying the status.
+func (b *HTTPBridge) post(ctx context.Context, path string, body []byte) ([]byte, int, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, b.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("build Slack bridge request: %w", err)
+		return nil, 0, fmt.Errorf("build Slack bridge request: %w", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+b.token)
 	request.Header.Set("Content-Type", "application/json")
 
 	response, err := b.client.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("call Slack bridge %s: %w", path, err)
+		return nil, 0, fmt.Errorf("call Slack bridge %s: %w", path, err)
 	}
 	defer response.Body.Close()
 
@@ -104,22 +109,41 @@ func (b *HTTPBridge) post(ctx context.Context, path string, body []byte) ([]byte
 	// ingested as a complete export.
 	out, err := io.ReadAll(io.LimitReader(response.Body, b.maxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read Slack bridge %s: %w", path, err)
+		return nil, 0, fmt.Errorf("read Slack bridge %s: %w", path, err)
 	}
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusAccepted {
 		// The body carries the connector's error string; keep it short so a
 		// failure cannot dump Slack content into logs.
 		snippet := strings.TrimSpace(string(out))
 		if len(snippet) > 200 {
 			snippet = snippet[:200]
 		}
-		return nil, &bridgeStatusError{status: response.StatusCode, path: path, snippet: snippet,
+		return nil, response.StatusCode, &bridgeStatusError{status: response.StatusCode, path: path, snippet: snippet,
 			retryAfter: retryAfterHeader(response.Header.Get("Retry-After"))}
 	}
 	if int64(len(out)) > b.maxBytes {
-		return nil, fmt.Errorf("Slack bridge %s output exceeded %d bytes", path, b.maxBytes)
+		return nil, response.StatusCode, fmt.Errorf("Slack bridge %s output exceeded %d bytes", path, b.maxBytes)
 	}
-	return out, nil
+	return out, response.StatusCode, nil
+}
+
+// requireOK is the refusal every path but Send applies to a 202: a queued
+// export has no result and a queued draft was never typed, so letting either
+// through would ingest an empty export or report words that are not in the
+// composer (SWT-76 criterion 10).
+func requireOK(path string, out []byte, status int) error {
+	if status != http.StatusAccepted {
+		return nil
+	}
+	var body struct {
+		JobID string `json:"job_id"`
+	}
+	_ = json.Unmarshal(out, &body)
+	snippet := strings.TrimSpace(string(out))
+	if len(snippet) > 200 {
+		snippet = snippet[:200]
+	}
+	return &BridgeQueuedError{Path: path, JobID: body.JobID, Body: snippet}
 }
 
 func (b *HTTPBridge) Export(ctx context.Context, req ExportRequest) (Export, error) {
@@ -129,7 +153,7 @@ func (b *HTTPBridge) Export(ctx context.Context, req ExportRequest) (Export, err
 	if err != nil {
 		return Export{}, fmt.Errorf("marshal Slack export request: %w", err)
 	}
-	out, err := b.post(ctx, "/export", body)
+	out, status, err := b.post(ctx, "/export", body)
 	if err != nil {
 		// SWT-75 criterion 14: the leaf's 503 is its browser queue refusing a
 		// second sweep (job-queue.ts:144-152), thrown BEFORE any browser work.
@@ -140,6 +164,9 @@ func (b *HTTPBridge) Export(ctx context.Context, req ExportRequest) (Export, err
 		if errors.As(err, &status) && status.status == http.StatusServiceUnavailable {
 			return Export{}, &BridgeBusyError{RetryAfter: status.retryAfter, Body: status.snippet}
 		}
+		return Export{}, err
+	}
+	if err := requireOK("/export", out, status); err != nil {
 		return Export{}, err
 	}
 	var exported Export
@@ -160,8 +187,11 @@ func (b *HTTPBridge) Draft(ctx context.Context, targetURL, text string) error {
 	if err != nil {
 		return fmt.Errorf("marshal Slack draft request: %w", err)
 	}
-	out, err := b.post(ctx, "/draft", in)
+	out, status, err := b.post(ctx, "/draft", in)
 	if err != nil {
+		return err
+	}
+	if err := requireOK("/draft", out, status); err != nil {
 		return err
 	}
 	var result struct {
@@ -198,6 +228,35 @@ func (e *SendRejectedError) Error() string {
 	}
 	return fmt.Sprintf("Slack send rejected (%d): %s", e.Status, e.Body)
 }
+
+// SendOutcome distinguishes a click that HAPPENED from a leaf ACCEPTANCE
+// (SWT-76 D1). Queued=false is a completed send (the leaf answered sent:true);
+// Queued=true means the click is still pending on the leaf's browser queue and
+// the delivery row must stay in 'sending' with its attempt unsettled. Callers
+// branch on Queued, never on a zero value.
+type SendOutcome struct {
+	Queued    bool
+	JobID     string
+	QueuedAt  time.Time
+	ExpiresIn time.Duration
+}
+
+// ErrBridgeQueued is the sentinel every *BridgeQueuedError matches: the leaf
+// answered 202 on a path whose RESULT the caller needs (Export, Draft). Only
+// Send interprets a 202 (SWT-76 criterion 10).
+var ErrBridgeQueued = errors.New("Slack bridge queued the request")
+
+// BridgeQueuedError is a 202 on a path that cannot accept one.
+type BridgeQueuedError struct {
+	Path, JobID, Body string
+}
+
+func (e *BridgeQueuedError) Error() string {
+	return fmt.Sprintf("Slack bridge %s answered 202 (job %q); this path needs a result, not an acceptance: %s",
+		e.Path, e.JobID, e.Body)
+}
+
+func (e *BridgeQueuedError) Is(target error) bool { return target == ErrBridgeQueued }
 
 // ErrBridgeBusy is the sentinel every *BridgeBusyError matches: the bridge's
 // queue refused the export before any browser work (SWT-75 D3/criterion 14).
@@ -239,32 +298,45 @@ func (e *bridgeStatusError) Error() string {
 	return fmt.Sprintf("Slack bridge %s returned %d: %s", e.path, e.status, e.snippet)
 }
 
-// Send clicks Send in the connector's browser. It returns nothing on success
-// because a browser click reserves no message id — the delivery's
-// sent_external_id stays NULL and the next export stamps it by body prefix.
-func (b *HTTPBridge) Send(ctx context.Context, targetURL, text string) error {
+// Send clicks Send in the connector's browser. A completed click returns a
+// zero SendOutcome and nil: a browser click reserves no message id, so the
+// delivery's sent_external_id stays NULL and the next export stamps it by
+// body prefix.
+//
+// SWT-76: maxQueue > 0 puts max_queue_ms in the request, which is the caller's
+// declaration that it understands the queue and PERMITS the leaf to answer 202
+// — accepted, not yet clicked — when the browser is busy (D1/D12). maxQueue 0
+// omits the key and the leaf behaves exactly as before (wait or 503): that is
+// the no-roll rollback. The caller derives maxQueue from its own lease
+// (tools.sendSlackReply), because the caller owns the window that protects
+// the row.
+func (b *HTTPBridge) Send(ctx context.Context, targetURL, text string, maxQueue time.Duration) (SendOutcome, error) {
 	if targetURL == "" || text == "" {
-		return &SendRejectedError{Body: "Slack send requires target URL and text"}
+		return SendOutcome{}, &SendRejectedError{Body: "Slack send requires target URL and text"}
 	}
-	in, err := json.Marshal(map[string]string{"target_url": targetURL, "text": text})
+	req := map[string]any{"target_url": targetURL, "text": text}
+	if maxQueue > 0 {
+		req["max_queue_ms"] = maxQueue.Milliseconds()
+	}
+	in, err := json.Marshal(req)
 	if err != nil {
-		return &SendRejectedError{Body: fmt.Sprintf("marshal Slack send request: %v", err)}
+		return SendOutcome{}, &SendRejectedError{Body: fmt.Sprintf("marshal Slack send request: %v", err)}
 	}
 	// A deadline already blown before dispatch means nothing was sent.
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return &SendRejectedError{Body: "context already done before dispatch: " + ctxErr.Error()}
+		return SendOutcome{}, &SendRejectedError{Body: "context already done before dispatch: " + ctxErr.Error()}
 	}
-	out, err := b.post(ctx, "/send", in)
+	out, status, err := b.post(ctx, "/send", in)
 	if err != nil {
 		// SWT-75 D7: 503 (and 429) are DEFINITE too. The leaf's 503 is
 		// QueueFullError, thrown inside JobQueue.run before the job function is
 		// called (job-queue.ts:144-152) — provably pre-click, like the 4xx cases.
 		// A 500 stays ambiguous: it can come from browser work that already
 		// pressed Send.
-		var status *bridgeStatusError
-		if errors.As(err, &status) && ((status.status >= 400 && status.status < 500) ||
-			status.status == http.StatusServiceUnavailable) {
-			return &SendRejectedError{Status: status.status, Body: status.snippet}
+		var refused *bridgeStatusError
+		if errors.As(err, &refused) && ((refused.status >= 400 && refused.status < 500) ||
+			refused.status == http.StatusServiceUnavailable) {
+			return SendOutcome{}, &SendRejectedError{Status: refused.status, Body: refused.snippet}
 		}
 		// A failure to establish the connection at all is provably pre-click: no
 		// TCP session means the request never reached the bridge, so the browser
@@ -272,11 +344,43 @@ func (b *HTTPBridge) Send(ctx context.Context, targetURL, text string) error {
 		// a timeout — stays ambiguous, because by then the click may have landed.
 		var opErr *net.OpError
 		if errors.As(err, &opErr) && opErr.Op == "dial" {
-			return &SendRejectedError{Body: "bridge unreachable (never dispatched): " + err.Error()}
+			return SendOutcome{}, &SendRejectedError{Body: "bridge unreachable (never dispatched): " + err.Error()}
 		}
-		return err
+		return SendOutcome{}, err
 	}
-	return checkSendResult(out)
+	if status == http.StatusAccepted {
+		// The leaf ACCEPTED the send and will click it in the first gap. Not
+		// checkSendResult: a 202 body carries no sent:true, and reading it as
+		// sent:false would turn an acceptance into a definite refusal — the
+		// exact defect this ticket removes (criterion 11). A body without a
+		// job_id is a leaf defect to log, never a reason to treat the send as
+		// refused: the row's protection is the unsettled attempt plus the
+		// lease, not the id (criterion 12).
+		return parseQueued(out), nil
+	}
+	return SendOutcome{}, checkSendResult(out)
+}
+
+// parseQueued reads the 202 body: {queued, job_id, queued_at, estimated_wait_ms,
+// expires_in_ms}. Every field is optional; the status alone means queued.
+func parseQueued(out []byte) SendOutcome {
+	var body struct {
+		JobID       string `json:"job_id"`
+		QueuedAt    string `json:"queued_at"`
+		ExpiresInMS int64  `json:"expires_in_ms"`
+	}
+	_ = json.Unmarshal(out, &body)
+	if len(body.JobID) > 200 { // the same cap post applies to error snippets: leaf text, never unbounded
+		body.JobID = body.JobID[:200]
+	}
+	outcome := SendOutcome{Queued: true, JobID: body.JobID, ExpiresIn: time.Duration(body.ExpiresInMS) * time.Millisecond}
+	if t, err := time.Parse(time.RFC3339Nano, body.QueuedAt); err == nil {
+		outcome.QueuedAt = t
+	}
+	if body.JobID == "" {
+		slog.Warn("slack bridge answered 202 without a job_id; the send is queued but cannot be found in the leaf's log")
+	}
+	return outcome
 }
 
 // checkSendResult enforces that only an exact {drafted:false, sent:true} counts

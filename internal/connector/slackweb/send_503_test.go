@@ -1,3 +1,4 @@
+// 2026-09-22 (SWT-76): every bridge.Send call gained the maxQueue argument (0 = never queue) and the SendOutcome return; assertions unchanged.
 package slackweb
 
 // slack-watch-sweep (SWT-75) Part 7, criterion 26 — D7: HTTPBridge.Send maps
@@ -60,7 +61,7 @@ func TestSend_503And429AreDefinite(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err = bridge.Send(context.Background(), sendTarget, "hi")
+			_, err = bridge.Send(context.Background(), sendTarget, "hi", 0)
 			if err == nil {
 				t.Fatalf("Send on HTTP %d = nil error", status)
 			}
@@ -92,7 +93,7 @@ func TestSend_500AndAMidResponseEOFStayAmbiguous(t *testing.T) {
 		defer server.Close()
 		bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
 		var rejected *SendRejectedError
-		if err := bridge.Send(context.Background(), sendTarget, "hi"); errors.As(err, &rejected) {
+		if _, err := bridge.Send(context.Background(), sendTarget, "hi", 0); errors.As(err, &rejected) {
 			t.Errorf("Send on HTTP 500 = *SendRejectedError; D7 moves 503 and 429 ONLY. A 500 can come from "+
 				"browser work that already clicked: %v", err)
 		}
@@ -110,7 +111,7 @@ func TestSend_500AndAMidResponseEOFStayAmbiguous(t *testing.T) {
 		defer server.Close()
 		bridge, _ := NewHTTPBridge(server.URL, testToken, server.Client())
 		var rejected *SendRejectedError
-		if err := bridge.Send(context.Background(), sendTarget, "hi"); errors.As(err, &rejected) {
+		if _, err := bridge.Send(context.Background(), sendTarget, "hi", 0); errors.As(err, &rejected) {
 			t.Errorf("a failure AFTER dispatch = *SendRejectedError, want untyped/ambiguous: %v", err)
 		}
 	})

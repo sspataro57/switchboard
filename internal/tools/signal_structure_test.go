@@ -89,8 +89,8 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		// capture_rules.comm_task and capture_decisions.comm_task_id with their
 		// two CHECKs, guarded by internal/capture
 		// TestMigration0040_CaptureCommTasksShape.
-		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 40 && v != 41 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 40: comms-inbox, 41: slack-watch-sweep)", e.Name())
+		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 40 && v != 41 && v != 42 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 40: comms-inbox, 41: slack-watch-sweep, 42: slack-send-queue)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {
