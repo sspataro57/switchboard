@@ -769,10 +769,19 @@ summary; assert none of them as a frozen literal in any test.
   **Gate:** if attaches onto NOT-closed tasks average more than ~25/day, or the `own_edit_shape`
   share of those is over half, STOP and decide the D10 suppression first. Otherwise record the daily
   figure — it is how many Requeue taps a day he is signing up for.
+  **Measured 2026-09-22 (14 days, prod):** attaches onto NOT-closed tasks per day — 79 (Sep 9, the
+  live seed), 6, 6, 4, 2, 1, 32 (Sep 18), 1, 10, 22 (Sep 22 to 10:30) — typical days under 10, busy
+  days 20–30; `Anonymous (JIRA)` share 4 of ~160 (2 on Sep 9, 2 on Sep 21). **Gate passed.** Senders
+  behind them: Jira mirrors 39, Mario Cruz 38 (Upwork), Salvador's own GitHub notifications 25, Katie
+  17 (+13 via Jira), José 9 (+4 direct, +3 via Jira), Lyle 3. The 25 self-GitHub rows are PR-review
+  mail on his own PRs — a candidate for D10's suppression list, not this ticket.
 - **0b. What D11 changes:** `classify_promotions` rows with `action='attached'` in 30 days, split by
   lane actor (`audit_events.actor` or the verdict's lane) and by the target task's status. Each
   inquiry-lane open-task row is a task that will now exist instead. Expected order of magnitude:
   José's four plus Katie's two per busy day.
+  **Measured:** 30 days of `attached`: 12, all inquiry lane (7 onto closed tasks, 5 onto ready). So
+  D11 creates about 5 tasks a month that were being buried — plus the ones the replied-since fold
+  correctly drops.
 - **0c. The sender shapes he will read:** distinct `nm.sender` behind 0a's not-closed rows, with
   counts. Expected `"<Name> (JIRA)"`, `"Anonymous (JIRA)"`, and real people (José). An empty sender
   renders no muted span — acceptable; record the count.
