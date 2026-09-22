@@ -3086,6 +3086,10 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   rotation (D8), so an old leaf costs one full export per half hour, not one per minute.
 - **Pipeline guard amended:** `AnnounceCaptured`'s connector literal may be `"<connector>-watch"` (its own
   MQTT client id). The rotation announces as `"slackweb"`, the targeted pass as `"slackweb-watch"`.
+- **Live 2026-09-22 13:58 EDT at `SLACK_WATCH_INTERVAL=180s`, not the 60s default** — Salvador chose the
+  gentler cadence in the kube window ("Yes, but gentler (180s)"): DMs surface in ~3 min for a third of the
+  navigations on the mini. The env value on the Deployment is the record; the code default stays 60s.
+  CronJob on `0 */2 * * *` since the same roll. The D10 24-hour mini-load gate is due 2026-09-23.
 - **Rollback levers, mildest first:** `opsctl slack-watch disable`; `SLACK_WATCH_INTERVAL=180s` or `=0`
   (rotation only) on the Deployment; scale it to 0 and put the CronJob back on `*/30`.
 - **`/funnel` shows the `slack_web_watch` phase as stale on quiet nights** by design: it groups by
