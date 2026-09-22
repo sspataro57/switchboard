@@ -77,29 +77,43 @@ func setPriority(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, 
 	var from int
 	changed := false
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx,
-			`SELECT priority FROM tasks WHERE id=$1 FOR UPDATE`, a.TaskID).Scan(&from); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("task %d not found", a.TaskID)
-			}
-			return fmt.Errorf("lock task %d: %w", a.TaskID, err)
-		}
-		if from == to {
-			return nil // idempotent: no update, no event
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE tasks SET priority=$2, updated_at=now() WHERE id=$1`, a.TaskID, to); err != nil {
-			return fmt.Errorf("set priority of task %d: %w", a.TaskID, err)
-		}
-		if _, err := insertTaskEvent(ctx, tx, a.TaskID, "priority_changed",
-			map[string]any{"from": from, "to": to, "reason": a.Reason}); err != nil {
-			return err
-		}
-		changed = true
-		return nil
+		var err error
+		from, changed, err = applyPriority(ctx, tx, a.TaskID, to, a.Reason)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 	return marshalResult(map[string]any{"task_id": a.TaskID, "from": from, "to": to, "changed": changed})
+}
+
+// priorityChangedEvent is the task_events type applyPriority writes; the
+// `reviewed` event (requeue.go) reuses the word as its priority-changed flag.
+const priorityChangedEvent = "priority_changed"
+
+// applyPriority is the ONE spelling of the priority write (SWT-72 criterion
+// 20), shared by task_set_priority and task_requeue: lock the row, no-op when
+// the value is unchanged (no event), else update priority + updated_at and
+// write one priority_changed {from,to,reason} event. Re-taking a row lock the
+// transaction already holds is a no-op, so a caller under lockTask is fine.
+func applyPriority(ctx context.Context, tx pgx.Tx, taskID int64, to int, reason string) (from int, changed bool, err error) {
+	if err := tx.QueryRow(ctx,
+		`SELECT priority FROM tasks WHERE id=$1 FOR UPDATE`, taskID).Scan(&from); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, fmt.Errorf("task %d not found", taskID)
+		}
+		return 0, false, fmt.Errorf("lock task %d: %w", taskID, err)
+	}
+	if from == to {
+		return from, false, nil // idempotent: no update, no event
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE tasks SET priority=$2, updated_at=now() WHERE id=$1`, taskID, to); err != nil {
+		return from, false, fmt.Errorf("set priority of task %d: %w", taskID, err)
+	}
+	if _, err := insertTaskEvent(ctx, tx, taskID, priorityChangedEvent,
+		map[string]any{"from": from, "to": to, "reason": reason}); err != nil {
+		return from, false, err
+	}
+	return from, true, nil
 }

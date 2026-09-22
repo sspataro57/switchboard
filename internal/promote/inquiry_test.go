@@ -185,15 +185,18 @@ func TestInquiryGate_EachReasonAlone(t *testing.T) {
 			c.PriorPost = true
 		}, ""},
 
-		// C-D13: never attach to or reopen a non-human thread task.
-		{"claude_task: the thread's open task is claude's", func(c *promote.InquiryCandidate) {
+		// C-D13: never attach to or reopen a non-human thread task. AMENDED by
+		// activity-resurfaces (SWT-72) criterion 16: an OPEN claude task no
+		// longer gates — the ask becomes its own task (D11) — so the gate bites
+		// only on the DISMISSED path, where Decide would still attach + reopen.
+		{"an open claude thread task no longer gates (SWT-72 D11: the ask is its own task)", func(c *promote.InquiryCandidate) {
 			c.ThreadTask = &promote.ExistingTask{ID: 5, Status: "ready", AssigneeType: "claude"}
-		}, "claude_task"},
+		}, ""},
 		{"claude_task: the thread's dismissed task is claude's", func(c *promote.InquiryCandidate) {
 			c.ThreadTask = &promote.ExistingTask{ID: 5, Status: "closed", DismissalID: 9, AssigneeType: "claude"}
 		}, "claude_task"},
-		{"claude_task: an empty assignee reads as not human (fail closed)", func(c *promote.InquiryCandidate) {
-			c.ThreadTask = &promote.ExistingTask{ID: 5, Status: "ready"}
+		{"claude_task: an empty assignee on a dismissed task reads as not human (fail closed)", func(c *promote.InquiryCandidate) {
+			c.ThreadTask = &promote.ExistingTask{ID: 5, Status: "closed", DismissalID: 9}
 		}, "claude_task"},
 		{"a human thread task passes", func(c *promote.InquiryCandidate) {
 			c.ThreadTask = &promote.ExistingTask{ID: 5, Status: "ready", AssigneeType: "human"}
@@ -216,7 +219,8 @@ func TestInquiryGate_ReportsTheFirstReasonInCThreeOrder(t *testing.T) {
 	c := promote.InquiryCandidate{
 		AskKind: "fyi", Channel: "slack", ThreadKey: "slack:T0HPR78RX:C07ABCDEF", ThreadScope: "conversation",
 		StoredThreadID: 7, CurrentThreadID: 8, SentAt: iqNow.Add(-73 * time.Hour), RepliedSince: true,
-		ThreadTask: &promote.ExistingTask{ID: 5, Status: "ready", AssigneeType: "claude"},
+		// A DISMISSED claude task: since SWT-72 D11 an open one no longer gates.
+		ThreadTask: &promote.ExistingTask{ID: 5, Status: "closed", DismissalID: 9, AssigneeType: "claude"},
 	}
 	steps := []struct {
 		want string
@@ -285,12 +289,18 @@ func TestDecide_ThePersonalWhitelistNeverAppliesToTheInquiryLane(t *testing.T) {
 	}
 }
 
+// AMENDED — not deleted — by activity-resurfaces (SWT-72) D11 and criterion 13,
+// the OWNER DECISION of 2026-09-22 ("and those messages to create it's own
+// tasks"): the OPEN-task rule no longer attaches on the inquiry lane. Rule 2
+// (dismissed) and the Q3 fall-through are unchanged, which is what the rest of
+// this test still proves. The new behaviour's full table is ownask_test.go.
 func TestDecide_InquiryAttachOrderIsTheExistingOne(t *testing.T) {
 	v := promote.Verdict{Lane: promote.LaneInquiry, Kind: "question"}
-	// attach-open
-	if got := promote.Decide(v, &promote.ExistingTask{ID: 11, Status: "holding"}); got.Action != "attached" ||
-		got.TaskID != 11 || got.Status != "" || got.ReopenDismissalID != 0 {
-		t.Errorf("inquiry verdict on a thread with an OPEN task: %+v, want a plain attach to 11", got)
+	// OPEN task: its OWN task, with a pointer back (D11) — never an attach.
+	if got := promote.Decide(v, &promote.ExistingTask{ID: 11, Status: "holding", AssigneeType: "human"}); got.Action == "attached" ||
+		got.TaskID != 0 || got.RelatedTaskID != 11 || got.Status != "ready" {
+		t.Errorf("inquiry verdict on a thread with an OPEN task: %+v, want its own {task ready} with "+
+			"RelatedTaskID 11 (SWT-72 D11)", got)
 	}
 	// attach + reopen a dismissed task (SWT-36)
 	if got := promote.Decide(v, &promote.ExistingTask{ID: 12, Status: "closed", DismissalID: 5}); got.Action != "attached" ||

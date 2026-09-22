@@ -839,6 +839,9 @@ claude task back in a console queue.
   seventh reason, last in the order. It writes nothing and stays in the inbox until the 72h fence,
   like every other gate.
 - It never falls through to a new task: Q3 (one open task per thread) holds.
+  *Amended 2026-09-22 (SWT-72 D11):* an ask with an OPEN thread task is now its own task (ids-only
+  pointer on the old one), so this gate bites only where `Decide` would still ATTACH — the
+  dismissed path. An open claude thread task no longer gates.
 - `InquiryGate` stays pure: `ExistingTask` carries `assignee_type`, `InquiryCandidate.ThreadTask`
   carries the task, and `runInquiry` reads the thread task only for a verdict that passed the six
   C3 clauses. An empty assignee reads as not human (fail closed).

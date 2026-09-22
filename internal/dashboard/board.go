@@ -50,6 +50,14 @@ type taskRow struct {
 	// "". It decides the board's first section. Board-only — never an export
 	// column.
 	Incoming string
+	// SWT-72 (activity-resurfaces) display fields, from boardLightFacts.
+	// Board-only — never export columns. NeedsReview: unreviewed inbound
+	// activity on this open task (the template's Requeue form and `from …`
+	// span hang off it); ActivityFrom is that message's sender; ActivityStamp
+	// is activity_at as a sortable string, the incoming section's fourth key.
+	NeedsReview   bool
+	ActivityFrom  string
+	ActivityStamp string
 	// SWT-67 display fields, computed in Go by display.go's pure helpers.
 	// Board-only — never export columns. Remark is the Remarks words (the
 	// status survives here, B5); Elapsed is HH:MM since the session signal;
@@ -232,11 +240,19 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 			Light:                  lightFor(t.Status, f),
 			QueueRank:              f.QueueRank,
 			Updated:                f.UpdatedStamp,
-			Incoming:               incomingKind(f.FromMessage, f.PRReview),
+			Incoming:               incomingKind(f.FromMessage, f.PRReview, f.NeedsReview),
+			NeedsReview:            f.NeedsReview,
+			ActivityFrom:           f.ActivitySender,
+			ActivityStamp:          f.ActivityStamp,
 			ProjectHue:             projectHue(t.Project),
 			HighPriority:           t.Priority >= boardPriorityMark,
 		}
 		tr.Remark = remarkFor(tr.Light, t.Status)
+		if tr.NeedsReview {
+			// SWT-72 D5: what arrived is the remark; the status words come back
+			// once Requeue (or a close) reviews it.
+			tr.Remark = activityRemark(f.ActivityChannel)
+		}
 		tr.Elapsed = elapsedFor(tr.Light.Class, f.StateAgeMinutes)
 		if tr.Updated == "" {
 			tr.Updated = t.UpdatedAt // never a blank cell for a row that has a value
@@ -358,7 +374,10 @@ func (s *Server) reopenMarkers(r *http.Request, rows []TaskExportRow) (map[int64
 //     BoardTimeZone. SWT-59 adds two display-only provenance facts, each an
 //     uncorrelated, NULL-safe COALESCE(… IN (subquery), false) that Postgres
 //     runs once: from_message (a classify_promotions task/review row) and
-//     pr_review (a human task with a github external ref).
+//     pr_review (a human task with a github external ref). SWT-72 adds four
+//     more display-only facts: needs_review (activity_at set and later than
+//     reviewed_at), and the surfacing message's channel, sender and the
+//     activity stamp, through a PK LEFT JOIN on normalized_messages.
 //  2. the queue-head candidates: every ready task in the database, in
 //     tools.TaskQueueOrder (D2) — never only the displayed rows, so a filter
 //     can hide a queue's first task but never make the second one blue. Skipped
@@ -378,7 +397,8 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	q, err := s.pool.Query(ctx,
 		`SELECT to_char(now() AT TIME ZONE $2, 'HH24:MI:SS'),
 		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today, f.session,
-		        f.updated, f.from_message, f.pr_review, f.state_age_min
+		        f.updated, f.from_message, f.pr_review, f.state_age_min,
+		        f.needs_review, f.activity_channel, f.activity_sender, f.activity_stamp
 		   FROM (SELECT 1) one
 		   LEFT JOIN (
 		     SELECT t.id, t.status,
@@ -401,8 +421,14 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		                            WHERE d.task_id = t.id AND d.reopened_at IS NULL
 		                            ORDER BY d.id DESC LIMIT 1), '')
 		                 ELSE '' END AS dismissal,
-		            (t.status = 'closed' AND COALESCE(t.closed_at, t.updated_at) >= `+boardDayStart("$2")+`) AS closed_today
+		            (t.status = 'closed' AND COALESCE(t.closed_at, t.updated_at) >= `+boardDayStart("$2")+`) AS closed_today,
+		            COALESCE(t.activity_at IS NOT NULL
+		                     AND (t.reviewed_at IS NULL OR t.activity_at > t.reviewed_at), false) AS needs_review,
+		            COALESCE(nm.channel, '') AS activity_channel,
+		            COALESCE(nm.sender, '') AS activity_sender,
+		            COALESCE(to_char(t.activity_at AT TIME ZONE $2, 'YYYY-MM-DD HH24:MI:SS.US'), '') AS activity_stamp
 		       FROM tasks t
+		       LEFT JOIN normalized_messages nm ON nm.id = t.activity_by_message_id
 		      WHERE t.id = ANY($1) OR t.status = 'ready') f ON true`,
 		ids, BoardTimeZone, tools.WorkingLease.Seconds())
 	if err != nil {
@@ -413,10 +439,12 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	for q.Next() {
 		var id *int64
 		var status, state, stateAt, dismissal, session, updated *string
-		var stateToday, stale, closedToday, fromMessage, prReview *bool
+		var stateToday, stale, closedToday, fromMessage, prReview, needsReview *bool
 		var stateAgeMin *int
+		var activityChannel, activitySender, activityStamp *string
 		if err := q.Scan(&renderedAt, &id, &status, &state, &stateAt, &stateToday, &stale, &dismissal, &closedToday,
-			&session, &updated, &fromMessage, &prReview, &stateAgeMin); err != nil {
+			&session, &updated, &fromMessage, &prReview, &stateAgeMin,
+			&needsReview, &activityChannel, &activitySender, &activityStamp); err != nil {
 			return nil, "", fmt.Errorf("scan light facts: %w", err)
 		}
 		if id == nil {
@@ -428,6 +456,8 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 			Session: *session, UpdatedStamp: *updated,
 			FromMessage: *fromMessage, PRReview: *prReview,
 			StateAgeMinutes: *stateAgeMin,
+			NeedsReview:     *needsReview,
+			ActivityChannel: *activityChannel, ActivitySender: *activitySender, ActivityStamp: *activityStamp,
 		}
 		statusOf[*id] = *status
 		if *status == "ready" {
@@ -862,6 +892,42 @@ func (s *Server) closeTaskAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.executeTask(w, r, "task_close", string(raw), taskID, boardBack(r))
+}
+
+// requeueTaskAction is POST /tasks/{id}/requeue (SWT-72 D6): the board's third
+// review verb. One executor call (task_requeue — humanOnly; stamps the review,
+// lifts holding -> ready, applies an optional priority), no SQL of its own
+// (invariant 3). The form's priority select leads with `unchanged` (empty
+// value), which is OMITTED from the args — never sent as 0, which would
+// silently demote an elevated task on a careless tap.
+func (s *Server) requeueTaskAction(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	taskID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || taskID <= 0 {
+		http.Error(w, "bad task id", http.StatusBadRequest)
+		return
+	}
+	args := map[string]any{"task_id": taskID}
+	if note := strings.TrimSpace(r.PostFormValue("note")); note != "" {
+		args["note"] = note
+	}
+	if p := strings.TrimSpace(r.PostFormValue("priority")); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			http.Error(w, "bad priority", http.StatusBadRequest)
+			return
+		}
+		args["priority"] = n // the tool's checkPriorityRange refuses anything outside 0..3
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.executeTask(w, r, "task_requeue", string(raw), taskID, boardBack(r))
 }
 
 // boardBack is D5's one spelling of the board redirect's keys: boardKeys (the

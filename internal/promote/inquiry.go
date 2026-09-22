@@ -185,14 +185,17 @@ func InquiryGate(c InquiryCandidate, now time.Time) string {
 	if !addressed(c) {
 		return GateNotAddressed
 	}
-	// C-D13: never attach to or reopen a task that is not a human's. An attach
-	// would log a summary of untrusted mail or Slack text onto a claude task,
-	// whose log feeds a worker prompt (SWT-38 pinned the log verb to human
-	// tasks for this reason); a reopen would put it back in a console queue.
-	// Creating a second task instead would break Q3 (one open task per
-	// thread), so the verdict waits, gated, until it ages out. An empty
-	// assignee reads as not human: fail closed.
-	if c.ThreadTask != nil && c.ThreadTask.AssigneeType != "human" {
+	// C-D13, narrowed by SWT-72 D11: never attach to or reopen a task that is
+	// not a human's. An attach would log a summary of untrusted mail or Slack
+	// text onto a claude task, whose log feeds a worker prompt (SWT-38 pinned
+	// the log verb to human tasks for this reason); a reopen would put it back
+	// in a console queue. Since D11 an ask with an OPEN thread task is its own
+	// task (ids-only pointer on the old one), so the gate bites only where
+	// Decide would still ATTACH — rule 2's dismissed path — spelled as one call
+	// to the pure Decide so "would attach" has one spelling. An empty assignee
+	// reads as not human: fail closed.
+	if c.ThreadTask != nil && c.ThreadTask.AssigneeType != "human" &&
+		Decide(Verdict{Lane: LaneInquiry, Kind: c.AskKind}, c.ThreadTask).Action == "attached" {
 		return GateClaudeTask
 	}
 	return ""
@@ -226,8 +229,9 @@ func inquiryTitle(asker, sender, ask string) string {
 // inquiryBody is C-D9's deterministic body: one `key: value` line each, in a
 // fixed order, "(none)" for an empty value. Every value is a copy of a stored
 // verdict field or a column, never generated. No permalink: it exists only in
-// raw_json.
-func inquiryBody(v Verdict) string {
+// raw_json. relatedTaskID (SWT-72 D11) is the thread's open task the ask
+// would have been attached to, the LAST line of the fixed list.
+func inquiryBody(v Verdict, relatedTaskID int64) string {
 	sentAt := ""
 	if v.SentAt != nil {
 		sentAt = v.SentAt.UTC().Format(time.RFC3339)
@@ -235,6 +239,10 @@ func inquiryBody(v Verdict) string {
 	storedThread := ""
 	if v.StoredThreadID != 0 {
 		storedThread = strconv.FormatInt(v.StoredThreadID, 10)
+	}
+	related := ""
+	if relatedTaskID != 0 {
+		related = strconv.FormatInt(relatedTaskID, 10)
 	}
 	var b strings.Builder
 	for _, kv := range [][2]string{
@@ -251,6 +259,7 @@ func inquiryBody(v Verdict) string {
 		{"thread_scope", v.ThreadScope},
 		{"external_message_id", v.ExternalMessageID},
 		{"verdict", v.Reason},
+		{"related_task", related},
 	} {
 		fmt.Fprintf(&b, "%s: %s\n", kv[0], orNone(kv[1]))
 	}
@@ -262,10 +271,11 @@ func inquiryBody(v Verdict) string {
 	return b.String()
 }
 
-// bodyFor is the lane's task body.
-func bodyFor(v Verdict) string {
+// bodyFor is the lane's task body. relatedTaskID is the inquiry lane's
+// (Decision.RelatedTaskID); the personal lane ignores it.
+func bodyFor(v Verdict, relatedTaskID int64) string {
 	if v.Lane == LaneInquiry {
-		return inquiryBody(v)
+		return inquiryBody(v, relatedTaskID)
 	}
 	return taskBody(v)
 }

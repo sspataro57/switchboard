@@ -11,7 +11,10 @@ package dashboard
 //	// internal/dashboard/sections.go
 //	const incomingMessage = "message"
 //	const incomingPRReview = "pr_review"
-//	func incomingKind(fromMessage, prReview bool) string
+//	func incomingKind(fromMessage, prReview, activity bool) string
+//	  // AMENDED — deliberately — by activity-resurfaces (SWT-72) D5/criterion 29:
+//	  // a third incoming kind, `activity`. The full truth table and the new
+//	  // ordering key live in sections_activity_test.go.
 //	func boardSectionOf(r taskRow) string
 //	// board.go:  taskRow gains Incoming string (board-only, never an export column)
 //	// lights.go: lightFacts gains FromMessage, PRReview bool (display-only)
@@ -81,6 +84,9 @@ func incRow(id int64, status, class, kind string, rank int) taskRow {
 
 // ---- criterion 9: incomingKind --------------------------------------------------------
 
+// AMENDED — not deleted — by activity-resurfaces (SWT-72) criterion 29: the
+// third argument. SWT-59's two-fact table is preserved by passing activity
+// false; the eight-combination table is sections_activity_test.go's.
 func TestIncomingKind_TruthTable(t *testing.T) {
 	if incomingMessage != "message" || incomingPRReview != "pr_review" {
 		t.Fatalf("incomingMessage = %q, incomingPRReview = %q, want \"message\" and \"pr_review\" (criterion 2)",
@@ -95,8 +101,8 @@ func TestIncomingKind_TruthTable(t *testing.T) {
 		{false, true, "pr_review"},
 		{true, true, "message"}, // message wins when both are set
 	} {
-		if got := incomingKind(tc.fromMessage, tc.prReview); got != tc.want {
-			t.Errorf("incomingKind(%v, %v) = %q, want %q (criterion 9)", tc.fromMessage, tc.prReview, got, tc.want)
+		if got := incomingKind(tc.fromMessage, tc.prReview, false); got != tc.want {
+			t.Errorf("incomingKind(%v, %v, false) = %q, want %q (criterion 9)", tc.fromMessage, tc.prReview, got, tc.want)
 		}
 	}
 }

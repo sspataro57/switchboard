@@ -740,6 +740,20 @@ func TestEvaluate_CaptureEventsFireNothing(t *testing.T) {
 			Payload: map[string]any{"from": "working", "to": "needs_input", "worker_id": "manual:salvo"}, Now: now}},
 		{"working_state_changed cleared", orch.Event{ID: 807, TaskID: 1, Type: "working_state_changed",
 			Payload: map[string]any{"from": "needs_input", "to": "", "worker_id": "manual:salvo"}, Now: now}},
+		// activity-resurfaces (SWT-72) D9 / criterion 25: the two rows this
+		// ticket adds. `reviewed` is task_requeue's own event (D6 step 5) and
+		// must fall into Evaluate's nil default, like working_state_changed
+		// above; the holding -> ready status_changed must hit the existing
+		// `to IN {delivered, closed}` guard (rules.go:124-129) and return nil.
+		// That guard is the whole safety argument for OQ-1 = B, so it is pinned
+		// here rather than left to review. GREEN with no production change.
+		{"reviewed (task_requeue)", orch.Event{ID: 808, TaskID: 1, Type: "reviewed",
+			Payload: map[string]any{"note": "not mine today", "from_status": "holding", "to_status": "ready",
+				"priority_from": float64(0), "priority_to": float64(0), "priority_changed": false,
+				"had_unreviewed_activity": true}, Now: now}},
+		{"status_changed holding -> ready (requeue)", orch.Event{ID: 809, TaskID: 1, Type: "status_changed",
+			Payload: map[string]any{"from": "holding", "to": "ready", "rule": "requeue",
+				"reason": "requeued from the board"}, Now: now}},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

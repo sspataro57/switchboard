@@ -430,8 +430,12 @@ func TestPromoteInquiryResurface_Integration_ACapturePassBecomesAReadyTaskOnTheD
 	}
 }
 
-// ---- criterion 15: T5, a second ask on the same DM attaches -----------------------------
+// ---- criterion 15: T5, a second ask on the same DM -------------------------------------
 
+// AMENDED by activity-resurfaces (SWT-72) D11: the second ask is its OWN task
+// (with a related_task pointer to the first), never an attach. What T5 still
+// proves: Decide runs on the resurfaced ask exactly as on an attributed one, and
+// the closed bucket stays closed.
 func TestPromoteInquiryResurface_Integration_ASecondAskOnTheSameDMAttaches(t *testing.T) {
 	ctx := context.Background()
 	s := newIQPSuite(t, ctx)
@@ -451,13 +455,16 @@ func TestPromoteInquiryResurface_Integration_ASecondAskOnTheSameDMAttaches(t *te
 	st := s.run(t, ctx, promote.Config{})
 
 	p, ok := s.promotion(t, ctx, b)
-	if !ok || p.action != "attached" || p.taskID == nil || *p.taskID != holding {
-		t.Fatalf("second resurfaced ask on the same DM: %+v (found=%v), want attached to the Holding task %d (T5: "+
-			"Decide, unchanged)", p, ok, holding)
+	if !ok || p.action != "task" || p.taskID == nil || *p.taskID == holding || *p.taskID == bucket {
+		t.Fatalf("second resurfaced ask on the same DM: %+v (found=%v), want its OWN task beside %d (SWT-72 D11)",
+			p, ok, holding)
 	}
-	if st.Attached != 1 || s.armedTasks(t, ctx) != 2 {
-		t.Errorf("stats %+v, %d armed tasks; want one attach and exactly two tasks (the bucket and the Holding one)",
-			st, s.armedTasks(t, ctx))
+	if st.Related != 1 || st.Attached != 0 || s.armedTasks(t, ctx) != 3 {
+		t.Errorf("stats %+v, %d armed tasks; want one related create and exactly three tasks (the bucket and one "+
+			"per ask)", st, s.armedTasks(t, ctx))
+	}
+	if !strings.Contains(p.reason, fmt.Sprintf("thread's open task %d", holding)) {
+		t.Errorf("reason %q does not name the first ask's task %d (SWT-72 D11)", p.reason, holding)
 	}
 	if !strings.Contains(p.reason, rsPart(bucket)) {
 		t.Errorf("attach reason %q does not name the closed task", p.reason)
@@ -505,11 +512,14 @@ func TestPromoteInquiryResurface_Integration_GatesExactlyAsForAnAttributedMessag
 		asks = append(asks, tw.ask("rs-answered-"+tw.name, ka, "slack", "conversation", s.ago(2*time.Hour)))
 		s.message(t, ctx, iqpMsg{label: "rs-answered-ours-" + tw.name, key: ka, channel: "slack", direction: "outbound",
 			sentAt: s.ago(time.Hour)})
-		// claude_task (T14): the thread's open task is a claude task.
+		// claude_task (T14): the thread's DISMISSED task is a claude task. (An
+		// OPEN one no longer gates since SWT-72 D11: the ask is its own task.)
 		kc := gmailKey("rs-claude-" + tw.name)
-		s.id(t, ctx, `INSERT INTO tasks (project_id, title, body, assignee_type, status, priority, source_thread_id)
-		              VALUES ($1,$2,'','claude','ready',0,$3) RETURNING id`,
+		ct := s.id(t, ctx, `INSERT INTO tasks (project_id, title, body, assignee_type, status, priority, source_thread_id)
+		              VALUES ($1,$2,'','claude','closed',0,$3) RETURNING id`,
 			s.armed, "itest-inqp rs claude "+tw.name, s.thread(t, ctx, kc))
+		s.id(t, ctx, `INSERT INTO task_dismissals (task_id, reason_code, dismissed_by)
+		              VALUES ($1,'not_actionable',$2) RETURNING id`, ct, iqpHuman)
 		asks = append(asks, tw.ask("rs-claude-"+tw.name, kc, "gmail", "thread", s.ago(2*time.Hour)))
 	}
 

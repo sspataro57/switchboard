@@ -59,6 +59,9 @@ package mcpserver_test
 // SWT-42 (mail-attachments) criterion 21: mail_list_attachments and
 // mail_read_attachment join wantAgentTools, so the full profile lists 25
 // tools. EXPECTED RED until schemas.go gains both entries.
+//
+// activity-resurfaces (SWT-72) criterion 23: task_requeue joins wantAgentTools.
+// EXPECTED RED until schemas.go gains the entry.
 
 import (
 	"context"
@@ -162,6 +165,13 @@ var wantAgentTools = []string{
 	// policy.humanOnly (rule human_only) is what refuses them; the handler
 	// refuses a claude task for every caller (D7).
 	"task_signal",
+	// activity-resurfaces (SWT-72) D6/criterion 23: the board's THIRD review verb
+	// — Requeue. Listed here so `swb requeue <id>` works from any Claude Code
+	// session; still policy.humanOnly (rule human_only), so a worker console is
+	// refused ("never choose your own work", and this verb can lift a status and
+	// raise a priority). Pinned for the real worker shapes by
+	// TestMCPListing_DoesNotMakeRequeueWorkerCallable (requeue_test.go).
+	"task_requeue",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.

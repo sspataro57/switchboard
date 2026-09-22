@@ -148,7 +148,11 @@ func TestIncomingSections_IncomingFunctionsDeclaredAndPure(t *testing.T) {
 		}
 	}
 	for name, want := range map[string]string{
-		"incomingKind":   "func incomingKind(fromMessage, prReview bool) string",
+		// AMENDED — deliberately — by activity-resurfaces (SWT-72) D5/criterion 29
+		// and 38: a THIRD incoming kind, `activity`. Pinned here rather than left
+		// to review, because the argument order IS the precedence
+		// (message > pr_review > activity).
+		"incomingKind":   "func incomingKind(fromMessage, prReview, activity bool) string",
 		"boardSectionOf": "func boardSectionOf(r taskRow) string",
 		"sectionFor":     "func sectionFor(status string, l light) string", // unchanged (criterion 2)
 	} {
@@ -289,8 +293,15 @@ func TestBoardLightFacts_SecondStatementByteUnchanged(t *testing.T) {
 }
 
 // Criteria 5 and 12 (I1, I7): boardLightFacts and what it reaches never read
-// the thread, the SWT-45 surfacing column, the message table or 'attached'.
-// GUARD: passes on main.
+// the thread, the SWT-45 surfacing column or 'attached'.
+//
+// NARROWED — not deleted — by activity-resurfaces (SWT-72) D5 and criterion 38.
+// The `normalized_messages` ban exists because that table has NO thread_id
+// index, so a thread-keyed read would be a sequential scan every 5 seconds. A
+// PRIMARY-KEY equality on nm.id is not that query. The token is therefore
+// permitted in EXACTLY ONE place and one spelling — the PK LEFT JOIN that
+// yields the remark's channel and the title cell's sender — and everything
+// else stays banned, `thread_id` explicitly included.
 func TestBoardLightFacts_NeverReadsThreadSurfacingOrAttached(t *testing.T) {
 	ps := parseDashboardSource(t)
 	if _, ok := ps.text["boardLightFacts"]; !ok {
@@ -300,12 +311,30 @@ func TestBoardLightFacts_NeverReadsThreadSurfacingOrAttached(t *testing.T) {
 	for _, banned := range []struct{ tok, why string }{
 		{"source_thread_id", "capture sets it on every ticket task too (I1)"},
 		{"surfaced_by_message_id", "that is SWT-45's Jira-activity revive (I1)"},
-		{"normalized_messages", "no thread_id index: a scan every 5 s (I1, I7)"},
 		{"'attached'", "an attached promotion created nothing (I1)"},
+		{"thread_id", "no thread_id index on normalized_messages: a scan every 5 s (I1, I7, SWT-72 D5)"},
 	} {
 		if strings.Contains(src, banned.tok) {
-			t.Errorf("boardLightFacts (or what it reaches) mentions %s: %s (criterion 5)", banned.tok, banned.why)
+			t.Errorf("boardLightFacts (or what it reaches) mentions %s: %s (criterion 5, SWT-72 criterion 38)",
+				banned.tok, banned.why)
 		}
+	}
+	// The ONE permitted occurrence, regex-pinned and counted.
+	pkJoin := regexp.MustCompile(`LEFT\s+JOIN\s+normalized_messages\s+nm\s+ON\s+nm\.id\s*=\s*t\.activity_by_message_id`)
+	occurrences := strings.Count(src, "normalized_messages")
+	switch {
+	case occurrences == 0:
+		t.Errorf("boardLightFacts never joins normalized_messages. SWT-72 criterion 28: one PK LEFT JOIN yields " +
+			"the remark's channel and the title cell's sender; without it the row says something arrived but " +
+			"not what or from whom")
+	case occurrences > 1:
+		t.Errorf("boardLightFacts mentions normalized_messages %d times; SWT-72 criterion 38 permits EXACTLY ONE "+
+			"occurrence, the PK LEFT JOIN", occurrences)
+	}
+	if occurrences > 0 && !pkJoin.MatchString(src) {
+		t.Errorf("boardLightFacts reads normalized_messages by something other than `LEFT JOIN normalized_messages " +
+			"nm ON nm.id = t.activity_by_message_id`. SWT-72 criterion 38: the SWT-59 ban is NARROWED to a " +
+			"primary-key equality, never widened to a scan")
 	}
 }
 
@@ -316,8 +345,11 @@ func TestListTasks_SetsIncomingFromTheFacts(t *testing.T) {
 	if body == "" {
 		t.Fatalf("board.go declares no listTasks")
 	}
-	if !regexp.MustCompile(`Incoming\s*:?=?\s*incomingKind\(\s*f\.FromMessage\s*,\s*f\.PRReview\s*\)`).MatchString(body) {
-		t.Errorf("listTasks does not set tr.Incoming = incomingKind(f.FromMessage, f.PRReview) (criterion 6)")
+	// AMENDED — deliberately — by activity-resurfaces (SWT-72) criterion 30: the
+	// third fact.
+	if !regexp.MustCompile(`Incoming\s*:?=?\s*incomingKind\(\s*f\.FromMessage\s*,\s*f\.PRReview\s*,\s*f\.NeedsReview\s*\)`).MatchString(body) {
+		t.Errorf("listTasks does not set tr.Incoming = incomingKind(f.FromMessage, f.PRReview, f.NeedsReview) " +
+			"(criteria 6, 30)")
 	}
 	row := structFieldNames(t, "board.go", "taskRow")
 	if !row["Incoming"] {

@@ -55,6 +55,18 @@ type lightFacts struct {
 	// task carrying a github PR ref. Either puts the row in the board's
 	// incoming section.
 	FromMessage, PRReview bool
+	// NeedsReview, ActivityChannel, ActivitySender and ActivityStamp are
+	// display-only (SWT-72, activity-resurfaces): lightFor never reads them, so
+	// a surfaced claude task keeps its yellow light and its session tag.
+	// NeedsReview: activity_at is set and later than reviewed_at (an inbound
+	// message a rule filed onto this open task, not yet reviewed) — the third
+	// incoming kind. ActivityChannel and ActivitySender are that message's
+	// channel and sender (the remark's words and the `from …` span);
+	// ActivityStamp is activity_at as 'YYYY-MM-DD HH24:MI:SS.US' in
+	// BoardTimeZone on the DB clock, the incoming section's fourth sort key.
+	NeedsReview                     bool
+	ActivityChannel, ActivitySender string
+	ActivityStamp                   string
 	// Stale: a working state older than tools.WorkingLease. QueueHead: the first
 	// eligible ready task of its queue, whose name is Lane (D2).
 	Stale, QueueHead bool

@@ -661,8 +661,9 @@ func TestPromoteInquiry_Integration_RouteAttributionIsFollowed(t *testing.T) {
 	}
 }
 
-// "Oldest first": the older ask on a thread creates the task, the newer one
-// attaches — so the task names the FIRST ask.
+// "Oldest first": the older ask on a thread creates the task first. AMENDED by
+// activity-resurfaces (SWT-72) D11: the newer ask is now its OWN task too,
+// with a related_task pointer to the older one — never an attach.
 func TestPromoteInquiry_Integration_OldestFirst(t *testing.T) {
 	ctx := context.Background()
 	s := newIQPSuite(t, ctx)
@@ -677,8 +678,11 @@ func TestPromoteInquiry_Integration_OldestFirst(t *testing.T) {
 	s.run(t, ctx, promote.Config{})
 	pa, _ := s.promotion(t, ctx, a)
 	pb, _ := s.promotion(t, ctx, b)
-	if pa.action != "task" || pb.action != "attached" || pa.taskID == nil || pb.taskID == nil || *pa.taskID != *pb.taskID {
-		t.Fatalf("oldest-first: a=%+v b=%+v, want a creates (task) and b attaches to the same task", pa, pb)
+	if pa.action != "task" || pb.action != "task" || pa.taskID == nil || pb.taskID == nil || *pa.taskID == *pb.taskID {
+		t.Fatalf("oldest-first: a=%+v b=%+v, want a creates (task) and b creates its OWN task (SWT-72 D11)", pa, pb)
+	}
+	if !strings.Contains(pb.reason, fmt.Sprintf("thread's open task %d", *pa.taskID)) {
+		t.Errorf("b's reason %q does not name a's task %d as the thread's open task (SWT-72 D11)", pb.reason, *pa.taskID)
 	}
 	var title string
 	s.pool.QueryRow(ctx, `SELECT title FROM tasks WHERE id=$1`, *pa.taskID).Scan(&title)
@@ -916,7 +920,8 @@ func TestPromoteInquiry_Integration_CreateShapeOrderAndExactText(t *testing.T) {
 		"thread_key: " + key + "\n" +
 		"thread_scope: thread\n" +
 		"external_message_id: <itest-inqp-create@mail.example>\n" +
-		"verdict: " + reason + "\n"
+		"verdict: " + reason + "\n" +
+		"related_task: (none)\n" // SWT-72 criterion 15: the fixed list's one new LAST line
 	if body != wantBody {
 		t.Errorf("body =\n%s\nwant\n%s(C-D9's deterministic body, exact text)", body, wantBody)
 	}
@@ -971,6 +976,10 @@ func TestPromoteInquiry_Integration_CreateShapeOrderAndExactText(t *testing.T) {
 
 // ---- C7: Decide's branches, each against the database -------------------------------
 
+// AMENDED by activity-resurfaces (SWT-72) D11: a second ask on a thread with an
+// OPEN task is its OWN task, linked both ways (body `related_task: N`, an
+// ids-only pointer log on N). ownask_integration_test.go has the full contract;
+// this keeps C7's branch table complete.
 func TestPromoteInquiry_Integration_AttachesToTheOpenTask(t *testing.T) {
 	ctx := context.Background()
 	s := newIQPSuite(t, ctx)
@@ -987,18 +996,24 @@ func TestPromoteInquiry_Integration_AttachesToTheOpenTask(t *testing.T) {
 	st := s.run(t, ctx, promote.Config{})
 
 	p, ok := s.promotion(t, ctx, b)
-	if !ok || p.action != "attached" || p.taskID == nil || *p.taskID != task {
-		t.Fatalf("second ask on the thread: %+v (found=%v), want attached to task %d", p, ok, task)
+	if !ok || p.action != "task" || p.taskID == nil || *p.taskID == task {
+		t.Fatalf("second ask on the thread: %+v (found=%v), want its OWN task, not task %d (SWT-72 D11)", p, ok, task)
 	}
-	if st.Attached != 1 || s.armedTasks(t, ctx) != 1 {
-		t.Errorf("stats %+v / %d tasks, want one attach and no second task", st, s.armedTasks(t, ctx))
+	if st.Related != 1 || st.Attached != 0 || s.armedTasks(t, ctx) != 2 {
+		t.Errorf("stats %+v / %d tasks, want one related create, no attach and two tasks", st, s.armedTasks(t, ctx))
 	}
+	// The pointer log on the OLD task: exactly one task_append_log, ids only.
 	if n := s.count(t, ctx, `SELECT count(*) FROM audit_events WHERE actor='promote:inquiry' AND tool='task_append_log'
 	                          AND task_id=$1`, task); n != 1 {
-		t.Errorf("%d task_append_log calls as promote:inquiry on task %d, want 1", n, task)
+		t.Errorf("%d task_append_log calls as promote:inquiry on task %d, want 1 (the D11 pointer)", n, task)
 	}
 	if st := s.status(t, ctx, task); st != "ready" {
-		t.Errorf("an attach changed the task's status to %q", st)
+		t.Errorf("the pointer changed the old task's status to %q", st)
+	}
+	var body string
+	s.pool.QueryRow(ctx, `SELECT body FROM tasks WHERE id=$1`, *p.taskID).Scan(&body)
+	if !strings.HasSuffix(body, fmt.Sprintf("related_task: %d\n", task)) {
+		t.Errorf("the new task's body does not end `related_task: %d`:\n%s", task, body)
 	}
 }
 
@@ -1513,23 +1528,38 @@ func (s *iqpSuite) assertClaudeGated(t *testing.T, ctx context.Context, task, ms
 	}
 }
 
-// MUTATIONS: drop InquiryGate's C-D13 clause → both tests red (an attach log on
-// the open claude task; a reopen of the dismissed one). Drop assignee_type from
-// threadTask's SELECTs → AttachesToTheOpenTask and ReopensADismissedTask red
-// (an empty assignee reads as not human), and so does this file's positive
-// control. The positive control flips the SAME task to human: the gate is the
-// only thing standing between the verdict and the attach.
+// AMENDED by activity-resurfaces (SWT-72) criterion 16: an ask on a thread
+// whose OPEN task is claude's is no longer gated — it becomes its own human
+// task, and the claude task gets only an ids-only pointer (no message text
+// reaches a worker prompt). The DISMISSED claude shape is still gated:
+// NeverReopensADismissedClaudeTask below. MUTATIONS: drop InquiryGate's C-D13
+// clause → the dismissed test red (a reopen of the dismissed one). Drop
+// assignee_type from threadTask's SELECTs → ReopensADismissedTask red (an
+// empty assignee reads as not human).
 func TestPromoteInquiry_Integration_NeverAttachesToAnOpenClaudeTask(t *testing.T) {
 	ctx := context.Background()
 	s := newIQPSuite(t, ctx)
 	task, _, m := s.claudeThreadTask(t, ctx, "claude-open", false)
-	s.assertClaudeGated(t, ctx, task, m, "ready")
-
-	s.exec(t, ctx, `UPDATE tasks SET assignee_type='human' WHERE id=$1`, task)
 	st := s.run(t, ctx, promote.Config{})
-	if p, ok := s.promotion(t, ctx, m); !ok || p.action != "attached" || p.taskID == nil || *p.taskID != task || st.Attached != 1 {
-		t.Errorf("POSITIVE CONTROL: the same task as human: promotion %+v (found=%v), stats %+v; want attached to %d",
-			p, ok, st, task)
+	if st.Gated[promote.GateClaudeTask] != 0 || st.Related != 1 {
+		t.Errorf("stats %+v, want no claude_task gate and one related create (SWT-72 criterion 16)", st)
+	}
+	p, ok := s.promotion(t, ctx, m)
+	if !ok || p.taskID == nil || *p.taskID == task {
+		t.Fatalf("promotion %+v (found=%v); want the ask's OWN task, never an attach to claude task %d", p, ok, task)
+	}
+	var assignee string
+	s.pool.QueryRow(ctx, `SELECT assignee_type FROM tasks WHERE id=$1`, *p.taskID).Scan(&assignee)
+	if assignee != "human" {
+		t.Errorf("the ask's task is %q, want human", assignee)
+	}
+	// Nothing but the ids-only pointer touches the claude task.
+	if n := s.count(t, ctx, `SELECT count(*) FROM task_events WHERE task_id=$1 AND event_type='log'
+	                          AND payload::text LIKE '%can you look at this%'`, task); n != 0 {
+		t.Errorf("message text reached the claude task's log (%d rows); the pointer is ids only", n)
+	}
+	if got := s.status(t, ctx, task); got != "ready" {
+		t.Errorf("claude task %d status = %q, want ready unchanged", task, got)
 	}
 }
 

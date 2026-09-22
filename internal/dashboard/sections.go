@@ -38,20 +38,23 @@ var boardSectionOrder = []boardSection{
 	{Key: "other", Title: "other"},
 }
 
-// The two incoming kinds (SWT-59 I1, I2), in the section's order.
+// The three incoming kinds (SWT-59 I1, I2; SWT-72 D5), in the section's order.
 const (
 	incomingMessage  = "message"   // the promoter created it from an email or Slack message
 	incomingPRReview = "pr_review" // a human task carrying a github PR ref
+	incomingActivity = "activity"  // an open task with unreviewed inbound activity (a comment, an email, a slack)
 )
 
-// incomingKind names a row's incoming kind from its two provenance facts; a
-// promoter task wins when both are set, "" when neither is.
-func incomingKind(fromMessage, prReview bool) string {
+// incomingKind names a row's incoming kind from its three provenance facts:
+// message > pr_review > activity, "" when none is set.
+func incomingKind(fromMessage, prReview, activity bool) string {
 	switch {
 	case fromMessage:
 		return incomingMessage
 	case prReview:
 		return incomingPRReview
+	case activity:
+		return incomingActivity
 	}
 	return ""
 }
@@ -93,13 +96,17 @@ func sectionFor(status string, l light) string {
 // lightRank is L2's within-section order: attention first.
 var lightRank = map[string]int{"input": 0, "stale": 1, "working": 2, "next": 3, "done": 4, "none": 5}
 
-// incomingRank is I5's second key: messages before PRs.
-var incomingRank = map[string]int{incomingMessage: 0, incomingPRReview: 1}
+// incomingRank is the incoming section's kind key: messages before PRs before
+// activity (SWT-59 I5, SWT-72 D5).
+var incomingRank = map[string]int{incomingMessage: 0, incomingPRReview: 1, incomingActivity: 2}
 
 // boardSections partitions rows into boardSectionOrder's sections, omitting
 // empty ones; every row lands in exactly one (boardSectionOf). Incoming is
-// ordered by light rank, then kind (messages before PRs), then id DESC — the
-// newest first; the queue by QueueRank (tools.TaskQueueOrder, read by
+// ordered by D5's four keys: light rank; needs-review before reviewed (the
+// unreviewed thing is the only one with a clock on it, and the only one
+// Requeue can clear); then kind (messages before PRs before activity); then
+// the later ActivityStamp first, else id DESC — the newest first. With no
+// needs-review row the order is SWT-59's, unchanged. The queue by QueueRank (tools.TaskQueueOrder, read by
 // boardLightFacts), unranked rows after ranked ones by id; every other section
 // by light rank, then the status's position in boardStatusOrder (unknown
 // statuses last), then id.
@@ -135,8 +142,17 @@ func boardSections(rows []taskRow) []boardSection {
 				if ra, rb := lightRank[a.Light.Class], lightRank[b.Light.Class]; ra != rb {
 					return ra < rb
 				}
+				if a.NeedsReview != b.NeedsReview {
+					return a.NeedsReview
+				}
 				if ka, kb := incomingRank[a.Incoming], incomingRank[b.Incoming]; ka != kb {
 					return ka < kb
+				}
+				// D5 key 4: the stamp orders NEEDS-REVIEW rows only. A reviewed
+				// row keeps a stale stamp (activity, then Requeue or a close), and
+				// among reviewed rows SWT-59's id DESC is the order.
+				if a.NeedsReview && b.NeedsReview && a.ActivityStamp != b.ActivityStamp {
+					return a.ActivityStamp > b.ActivityStamp
 				}
 				return a.ID > b.ID
 			})

@@ -68,6 +68,9 @@ var readProfileTools = []string{"project_list", "task_list", "task_get_next"}
 var userProfileTools = append(append([]string(nil), readProfileTools...),
 	"task_dismiss", "task_close", "task_mark_delivered",
 	"create_task", "task_append_log", "task_set_priority",
+	// SWT-72 D6: the third review verb, `swb requeue <id>`; humanOnly keeps
+	// worker consoles out, as with task_set_priority.
+	"task_requeue",
 	// SWT-42 O1 (Salvador, 2026-09-12: "yes expose it on the user mcp too"):
 	// attachment reads, gated by the SWT-21 locality rule in the handler. The
 	// finder returns headers and attachment names only; mail bodies

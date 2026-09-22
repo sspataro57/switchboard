@@ -1207,13 +1207,20 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// 0038_delivery_cc.sql. Its own guards are internal/tools
 		// TestMigration0038_CcColumnAndChecks (the file) and
 		// TestMigration0038_Integration_DeliveryCcShape (the applied schema).
+		// 39 is SWT-72's (activity-resurfaces: tasks.activity_at,
+		// activity_by_message_id and reviewed_at — the board-facing pair that
+		// surfaces an open task into INCOMING plus the review stamp, deliberately
+		// NOT a reuse of SWT-45's surfaced_* (D1)), named by its SPEC's data-model
+		// section as 0039_task_activity_review.sql. Its own guards are
+		// internal/tools TestMigration0039_ActivityReviewColumns (the file) and
+		// TestMigration0039_Integration_ActivityColumns (the applied schema).
 		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
 		// (TestMigration0021_..., TestMigration0022_..., TestMigration0023_...)
 		// asserts only its own file; the numbers nobody owns are caught HERE,
 		// because the migrate runner keys on schema_migrations.version with NO
 		// checksum — a stray or edited file is skipped SILENTLY and the schema
 		// diverges with no error anywhere.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 {
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 && n != 39 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

@@ -127,6 +127,13 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"task_set_source_thread", validateSetSourceThread, taskSetSourceThread},
 		// SWT-45 J7: spine-facing (capture), off both MCP profiles, not humanOnly.
 		{"task_mark_surfaced", validateMarkSurfaced, markSurfaced},
+		// SWT-72 D3: inbound activity on an OPEN task, for the board's INCOMING.
+		// Spine-facing (capture, promote), off both MCP profiles, not humanOnly.
+		{"task_mark_activity", validateMarkActivity, markActivity},
+		// SWT-72 D6: the third review verb — back to the queue, optional
+		// priority, lifts holding -> ready. humanOnly (rule human_only).
+		// MCP-listed in both profiles. See requeue.go.
+		{"task_requeue", validateRequeue, requeueTask},
 		// SWT-38 C5/C6: reorder any task on the 0..3 scale. humanOnly (rule
 		// human_only): no spine caller writes priority after creation, so every
 		// automated caller is refused. MCP-listed in both profiles. See priority.go.

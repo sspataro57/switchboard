@@ -110,11 +110,11 @@ func TestTaskContext_OneEntryBothProfiles(t *testing.T) {
 	}
 	full := mcpserver.New(&fakeExec{}, testWorkerID).ListTools()
 	user := mcpserver.NewWithProfile(&fakeExec{}, "manual:salvo", mcpserver.ProfileUser).ListTools()
-	if len(full) != 27 {
-		t.Errorf("the full profile lists %d tools, want 27 (unchanged: it already lists task_context)", len(full))
+	if len(full) != 28 {
+		t.Errorf("the full profile lists %d tools, want 28 (27 → 28 with SWT-72's task_requeue)", len(full))
 	}
-	if len(user) != 15 {
-		t.Errorf("the user profile lists %d tools, want 15 (14 → 15, criterion 27)", len(user))
+	if len(user) != 16 {
+		t.Errorf("the user profile lists %d tools, want 16 (14 → 15 criterion 27; 15 → 16 with SWT-72's task_requeue)", len(user))
 	}
 	f, u := find(full), find(user)
 	if f == nil || u == nil {

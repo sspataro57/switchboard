@@ -718,9 +718,9 @@ func runCaptureRulesRun(argv []string) error {
 	// that matched nothing and a pass that never ran must not look the same.
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
 		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
-		"\"pr_author_skipped\":%d,\"pr_closed\":%d}\n",
+		"\"pr_author_skipped\":%d,\"pr_closed\":%d,\"activity\":%d}\n",
 		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated, stats.Deferred, stats.Blind, stats.Resurfaced,
-		stats.PRAuthorSkipped, stats.PRClosed)
+		stats.PRAuthorSkipped, stats.PRClosed, stats.Activity)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
 	}
