@@ -842,6 +842,28 @@ frozen literals*).
   order (SWT-72 Step 0e measured 453 rows / 55 buffers for the board's own scan). Not a gate; it
   decides whether an index is Future work.
 
+- **Measured 2026-09-22 14:00 EDT (prod, read-only, 14 days, the build session):**
+  - **0a — gate passed for every rule.** Attaches onto OPEN tasks per day: rule 10 (`body_regex`
+    collaboratory) gmail 2.9 / slack 1.2 / jira 0.1; rule 57 (Mario Cruz's Upwork room, saka) 2.8;
+    rule 3 (jira WEB-) 1.0; rule 75 (José's key regex) slack 0.9 / gmail 0.4; rule 72 (jira API-) 0.7;
+    rule 71 (jira WEB-) 0.6; rule 74 slack 0.4 / gmail 0.1. Own edits (`Anonymous (JIRA)`): 2, all on
+    rule 10 gmail; blank senders: 0. Nothing near 10/day.
+  - **0b — the two-copy risk is real for rule 75 on Slack:** 37 of its 48 Slack attaches have a jira
+    sibling on the same task within ±10 min (the Jira bot echoing comments into Slack, sender `Jira`);
+    rule 10 slack 42/253, gmail 23/554; rule 74 slack 7/13, gmail 5/9. The `Jira` sender is already
+    in collaboratory's notifier list, so D2's notifier check removes those before a comm is made;
+    still, arm the JIRA-side rules (3, 71, 72) and rule 75 first, and watch 74/10 before arming them.
+  - **0c — senders behind the candidates:** rules 3/71/72 — José Garcia 15, Katie Evans 17 (real
+    comments, ~1/day each); rule 75 — `Jira` 12 (notifier), Katie Evans (JIRA) 4, José Garcia (JIRA)
+    1, José direct 1; rule 10 gmail — Salvador's own GitHub notifications 25 (notifier), `Jira` 14
+    (notifier), Katie (JIRA) 6, Lyle 3, Anonymous 2, misc bots 3; rule 57 — Mario Cruz 39 (real,
+    Upwork). The D10 residual after the notifier/anonymous checks is a handful of bot mails on rule 10.
+  - **0d —** only `collaboratory` has a notifier list
+    (`Jira, jira@treetopllc.jira.com, notifications@github.com, noreply@github.com, no-reply@github.com,
+    no-reply@builds.circleci.com`). saka/foundry have none and need none (their attaches are people).
+  - **0e —** all 155 open targets are `human`; the ids-only pointer never lands on a worker task today.
+  - **0f —** `Seq Scan on tasks` 461 rows / 55 buffers, 0.36 ms. No index needed.
+
 **1. Unit:** `go test ./...`. The SWT-48 `TestAttributionTrend_*` flake (20:00–24:00 EDT) is
 pre-existing; re-run with `TZ=UTC` if it fires.
 
