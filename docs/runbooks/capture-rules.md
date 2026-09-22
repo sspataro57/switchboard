@@ -831,3 +831,41 @@ inquiry-armed today, so nothing is lost. A gate-path resurface is future work.
 and there is no tool to pick up those misses. A shadow re-point
 ("Re-pointing already-decided messages" above) does not help here, because
 the resurface path reads only live decisions.
+
+## Comm rules (SWT-74, comms-inbox)
+
+A rule armed with `comm_task` turns a PERSON's message it files onto an OPEN task into its own
+task in INCOMING — a "comm" to answer, route or dismiss — instead of a log line that surfaces the
+ticket task. Everything else about the rule is unchanged: the ticket task still gets the full log
+line, plus an ids-only pointer (`capture: comm #N created from this message (message M)`).
+
+```bash
+# see what arming WOULD do, before any row exists (shadow, writes nothing)
+opsctl capture-rules try --project collaboratory --type body_regex --pattern '\b(?:WEB|API|OPS)-[0-9]+\b' \
+  --external-system jira --key-regex '\b((?:WEB|API|OPS)-[0-9]+)\b' --comm-task --show all
+# arm a NEW rule
+opsctl capture-rules add … --external-system jira --key-regex '…' --comm-task
+# arm an EXISTING rule (rules cannot be edited through the tool): one UPDATE, recorded in the ticket
+psql … -c "UPDATE capture_rules SET comm_task = true WHERE id = 75"
+# disarm — the mildest rollback, no deploy
+psql … -c "UPDATE capture_rules SET comm_task = false WHERE id = 75"
+```
+
+What does NOT become a comm even on an armed rule (the decision's `reason` names the cause): a
+closed target (SWT-45/SWT-53 own it), a blank sender, a sender on the project's `notifier_senders`
+(the Jira bot's Slack echoes, GitHub notifications), and `Anonymous (JIRA)` (his own edits). A first
+message about a NEW key creates the ticket task, never a comm. `comm_task` is refused with
+`pr_review` and without an `external_system`.
+
+Why not arm the Jira connector's own thread rules AND a body-regex rule on the same keys: both file
+the same comment (J3's two copies) and you would get two comms per comment. Arm one side per key
+shape; pre-check 0a in the SPEC measured which. A rule on a project whose `ticket_assignee_gate`
+is on creates NO comms for its jira matches (the gate stage has no comm path).
+
+Routing a comm: on the board, `actions → Attach` with the target task id (the comm closes; the
+target gets an ids-only pointer, is NOT resurfaced, and never sees the note). From a session:
+`swb match <id>` proposes the task by capture's own rules; `swb attach <id> <target>` routes it.
+`opsctl task-match --message N | --task N | --text "…"` is the same read from the shell; a pasted
+line can only match subject/body rules and says so.
+
+Counters: `"comm_tasks":N` on every capture line. Watch it for a day after arming ONE rule.

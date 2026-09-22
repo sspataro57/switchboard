@@ -160,7 +160,11 @@ func TestMigrationLedger_Learns0024(t *testing.T) {
 	// note (the slack_watch table, plus the line recording that 0040 belongs to
 	// comms-inbox and is deliberately NOT accepted) sits immediately above the
 	// marker. Third time, same reason — the reach, not the rule.
-	start := i - 5600
+	//
+	// WIDENED again, 5600 → 6400, by comms-inbox (SWT-74): 40's ownership note
+	// (capture_rules.comm_task, capture_decisions.comm_task_id and their two
+	// CHECKs) now sits between 39's and 41's. Fourth time, same reason.
+	start := i - 6400
 	if start < 0 {
 		start = 0
 	}

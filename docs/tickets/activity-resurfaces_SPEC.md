@@ -169,6 +169,10 @@ trace. A monotone `reviewed_at` keeps the history, and a later activity re-surfa
 
 ### D3 — Who writes it: a sibling spine tool, `task_mark_activity`, on the rule-driven attach paths
 
+> *Amended 2026-09-22 (SWT-74, comms-inbox D3):* on a rule armed with `capture_rules.comm_task`, a
+> person's attach makes its OWN comm task and the activity mark lands on the COMM, not on the target
+> (the target keeps the log line and gains an ids-only pointer). Un-armed rules are unchanged.
+
 `{task_id, message_id, reason}` → `{task_id, marked, skipped?}`. Modelled line for line on
 `task_mark_surfaced`, under the tasks row lock:
 

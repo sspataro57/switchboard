@@ -299,6 +299,16 @@
           <button>Requeue</button>
         </form>
         {{end}}
+        <form class="inline" method="post" action="/tasks/{{.ID}}/attach">
+          <input type="hidden" name="project" value="{{index $.Filters "project"}}">
+          <input type="hidden" name="status" value="{{index $.Filters "status"}}">
+          <input type="hidden" name="assignee_type" value="{{index $.Filters "assignee_type"}}">
+          <input type="hidden" name="subproject" value="{{index $.Filters "subproject"}}">
+          <input type="hidden" name="refresh" value="{{index $.Filters "refresh"}}">
+          <input type="number" name="target_task_id" min="1" placeholder="task #" required>
+          <input type="text" name="note" placeholder="note (optional)">
+          <button>Attach</button>
+        </form>
       </div></details>
     </div>
     {{end}}

@@ -899,6 +899,17 @@ Run the capture and dashboard packages twice (rerunnable cleanup), then
 - `opsctl capture-rules try --comm-task …` on the same db shows the comm proposals.
 - Drop the database afterwards.
 
+**Measured 2026-09-22 (implementation):** unit `go test ./...` green; `-race` clean on internal/tools and
+internal/capture; integration green on the isolated `ops_swt72` (0040 applied): capture (criteria 10, 11,
+16, 41–45 + amended D8), tools (22–26, 29–35, 46, 47), dashboard (the comm row renders in INCOMING with
+`new email` + sender, the ticket stays in QUEUE; the Attach form POSTs through the real server and the
+comm leaves every working section), promote/ticketstatus/opsctl unchanged. Step 4's browser smoke is
+covered by the HTTP-driven dashboard integration test (real server, real form post); no Playwright pass
+was run for this ticket. Three test-side readings amended on implementation, each with a dated note:
+the criterion-6 column scan exempts the `comm_tasks` counter key and opsctl's flag; ruleTaskBody's key
+block is the segment after the header sentence's blank line; "the board no longer shows the comm
+anywhere" reads as "in no working section" (a row closed today renders in DONE, SWT-57 L1).
+
 **5. Deploy — migration FIRST, then ONE image tag, then arm ONE rule and watch it.**
 
 1. Apply 0040 (kube one-shot migrate Job). **Barrier:** every capture pass built from this branch

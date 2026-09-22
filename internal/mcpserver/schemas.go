@@ -207,6 +207,33 @@ var agentTools = []Tool{
 			"is refused by policy.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"priority":{"type":"integer","minimum":0,"maximum":3,"description":"optional: 0 normal, 1 elevated, 2 high, 3 urgent; omitted = unchanged"},"note":{"type":"string","description":"optional: why it goes back, in Salvador's words"}},"required":["task_id"]}`),
 	},
+	// SWT-74 (comms-inbox) D6: the routing READ. Read-only, not humanOnly: a
+	// worker console may ask which task a line belongs to; it cannot act on
+	// the answer (task_attach is humanOnly). Runs capture's own matcher.
+	{
+		Name: "task_match",
+		Description: "Ask which swb task a message, a comm task or a pasted line belongs to, using capture's own " +
+			"matcher rules (the same decision a capture pass makes). Pass EXACTLY ONE of message_id (a normalized " +
+			"message), task_id (a comm task in INCOMING: its activity message is matched) or text (a pasted line). " +
+			"Returns matched, capture's reason, and ranked proposals — each with the task's id/title/status/project, " +
+			"the source (rule_ref: the matching rule's own external-ref resolution; source_thread: open tasks on " +
+			"the message's thread), the rule that matched and why. A text proposal is partial:true (the own-action " +
+			"and PR-trust checks need a stored message). Read-only: proposes, never routes. Optional project (slug " +
+			"filter) and limit (1..20, default 5). Titles only, never bodies.",
+		InputSchema: schema(`{"type":"object","properties":{"message_id":{"type":"integer"},"task_id":{"type":"integer"},"text":{"type":"string"},"project":{"type":"string","description":"optional: only proposals in this project slug"},"limit":{"type":"integer","minimum":1,"maximum":20,"description":"optional, default 5"}}}`),
+	},
+	// SWT-74 (comms-inbox) D7: the routing VERB. humanOnly (rule human_only):
+	// it closes a task. Listed on both profiles beside task_requeue.
+	{
+		Name: "task_attach",
+		Description: "Route a comm task (a person's message that became its own INCOMING row) onto the task it " +
+			"belongs with, and CLOSE the comm: the target task gets one ids-only log line (attached: task #N), " +
+			"the comm is closed with reason `routed to task #target: note` and its own `attached` event. The note " +
+			"never reaches the target. Refuses a closed target (task_reopen is the verb for that) and a task routed " +
+			"onto itself; the same pair twice is a no-op (attached:false, skipped: already_attached); a second, " +
+			"different target is allowed. Nothing is sent. Human sessions only: a worker console is refused by policy.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer","description":"the comm task to route"},"target_task_id":{"type":"integer","description":"the task it belongs with"},"note":{"type":"string","maxLength":500,"description":"optional: why, in Salvador's words; rides the comm's close reason"}},"required":["task_id","target_task_id"]}`),
+	},
 	// SWT-52 (board-status-lights) D7/D13: a session's state signal on a HUMAN
 	// task, so the board's light is truthful. Listing it removes the transport
 	// allowlist as a refusal for worker consoles, so policy.humanOnly (rule

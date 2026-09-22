@@ -366,7 +366,11 @@ func TestRuleTaskBody_Characterization(t *testing.T) {
 		"external_message_id: upwork:msg:99\n" +
 		"\nHi Salvador, I wanted to check in about the invoice"
 
-	got := ruleTaskBody(pm, titleUpworkRule(), "upwork_crm", titleUpworkThreadKey)
+	// AMENDED — not rewritten — by comms-inbox (SWT-74) criterion 13:
+	// ruleTaskBody gains a relatedTaskID parameter, and with 0 the output is
+	// BYTE-IDENTICAL to today, which is exactly what this characterization
+	// asserts. The `want` string below is unchanged.
+	got := ruleTaskBody(pm, titleUpworkRule(), "upwork_crm", titleUpworkThreadKey, 0)
 	if got != want {
 		t.Errorf("ruleTaskBody changed.\n got: %q\nwant: %q\nCriterion 6: the title change moves the "+
 			"identity OUT of the title, so the body is now the only place a human can recover it — "+
@@ -387,7 +391,7 @@ func TestRuleTaskBody_EmptySenderStillReadsAsNone(t *testing.T) {
 		channel: "",
 		sentAt:  time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC),
 	}
-	got := ruleTaskBody(pm, titleUpworkRule(), "upwork_crm", titleUpworkThreadKey)
+	got := ruleTaskBody(pm, titleUpworkRule(), "upwork_crm", titleUpworkThreadKey, 0)
 	if !strings.Contains(got, "sender: (none)\n") {
 		t.Errorf("ruleTaskBody with an empty sender does not write `sender: (none)`:\n%s", got)
 	}

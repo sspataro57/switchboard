@@ -160,6 +160,7 @@ type RulesStats struct {
 	PRAuthorSkipped int
 	PRClosed        int
 	Activity        int // SWT-72: task_log attaches that marked activity on an OPEN task
+	CommTasks       int // SWT-74: comm tasks CREATED by armed rules' task_log attaches
 }
 
 // RulesMode reads CAPTURE_RULES_MODE. Anything that is not exactly "live" —
@@ -264,6 +265,10 @@ type storedRule struct {
 	// read from the COLUMN with the rules. This is its one reader:
 	// notifierSender matches a sender against it by equality.
 	notifiers []string
+	// commTask is capture_rules.comm_task (SWT-74 D1), read from the COLUMN
+	// with the rules — the ONLY reader. An armed rule's task_log attach from a
+	// person becomes its own INCOMING task (comm.go decides).
+	commTask bool
 }
 
 // pendingMessage is one inbound message the pass must decide about.
@@ -293,6 +298,10 @@ type ruleDecision struct {
 	// criterion 13), 0 = none. Carried, never written to capture_decisions:
 	// the typed outcome lives in task_dismissals.reopened_by_message_id (D7).
 	dismissalID int64
+	// comm (SWT-74 D3): this task_log makes its own comm task — carried on the
+	// decision, never a column; the created task's id is what capture_decisions
+	// records (comm_task_id), after the fact.
+	comm bool
 	// revive: a task_log on a CLOSED task by an overriding rule (SWT-45 J9) —
 	// log, then the revive form of task_reopen. surface: a task created by an
 	// overriding rule — create, link, provenance, then task_mark_surfaced.
@@ -525,9 +534,11 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 			// for review. Log first, THEN the mark (a crash between the two
 			// leaves today's behaviour); a closed target is skipped by the tool,
 			// so the revive and reopen below keep their SWT-45/SWT-36 meaning.
-			// The ONE exclusion is the merged/closed PR notice: the next call
-			// closes the task, and surfacing a row to close it is noise.
-			if !decision.prClose {
+			// Two exclusions: the merged/closed PR notice (the next call closes
+			// the task, and surfacing a row to close it is noise) and a comm
+			// (SWT-74 D3: the mark MOVES to the comm task — the new row is the
+			// thing to look at, and surfacing the target too would double the rows).
+			if !decision.prClose && !decision.comm {
 				marked, err := markRuleActivity(ctx, ex, cfg.Actor, pm, *decision.taskID, *decision.extSystem, *decision.extKey)
 				if err != nil {
 					return stats, err
@@ -535,6 +546,46 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 				if marked {
 					stats.Activity++
 				}
+			}
+			// SWT-74 D3: an ARMED rule's attach from a person makes its OWN comm
+			// task, in this order — create (through create_task), record the id
+			// on the decision (the claim is spent; a later failure must not lose
+			// the pointer), provenance (draft_delivery refuses a task without
+			// it), the activity mark (the ONE thing that puts the comm in
+			// INCOMING), and LAST the ids-only pointer on the target. No
+			// external_refs row for the comm: taskForExternalRef takes the NEWEST
+			// ref for a key, and a second row would hijack every future attach.
+			// Crash window: a death between create_task and recordDecisionCommTask
+			// leaves one orphan comm task — ready, in QUEUE, no thread, no pointer,
+			// unreferenced by the spent claim — that nothing reconciles. Accepted:
+			// one quiet extra row, strictly milder than the create branch's own
+			// window, and the operator sees it as a plain human task to dismiss.
+			if decision.comm {
+				commID, err := createCommTask(ctx, ex, cfg.Actor, pm, winner, *decision.extSystem, *decision.extKey, *decision.taskID)
+				if err != nil {
+					return stats, err
+				}
+				if err := recordDecisionCommTask(ctx, pool, decisionID, commID); err != nil {
+					return stats, err
+				}
+				if err := setRuleProvenance(ctx, ex, cfg.Actor, commID, pm); err != nil {
+					return stats, err
+				}
+				marked, err := markRuleActivity(ctx, ex, cfg.Actor, pm, commID, *decision.extSystem, *decision.extKey)
+				if err != nil {
+					return stats, err
+				}
+				if !marked {
+					// Cannot happen for a task created one statement ago — and if
+					// it did, the comm would sit in QUEUE, the one failure this
+					// ticket exists to prevent. Loud, not silent.
+					return stats, fmt.Errorf("comm task %d for message %d was not marked with its activity (tool skipped)",
+						commID, pm.msg.ID)
+				}
+				if err := appendCommPointer(ctx, ex, cfg.Actor, pm, *decision.taskID, commID); err != nil {
+					return stats, err
+				}
+				stats.CommTasks++
 			}
 			// SWT-36 D10 / SWT-45 J9: log first, THEN the reopen — a crash
 			// between the two leaves exactly today's behaviour (logged, still
@@ -619,7 +670,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		`SELECT r.id, p.slug, p.name, r.criteria_type, r.pattern, r.key_regex, r.priority, r.enabled,
 		        r.project_id, COALESCE(r.subproject,''), COALESCE(r.external_system,''),
 		        COALESCE(r.url_template,''), p.ticket_assignee_gate, r.revive, r.addressed,
-		        r.pr_review, r.exclude_pr_authors, p.notifier_senders
+		        r.pr_review, r.exclude_pr_authors, p.notifier_senders, r.comm_task
 		   FROM capture_rules r
 		   JOIN projects p ON p.id = r.project_id
 		  WHERE r.enabled
@@ -635,7 +686,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		if err := rows.Scan(&s.rule.ID, &s.rule.Project, &s.projectName, &s.rule.Kind, &s.rule.Pattern,
 			&s.rule.ExternalKeyRegex, &s.rule.Priority, &s.rule.Enabled,
 			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate, &s.gateOn,
-			&s.revive, &s.addressed, &s.prReview, &s.excludePRAuthors, &s.notifiers); err != nil {
+			&s.revive, &s.addressed, &s.prReview, &s.excludePRAuthors, &s.notifiers, &s.commTask); err != nil {
 			return nil, fmt.Errorf("scan capture rule: %w", err)
 		}
 		// Rule.Source is the evaluator's carrier for `external_system` (Evaluate
@@ -674,15 +725,7 @@ func pendingMessages(ctx context.Context, pool *pgxpool.Pool, cfg RulesConfig) (
 		since = &t
 	}
 
-	q := `SELECT m.id, m.raw_source_item_id, m.thread_id, COALESCE(sa.account_email,''),
-	             COALESCE(nt.thread_key,''), COALESCE(m.sender,''), COALESCE(m.subject,''),
-	             COALESCE(m.body_text,''), COALESCE(m.external_message_id,''),
-	             COALESCE(nt.participants,'[]'::jsonb), COALESCE(m.channel,''),
-	             COALESCE(m.sent_at, m.created_at)
-	        FROM normalized_messages m
-	        LEFT JOIN raw_source_items ri ON ri.id = m.raw_source_item_id
-	        LEFT JOIN source_accounts sa ON sa.id = ri.source_account_id
-	        LEFT JOIN normalized_threads nt ON nt.id = m.thread_id
+	q := `SELECT ` + pendingMessageCols + pendingMessageFrom + `
 	       WHERE m.direction = 'inbound'
 	         AND ($1::timestamptz IS NULL OR COALESCE(m.sent_at, m.created_at) >= $1)`
 	if !cfg.everything {
@@ -750,20 +793,47 @@ func pendingMessages(ctx context.Context, pool *pgxpool.Pool, cfg RulesConfig) (
 
 	var out []pendingMessage
 	for rows.Next() {
-		var pm pendingMessage
-		var participants []byte
-		if err := rows.Scan(&pm.msg.ID, &pm.rawItemID, &pm.threadID, &pm.msg.Source, &pm.msg.ThreadKey,
-			&pm.msg.Sender, &pm.msg.Subject, &pm.msg.BodyText, &pm.msg.ExternalMessageID,
-			&participants, &pm.channel, &pm.sentAt); err != nil {
-			return nil, fmt.Errorf("scan pending message: %w", err)
+		pm, err := scanPendingMessage(rows)
+		if err != nil {
+			return nil, err
 		}
-		pm.msg.Participants = parseThreadParticipants(participants)
 		out = append(out, pm)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate pending messages: %w", err)
 	}
 	return out, nil
+}
+
+// pendingMessageCols and pendingMessageFrom are the ONE projection of the
+// message capture evaluates (SWT-74 criterion 21): pendingMessages runs it for
+// a pass and ExplainMessage for a question, so the explainer can never read a
+// message differently from the pass that decides it. Aliases: m, ri, sa, nt.
+const (
+	pendingMessageCols = `m.id, m.raw_source_item_id, m.thread_id, COALESCE(sa.account_email,''),
+	             COALESCE(nt.thread_key,''), COALESCE(m.sender,''), COALESCE(m.subject,''),
+	             COALESCE(m.body_text,''), COALESCE(m.external_message_id,''),
+	             COALESCE(nt.participants,'[]'::jsonb), COALESCE(m.channel,''),
+	             COALESCE(m.sent_at, m.created_at)`
+	pendingMessageFrom = `
+	        FROM normalized_messages m
+	        LEFT JOIN raw_source_items ri ON ri.id = m.raw_source_item_id
+	        LEFT JOIN source_accounts sa ON sa.id = ri.source_account_id
+	        LEFT JOIN normalized_threads nt ON nt.id = m.thread_id`
+)
+
+// scanPendingMessage is the ONE scan of pendingMessageCols: it is where the
+// participants and the channel are folded in.
+func scanPendingMessage(row interface{ Scan(dest ...any) error }) (pendingMessage, error) {
+	var pm pendingMessage
+	var participants []byte
+	if err := row.Scan(&pm.msg.ID, &pm.rawItemID, &pm.threadID, &pm.msg.Source, &pm.msg.ThreadKey,
+		&pm.msg.Sender, &pm.msg.Subject, &pm.msg.BodyText, &pm.msg.ExternalMessageID,
+		&participants, &pm.channel, &pm.sentAt); err != nil {
+		return pm, fmt.Errorf("scan pending message: %w", err)
+	}
+	pm.msg.Participants = parseThreadParticipants(participants)
+	return pm, nil
 }
 
 // parseParticipants reads normalized_threads.participants, a JSON array of
@@ -996,6 +1066,31 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 			prNotice:      d.prNotice != "",
 		})
 		d.resurface = resurface
+		// comms-inbox (SWT-74 D2): does this attach make its own comm task?
+		// Decided from VALUES — the rule's column, the task's status, the three
+		// sender facts — and worded by mode: a live pass REQUESTS, a shadow pass
+		// says what it WOULD do (SWT-45 criterion 25's pattern). Every outcome
+		// names its cause on the decision row, the un-armed one included, so a
+		// smoke read of capture_decisions can tell them apart (criterion 44).
+		comm, commWhy := commTask(commInput{
+			armed:       winner.commTask,
+			status:      existing.status,
+			blankSender: blankSender(pm.msg.Sender),
+			notifier:    notifierSender(pm.msg.Sender, winner.notifiers),
+			ownJiraEdit: anonymousJiraActor(pm.msg.Sender),
+		})
+		// `&& d.prNotice == ""` is defence in depth only: 0040's CHECK and
+		// capture_rule_add both refuse comm_task with pr_review, so a PR notice
+		// can never reach an armed rule. Kept so the invariant is visible here.
+		d.comm = comm && d.prNotice == ""
+		switch {
+		case !d.comm:
+			d.reason += "; " + commWhy
+		case mode != RulesModeLive:
+			d.reason += "; " + commWhy + "; would create a comm task"
+		default:
+			d.reason += "; " + commWhy + "; comm task requested"
+		}
 		if existing.status == "closed" {
 			d.reason += "; " + why
 		}
@@ -1467,7 +1562,7 @@ func ruleCreateTaskArgs(pm pendingMessage, winner storedRule, system, key string
 		"project":       winner.rule.Project,
 		"subproject":    winner.subproject,
 		"title":         title,
-		"body":          ruleTaskBody(pm, winner, system, key),
+		"body":          ruleTaskBody(pm, winner, system, key, 0),
 		"assignee_type": "human",
 		"priority":      0,
 	}
@@ -1774,8 +1869,11 @@ func ruleTaskTitle(key string, msg Message, winner storedRule) string {
 }
 
 // ruleTaskBody copies the provenance a human needs to judge the task: which
-// message, which thread, which rule. Nothing generated.
-func ruleTaskBody(pm pendingMessage, winner storedRule, system, key string) string {
+// message, which thread, which rule. Nothing generated. relatedTaskID (SWT-74
+// D4) is the ticket task a comm belongs with: when non-zero it is the LAST
+// key/value line, before the blank line and the preview (D11's key name, one
+// vocabulary for both paths); 0 leaves the body byte-identical to before.
+func ruleTaskBody(pm pendingMessage, winner storedRule, system, key string, relatedTaskID int64) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Captured deterministically by capture rule %d (%s %q).\n\n",
 		winner.rule.ID, winner.rule.Kind, winner.rule.Pattern)
@@ -1788,8 +1886,112 @@ func ruleTaskBody(pm pendingMessage, winner storedRule, system, key string) stri
 	if pm.msg.ExternalMessageID != "" {
 		fmt.Fprintf(&b, "external_message_id: %s\n", pm.msg.ExternalMessageID)
 	}
+	if relatedTaskID != 0 {
+		fmt.Fprintf(&b, "related_task: %d\n", relatedTaskID)
+	}
 	fmt.Fprintf(&b, "\n%s", textmatch.NormalizedPrefix(rulesPreview(pm.msg), rulesPreviewLen))
 	return b.String()
+}
+
+// commTaskTitle is a comm task's title (SWT-74 D4, criterion 14):
+// `{sender}: {subject else first line}`, through textmatch.NormalizedPrefix at
+// rulesTitleLen — the ONE truncation spelling. The label falls back to the
+// project NAME, then the slug, then the key; never empty, and the separator
+// appears only when there is something after it (ruleTaskTitle's rule).
+func commTaskTitle(pm pendingMessage, winner storedRule, key string) string {
+	label := strings.TrimSpace(pm.msg.Sender)
+	switch {
+	case label != "":
+	case winner.projectName != "":
+		label = winner.projectName
+	case winner.rule.Project != "":
+		label = winner.rule.Project
+	default:
+		label = key
+	}
+	head := strings.TrimSpace(pm.msg.Subject)
+	if head == "" {
+		head = ruleFirstLine(pm.msg.BodyText)
+	}
+	title := label
+	if head != "" {
+		title = label + ": " + head
+	}
+	return textmatch.NormalizedPrefix(title, rulesTitleLen)
+}
+
+// commTaskArgs is create_task's argument object for a comm task (SWT-74 D4):
+// the RULE's project and subproject, a human task at priority 0, the sender-led
+// title and ruleTaskBody's body with `related_task: N` as its last key line.
+// Pure, like ruleCreateTaskArgs, so the payload is testable without a database.
+func commTaskArgs(pm pendingMessage, winner storedRule, system, key string, relatedTaskID int64) map[string]any {
+	return map[string]any{
+		"project":       winner.rule.Project,
+		"subproject":    winner.subproject,
+		"title":         commTaskTitle(pm, winner, key),
+		"body":          ruleTaskBody(pm, winner, system, key, relatedTaskID),
+		"assignee_type": "human",
+		"priority":      0,
+	}
+}
+
+// createCommTask creates the comm task through create_task on the executor.
+// No link_external_ref (the key belongs to the ticket task; a second ref row
+// would hijack every future attach) and no task_mark_surfaced (SWT-45's
+// machinery for an overriding create).
+func createCommTask(ctx context.Context, ex *executor.Executor, actor string,
+	pm pendingMessage, winner storedRule, system, key string, relatedTaskID int64) (int64, error) {
+	args, err := json.Marshal(commTaskArgs(pm, winner, system, key, relatedTaskID))
+	if err != nil {
+		return 0, fmt.Errorf("marshal create_task args for comm on message %d: %w", pm.msg.ID, err)
+	}
+	res, err := ex.Execute(ctx, executor.Call{Tool: "create_task", Actor: actor, Args: args})
+	if err != nil {
+		return 0, fmt.Errorf("create comm task for %s %s (message %d): %w", system, key, pm.msg.ID, err)
+	}
+	var out struct {
+		TaskID int64 `json:"task_id"`
+	}
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		return 0, fmt.Errorf("parse create_task result for comm on message %d: %w", pm.msg.ID, err)
+	}
+	if out.TaskID == 0 {
+		return 0, fmt.Errorf("create_task returned no task id for comm on message %d", pm.msg.ID)
+	}
+	return out.TaskID, nil
+}
+
+// recordDecisionCommTask completes the decision with the comm task it created
+// (SWT-74 D3 step 3) — recordDecisionTask's twin: the claim is spent, so a
+// later failure must not lose the pointer to what was created.
+func recordDecisionCommTask(ctx context.Context, pool *pgxpool.Pool, decisionID, commTaskID int64) error {
+	if _, err := pool.Exec(ctx,
+		`UPDATE capture_decisions SET comm_task_id = $2 WHERE id = $1`, decisionID, commTaskID); err != nil {
+		return fmt.Errorf("record comm task %d on capture decision %d: %w", commTaskID, decisionID, err)
+	}
+	return nil
+}
+
+// appendCommPointer is the ids-only pointer on the TARGET (SWT-74 D3 step 6):
+// one task_append_log through the executor, no title, no sender, no preview —
+// which is what makes it safe on a claude task, whose log feeds a worker
+// prompt. Deliberately NOT an activity mark: the mark moved to the comm.
+func appendCommPointer(ctx context.Context, ex *executor.Executor, actor string,
+	pm pendingMessage, targetID, commID int64) error {
+	args, err := json.Marshal(map[string]any{
+		"task_id": targetID,
+		"kind":    "log",
+		"message": fmt.Sprintf("capture: comm #%d created from this message (message %d)", commID, pm.msg.ID),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal comm pointer args for task %d: %w", targetID, err)
+	}
+	if _, err := ex.Execute(ctx, executor.Call{
+		Tool: "task_append_log", Actor: actor, Args: args, TaskID: &targetID,
+	}); err != nil {
+		return fmt.Errorf("append comm pointer to task %d (comm %d, message %d): %w", targetID, commID, pm.msg.ID, err)
+	}
+	return nil
 }
 
 // externalURL substitutes {key} once, per SPEC §3. An empty template yields an

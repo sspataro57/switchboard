@@ -84,10 +84,13 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		// TestMigration0039_Integration_ActivityColumns.
 		// AMENDED — not deleted — by slack-watch-sweep (SWT-75): 0041 creates
 		// slack_watch, guarded by TestMigration0041_SlackWatchTable and
-		// TestMigration0041_Integration_SlackWatchShape. 0040 is comms-inbox's
-		// (SWT-74) and is deliberately not exempted here until that file exists.
-		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 41 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 41: slack-watch-sweep)", e.Name())
+		// TestMigration0041_Integration_SlackWatchShape.
+		// AMENDED — not deleted — by comms-inbox (SWT-74): 0040 adds
+		// capture_rules.comm_task and capture_decisions.comm_task_id with their
+		// two CHECKs, guarded by internal/capture
+		// TestMigration0040_CaptureCommTasksShape.
+		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 40 && v != 41 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 40: comms-inbox, 41: slack-watch-sweep)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {

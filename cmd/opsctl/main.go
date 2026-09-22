@@ -8,7 +8,8 @@
 //	opsctl call --tool <name> [--args '<json>']   (raw executor call; used by the negative smoke)
 //	opsctl fleet
 //	opsctl answer-feedback --id N --answer "..." [--resume]
-//	opsctl capture-rules <list|add|run|report|gate> [flags]
+//	opsctl capture-rules <list|add|try|run|report|gate> [flags]   (add/try take --comm-task, SWT-74)
+//	opsctl task-match --message N | --task N | --text "…" [--project slug] [--limit N]   (SWT-74: capture's own matcher, read-only)
 //	opsctl ticket-status <sync|report> [flags]   (SWT-32: the jira reconciler by hand)
 //	opsctl route-candidates <add|remove|list> [flags]   (SWT-40 Part B: the routing tier's candidate sets)
 //	opsctl mail refetch <--from <sender>|--raw-id <id[,id...]>> --limit N [--since D --until D --account E --max-bytes N --dry-run]
@@ -39,7 +40,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules|slack-watch|ticket-status|route-candidates|mail> [flags]")
+		fmt.Fprintln(os.Stderr, "usage: opsctl <create-task|call|fleet|answer-feedback|capture-rules|slack-watch|task-match|ticket-status|route-candidates|mail> [flags]")
 		os.Exit(2)
 	}
 
@@ -114,6 +115,10 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case "task-match":
+		// SWT-74 D6: capture's own matcher over a message, a comm task or a
+		// pasted line — a read through the executor, printed like create-task.
+		toolName, args, err = parseTaskMatch(os.Args[2:])
 	case "slack-watch":
 		// SWT-75: the Slack watch list. Every subcommand is a tool call through
 		// the executor (slack_watch_add / slack_watch_set_enabled /
@@ -468,6 +473,8 @@ func parseCaptureRuleAdd(argv []string, extra ...func(*flag.FlagSet)) (string, j
 	var excludePRAuthors stringList
 	fs.Var(&excludePRAuthors, "exclude-pr-author", "SWT-54, repeatable: a PR author login treated like his own "+
 		"(exact, case-insensitive) or '*'+suffix, e.g. '*[bot]'; needs --pr-review")
+	commTask := fs.Bool("comm-task", false, "SWT-74: a person's message this rule files onto an OPEN task becomes "+
+		"its own INCOMING task (a comm to answer, route or dismiss); needs --external-system, refused with --pr-review")
 	for _, declare := range extra {
 		declare(fs)
 	}
@@ -509,6 +516,9 @@ func parseCaptureRuleAdd(argv []string, extra ...func(*flag.FlagSet)) (string, j
 	}
 	if *addressed {
 		payload["addressed"] = true
+	}
+	if *commTask {
+		payload["comm_task"] = true
 	}
 	if *prReview {
 		payload["pr_review"] = true
@@ -567,6 +577,7 @@ func runCaptureRulesTry(argv []string) error {
 		Priority         int      `json:"priority"`
 		PRReview         bool     `json:"pr_review"`
 		ExcludePRAuthors []string `json:"exclude_pr_authors"`
+		CommTask         bool     `json:"comm_task"`
 	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return fmt.Errorf("read candidate args: %w", err)
@@ -585,6 +596,7 @@ func runCaptureRulesTry(argv []string) error {
 			Project: a.Project, CriteriaType: a.CriteriaType, Pattern: a.Pattern, Subproject: a.Subproject,
 			ExternalSystem: a.ExternalSystem, KeyRegex: a.KeyRegex, URLTemplate: a.URLTemplate,
 			Priority: a.Priority, PRReview: a.PRReview, ExcludePRAuthors: a.ExcludePRAuthors,
+			CommTask: a.CommTask,
 		},
 		Since: *since, Show: *show, Out: os.Stdout,
 	})
@@ -728,9 +740,9 @@ func runCaptureRulesRun(argv []string) error {
 	// that matched nothing and a pass that never ran must not look the same.
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
 		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
-		"\"pr_author_skipped\":%d,\"pr_closed\":%d,\"activity\":%d}\n",
+		"\"pr_author_skipped\":%d,\"pr_closed\":%d,\"activity\":%d,\"comm_tasks\":%d}\n",
 		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated, stats.Deferred, stats.Blind, stats.Resurfaced,
-		stats.PRAuthorSkipped, stats.PRClosed, stats.Activity)
+		stats.PRAuthorSkipped, stats.PRClosed, stats.Activity, stats.CommTasks)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
 	}

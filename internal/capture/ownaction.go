@@ -132,6 +132,16 @@ func namedJiraActor(from string) string {
 	return name
 }
 
+// anonymousJiraActor reports whether From is Jira's `Anonymous (JIRA)`
+// placeholder — the shape Jira renders for a change it cannot attribute, which
+// on prod is HIS OWN edit (SWT-72 D10's residual). Built from the existing
+// parse: no new literal. A named actor, a person, a Slack name or nothing at
+// all are all false; namedJiraActor is the sibling that excludes the placeholder.
+func anonymousJiraActor(from string) bool {
+	name, ok := jiraNotificationActor(from)
+	return ok && sameJiraActor(name, jiraAnonymousActor)
+}
+
 // sameJiraActor compares two display names the way a human reads them: case
 // and runs of whitespace do not make a different person.
 func sameJiraActor(a, b string) bool {

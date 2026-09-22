@@ -930,6 +930,39 @@ func (s *Server) requeueTaskAction(w http.ResponseWriter, r *http.Request) {
 	s.executeTask(w, r, "task_requeue", string(raw), taskID, boardBack(r))
 }
 
+// attachTaskAction is POST /tasks/{id}/attach (SWT-74 D7): the board's Attach
+// verb — route this comm onto the task it belongs with and close it. One
+// executor call (task_attach — humanOnly; the ids-only pointer, the close and
+// the event are the tool's one transaction), no SQL of its own (invariant 3).
+// The target is parsed as a number before the call: a non-numeric paste is a
+// 400, not a tool error.
+func (s *Server) attachTaskAction(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	taskID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || taskID <= 0 {
+		http.Error(w, "bad task id", http.StatusBadRequest)
+		return
+	}
+	target, err := strconv.ParseInt(strings.TrimSpace(r.PostFormValue("target_task_id")), 10, 64)
+	if err != nil || target <= 0 {
+		http.Error(w, "bad target_task_id", http.StatusBadRequest)
+		return
+	}
+	args := map[string]any{"task_id": taskID, "target_task_id": target}
+	if note := strings.TrimSpace(r.PostFormValue("note")); note != "" {
+		args["note"] = note
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.executeTask(w, r, "task_attach", string(raw), taskID, boardBack(r))
+}
+
 // boardBack is D5's one spelling of the board redirect's keys: boardKeys (the
 // four filters plus SWT-52's refresh, so a Done or Dismiss made with
 // auto-refresh on lands back on an auto-refreshing board), re-encoded from the

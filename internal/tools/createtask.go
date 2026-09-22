@@ -140,6 +140,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"slack_watch_add", validateSlackWatchAdd, slackWatchAdd},
 		{"slack_watch_set_enabled", validateSlackWatchSetEnabled, slackWatchSetEnabled},
 		{"slack_watch_list", validateSlackWatchList, slackWatchList},
+		// SWT-74 D6/D7: the routing read (not humanOnly — a worker may ask, it
+		// cannot act) and the routing verb (humanOnly: it closes a task). Both
+		// MCP-listed. See match.go and attach.go.
+		{"task_match", validateMatch, matchTask},
+		{"task_attach", validateAttach, attachTask},
 		// SWT-38 C5/C6: reorder any task on the 0..3 scale. humanOnly (rule
 		// human_only): no spine caller writes priority after creation, so every
 		// automated caller is refused. MCP-listed in both profiles. See priority.go.

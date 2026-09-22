@@ -172,6 +172,17 @@ var wantAgentTools = []string{
 	// raise a priority). Pinned for the real worker shapes by
 	// TestMCPListing_DoesNotMakeRequeueWorkerCallable (requeue_test.go).
 	"task_requeue",
+	// comms-inbox (SWT-74) criteria 27 and 36: the routing pair.
+	//   - task_match: capture's OWN matcher, run read-only over a message, a
+	//     task or a pasted line. NOT humanOnly (task_list's shape) — a worker
+	//     console may ASK which task a line belongs to, because it cannot act
+	//     on the answer.
+	//   - task_attach: route the comm onto that task and close it. Still
+	//     policy.humanOnly, so a worker console is refused; pinned for the real
+	//     worker shapes by TestMCPListing_DoesNotMakeAttachWorkerCallable
+	//     (comm_tools_test.go).
+	"task_match",
+	"task_attach",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.

@@ -52,11 +52,15 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		// SWT-52 (board-status-lights) criterion 23: task_signal joins both
 		// profiles — full 26 → 27, user 13 → 14. Values changed, still literal.
 		// SWT-72: task_requeue on both profiles — full 27 → 28, user 15 → 16.
-		{ProfileFull, 28},
+		// comms-inbox (SWT-74) criteria 27 and 36: task_match and task_attach
+		// join BOTH profiles — "routing is one verb and one read" — so full
+		// 28 → 30 and user 16 → 18. Read: 3, unchanged (the fail-closed floor
+		// gains nothing).
+		{ProfileFull, 30},
 		{ProfileRead, 3},
 		// SWT-56 (signal-session-name) criterion 34: task_context joins the user
 		// profile, pinned read-only — user 14 → 15; full unchanged (it lists it).
-		{ProfileUser, 16},
+		{ProfileUser, 18},
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()

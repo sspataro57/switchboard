@@ -111,6 +111,10 @@ var humanOnly = map[string]bool{
 	"slack_watch_add":         true,
 	"slack_watch_set_enabled": true,
 	"slack_watch_list":        true,
+	// SWT-74 D7: routing a comm onto a task and CLOSING it is his judgement.
+	// humanOnly, NOT mcpHumanOnly; task_match (the read) is deliberately in no
+	// map: a worker console may ask which task a line belongs to.
+	"task_attach": true,
 	// SWT-41 D1: moving the orchestrator cursor forward DISCARDS lifecycle
 	// events — a human decision, audited, never an automated caller's (the
 	// orchestrator included). humanOnly, NOT mcpHumanOnly, and not MCP-listed:
