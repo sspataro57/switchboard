@@ -153,5 +153,18 @@
     {{end}}
   </table>
   {{if not .Deliveries}}<p>No deliveries.</p>{{end}}
+  <script>
+  // A Slack send holds the page while the mini types and clicks (up to a
+  // minute), and a second click would only be refused by the server: disable
+  // the submitting form's buttons the moment it submits, and say so on Send.
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    form.querySelectorAll('button').forEach(function (b) {
+      if (b.textContent.trim() === 'Send' || b.textContent.trim() === 'Book') b.textContent = 'Sending…';
+      b.disabled = true;
+    });
+  }, true);
+  </script>
 </body>
 </html>
