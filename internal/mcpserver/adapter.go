@@ -71,6 +71,9 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// SWT-72 D6: the third review verb, `swb requeue <id>`; humanOnly keeps
 	// worker consoles out, as with task_set_priority.
 	"task_requeue",
+	// SWT-74 D6/D7: `swb match <id>` (read-only) and `swb attach <id> <target>`
+	// (humanOnly keeps worker consoles out, as with task_requeue).
+	"task_match", "task_attach",
 	// SWT-42 O1 (Salvador, 2026-09-12: "yes expose it on the user mcp too"):
 	// attachment reads, gated by the SWT-21 locality rule in the handler. The
 	// finder returns headers and attachment names only; mail bodies

@@ -233,9 +233,9 @@ func rulesConfigFor(connector string) capture.RulesConfig {
 func printRules(cfg capture.RulesConfig, rules capture.RulesStats) {
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
 		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
-		"\"pr_author_skipped\":%d,\"pr_closed\":%d,\"activity\":%d}\n",
+		"\"pr_author_skipped\":%d,\"pr_closed\":%d,\"activity\":%d,\"comm_tasks\":%d}\n",
 		cfg.Mode, rules.Considered, rules.Matched, rules.Unmatched, rules.TasksCreated, rules.Appended, rules.Reopened, rules.Revived, rules.SurfacedCreated, rules.Deferred, rules.Blind, rules.Resurfaced,
-		rules.PRAuthorSkipped, rules.PRClosed, rules.Activity)
+		rules.PRAuthorSkipped, rules.PRClosed, rules.Activity, rules.CommTasks)
 }
 
 // newExecutor builds the one path to tasks/external_refs/task_events

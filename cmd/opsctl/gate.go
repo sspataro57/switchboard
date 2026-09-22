@@ -114,12 +114,12 @@ func runCaptureRulesGate(argv []string) error {
 // the gate stage resolves jira holds only, and a pr_review rule is a github
 // rule, never held.
 func printGateStats(mode string, st capture.GateStats) {
-	const revived, surfacedCreated, deferred, blind, resurfaced, prAuthorSkipped, prClosed = 0, 0, 0, 0, 0, 0, 0
+	const revived, surfacedCreated, deferred, blind, resurfaced, prAuthorSkipped, prClosed, commTasks = 0, 0, 0, 0, 0, 0, 0, 0
 	fmt.Printf("capture_gate: {\"mode\":%q,\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,"+
 		"\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
-		"\"pr_author_skipped\":%d,\"pr_closed\":%d,"+
+		"\"pr_author_skipped\":%d,\"pr_closed\":%d,\"comm_tasks\":%d,"+
 		"\"attributed\":%d,\"pending_lookup\":%d,\"budget_skipped\":%d,\"resolved\":%d}\n",
 		mode, st.TasksCreated, st.Appended, st.Reopened, revived, surfacedCreated, deferred, blind, resurfaced,
-		prAuthorSkipped, prClosed,
+		prAuthorSkipped, prClosed, commTasks,
 		st.Attributed, st.PendingLookup, st.BudgetSkipped, st.Resolved)
 }

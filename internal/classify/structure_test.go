@@ -1214,13 +1214,21 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// section as 0039_task_activity_review.sql. Its own guards are
 		// internal/tools TestMigration0039_ActivityReviewColumns (the file) and
 		// TestMigration0039_Integration_ActivityColumns (the applied schema).
+		// 40 is SWT-74's (comms-inbox: capture_rules.comm_task — the per-rule
+		// flag that makes a person's message its OWN INCOMING task instead of a
+		// log line on someone else's — and capture_decisions.comm_task_id, with
+		// the two CHECKs capture_rules_comm_task_shape (NOT comm_task OR
+		// (external_system IS NOT NULL AND NOT pr_review)) and
+		// capture_decisions_comm_task_is_task_log), named by its SPEC's "Data
+		// model changes" section as 0040_capture_comm_tasks.sql. Its own guards
+		// are internal/capture TestMigration0040_CaptureCommTasksShape (the
+		// file) and the rules_comm integration suite's ccRequire0040 probe (the
+		// applied schema).
 		// 41 is SWT-75's (slack-watch-sweep: the slack_watch configuration table —
 		// workspace_id/conversation_id with the leaf's own id CHECKs, label,
 		// enabled — read by the resident watch loop and written only by the
 		// three humanOnly slack_watch_* tools), named by its SPEC's "Data model
-		// changes" section as 0041_slack_watch.sql. 0040 is comms-inbox's
-		// (SWT-74), on an adjacent branch and not written yet, so it is
-		// deliberately NOT accepted below. Its own guards are internal/tools
+		// changes" section as 0041_slack_watch.sql. Its own guards are internal/tools
 		// TestMigration0041_SlackWatchTable (the file) and
 		// TestMigration0041_Integration_SlackWatchShape (the applied schema).
 		// THIS LEDGER IS THE LIVING REGISTRY. Each ticket's own guard
@@ -1229,7 +1237,7 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// because the migrate runner keys on schema_migrations.version with NO
 		// checksum — a stray or edited file is skipped SILENTLY and the schema
 		// diverges with no error anywhere.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 && n != 39 && n != 41 {
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 && n != 39 && n != 40 && n != 41 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

@@ -254,9 +254,9 @@ func captureRulesConfig() capture.RulesConfig {
 func printCaptureRules(cfg capture.RulesConfig, stats capture.RulesStats) {
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
 		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
-		"\"pr_author_skipped\":%d,\"pr_closed\":%d,\"activity\":%d}\n",
+		"\"pr_author_skipped\":%d,\"pr_closed\":%d,\"activity\":%d,\"comm_tasks\":%d}\n",
 		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated, stats.Deferred, stats.Blind, stats.Resurfaced,
-		stats.PRAuthorSkipped, stats.PRClosed, stats.Activity)
+		stats.PRAuthorSkipped, stats.PRClosed, stats.Activity, stats.CommTasks)
 }
 
 // newExecutor is the four-line block cmd/connectors/github/main.go established:

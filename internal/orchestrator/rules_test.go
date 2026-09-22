@@ -754,6 +754,15 @@ func TestEvaluate_CaptureEventsFireNothing(t *testing.T) {
 		{"status_changed holding -> ready (requeue)", orch.Event{ID: 809, TaskID: 1, Type: "status_changed",
 			Payload: map[string]any{"from": "holding", "to": "ready", "rule": "requeue",
 				"reason": "requeued from the board"}, Now: now}},
+		// comms-inbox (SWT-74) D9 / criterion 40: task_attach's own event on the
+		// ROUTED task. It must fall into Evaluate's nil default like `reviewed`
+		// above — the attach's lifecycle effect is its CLOSE, which goes through
+		// closeTransition and emits the same status_changed {to:"closed"} that
+		// R1/R2/R8 already handle for every close in the system. A case added
+		// for `attached` later would fire a rule TWICE for one act. GREEN with
+		// no production change.
+		{"attached (task_attach)", orch.Event{ID: 810, TaskID: 1, Type: "attached",
+			Payload: map[string]any{"target_task_id": float64(452), "note": "belongs with the ticket"}, Now: now}},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {

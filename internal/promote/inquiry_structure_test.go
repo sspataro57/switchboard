@@ -241,7 +241,11 @@ func TestMigrationLedger_Learns0031(t *testing.T) {
 	// TestMigrationLedger_Learns0024 has been widened three times: 41's
 	// ownership note sits immediately above the marker and pushed "31 is SWT-40
 	// Part C" out of a 3000-byte window. The reach, not the rule.
-	start, end := max(i-3800, 0), min(i+1800, len(src))
+	//
+	// WIDENED again 3800 -> 4700 by comms-inbox (SWT-74): 40's ownership note
+	// (capture_rules.comm_task, capture_decisions.comm_task_id) now sits between
+	// 39's and 41's. Same reason.
+	start, end := max(i-4700, 0), min(i+1800, len(src))
 	ledger := src[start:end]
 	if !regexp.MustCompile(`n\s*!=\s*31\b`).MatchString(ledger) {
 		t.Errorf("the ledger does not accept 31 (`n != 31`); 0031_inquiry_promotion.sql would be flagged as unowned")

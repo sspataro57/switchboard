@@ -3100,3 +3100,57 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   `/sources`' Go file must not name `sync_runs` (connector health belongs to `/funnel`), so the watch
   panel's "last read" lives in its own file; a smoke seed left in the shared scratch DB fails unrelated
   suites that count globally — clean it before the sweep.
+
+## Comms inbox (SWT-74, comms-inbox)
+
+- **What it is.** A person's message a capture rule files onto an OPEN task becomes its OWN task in
+  INCOMING ("comm": answer it, `Attach` it onto the task it belongs with, or dismiss it) instead of a
+  log line that surfaces the ticket task. Per rule, opt-in: `capture_rules.comm_task` (0040), armed with
+  `opsctl capture-rules add --comm-task` or one UPDATE; `capture-rules try --comm-task --show all`
+  shows what arming would do first. Refused with `pr_review` and without an `external_system` (validator
+  AND CHECK). Salvador's words: "you don't need a message construct they can still be task… the task is
+  just answer questions or update other tasks."
+- **The split is pure and reason-bearing** (`internal/capture/comm.go`, `commTask`): armed → task not
+  closed → sender not blank → not a notifier → not `Anonymous (JIRA)` (his own edit). First cause wins
+  and every false outcome names its own cause on `capture_decisions.reason` ("comm task requested" /
+  "would create a comm task" by mode). No `dismissed`/`connectorCopy`/`prNotice`/channel clause — each
+  would be an inert predicate; the file says why.
+- **D3 order in `EvaluateRules`' task_log branch:** appendRuleLog (unchanged) → create_task (the comm:
+  the RULE's project, human, ready, title `{sender}: {subject|first line}`, body = ruleTaskBody +
+  `related_task: N` as the last key line) → `capture_decisions.comm_task_id` → task_set_source_thread →
+  task_mark_activity on the COMM → ids-only pointer on the target
+  (`capture: comm #<new> created from this message (message <M>)`). The TARGET's mark is skipped
+  (`if !decision.prClose && !decision.comm`) — the mark MOVES to the comm. **No external_refs row for
+  the comm** (taskForExternalRef takes the newest ref per key; a second row would hijack every future
+  attach). The board is untouched: a comm is an activity row (SWT-72's columns and words).
+- **D8 as amended by swb #491:** a first message about a NEW key creates the ticket task (marked with
+  its message, so INCOMING) and NO comm task; the comm path lives strictly in the task_log branch.
+- **`task_match`** (both MCP profiles, not humanOnly): `capture.ExplainMessage`/`ExplainText` run
+  capture's OWN `decideMessage` in shadow mode (never a second matcher), sharing `pendingMessageCols` +
+  `scanPendingMessage` with the pass; sources `rule_ref` (rank 0) then `source_thread` (open tasks on
+  the message's thread, oldest first); `{task_id}` resolves only through `activity_by_message_id`
+  (refused by name otherwise); `{text}` is `partial:true` (no own-action guard, no PR-trust check);
+  titles only. **`task_attach`** (humanOnly, both profiles): one tx, lower id locked first, closed
+  target refused naming task_reopen, pair-keyed dedup (`already_attached`; a second DIFFERENT target
+  is legal), ids-only log on the target (`attached: task #S (message M)` — the NOTE never reaches the
+  target), source closed through `closeTransition` (`routed to task #T: note`) + an `attached` event.
+  The target is NOT surfaced. Dashboard: `POST /tasks/{id}/attach`, a numeric target input on every
+  row's actions popup.
+- **Measured before arming (2026-09-22):** every candidate rule under 10 attaches/day; rule 75's Slack
+  attaches are mostly the Jira bot's echoes (sender `Jira`, on the notifier list → no comm); arm the
+  Jira-side rules 3/71/72 and rule 75 first, watch 10/74.
+- **Dev lessons:** the criterion-6 "one reader of the column" scan had to exempt the `"comm_tasks"`
+  counter key and opsctl's flag (same prefix); the counter format is printed by SIX places (five mains +
+  `cmd/opsctl/gate.go`); ruleTaskBody's header sentence is followed by a blank line, so "the last key
+  line before the blank line" means the SECOND blank line.
+- **The gate stage is a second attach path with NO comm path** (`capture/gate.go`, held jira matches on a
+  `ticket_assignee_gate` project): arming a rule there is a silent no-op for its jira matches. Today's
+  candidates are not gated (0a shows live task_log decisions); check before arming a gated project's rule.
+
+## A gmail delivery sent by hand (2026-09-22, delivery 55)
+
+- `mark_delivery_sent` is the ASSISTED tier's verb (upwork_chat / slack_reply) and refuses gmail. Salvador
+  sent delivery 55's reply from Mailspring and wanted the record without a duplicate: the row was set to
+  `sent` by hand (SQL on prod, `sent_at`/`send_settled_at` now, a `policy_result.sent_by_hand` note) and the
+  act logged on task #487 through `task_append_log`. A direct write to `deliveries` outside the executor —
+  a one-off; a "sent by hand" verb for gmail (no transport, the SWT-71 finish shape) is future work.

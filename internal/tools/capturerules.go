@@ -87,6 +87,11 @@ type captureRuleAddArgs struct {
 	// like his own: an exact login (case-insensitive) or '*'+suffix.
 	PRReview         bool     `json:"pr_review,omitempty"`
 	ExcludePRAuthors []string `json:"exclude_pr_authors,omitempty"`
+	// SWT-74 D1: comm_task = a person's message this rule files onto an OPEN
+	// task becomes its own INCOMING task. Needs an external_system (a keyless
+	// rule never reaches the task_log branch: an inert flag) and is refused
+	// with pr_review (GitHub mail is a notice stream with its own review tasks).
+	CommTask bool `json:"comm_task,omitempty"`
 }
 
 // excludePRAuthorRe / excludeBotSuffixRe are criterion 2's two shapes of an
@@ -157,6 +162,19 @@ func parseCaptureRuleAdd(args []byte) (captureRuleAddArgs, error) {
 		return a, fmt.Errorf("url_template %q must contain the {key} placeholder", a.URLTemplate)
 	}
 
+	// SWT-74 criterion 18, migration 0040's CHECK, refused here first so the
+	// error names the FIELDS: capture_rules cannot be edited, so the operator
+	// gets one chance at a rule.
+	if a.CommTask {
+		if a.PRReview {
+			return a, errors.New("comm_task with pr_review is refused: GitHub notification mail is a notice stream " +
+				"with its own review tasks (SWT-54); a comm task for each notice is a worse board than today's")
+		}
+		if a.ExternalSystem == "" {
+			return a, errors.New("comm_task requires an external_system: a keyless rule never reaches the task_log " +
+				"branch (attribution only), so an armed keyless rule would be an inert flag")
+		}
+	}
 	// SWT-54 criterion 2, migration 0035's CHECKs plus what a CHECK cannot
 	// see, refused here first so the error names the field. Ahead of the J1
 	// block so `pr_review` + `revive` names both fields. The github
@@ -261,12 +279,12 @@ func captureRuleAdd(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 	err = pool.QueryRow(ctx,
 		`INSERT INTO capture_rules
 		   (project_id, subproject, criteria_type, pattern, external_system, key_regex, url_template, priority, note,
-		    revive, addressed, pr_review, exclude_pr_authors)
+		    revive, addressed, pr_review, exclude_pr_authors, comm_task)
 		 VALUES ($1, NULLIF($2,''), $3, $4, NULLIF($5,''), NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,''), $10, $11,
-		         $12, $13)
+		         $12, $13, $14)
 		 RETURNING id`,
 		projectID, a.Subproject, a.CriteriaType, a.Pattern, a.ExternalSystem,
-		a.KeyRegex, a.URLTemplate, priority, a.Note, a.Revive, a.Addressed, a.PRReview, exclude).Scan(&ruleID)
+		a.KeyRegex, a.URLTemplate, priority, a.Note, a.Revive, a.Addressed, a.PRReview, exclude, a.CommTask).Scan(&ruleID)
 	if err != nil {
 		return nil, fmt.Errorf("insert capture rule (one rule per project+criteria_type+pattern — "+
 			"disable the existing one with capture_rule_set_enabled instead of re-adding?): %w", err)

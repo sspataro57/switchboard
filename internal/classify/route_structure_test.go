@@ -26,7 +26,11 @@ func TestMigrationLedger_Learns0032(t *testing.T) {
 	if i < 0 {
 		t.Fatalf("%s no longer carries the migration ledger; rewrite the guard, never delete it", rel)
 	}
-	start := i - 3500
+	// WIDENED, 3500 → 4400, by comms-inbox (SWT-74): 40's ownership note
+	// (capture_rules.comm_task and capture_decisions.comm_task_id) sits above
+	// the marker and pushed "32 is SWT-40 Part B" back past 3500. The reach,
+	// not the rule.
+	start := i - 4400
 	if start < 0 {
 		start = 0
 	}

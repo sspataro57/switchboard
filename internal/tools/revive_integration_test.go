@@ -93,6 +93,11 @@ func rvCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	const actors = `('` + rvCloser + `','` + rvDismisser + `','` + rvSpine + `')`
 	for _, q := range []string{
 		`DELETE FROM task_dismissals WHERE task_id IN ` + tasksOf,
+		// AMENDED by comms-inbox (SWT-74): task_match's fixture writes an
+		// external_refs row through link_external_ref (it IS the rule_ref
+		// resolution the tool proposes from), and external_refs.task_id has no
+		// ON DELETE, so the tasks delete below fails its FK without this line.
+		`DELETE FROM external_refs WHERE task_id IN ` + tasksOf,
 		`DELETE FROM task_dependencies WHERE task_id IN ` + tasksOf + ` OR depends_on_task_id IN ` + tasksOf,
 		`DELETE FROM task_events WHERE task_id IN ` + tasksOf,
 		`DELETE FROM task_claims WHERE task_id IN ` + tasksOf,

@@ -37,6 +37,10 @@ type CandidateRule struct {
 	Priority                                                                          int
 	PRReview                                                                          bool
 	ExcludePRAuthors                                                                  []string
+	// CommTask (SWT-74 D1): simulate the rule ARMED for comms, so
+	// `opsctl capture-rules try --comm-task --show all` shows what arming would
+	// do before a row exists.
+	CommTask bool
 }
 
 // DryRunConfig configures one dry run.
@@ -346,6 +350,7 @@ func dryRunCandidate(ctx context.Context, pool *pgxpool.Pool, c CandidateRule) (
 	}
 	s.subproject, s.extSystem, s.urlTemplate = c.Subproject, c.ExternalSystem, c.URLTemplate
 	s.prReview = c.PRReview
+	s.commTask = c.CommTask
 	s.excludePRAuthors = append([]string{}, c.ExcludePRAuthors...)
 	return s, nil
 }
@@ -410,6 +415,9 @@ func dryRunProposed(d ruleDecision) string {
 	if d.prClose {
 		parts = append(parts, "then close it")
 	}
+	if d.comm {
+		parts = append(parts, "and create a comm task for it")
+	}
 	if len(parts) > 0 {
 		s += " (" + strings.Join(parts, ", ") + ")"
 	}
@@ -428,6 +436,9 @@ func dryRunRuleFlags(s storedRule) string {
 	}
 	if s.prReview {
 		fmt.Fprintf(&b, ", pr_review, exclude_pr_authors [%s]", strings.Join(s.excludePRAuthors, ","))
+	}
+	if s.commTask {
+		b.WriteString(", comm-task (armed)")
 	}
 	return b.String()
 }

@@ -124,11 +124,18 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 // verb, so `swb requeue <id>` clears a surfaced row from any repo's session
 // (and lifts a holding ask to ready). No pin: humanOnly already refuses every
 // worker shape. SIXTEEN in all.
+//
+// comms-inbox (SWT-74) criteria 27 and 36: task_attach — route a comm onto the
+// task it belongs with and close it, humanOnly (so no worker shape can) — and
+// task_match — capture's own matcher, read-only, which a worker MAY call
+// because it cannot act on the answer. `swb match <id>` then `swb attach <id>
+// <target>` from any repo's session is the routing half of the ticket.
+// EIGHTEEN in all.
 var wantUserProfileTools = []string{
 	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
-	"task_append_log", "task_close", "task_context", "task_dismiss",
-	"task_get_next", "task_list", "task_mark_delivered", "task_requeue", "task_set_priority", "task_signal",
-	"update_delivery",
+	"task_append_log", "task_attach", "task_close", "task_context", "task_dismiss",
+	"task_get_next", "task_list", "task_mark_delivered", "task_match", "task_requeue", "task_set_priority",
+	"task_signal", "update_delivery",
 }
 
 func TestReadProfile_ListsExactlyTheQueueReads(t *testing.T) {
@@ -368,8 +375,8 @@ func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 	}
 	// SWT-52 criterion 24: the control checked fourteen tools; SWT-56 criterion
 	// 34: fifteen (task_context); SWT-72 criterion 23: sixteen (task_requeue).
-	if len(wantUserProfileTools) != 16 {
-		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 16 (SWT-72 criterion 23)",
+	if len(wantUserProfileTools) != 18 {
+		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 18 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach)",
 			len(wantUserProfileTools))
 	}
 	if checked != len(wantUserProfileTools) {
