@@ -363,6 +363,12 @@ func tdSourceBody() string {
 		tdSourceMark + " placeholder alert body.",
 		"Amount: 100.00 at PLACEHOLDER MERCHANT, card ending 0000.",
 		"",
+		// Task #513: the whitespace-only lines an HTML-table email converts to.
+		// The page shows ONE blank line here; body_text keeps every one.
+		" \r",
+		"\u00a0",
+		"\t ",
+		"",
 		tdScript,
 		tdImg,
 		"Track: " + tdTrackTo,
@@ -775,6 +781,16 @@ func TestTaskDetail_Integration_PrecedenceAndSourceMessage(t *testing.T) {
 			"-----Original Message----- stripping. Collapsing is reversible in one tap; stripping is invisible")
 	tdWant(t, "T1", "the inline source block", inline, tdEsc("> placeholder quoted line four"),
 		"D5: the quoted chain itself is kept, collapsed by POSITION (it lives in the other messages), never parsed")
+
+	// --- task #513: whitespace-only lines are tidied for DISPLAY, never in the column.
+	var storedRun bool
+	if err := pool.QueryRow(ctx, `SELECT strpos(body_text, E'0000.\n\n \r\n') > 0 FROM normalized_messages WHERE id = $1`,
+		f.ma2.id).Scan(&storedRun); err != nil || !storedRun {
+		t.Fatalf("T1: POSITIVE CONTROL FAILED — the stored source body does not carry the whitespace-only run "+
+			"(err=%v): the display tidy below would pass on a fixture that never had one", err)
+	}
+	tdWant(t, "T1", "the inline source block", inline, tdEsc("card ending 0000.\n\n"+tdScript),
+		"task #513: a run of blank and whitespace-only lines (CR, U+00A0, tab) renders as ONE blank line")
 
 	// --- criterion 10: the source message is never shown twice.
 	if n := strings.Count(sec, tdEsc(tdSourceMark)); n != 1 {

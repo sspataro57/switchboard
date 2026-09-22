@@ -25,6 +25,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
@@ -205,13 +207,10 @@ func (s *Server) loadSourceMessage(ctx context.Context, taskID int64, sourceThre
 		return nil, fmt.Errorf("resolve source message for task %d: %w", taskID, err)
 	}
 	m.Heading = sourceMessageHeading(m.Channel, pri == 3)
-	// storedLen comes from SQL length(), and left() cut by CHARACTERS — so the
-	// comparison has to be in characters too. len(m.Body) is BYTES, and for a
-	// Cyrillic or CJK body it exceeds the character count, which would silence
-	// this marker on exactly the messages that were cut.
-	if shown := utf8.RuneCountInString(m.Body); storedLen > shown {
+	var cutTo int
+	if m.Body, cutTo = displayBody(m.Body, storedLen); cutTo > 0 {
 		m.BodyNote = fmt.Sprintf("Showing the first %d of %d characters; the rest is in the mailbox.",
-			shown, storedLen)
+			cutTo, storedLen)
 	}
 
 	if thread != 0 {
@@ -245,16 +244,19 @@ func (s *Server) loadSourceThread(ctx context.Context, m *sourceMessage, threadI
 			return
 		}
 		m.ThreadMore = total
+		shown, cutTo := displayBody(body, storedLen)
 		t := sourceThreadMessage{
 			// NormalizedPrefix is the ONE truncation spelling (SWT-16): a
 			// left(body_text, 120) in SQL would cut mid-rune and keep the
-			// newlines that make a summary line unreadable.
+			// newlines that make a summary line unreadable. It already folds
+			// every whitespace run, so the raw body and the tidied one give the
+			// same summary; it is fed the raw one to keep that spelling exact.
 			Summary: fmt.Sprintf("%s · %s · %s — %s", direction, sender, sentAt,
 				textmatch.NormalizedPrefix(body, summaryPrefix)),
-			Body: body,
+			Body: shown,
 		}
-		if shown := utf8.RuneCountInString(body); storedLen > shown {
-			t.BodyNote = fmt.Sprintf("Showing the first %d of %d characters.", shown, storedLen)
+		if cutTo > 0 {
+			t.BodyNote = fmt.Sprintf("Showing the first %d of %d characters.", cutTo, storedLen)
 		}
 		m.Thread = append(m.Thread, t)
 	}
@@ -267,6 +269,53 @@ func (s *Server) loadSourceThread(ctx context.Context, m *sourceMessage, threadI
 	if m.ThreadMore > len(m.Thread) {
 		m.ThreadNote = fmt.Sprintf("Showing the oldest %d; the rest are in the mailbox.", len(m.Thread))
 	}
+}
+
+// displayBody turns a body as SQL cut it (left(body_text, cap)) into the text
+// the page renders, and reports cutTo: how many stored characters the cap kept
+// when it dropped some, else 0.
+//
+// cutTo is counted BEFORE the tidy, on purpose. The marker answers "did the cap
+// drop text?", and the tidy removing blank lines is not dropped text — counting
+// after it would put a marker on every table email that was never cut. It is in
+// CHARACTERS because storedLen comes from SQL length() and left() cut by
+// characters: len() is BYTES, and for a Cyrillic or CJK body it exceeds the
+// character count, which would silence the marker on exactly the cut messages.
+func displayBody(cut string, storedLen int) (body string, cutTo int) {
+	if n := utf8.RuneCountInString(cut); storedLen > n {
+		cutTo = n
+	}
+	return tidySourceBody(cut), cutTo
+}
+
+// tidySourceBody is DISPLAY ONLY (task #513): body_text is never rewritten
+// (invariant 1). An HTML-table email converts to text with dozens of lines of a
+// lone space or a no-break space between its cells, and the <pre> (pre-wrap)
+// rendered each one — screens of blank space around a four-line bank alert.
+//
+// A line that is only whitespace (unicode.IsSpace, so CR, tab, U+00A0 and
+// U+3000 count) is blank, a run of blank lines becomes one, and the ends carry
+// none. A content line loses only its TRAILING whitespace (the CR of a CRLF
+// body): its indentation stays, because code in a GitHub or Jira notification
+// and an indented quote are part of the message. No quote stripping (D5): this
+// tidies spacing, it never edits the message.
+func tidySourceBody(s string) string {
+	lines := strings.Split(s, "\n")
+	out := lines[:0]
+	blank := false
+	for _, line := range lines {
+		line = strings.TrimRightFunc(line, unicode.IsSpace)
+		if line == "" {
+			blank = len(out) > 0
+			continue
+		}
+		if blank {
+			out = append(out, "")
+			blank = false
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 // dropThread removes a conversation that was only partly read, so the page

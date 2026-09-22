@@ -131,7 +131,8 @@ the same weight as the one with a message (criteria 16 and 17).
 
 ### D3 — one message in full, the rest of the thread collapsed
 
-- **The source message renders in full, verbatim, inline** — `normalized_messages.body_text` as
+- **The source message renders in full, verbatim, inline** (whitespace-only line runs collapsed for
+  display since swb #513; see criterion 7) — `normalized_messages.body_text` as
   stored, no quote detection, no CSS clipping, no per-paragraph fold. Cap: `sourceBodyCap` = **262144
   characters** (`left(body_text, $n)`), and when the stored body is longer the page prints one
   explicit marker line naming the character counts. Message 315655's 33,465 characters render whole.
@@ -318,6 +319,9 @@ Numbered; each testable. "The section" means the markup between the two
 
 7. The source message renders `sender`, `subject`, `sent_at`, `direction`, and its `body_text` in
    full, inline, verbatim — no quote stripping, no "show more" on the body itself.
+   *Amended 2026-09-22 (swb #513):* for display only, whitespace-only lines are blank, a run of blank
+   lines becomes one, and each line loses its trailing whitespace; indentation and every character of
+   content stay. `body_text` is never rewritten. (HTML-table mail rendered screens of blank lines.)
 8. A body longer than `sourceBodyCap` renders the first `sourceBodyCap` characters plus exactly one
    marker line naming the shown and stored character counts.
 9. Every other message on the thread renders inside a CLOSED `<details>`, ordered
