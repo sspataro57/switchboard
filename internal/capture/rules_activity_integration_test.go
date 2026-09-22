@@ -97,6 +97,13 @@ func craSeedTask(t *testing.T, ctx context.Context, s *crvSuite, key string) int
 	s.pass(t, ctx, "live")
 	task := s.mustTask(t, ctx, key)
 	s.exec(t, ctx, `UPDATE tasks SET activity_at = NULL, activity_by_message_id = NULL WHERE id=$1`, task)
+	// 2026-09-22 (swb #491): the create path marks activity too, so the seed
+	// pass leaves one task_mark_activity audit row behind. The tests below count
+	// what THEIR pass adds, so that row is removed here — the seed is fixture,
+	// not the thing under test.
+	s.exec(t, ctx, `DELETE FROM policy_decisions WHERE audit_event_id IN
+	                  (SELECT id FROM audit_events WHERE task_id=$1 AND tool='task_mark_activity')`, task)
+	s.exec(t, ctx, `DELETE FROM audit_events WHERE task_id=$1 AND tool='task_mark_activity'`, task)
 	return task
 }
 

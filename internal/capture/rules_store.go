@@ -484,6 +484,25 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 				return stats, err
 			}
 			stats.TasksCreated++
+			// SWT-72 follow-up (2026-09-22, Salvador: "lyle's emails are not
+			// landing in incoming"): a task a rule CREATES from a person's first
+			// message is activity by that message too, so it lands in INCOMING
+			// with the sender and "new email / new comment / new slack" like an
+			// attach does — rather than sitting silently in QUEUE. Same tool,
+			// same skips (a non-inbound message errors; a replay is a no-op).
+			// After provenance and before surfacing, so a crash leaves today's
+			// behaviour (a queued task) and never a half-linked one. NOT for a
+			// pr_review rule: a PR notice is not a person's comm, and the review
+			// task reaches INCOMING on its own kind (SWT-59 pr_review) already.
+			if !(winner.prReview && *decision.extSystem == "github") {
+				marked, err := markRuleActivity(ctx, ex, cfg.Actor, pm, taskID, *decision.extSystem, *decision.extKey)
+				if err != nil {
+					return stats, err
+				}
+				if marked {
+					stats.Activity++
+				}
+			}
 			// SWT-45 J7/J9: surfacing LAST. A crash before it degrades to today:
 			// the reconciler may close the new task, and the next overriding
 			// message revives and surfaces it.

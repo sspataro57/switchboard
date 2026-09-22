@@ -3036,3 +3036,11 @@ did not author, from the GitHub notification mail he already receives. Runbook:
 - **Dev lesson:** the old inquiry integration tests pinned the attach; three of them plus a helper that
   counts audit rows suite-wide (`assertClaudeGated`) needed amending — a new test that creates a task must
   use a fresh suite before calling it.
+- **Follow-up 2026-09-22 (swb #491, "lyle's emails are not landing in incoming"):** a task a rule CREATES from a
+  person's first message is marked with that message too (capture's `actionTask` branch, after provenance,
+  before `task_mark_surfaced`), so it lands in INCOMING with the sender instead of QUEUE. Excluded: a
+  `pr_review` rule's create (a PR notice is not a comm; the review task has its own incoming kind). The
+  SWT-72 structure test now looks for the mark INSIDE the `actionTaskLog` branch; the SWT-45 executor
+  sequence for an overriding create is `create_task, link_external_ref, task_set_source_thread,
+  task_mark_activity, task_mark_surfaced`. Test fixtures that seed a rule-created task strip the seed's
+  `task_mark_activity` audit row (and its `policy_decisions` child first — FK).

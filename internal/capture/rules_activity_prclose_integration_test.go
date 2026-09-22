@@ -83,9 +83,13 @@ func TestCaptureActivityPRClose_Integration_AMergeNoticeDoesNotSurface(t *testin
 				"and a refused close means someone is holding the work", c.what, *at)
 		}
 	}
+	// A pr_review rule's CREATE is not marked either (2026-09-22, swb #491: a PR
+	// notice is not a person's comm; the review task reaches INCOMING on its own
+	// kind), so no row of this tool exists for either task at all.
 	if n := s.n(t, ctx, `SELECT count(*) FROM audit_events WHERE tool='task_mark_activity' AND task_id IN ($1,$2)`,
 		merged, held); n != 0 {
-		t.Errorf("%d task_mark_activity audit rows for the PR-close notices, want 0 (criterion 12)", n)
+		t.Errorf("%d task_mark_activity audit rows for the PR-review tasks, want 0 (criterion 12; and the create "+
+			"of a pr_review task is not marked)", n)
 	}
 	if st.Activity != 0 {
 		t.Errorf("RulesStats.Activity = %d on a prClose-only pass, want 0 (criterion 12)", st.Activity)
