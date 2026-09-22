@@ -193,8 +193,12 @@ Calendar API for the READS, keeping Pipedream only for the occasional booking
 write, which fits inside 100 credits comfortably. The calendar sync age — judged with the SAME `AVAIL_MAX_SYNC_AGE`
 and readiness predicate `propose_slots` uses — is visible on the dashboard's
 `/funnel` page (SWT-29), alongside every other connector's freshness. Don't ALSO run the mail
-one-shot with `CAL_SOURCE=pipedream` or invocations double; production mail
-runs in the watch loop, which has no calendar phase.
+one-shot with `CAL_SOURCE=pipedream` or invocations double. `connector-gcal`
+(`--calendar-only`, `CAL_SOURCE=pipedream`) is the workload that OWNS the
+calendar phase. Production mail runs in `connector-google-watch` (the resident
+IMAP IDLE loop, SWT-73), which has no calendar phase at all, and in the
+2-hourly `connector-google` net, whose inline calendar phase selects accounts
+by OAuth credential and is a no-op on the three app-password rows.
 
 ## Booking an own block (SWT-28)
 
