@@ -82,6 +82,8 @@ producing a zero):
 | `MAIL_FOLDERS` | discover | comma-separated override; otherwise INBOX + the `\Sent` mailbox |
 | `MAIL_IDLE_REFRESH` | 25m | IDLE re-issue interval (RFC 2177 caps at 29m) |
 | `MAIL_RECONCILE_INTERVAL` | 10m | full sweep in `--watch` |
+| `MAIL_PASS_TIMEOUT` | 10m | `--watch` only: bound on every pass (SWT-73 D6); a pass that exceeds it is cancelled, logged and counted, the loop continues |
+| `MAIL_WATCH_HEALTH_ADDR` | `:8092` | `--watch` only: `GET /healthz` listen address (SWT-73 D7) |
 | `OUTBOUND_OBSERVE_HORIZON` | 720h | SWT-16 capture window |
 
 First pass is bounded by `SEARCH SINCE --backfill` (90d default). A 106,930-message
@@ -90,7 +92,74 @@ does not hold thousands of bodies at once.
 
 `--watch` stays resident: IMAP IDLE on INBOX per account plus the reconcile sweep.
 Sent is covered by the sweep only — its latency affects delivery confirmation,
-which no rule waits on.
+which no rule waits on. In production that is `deployment/connector-google-watch`
+— see "Running it resident" below.
+
+## Running it resident (SWT-73)
+
+`connector-google-watch` is a 1-replica Deployment (`strategy: Recreate`) running
+`google --watch`: one IDLE connection per mailbox on INBOX, a wake runs the same
+pass the CronJob runs (ingest → normalize → outbound observation → capture rules
+→ pipeline announce) scoped to that mailbox, and a reconcile sweep every
+`MAIL_RECONCILE_INTERVAL` covers Sent and anything IDLE missed. Mail lands in
+seconds; the `connector-google` CronJob stays on `0 */2 * * *` as a net, never
+suspended. Spec: `docs/tickets/imap-idle-watch_SPEC.md`.
+
+**Watch mode is IMAP-only by construction.** `--watch` branches before
+`MAIL_SOURCE` is read, so `MAIL_SOURCE` is irrelevant on the Deployment (harmless,
+but not what selects the path). The one-shot flags are not available in watch mode:
+`--full`, `--overlap`, `--all`, `--normalize-only` and `--calendar-only` are
+one-shot only — a Deployment cannot be asked for a full rescan. Run those as a
+one-shot `google` invocation; the per-account lock keeps it from racing the
+watcher (it counts `accounts_busy` and skips a mailbox the watcher is reading).
+
+**Startup.** The watcher resolves the capture config once and prints one line:
+`watch: mode=live horizon=720h reconcile=10m idle_refresh=25m pass_timeout=10m
+accounts=4 health=:8092`. It **refuses to start** (exit 1) when
+`CAPTURE_RULES_MODE=live` sits under a `CAPTURE_RULES_SINCE` below 2h — under
+cron that is one red run, in a resident loop it is a pod that looks alive while
+capturing nothing. It does NOT refuse `mode=shadow`; it prints it, so read that
+line first when the watcher creates no tasks.
+
+**The singleton.** The pod holds `lockkeys.MailWatch` (`0x5157_0010`) as a session
+lock for its lifetime. A second replica (a node drain's overlap, a rolling
+restart) does not crash: it logs `standing by`, answers `/healthz` 503
+`standby: another mail watcher holds the lock`, retries every 15 s and takes over
+when the holder goes away. **Standby is not an outage.** A LOST lock connection (a
+CNPG switchover) is different: the loop exits non-zero on its next reconcile tick
+and the kubelet restarts the pod. The key is watcher-versus-watcher only — the
+CronJob is kept off a mailbox by the per-account locks, not by this key.
+
+**`/healthz`** (`MAIL_WATCH_HEALTH_ADDR`, default `:8092`) answers 200 `ok` iff a
+pass **completed** within 3 x `MAIL_RECONCILE_INTERVAL` and the lock connection
+answers; else 503 with one line naming which condition failed. A pass that hit
+`MAIL_PASS_TIMEOUT` does not count as completed. It deliberately ignores IDLE
+state and mail volume: one mailbox in backoff must not restart the pod (a restart
+cannot fix `invalid_grant` and would thrash the healthy mailboxes), and a quiet
+mailbox is not a sick one. Do not add either to the verdict. There is no Service
+and no Ingress; `kubectl -n ops port-forward deploy/connector-google-watch
+8092:8092` when a human wants to see it.
+
+**The `imap_idle` phase.** A mailbox whose IDLE fails writes one `sync_runs` row
+(`stats->>'phase' = 'imap_idle'`, status `error`) per failure and backs off with
+jitter (5s → 5m), leaving the other mailboxes listening. On the first successful
+cycle after a failure it writes ONE `ok` row — the recovery marker — and nothing
+per wake or per refresh. So on `/funnel`: an account that never failed has no
+`imap_idle` phase at all; one that failed and recovered shows a fresh `last_ok`;
+one that is still broken shows a stale-or-never `imap_idle` with its error. The
+`imap` phase (per account, per pass) is the ingest itself, exactly as under cron.
+
+**Connections.** Per mailbox: 1 resident IDLE connection plus 1 transient per pass
+— at most 8 concurrent for four mailboxes, inside Gmail's 15 per account. The
+MSN mailbox's credential is minted under the per-account lock in BOTH drivers,
+and `idleOnce` makes exactly one connection per lock acquisition (a test pins
+it): two processes redeeming the same rotating refresh token is how the loser
+gets `invalid_grant`, and that alarm looks exactly like a revoked consent.
+
+**Levers.** Scale the Deployment to 0 and put the CronJob back on `*/10 * * * *`:
+today's behaviour returns within ten minutes, no data loss (same cursors, same
+raw rows, same locks). `MAIL_PASS_TIMEOUT` and `MAIL_RECONCILE_INTERVAL` are env
+only, no roll.
 
 ## 4. Verify
 

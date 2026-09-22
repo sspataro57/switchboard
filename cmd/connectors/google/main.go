@@ -1,18 +1,36 @@
-// google is the one-shot Google poller. With GMAIL_CONNECTOR_BRIDGE set it
-// performs Gmail + Calendar ingestion through the sibling local connector.
-// Without it, the existing database-token Gmail + Calendar path is unchanged.
+// google is the Google mail connector, with two drivers.
+//
+// The one-shot poller (the CronJob): with GMAIL_CONNECTOR_BRIDGE set it
+// performs Gmail + Calendar ingestion through the sibling local connector;
+// MAIL_SOURCE=imap selects the IMAP path; without either, the database-token
+// Gmail API path is unchanged.
 //
 //	google [--full] [--normalize-only] [--all] [--calendar-only] [--overlap 1h] [--backfill 2160h] [--account email]
 //
+// The resident watcher (deployment/connector-google-watch, SWT-73): IMAP IDLE
+// on every mailbox's INBOX plus a periodic reconcile sweep, the same pass the
+// one-shot runs. Watch mode is IMAP-only BY CONSTRUCTION — it branches before
+// MAIL_SOURCE is read, so MAIL_SOURCE is irrelevant in watch mode and is not
+// what selects the path. The one-shot flags (--full, --overlap, --all,
+// --normalize-only, --calendar-only) are not available in watch mode; only
+// --backfill and --account are read.
+//
+//	google --watch [--backfill 2160h] [--account email]
+//
 //	DATABASE_URL               ops db, required
-//	GMAIL_CONNECTOR_BRIDGE     optional absolute local bridge binary
+//	GMAIL_CONNECTOR_BRIDGE     optional absolute local bridge binary (one-shot only)
+//	MAIL_SOURCE                one-shot only: imap | bridge | gmail_api; ignored by --watch
 //	OPS_TOKEN_KEY              required for direct mode unless --normalize-only
 //	GOOGLE_CLIENT_SECRET_FILE  default ~/.config/switchboard/google_client_secret.json
 //	CAL_SOURCE                 calendar transport: oauth (default) | pipedream
 //	PIPEDREAM_CALENDAR_URL     the workflow endpoint (CAL_SOURCE=pipedream)
 //	PIPEDREAM_CALENDAR_TOKEN_FILE / _TOKEN   its bearer secret (file preferred)
 //	CAPTURE_RULES_MODE         shadow (default) | live
-//	CAPTURE_RULES_SINCE        Go duration bounding the capture-rules pass
+//	CAPTURE_RULES_SINCE        Go duration bounding the capture-rules pass (live: >= 2h, or --watch refuses to start)
+//	MAIL_RECONCILE_INTERVAL    --watch: the sweep cadence, default 10m
+//	MAIL_IDLE_REFRESH          --watch: IDLE re-issue interval, default 25m (RFC 2177 caps at 29m)
+//	MAIL_PASS_TIMEOUT          --watch: bound on every pass, default 10m
+//	MAIL_WATCH_HEALTH_ADDR     --watch: GET /healthz listen address, default :8092
 package main
 
 import (

@@ -10,6 +10,14 @@ package lockkeys
 // transaction lock, so it refuses while an engine runs.
 const Orchestrator int64 = 0x5157_0005 // "switchboard step 5"
 
+// MailWatch is the resident IMAP IDLE watcher's single-instance lock (SWT-73
+// D4): connector-google-watch holds it as a session lock for its lifetime. A
+// second replica stands by rather than crashing (a node drain leaves the old
+// pod terminating while the new one starts); a LOST connection is a restart.
+// It is watcher-versus-watcher only: the one-shot connector-google CronJob is
+// kept off the same mailbox by the per-account locks, not by this key.
+const MailWatch int64 = 0x5157_0010 // SWT-11 decision 16's reserved value
+
 // SlackWatch is the resident Slack watcher's single-instance lock (SWT-75
 // D9): connector-slackweb-watch holds it as a session lock for its lifetime
 // (a second replica stands by rather than crashing), and the one-shot

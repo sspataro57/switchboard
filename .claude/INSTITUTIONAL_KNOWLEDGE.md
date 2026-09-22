@@ -3154,3 +3154,54 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   `sent` by hand (SQL on prod, `sent_at`/`send_settled_at` now, a `policy_result.sent_by_hand` note) and the
   act logged on task #487 through `task_append_log`. A direct write to `deliveries` outside the executor —
   a one-off; a "sent by hand" verb for gmail (no transport, the SWT-71 finish shape) is future work.
+
+## The IMAP watcher is the live mail path (SWT-73, imap-idle-watch)
+
+- **What changed.** `google --watch` — written and shelved at SWT-11 delivery (2026-07-31, "wants its
+  own decision about runtime shape"; the premise expired the same day when the dashboard, then
+  orchestratord and pipelined, shipped as Deployments) and corrected on 2026-09-18 by the kube session
+  ("there is no such workload") — is deployed as `deployment/connector-google-watch`. Mail lands in
+  seconds; the `connector-google` CronJob runs `0 */2 * * *` as a net (Salvador, 2026-09-22: "move it to
+  every 2 hours to catch misses"), never suspended. `watchPass` is untouched; the ticket added an
+  operational skin around it: `lockkeys.MailWatch` (`0x5157_0010`, SWT-11 decision 16's value) held as a
+  session lock with STANDBY on contention (log once, `/healthz` 503 `standby`, retry 15 s) and an exit
+  on LOSS (checked on every reconcile tick — the `os.Exit` stays in main); `MAIL_PASS_TIMEOUT` (10m,
+  the one-shot's own bound) around every pass; `GET /healthz :8092`; a startup refusal; a per-tick
+  re-read of `source_accounts`; and the loop's seams (`watchDeps`, `idleDeps`) injected so it is
+  tested without a database for the first time.
+- **Safe by an invariant, so aim at one process per mailbox.** `pg_advisory_lock` is database-wide, so
+  the per-account lock serializes the MSN refresh-token mint across PROCESSES: the ingest pass holds it
+  from before `OpenIMAPSource` until `src.Close()`, `idleOnce` holds it across `OpenIMAPSource` only and
+  releases before going idle — correct ONLY because that cycle makes exactly one connection
+  (`src.Idle` consumes the eagerly minted token, `credential.go:60-71` stores the rotated one).
+  `idle_test.go` pins the one-connection rule and the lock order; the integration test interleaves a
+  watcher cycle and a one-shot pass against a rotating stub authority. A second connect inside
+  `idleOnce` brings back an intermittent `invalid_grant` that reads exactly like a revoked consent on
+  the one mailbox that cannot be re-consented from a script.
+- **The parity landmine.** The CronJob and the watcher take turns on the same mailboxes, so drift in
+  `CAPTURE_RULES_MODE`, `CAPTURE_RULES_SINCE` or `MAIL_MAX_MESSAGE_BYTES` between the two manifests is
+  two behaviours on one mailbox depending on which process won the lock. The handoff's env diff is a
+  gate. A resident loop turns a failed run into a healthy-looking no-op: a live horizon under 2h is
+  refused at startup (exit 1, naming `CAPTURE_RULES_SINCE` and `MinLiveRulesHorizon`); `mode=shadow`
+  is NOT refused, only printed on the startup line — read that line first when the watcher creates no
+  tasks.
+- **`/healthz` semantics.** 200 iff a pass COMPLETED within 3 × reconcile AND the lock connection
+  answers. A pass cancelled by `MAIL_PASS_TIMEOUT` is not a completed pass. Deliberately blind to IDLE
+  state and mail volume: one mailbox in backoff must not restart the pod (a restart cannot fix a
+  credential and thrashes the healthy mailboxes). Its handler's signature is pinned by a structure test
+  so an `accounts` parameter cannot creep in.
+- **The `imap_idle` phase.** One `error` row per IDLE failure (existing), ONE `ok` row at recovery
+  (new, D9), nothing per wake. On `/funnel` a never-failed mailbox has no `imap_idle` phase at all;
+  that is the healthy shape, not a missing row.
+- **Watch mode is IMAP-only by construction**: it branches before `MAIL_SOURCE` is read. The one-shot
+  flags (`--full`, `--overlap`, `--all`, `--normalize-only`, `--calendar-only`) are one-shot only; run
+  them as a one-shot `google` and let the per-account lock arbitrate (`accounts_busy`).
+- **Pre-checks worth remembering (2026-09-22 15:20 EDT).** 0a's latency query is dominated by the
+  90-day backfill on three mailboxes (p50 in months); the one clean before-picture is
+  `salvador@handsonconnect.org`: p50 5m22s, p90 9m35s over 7 days — the `*/10` period, as expected.
+  Zero `imap_idle` rows ever. The MSN mailbox: 0 `invalid_grant` in 14 days. `pipelined` already logs
+  `wake topic=ops/pipeline/captured source=google` for every CronJob tick that decided something, so
+  instant mail becomes instant tasks with no further change. Old `imap` runs stuck in `running` (1/1/3
+  per account) are crashed CronJob pods from before the pass bound, not a live problem.
+- **Dev lesson.** A unit test that ends "after N shared sleeps across four goroutines" is a scheduling
+  lottery — one goroutine can burn all N before another runs once. End it on a per-goroutine condition.

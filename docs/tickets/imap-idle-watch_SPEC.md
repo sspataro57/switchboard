@@ -726,6 +726,59 @@ and scale `deployment/connector-google-watch` to 0. Mail ingestion returns to `*
 with no data loss: the cursors, the raw rows and the locks are the same in both modes. Nothing about
 the schema or the db changes, so there is nothing to un-apply.
 
+## Verification record (2026-09-22, delivery)
+
+- **0a (latency, 7d):** dominated by the 90-day backfill on three mailboxes (p50 in months, the
+  `sent_at` of backfilled mail is old). The one clean before-picture: `salvador@handsonconnect.org`
+  258 messages, p50 **5m22s**, p90 **9m35s**, i.e. the `*/10` period as expected. Post-roll
+  comparison uses that mailbox.
+- **0b (phases, 7d):** `imap` ok every 10 min on all four accounts; **zero `imap_idle` rows** ever;
+  `calendar` error rows on the three app-password accounts (the inline phase's known no-op-as-error;
+  not this ticket); a few `imap` rows stuck in `running` (1/1/3) from killed CronJob pods.
+- **0c (MSN):** `sspataro57@msn.com` is `xoauth2`, refresh token present, scopes present, **0
+  `invalid_grant` in 14 days** (16 error rows total, last 2026-09-19).
+- **0d:** not measured against the providers' consoles; D12's derivation stands (≤ 2 per Google
+  account).
+- **0e:** `pipelined` logs `wake topic=ops/pipeline/captured source=google` on the CronJob's ticks
+  that decided something (19:00:28 UTC observed); `MQTT_BROKER` is on the CronJob.
+- **0f:** not run (0e already proves the announce path end to end).
+- **0g:** CronJob env: `MQTT_BROKER`, `CAPTURE_RULES_MODE=live`, `DATABASE_URL`, `OPS_TOKEN_KEY`,
+  `MAIL_SOURCE=imap`, `MS_OAUTH_CLIENT_ID`; no `CAPTURE_RULES_SINCE`, no `MAIL_MAX_MESSAGE_BYTES`;
+  schedule `*/10 * * * *`, `concurrencyPolicy: Forbid`, command `/usr/local/bin/google` (no args).
+  Copied into the handoff's parity table.
+- **1. Unit:** `go vet ./...` and `go test ./...` green; `go test -race -count=3
+  ./cmd/connectors/google/` green.
+- **2. Integration:** `ops_idlewatch` (fresh, 41 migrations), `go test -tags integration -p 1
+  ./cmd/connectors/google/ ./internal/connector/google/` green **twice** (rerunnable cleanup held).
+  The repo-wide `-tags integration ./...` run was not repeated for this ticket: the change is
+  confined to `cmd/connectors/google` and `internal/lockkeys`, and the collision scan in
+  `internal/classify` is in the unit run.
+- **3. Mutations:** not run individually; every row of the table maps to a named test that failed
+  red before implementation (test-author's report) — the same standing deviation as SWT-74.
+- **4. Local smoke, real mailbox:** run against `sspataro@gmail.com` ONLY (its `source_accounts`
+  row copied into the scratch database; the MSN mailbox was deliberately excluded because a local
+  mint would rotate prod's refresh token and break the CronJob). Observed: startup line
+  `watch: mode=live horizon=720h reconcile=2m idle_refresh=25m pass_timeout=10m accounts=1
+  health=:8092`; `/healthz` → `ok [200]`; a second instance logged `standing by`, answered 503 and
+  ingested nothing; SIGTERM on the first → exit 0; the second logged `lock held; running` and
+  answered `ok [200]` within 25 s; five minutes of reconciles at 200; SIGINT → exit 0. The first
+  smoke's standby body read `no pass has completed yet` — the review's finding — fixed by judging
+  the lock before pass freshness; the second leg re-checks the wording. Wedge run
+  (`MAIL_PASS_TIMEOUT=1s`): the pass was cancelled and logged (`exceeded MAIL_PASS_TIMEOUT=1s
+  … timed_out=1`), the loop survived, `/healthz` → 503 `no pass has completed yet`. Known: a pass
+  cancelled by the bound leaves its `imap` `sync_runs` row in `running`, exactly like a killed
+  CronJob pod. IMAP hygiene not re-verified by eye (`BODY.PEEK` unchanged). **Wake observed** (second leg, fixed
+  binary, 20 min): a real mail arriving at `sspataro@gmail.com` produced `watch: wake
+  sspataro@gmail.com normalized=1` at 15:40:05 EDT, then `capture_rules: … "considered":1`, with
+  `/healthz` at 200 throughout and a clean exit 0; the standby instance's body now reads
+  `standby: another mail watcher holds the lock [503]`.
+- **Test-side amendments (dated in the files):** `TestWatcherRun_HealthIsGreenWhileEveryMailboxIsInBackoff`
+  ends on a per-account condition (the shared sleep budget was a scheduling lottery);
+  `TestWatcherRun_OneFailingMailboxLeavesTheOthersIdling` added at review (criterion 9's isolation
+  half); a `never, standby` row added to the health table.
+- **Review deviations taken:** `failureThreshold: 3` (D7) kept in the handoff, with the reason it
+  differs from the Slack watcher's 20.
+
 ## Future work (not this ticket)
 
 - **Push the personal classify lane** (a `personal` pipelined stage woken by `captured`), so receipts
