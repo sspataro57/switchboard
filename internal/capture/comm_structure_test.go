@@ -357,9 +357,11 @@ func TestCommTaskColumn_IsReadByCaptureRulesStoreOnly(t *testing.T) {
 
 func TestDecideMessage_SetsCommFromThePureSplit(t *testing.T) {
 	src := mustReadRepoFile(t, "internal/capture/rules_store.go")
-	body := rvFuncSrc(src, "decideMessage")
+	// SWT-79: the decision itself moved into decideMessageInner (decideMessage
+	// adds the mention fact on top, outside prFallThrough's recursion).
+	body := rvFuncSrc(src, "decideMessageInner")
 	if body == "" {
-		t.Fatalf("rules_store.go no longer declares decideMessage")
+		t.Fatalf("rules_store.go no longer declares decideMessageInner")
 	}
 	if !strings.Contains(body, "commTask(") {
 		t.Fatalf("decideMessage never calls commTask. Criterion 7: the found branch sets d.comm from the PURE " +

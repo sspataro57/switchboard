@@ -30,6 +30,7 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/connector/github"
 	"github.com/sspataro57/switchboard/internal/connector/jira"
+	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/textmatch"
 	"github.com/sspataro57/switchboard/internal/ticketstatus"
@@ -355,6 +356,13 @@ type ruleDecision struct {
 	// counts in.
 	direct     bool
 	directConv string
+
+	// channelUnmentioned (SWT-79 D2): an `attributed` Slack CHANNEL decision
+	// whose text does not @-mention him. WRITTEN to
+	// capture_decisions.channel_unmentioned: both inquiry inboxes skip it, so
+	// qwen never sees channel chatter. Set by decideMessage's one post-decision
+	// step, never by the inner decision.
+	channelUnmentioned bool
 	// directNoThread: the conversation task found carries no source thread
 	// (an interrupted create); the attach records it.
 	directNoThread bool
@@ -428,6 +436,10 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 	for _, r := range rules {
 		byID[r.rule.ID] = r
 		pure = append(pure, r.rule)
+	}
+
+	if err := recheckEditedMentions(ctx, pool); err != nil {
+		return RulesStats{}, err
 	}
 
 	pending, err := pendingMessages(ctx, pool, cfg)
@@ -890,6 +902,29 @@ func parseThreadParticipants(raw []byte) []int64 {
 // the database does not hold but the dry run "created" earlier in its window.
 func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendingMessage,
 	rules []Rule, byID map[int64]storedRule, sim simulatedRefs) (ruleDecision, storedRule, error) {
+	d, winner, err := decideMessageInner(ctx, pool, mode, pm, rules, byID, sim)
+	if err != nil || d.deferred || d.action != actionAttributed {
+		return d, winner, err
+	}
+	// SWT-79 D1: ONE post-decision step, on every `attributed` exit whatever
+	// the project — outside the inner decision, so prFallThrough's recursion
+	// never applies it twice.
+	if flag, why := channelUnmentioned(channelMentionInput{
+		slack:     pm.channel == slackweb.Channel,
+		dm:        slackweb.IsDirectMessageKey(pm.msg.ThreadKey),
+		groupDM:   pm.rawConvType == "group_dm",
+		mentioned: slackweb.MentionsOwner(pm.msg.BodyText),
+	}); flag {
+		d.channelUnmentioned = true
+		d.reason += why
+	}
+	return d, winner, nil
+}
+
+// decideMessageInner is the decision itself; decideMessage adds the SWT-79
+// mention fact on top. prFallThrough recurses into THIS, not decideMessage.
+func decideMessageInner(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendingMessage,
+	rules []Rule, byID map[int64]storedRule, sim simulatedRefs) (ruleDecision, storedRule, error) {
 	outcome := evaluateAll(pm.msg, rules)
 	d := ruleDecision{action: actionUnmatched, matchedRuleIDs: outcome.matchedIDs, ambiguous: outcome.ambiguous}
 	if !outcome.matched {
@@ -1250,7 +1285,7 @@ func decidePRReviewCreate(ctx context.Context, pool *pgxpool.Pool, mode string, 
 func prFallThrough(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendingMessage,
 	rules []Rule, byID map[int64]storedRule, sim simulatedRefs, outcome rulesEvaluation,
 	d ruleDecision, winner storedRule, prefix string) (ruleDecision, storedRule, error) {
-	fell, fellWinner, err := decideMessage(ctx, pool, mode, pm, withoutRule(rules, winner.rule.ID), byID, sim)
+	fell, fellWinner, err := decideMessageInner(ctx, pool, mode, pm, withoutRule(rules, winner.rule.ID), byID, sim)
 	if err != nil {
 		return fell, fellWinner, err
 	}
@@ -1540,13 +1575,13 @@ func insertDecision(ctx context.Context, pool *pgxpool.Pool, mode string,
 		`INSERT INTO capture_decisions
 		   (message_id, raw_source_item_id, mode, matched_rule_id, project_id,
 		    matched_rule_ids, ambiguous, action, external_system, external_key,
-		    task_id, reason, resurface)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		    task_id, reason, resurface, channel_unmentioned)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		 ON CONFLICT (message_id) WHERE mode = 'live' DO NOTHING
 		 RETURNING id`,
 		pm.msg.ID, pm.rawItemID, mode, d.matchedRuleID, d.projectID,
 		d.matchedRuleIDs, d.ambiguous, d.action, d.extSystem, d.extKey,
-		d.taskID, ruleNullIfEmpty(d.reason), d.resurface).Scan(&id)
+		d.taskID, ruleNullIfEmpty(d.reason), d.resurface, d.channelUnmentioned).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}

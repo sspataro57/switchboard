@@ -393,6 +393,33 @@ are HOC/LLamasite not my projects. not even ReEngine".
   8,559 messages match the prefix, the same count as messages whose raw
   conversation id is `C1C1TSLJH`. No longer conversation id shares the prefix.
 
+### SWT-79 update (2026-09-23): #a-millon is the general forum, mention-gated
+
+Salvador: "#a-millon is the general forum, send it through qwen" / "a-million is generally not
+collaboratory. we only respond to mentions on those channels". The channel moves from `bulk` to its OWN
+project, `a-millon` (migration 0043; `ai_inquiry` on, `ai_locality` any, `client` NULL). The rule keeps
+rule 63's shape and priority 99, so every "why 99" above still holds. The swap (after migration 0043, the
+image roll, and arming `inquiry_promote_after` — in that order):
+
+```
+opsctl capture-rules try --project a-millon --type thread_key_prefix --pattern slack:T0360B84U:C1C1TSLJH --priority 99 --since 72h --show wins
+opsctl capture-rules add --project a-millon --type thread_key_prefix --pattern slack:T0360B84U:C1C1TSLJH --priority 99 --note "SWT-79: its own project, mention-gated inquiry lane (was rule 63 → bulk)"
+opsctl call --tool capture_rule_set_enabled --args '{"rule_id":63,"enabled":false}'
+```
+
+Add first: at equal priority the lower id (63) wins, so the add changes nothing until 63 is disabled, and
+the channel never falls through to the collaboratory catch-all.
+
+## Channel messages reach qwen only when they mention Salvador (SWT-79)
+
+"channels is only when they mention me". A Slack CHANNEL message decided `attributed` whose text does not
+@-mention him (`slackweb.MentionsOwner`: "@Salvador", "@Salvador Spataro", "@SalvadorSpataro", case-
+insensitive; not emails, not @here/@channel/@everyone) records `capture_decisions.channel_unmentioned = true`
+and the reason suffix "a channel message that does not mention Salvador: no inquiry verdict (SWT-79)". Both
+inquiry inboxes skip such rows, so qwen never sees them. A mention reaches qwen, and promote treats it as
+addressed. DMs and group DMs are SWT-78's path; rule-matched outcomes (ticket keys, comm, pr_review,
+resurface) are unchanged.
+
 ## Activity rules (SWT-45)
 
 Two flags on a rule turn its matches into Jira activity. Set them with

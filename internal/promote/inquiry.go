@@ -137,17 +137,21 @@ func InquiryGateReasons() []string {
 // InquiryCandidate is what the gate reads: stored verdict facts, the two
 // replyfold columns and the message's current thread.
 type InquiryCandidate struct {
-	AskKind         string        // fields.ask_kind
-	Channel         string        // fields.channel
-	ThreadKey       string        // fields.thread_key, stored verbatim
-	ThreadScope     string        // fields.thread_scope
-	StoredThreadID  int64         // fields.thread_id (0 = none)
-	CurrentThreadID int64         // normalized_messages.thread_id now (0 = none)
-	SentAt          time.Time     // normalized_messages.sent_at
-	RepliedSince    bool          // replyfold.RepliedSinceCol
-	PriorPost       bool          // replyfold.PriorParticipationCol
-	MaxAge          time.Duration // 0 = InquiryMaxAge; only a dry-run may widen it
-	ThreadTask      *ExistingTask // threadTask's open-or-dismissed result (nil = none or not yet read)
+	AskKind         string    // fields.ask_kind
+	Channel         string    // fields.channel
+	ThreadKey       string    // fields.thread_key, stored verbatim
+	ThreadScope     string    // fields.thread_scope
+	StoredThreadID  int64     // fields.thread_id (0 = none)
+	CurrentThreadID int64     // normalized_messages.thread_id now (0 = none)
+	SentAt          time.Time // normalized_messages.sent_at
+	RepliedSince    bool      // replyfold.RepliedSinceCol
+	PriorPost       bool      // replyfold.PriorParticipationCol
+	// Mentioned (SWT-79 D4): slackweb.MentionsOwner over the message body,
+	// computed at the scan. Read only by addressed(); the body never reaches a
+	// title, a body or a log.
+	Mentioned  bool
+	MaxAge     time.Duration // 0 = InquiryMaxAge; only a dry-run may widen it
+	ThreadTask *ExistingTask // threadTask's open-or-dismissed result (nil = none or not yet read)
 }
 
 // InquiryGate returns "" when the verdict may promote, else the FIRST failing
@@ -210,6 +214,12 @@ func addressed(c InquiryCandidate) bool {
 	case c.Channel == gmailChannel:
 		return true
 	case slackweb.IsDirectMessageKey(c.ThreadKey):
+		return true
+	case c.Channel == slackweb.Channel && c.Mentioned:
+		// SWT-79 D4: "we only respond to mentions on those channels" — a
+		// channel message that @-mentions him is addressed to him, top-level
+		// or in a thread he has not posted in. The thread rule below stays for
+		// the paths this ticket leaves alone (resurface, gate/route rows).
 		return true
 	default:
 		return c.ThreadScope == replyfold.ScopeThread && c.PriorPost
@@ -404,13 +414,14 @@ func inquiryInbox(ctx context.Context, pool *pgxpool.Pool, maxAge time.Duration)
 	       nm.id, nm.thread_id, nm.sent_at, r.created_at,
 	       p.id, p.slug,
 	       ` + replyfold.RepliedSinceCol + `, ` + replyfold.PriorParticipationCol + `,
-	       ` + replyfold.InquiryLoggedOnTaskSQL + `
+	       ` + replyfold.InquiryLoggedOnTaskSQL + `,
+	       COALESCE(nm.body_text, '')
 	  FROM ai_extractions e
 	  JOIN ai_runs r ON r.id = e.ai_run_id
 	       AND r.worker_type = 'classify_inquiry' AND r.status = 'ok'
 	  JOIN normalized_messages nm ON nm.raw_source_item_id = e.raw_source_item_id
 	       AND nm.direction = 'inbound'
-	  JOIN LATERAL (SELECT cd.action, cd.project_id FROM capture_decisions cd
+	  JOIN LATERAL (SELECT cd.action, cd.project_id, cd.channel_unmentioned FROM capture_decisions cd
 	                 WHERE cd.message_id = nm.id
 	                 ORDER BY cd.id DESC LIMIT 1) latest ON true` + replyfold.InquiryLiveDecisionJoinSQL + `
 	  JOIN projects p ON p.id = ` + replyfold.InquiryProjectIDSQL + `
@@ -440,10 +451,11 @@ func inquiryInbox(ctx context.Context, pool *pgxpool.Pool, maxAge time.Duration)
 			sentAt        *time.Time
 			replied       bool
 			prior         bool
+			body          string
 		)
 		if err := rows.Scan(&v.ExtractionID, &rawItem, &raw,
 			&v.MessageID, &currentThread, &sentAt, &v.RunAt,
-			&v.ProjectID, &v.ProjectSlug, &replied, &prior, &v.LoggedOnTaskID); err != nil {
+			&v.ProjectID, &v.ProjectSlug, &replied, &prior, &v.LoggedOnTaskID, &body); err != nil {
 			return nil, fmt.Errorf("promote: scan inquiry inbox row: %w", err)
 		}
 		var f struct {
@@ -480,6 +492,7 @@ func inquiryInbox(ctx context.Context, pool *pgxpool.Pool, maxAge time.Duration)
 		c := InquiryCandidate{
 			AskKind: f.AskKind, Channel: f.Channel, ThreadKey: f.StoredKey, ThreadScope: f.ThreadScope,
 			StoredThreadID: f.StoredThreadID, RepliedSince: replied, PriorPost: prior,
+			Mentioned: slackweb.MentionsOwner(body),
 		}
 		if currentThread != nil {
 			c.CurrentThreadID = *currentThread

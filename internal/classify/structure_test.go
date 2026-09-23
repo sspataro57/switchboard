@@ -1196,6 +1196,8 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// guards: internal/tools TestMigration0042_SendQueueColumns (+ _Integration_).
 		// (42 sits above 34 on purpose: internal/capture's 0034 guard reads only
 		// the 3000 chars above the marker, and the notes below it already fill them.)
+		// 43 is SWT-79's (slack-channel-mentions: capture_decisions.channel_unmentioned,
+		// the mention gate on the inquiry lane, and the #a-millon project row).
 		// 34 is chat-on-closed-task (SWT-53, 0034_chat_on_closed_task.sql).
 		// 35 is SWT-54's (0035_capture_rules_pr_review; SWT-53 owns 34).
 		// 36 is SWT-56's (signal-session-name: tasks.working_session, the Claude session
@@ -1242,7 +1244,7 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// because the migrate runner keys on schema_migrations.version with NO
 		// checksum — a stray or edited file is skipped SILENTLY and the schema
 		// diverges with no error anywhere.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 && n != 39 && n != 40 && n != 41 && n != 42 {
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 && n != 39 && n != 40 && n != 41 && n != 42 && n != 43 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

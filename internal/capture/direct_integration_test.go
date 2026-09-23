@@ -701,8 +701,11 @@ func TestRegression_SWT78_ChannelMessageStaysAttributed(t *testing.T) {
 	ctx := context.Background()
 	s := newDMTSuite(t, ctx)
 
+	// SWT-79 (slack-channel-mentions): a channel message reaches the classifier
+	// only when it @-mentions Salvador, so the channel control carries the
+	// mention; an unmentioned one is now correctly absent from the inbox.
 	ch := s.message(t, ctx, dmtMsg{key: dmtKey("C0DMTGENERAL"), conv: "C0DMTGENERAL", convType: "public_channel",
-		sender: "Dana Ruiz", body: "morning all"})
+		sender: "Dana Ruiz", body: "@Salvador morning all"})
 	dm := s.dm(t, ctx, "D0DMTDANA", "Dana Ruiz", "morning")
 	s.pass(t, ctx, capture.RulesModeLive)
 

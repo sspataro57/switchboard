@@ -140,7 +140,7 @@ const inboxWhereResidue = `
 // would never be offered these messages or their thread neighbours' bodies.
 const inboxWhereInquiry = `
 	  FROM normalized_messages nm
-	  JOIN LATERAL (SELECT cd.action, cd.project_id
+	  JOIN LATERAL (SELECT cd.action, cd.project_id, cd.channel_unmentioned
 	                  FROM capture_decisions cd
 	                 WHERE cd.message_id = nm.id
 	                 ORDER BY cd.id DESC LIMIT 1) latest ON true

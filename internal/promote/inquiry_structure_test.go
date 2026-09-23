@@ -52,7 +52,9 @@ func TestPromoteInquiryPureTest_ImportsNothingThatCouldDoIO(t *testing.T) {
 // ---- C5: promote asks slackweb, and only about DMs -----------------------------
 
 func TestPromote_UsesOnlyTheDMHelperFromSlackweb(t *testing.T) {
-	allowed := map[string]bool{"IsDirectMessageKey": true, "Channel": true}
+	// SWT-79 D4: MentionsOwner is a pure function of the stored body — it
+	// reaches no bridge — and "addressed" asks it for a channel mention.
+	allowed := map[string]bool{"IsDirectMessageKey": true, "Channel": true, "MentionsOwner": true}
 	use := regexp.MustCompile(`\bslackweb\.([A-Za-z_]\w*)`)
 	seen := map[string]bool{}
 	for _, rel := range prSources(t, "internal/promote") {
