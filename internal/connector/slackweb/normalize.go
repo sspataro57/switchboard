@@ -131,6 +131,25 @@ func IsRootedThreadKey(threadKey string) bool {
 	return true
 }
 
+// ConversationThreadKey is the CONVERSATION a slack thread key belongs to:
+// slack:{ws}:{conv} for both slack:{ws}:{conv} and slack:{ws}:{conv}:{root},
+// ok=false for anything else. SWT-78 decision 4 ("one task per conversation"):
+// a rooted thread inside a DM folds into the DM's conversation task, so the
+// lookup matches every thread of the conversation through this one spelling
+// (channelThreadKey builds the unrooted form it returns).
+func ConversationThreadKey(threadKey string) (string, bool) {
+	parts := strings.Split(threadKey, ":")
+	if (len(parts) != 3 && len(parts) != 4) || parts[0] != "slack" {
+		return "", false
+	}
+	for _, p := range parts[1:] {
+		if p == "" {
+			return "", false
+		}
+	}
+	return channelThreadKey(parts[1], parts[2]), true
+}
+
 // IsDirectMessageKey reports whether a slack thread key names a 1:1 DIRECT
 // MESSAGE conversation, rooted or not (SWT-40 C-D4): the CONVERSATION segment
 // of slack:{ws}:{conv}[:{root}] starts with an upper-case `D`, the leaf's own DM

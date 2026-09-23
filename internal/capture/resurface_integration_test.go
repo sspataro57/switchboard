@@ -211,8 +211,11 @@ func (s *rsfSuite) execute(t *testing.T, ctx context.Context, tool, actor string
 	}
 }
 
-// dm is a 1:1 DM conversation key in the normalizer's shape, built in Go.
-func rsfDM(ws, label string) string { return "slack:" + ws + ":D0RSF" + strings.ToUpper(label) }
+// rsfDM was a 1:1 DM key. Since SWT-78 a person's DM never resurfaces — it
+// goes to its conversation task (direct_integration_test.go owns that) — so the
+// resurface fixtures use a CHANNEL conversation key in the normalizer's shape:
+// resurfacing is unchanged for channels, which is what these tests pin.
+func rsfDM(ws, label string) string { return "slack:" + ws + ":C0RSF" + strings.ToUpper(label) }
 
 func (s *rsfSuite) thread(t *testing.T, ctx context.Context, key string) int64 {
 	t.Helper()

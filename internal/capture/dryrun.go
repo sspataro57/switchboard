@@ -201,6 +201,17 @@ func DryRunRules(ctx context.Context, pool *pgxpool.Pool, cfg DryRunConfig) (Dry
 
 		// Simulate what a live pass would leave behind, so the next mail on the
 		// same key reads as it would live.
+		// SWT-78 item F: a DM decision simulates its CONVERSATION task, so a
+		// second DM in the window reads task_log as the live pass would log it.
+		if !d.deferred && d.direct {
+			switch d.action {
+			case actionTask:
+				sum.WouldCreate++
+				sim[directSimSystem+" "+d.directConv] = refTask{status: "ready"}
+			case actionTaskLog:
+				sum.WouldLog++
+			}
+		}
 		if !d.deferred && d.extSystem != nil && d.extKey != nil {
 			switch {
 			case d.action == actionTask:

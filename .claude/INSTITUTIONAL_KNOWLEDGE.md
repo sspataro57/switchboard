@@ -590,6 +590,65 @@ all**, so precision measured from dismissals undercounts. On SWT-68's 19-row set
 with Done and 13 dismissed — a third of the false positives are invisible to any
 dismissal-based readout.
 
+### A Slack DM is not a channel, and the conversation id does not tell you which is which (SWT-78)
+**Location:** `internal/capture/rules_store.go:887` (rules 8/9 → `attributed`), `internal/promote/inquiry.go:182,420`,
+`internal/connector/slackweb/normalize.go:146`, found 2026-09-23 (`docs/bugs/slack-messages-not-becoming-tasks_DIAGNOSIS.md`)
+
+Human Slack DMs had no path of their own: workspace catch-all rules attribute them, the inquiry lane asks
+qwen3:8b with a PRECISION prompt ("when torn, answer false"), and `needs_reply=false` is read by nothing.
+On 2026-09-22, 16 of 17 dropped DMs were qwen `fyi`. What will bite whoever fixes or extends this:
+- **Group DMs mostly have `C…` ids** (40 of 53 prod mpdm conversations; only 13 are `G…`). The one
+  reliable fact is raw `conversation.type = 'group_dm'`, which is not in any normalized table. It is also
+  path-dependent: the leaf types by id prefix on explicit-URL/targeted reads (`slackconnector
+  export.ts conversationTypeForId`), so a watched C-mpdm is stored `public_channel`. `^[DG]` and
+  `IsDirectMessageKey` (D only, by design) both miss them.
+- **In a DM, `answered` means "he said anything later in the whole DM"** (`thread_scope=conversation`).
+  Rotation ingests in batches, so an ask and his 38-second reply land in the SAME export (403664/403665,
+  11 ms apart). The verdict is recorded after the reply is stored, and `InquiryGrace=0`'s premise ("nothing
+  waits long enough for a reply to land first") is false for Slack. Measured: `answered:11` = 11 DM verdicts.
+- **A gated or `needs_reply=false` verdict leaves no row**. "Qwen dropped it" is only visible by joining
+  `ai_extractions` against `classify_promotions`, never in audit_events.
+- **A Jira app's DM author is an ordinary `U…` id.** Tell a bot by the project's `notifier_senders`
+  (equality), never by author id.
+- **Ticket tasks can carry a DM as `source_thread_id`** (#452 WEB-10469 on José's DM, created by rule 75
+  from a DM). A bare `source_thread_id` lookup for "the conversation's task" finds them.
+**Rule:** an owner-declared "always actionable" class (a DM to him) must be decided in CAPTURE, before
+any model: a live `task`/`task_log` decision is excluded from both inquiry inboxes by
+`InquiryEligibleLatestSQL`, and a live decision is forever. That same "forever" means a message
+already decided `attributed` can never be re-decided by a fixed capture binary; its backfill is an
+out-of-band executor sequence.
+
+**Fixed 2026-09-23 (SWT-78, fix-slack-dm-tasks).** Salvador: "all DMs to me are actionable", "fix it so
+DMs skip qwen", "one task per conversation", "make qwen say yes when unsure".
+- Capture's attribution-only exit runs `directConversationTask` (internal/capture/direct.go): Slack AND
+  (1:1 DM by `IsDirectMessageKey` OR raw `conversation.type='group_dm'`, now in `pendingMessageCols`) AND
+  sender not blank AND not on the project's notifier list. It decides `task_log` onto the conversation's
+  OPEN task (human, no external_refs, any thread of the conversation via `slackweb.ConversationThreadKey`,
+  status NOT IN closed/delivered — a dismissed task means a new one) or `task`. external_system/key stay
+  NULL and no ref is written: a ref would make "closed → new task" impossible.
+- Item E: a person's DM that would RESURFACE onto a closed ticket task takes the same DM path; the closed
+  ticket gets nothing. The resurface suites' fixtures moved to channel keys (and one promote test to
+  email) on purpose — resurfacing is unchanged for channels.
+- A DM decision has its own act (`actDirect`): EvaluateRules' main switch dereferences extSystem/extKey
+  on every branch and would nil-panic on it.
+- The inquiry prompt's tie-break is RECALL since `inquiry-v3` ("when unsure, answer true"); criterion 8's
+  precision test was reversed deliberately.
+- Backfill verb: `opsctl capture-rules direct-backfill --message <ids> [--dry-run]` — the same decision,
+  no capture_decisions write, a `capture: DM backfill (SWT-78)` log line per message (its idempotency key),
+  actor `capture:backfill`.
+- Deploy: every capture writer must roll to the same image (any connector's pass decides every pending
+  message); a stale binary decides a DM `attributed` forever. After a roll, sweep the day with the repro script and
+  `direct-backfill` the DMs it lists (runbook capture-rules.md).
+- The DM path covers EVERY exit that would leave a person's DM `attributed` (no external_system, a keyless
+  external rule, a non-PR github key), not just the catch-all's (codex review).
+- **Crash windows in a DM create, and what heals them.** create → provenance: the next DM finds the task by
+  its BODY (`directTaskBodyMarker` + `conversation:` line), attaches, and records the provenance. create →
+  recordDecisionTask: the decision row lacks its task_id — the rule-create path's existing, accepted
+  window, visible as "action=task with no task_id" in the capture report. The backfill finds its own
+  interrupted creates by the body's `message_id:` line.
+- Known gap: a `C…` group DM read by the leaf's targeted path is typed `public_channel` and misses the DM
+  path; `slack_watch` holds only 1:1 DMs today. Keep it that way until the leaf is fixed.
+
 ---
 
 ## The seven invariants (review checklist form)

@@ -429,8 +429,11 @@ func runCaptureRules(sub string, argv []string) error {
 	case "try":
 		// SWT-54 D10: the write-nothing dry run of a candidate rule.
 		return runCaptureRulesTry(argv)
+	case "direct-backfill":
+		// SWT-78: named Slack DMs the inquiry lane dropped → their conversation tasks.
+		return runCaptureRulesDirectBackfill(argv)
 	default:
-		return fmt.Errorf("unknown capture-rules command %q (want list|add|try|run|report|gate)", sub)
+		return fmt.Errorf("unknown capture-rules command %q (want list|add|try|run|report|gate|direct-backfill)", sub)
 	}
 }
 
