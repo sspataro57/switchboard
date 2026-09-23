@@ -96,7 +96,12 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	"task_signal",
 	// SWT-56 (Salvador, 2026-09-15: "we need a tool so it can pull the task with
 	// detail"): one task's full document, read-only by the pin below.
-	"task_context")
+	"task_context",
+	// slack-auto-tier (SWT-77 D6, Salvador 2026-09-22: "auto for every
+	// conversation"): post a Slack message in one call — draft, auto-approve,
+	// send. No pin: the handler fixes the channel and there is nothing to
+	// narrow. The brakes are policy's (send_enabled, hourly limit, kill switch).
+	"send_slack_reply")
 
 // userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
 // by OVERWRITE, after injectWorkerID. require_assignee_type:"human" makes the

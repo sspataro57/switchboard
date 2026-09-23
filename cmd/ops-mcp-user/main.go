@@ -19,14 +19,19 @@
 //
 // It is a separate binary, not a setting on ops-mcp, so that nothing can fall
 // back to the full surface: there is no variable whose absence restores it.
-// It wires NO sender: main never imports a connector or calls a tools.Set* seam,
-// so the send seams stay nil (the connector code is linked, via internal/tools,
-// but never wired) and no secret inherited from the launching shell (~/.bashrc
-// exports OPS_TOKEN_KEY) can arm one. The user profile lists no tool that would
-// reach a seam anyway.
+// It wires ONE sender, the Slack bridge, and nothing else (SWT-77, Salvador
+// 2026-09-22: send_slack_reply is on the user profile, and it is dead without
+// the bridge). Every other seam stays nil: main imports no connector but
+// slackweb and calls no tools.Set* but SetSlackSender, so no secret inherited
+// from the launching shell (~/.bashrc exports OPS_TOKEN_KEY) can arm gmail,
+// Jira or the calendar. The bridge is armed only from SLACK_WEB_BRIDGE_URL,
+// which the MCP config's env block sets and no shell exports; the command
+// bridge (SLACK_WEB_BRIDGE_SCRIPT) is never read here.
 //
-//	DATABASE_URL   ops db, required
-//	OPS_WORKER_ID  the caller's identity, required (manual:salvo)
+//	DATABASE_URL                 ops db, required
+//	OPS_WORKER_ID                the caller's identity, required (manual:salvo)
+//	SLACK_WEB_BRIDGE_URL         the mini's bridge, optional (absent: Slack sends refused by name)
+//	SLACK_WEB_BRIDGE_TOKEN_FILE  its bearer token (or SLACK_WEB_BRIDGE_TOKEN)
 package main
 
 import (
@@ -36,6 +41,7 @@ import (
 	"os"
 
 	"github.com/sspataro57/switchboard/internal/audit"
+	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/mcpserver"
 	"github.com/sspataro57/switchboard/internal/policy"
@@ -70,6 +76,20 @@ func run() error {
 	tools.Register(reg, pool)
 	checker := policy.NewMatrix(policy.NewPGSnapshotLoader(pool), policy.NewStatic(reg.Names()...))
 	ex := executor.New(reg, checker, audit.NewPGStore(pool))
+
+	// SWT-77: the one seam this binary arms. HTTP only, from this process's
+	// own config; a misconfiguration is fatal here, before any row is touched.
+	if rawURL := os.Getenv("SLACK_WEB_BRIDGE_URL"); rawURL != "" {
+		token, err := slackweb.TokenFromEnv()
+		if err != nil {
+			return fmt.Errorf("configure Slack bridge: %w", err)
+		}
+		bridge, err := slackweb.NewHTTPBridge(rawURL, token, nil)
+		if err != nil {
+			return fmt.Errorf("configure Slack bridge: %w", err)
+		}
+		tools.SetSlackSender(bridge)
+	}
 
 	adapter := mcpserver.NewWithProfile(ex, workerID, mcpserver.ProfileUser)
 	slog.Info("ops-mcp-user serving", "worker_id", workerID, "tools", len(adapter.ListTools()))

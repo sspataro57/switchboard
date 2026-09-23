@@ -283,6 +283,16 @@ func ruleDeliveryLifecycle(ev Event, f Facts) []Action {
 	if payloadStr(ev.Payload, "channel") == "calendar" {
 		return nil
 	}
+	// slack-auto-tier (SWT-77 D8): the same reasoning, generalized. A session
+	// posting to Slack on an ordinary task emits delivery_sent on a task that
+	// is nowhere near done_locally; task_mark_delivered would refuse it and
+	// the record would still mute the task's later real delivery. So only the
+	// statuses task_mark_delivered accepts get the lifecycle at all.
+	switch f.Task.Status {
+	case "done_locally", "delivered", "closed":
+	default:
+		return nil
+	}
 	if orchestrated(f, "delivery_lifecycle", func(o Orchestration) bool { return o.TaskID == ev.TaskID }) {
 		return nil
 	}

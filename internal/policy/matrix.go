@@ -41,7 +41,13 @@ var sendShaped = map[string]bool{"send_delivery": true, "mark_delivery_sent": tr
 	// consumes the channel's hourly allowance and reaches the channel branch —
 	// an allow before the switch would be an allow with no rate limit and no
 	// kill switch, which is the auto tier with both of its brakes missing.
-	"book_calendar_block": true}
+	"book_calendar_block": true,
+	// slack-auto-tier (SWT-77): the slack_reply auto tier's verb — draft +
+	// approve + send in one call. sendShaped for the same reason as
+	// book_calendar_block: the hourly limit and the channel branch are its
+	// brakes. Never add it to mcpHumanOnly: Check routes those to the static
+	// allow-list and the loader would never run (D7).
+	"send_slack_reply": true}
 
 // freezeGated is the subset the kill switch can actually prevent: an actual
 // send. The switch is for switchboard — it governs what switchboard itself puts
@@ -59,7 +65,10 @@ var freezeGated = map[string]bool{"send_delivery": true,
 	// book_calendar_block actually sends (SWT-28). With no human gate on the
 	// auto tier, set_sending_frozen is the ONLY thing that can halt a worker
 	// that has decided to book — the operator's stop button.
-	"book_calendar_block": true}
+	"book_calendar_block": true,
+	// send_slack_reply actually sends (SWT-77), with no human gate: the kill
+	// switch is the only thing that halts a session that has decided to post.
+	"send_slack_reply": true}
 
 // humanOnly tools require a human actor prefix.
 var humanOnly = map[string]bool{
@@ -191,6 +200,14 @@ func Decide(req Request, snap Snapshot) Decision {
 	if req.Tool == "book_calendar_block" && snap.Channel != "calendar" {
 		return Decision{Decision: "deny", Rule: "channel_mismatch",
 			Reason: fmt.Sprintf("book_calendar_block only acts on a calendar delivery; this delivery's channel is %q", snap.Channel)}
+	}
+	// send_slack_reply, the same by-name deny (SWT-77 D5a). The loader pins
+	// its channel from the tool name, so this is unreachable in production
+	// today; it stays because Decide is where a future loader or args change
+	// would otherwise let this verb draft, approve and send on another channel.
+	if req.Tool == "send_slack_reply" && snap.Channel != "slack_reply" {
+		return Decision{Decision: "deny", Rule: "channel_mismatch",
+			Reason: fmt.Sprintf("send_slack_reply only sends on the slack_reply channel; this request's channel is %q", snap.Channel)}
 	}
 	if !sendShaped[req.Tool] {
 		return Decision{Decision: "allow", Rule: "matrix-human", Reason: "human delivery action"}

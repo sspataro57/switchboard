@@ -183,6 +183,13 @@ var wantAgentTools = []string{
 	//     (comm_tools_test.go).
 	"task_match",
 	"task_attach",
+	// slack-auto-tier (SWT-77) criterion 17, D6: the slack_reply AUTO tier's
+	// verb — drafts, approves and SENDS in one audited call. Listed in both
+	// profiles with no pin. NOT humanOnly: a worker console CAN post (Salvador's
+	// call, "auto for every conversation"); the brakes are the policy matrix
+	// (sendShaped + freezeGated: kill switch, hourly limit, channel_mismatch),
+	// the per-workspace send_enabled gate and the WHEN rule in the description.
+	"send_slack_reply",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.

@@ -131,8 +131,18 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 // because it cannot act on the answer. `swb match <id>` then `swb attach <id>
 // <target>` from any repo's session is the routing half of the ticket.
 // EIGHTEEN in all.
+//
+// slack-auto-tier (SWT-77) criterion 17, D6: send_slack_reply — draft,
+// auto-approve and SEND a Slack reply in one audited call, on every
+// conversation, with no pin. The first SEND-SHAPED tool on this profile, by
+// Salvador's decision ("auto for every conversation — claude always asks
+// approval so the double gate is just annoying for slack"). Its brakes are the
+// policy matrix (kill switch, hourly limit, channel_mismatch), send_enabled per
+// workspace, and the WHEN rule in its description and in Instructions.
+// NINETEEN in all.
 var wantUserProfileTools = []string{
 	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
+	"send_slack_reply",
 	"task_append_log", "task_attach", "task_close", "task_context", "task_dismiss",
 	"task_get_next", "task_list", "task_mark_delivered", "task_match", "task_requeue", "task_set_priority",
 	"task_signal", "update_delivery",
@@ -344,9 +354,28 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 
 // userProfileLoader fails the test if the matrix ever loads a delivery snapshot:
 // a user-profile tool that reached the loader would be send-shaped.
-type userProfileLoader struct{ t *testing.T }
+//
+// AMENDED — not deleted — by slack-auto-tier (SWT-77) criteria 17 and 20:
+// send_slack_reply is the ONE deliberate exception. It MUST reach the loader
+// (D7: a send verb that skipped it would skip the kill switch, the hourly limit
+// and the channel branch), so the loader answers it with a clean slack_reply
+// snapshot and records that it ran; every OTHER tool reaching it is still the
+// failure this test was written for.
+type userProfileLoader struct {
+	t        *testing.T
+	sendSeen *bool
+}
+
+// userProfileSendTool is the one send-shaped verb the user profile serves.
+const userProfileSendTool = "send_slack_reply"
 
 func (l userProfileLoader) Load(_ context.Context, req policy.Request) (policy.Snapshot, error) {
+	if req.Tool == userProfileSendTool {
+		if l.sendSeen != nil {
+			*l.sendSeen = true
+		}
+		return policy.Snapshot{SentLastHour: map[string]int{}, Channel: "slack_reply", HourlyLimit: 10}, nil
+	}
 	l.t.Errorf("the production matrix loaded a send snapshot for user-profile tool %s — the user binary "+
 		"serves a send-shaped tool (invariant 4)", req.Tool)
 	return policy.Snapshot{}, nil
@@ -354,11 +383,13 @@ func (l userProfileLoader) Load(_ context.Context, req policy.Request) (policy.S
 
 // Criterion 12. Every user-profile tool, checked as mcp:manual:salvo through
 // the production matrix (real registry, loader that must not run), is allowed.
-// So no tool the user binary serves is send-shaped.
+// So no tool the user binary serves is send-shaped — except send_slack_reply
+// (SWT-77), which must be allowed AND must have gone through the loader.
 func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 	reg := executor.NewRegistry()
 	tools.Register(reg, nil) // nil pool: Register only builds closures
-	checker := policy.NewMatrix(userProfileLoader{t}, policy.NewStatic(reg.Names()...))
+	sendSeen := false
+	checker := policy.NewMatrix(userProfileLoader{t: t, sendSeen: &sendSeen}, policy.NewStatic(reg.Names()...))
 
 	checked := 0
 	for _, tool := range mcpserver.NewWithProfile(&fakeExec{}, "manual:salvo", mcpserver.ProfileUser).ListTools() {
@@ -374,10 +405,15 @@ func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 		checked++
 	}
 	// SWT-52 criterion 24: the control checked fourteen tools; SWT-56 criterion
-	// 34: fifteen (task_context); SWT-72 criterion 23: sixteen (task_requeue).
-	if len(wantUserProfileTools) != 18 {
-		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 18 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach)",
+	// 34: fifteen (task_context); SWT-72 criterion 23: sixteen (task_requeue);
+	// SWT-77 criterion 17: nineteen (send_slack_reply).
+	if len(wantUserProfileTools) != 19 {
+		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 19 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach; SWT-77 adds send_slack_reply)",
 			len(wantUserProfileTools))
+	}
+	if !sendSeen {
+		t.Errorf("send_slack_reply never reached the snapshot loader through the production matrix (SWT-77 " +
+			"criterion 20 / D7): a send verb decided by the static allow-list has no kill switch and no hourly limit")
 	}
 	if checked != len(wantUserProfileTools) {
 		t.Fatalf("POSITIVE CONTROL FAILED: checked %d user-profile tools, want %d", checked, len(wantUserProfileTools))
