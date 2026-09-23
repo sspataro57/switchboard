@@ -20,7 +20,9 @@
       "env": {
         "DATABASE_URL": "${OPS_DATABASE_URL}",
         "OPS_WORKER_ID": "manual:salvo",
-        "OPS_TOKEN_KEY": "${OPS_TOKEN_KEY}"
+        "OPS_TOKEN_KEY": "${OPS_TOKEN_KEY}",
+        "SLACK_WEB_BRIDGE_URL": "http://192.168.50.130:8787",
+        "SLACK_WEB_BRIDGE_TOKEN_FILE": "${HOME}/.config/switchboard/slack-bridge-token"
       }
     }
   }

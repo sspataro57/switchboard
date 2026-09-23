@@ -27,7 +27,10 @@ ships in the binary, so it exists only after the re-install below (`go install
 
 ```bash
 cd ~/projects/personal/switchboard && git switch main && go install ./cmd/ops-mcp-user
-claude mcp add --scope user ops -e DATABASE_URL='${OPS_DATABASE_URL}' -e OPS_WORKER_ID=manual:salvo -- "$(go env GOPATH)/bin/ops-mcp-user"
+claude mcp add --scope user ops -e DATABASE_URL='${OPS_DATABASE_URL}' -e OPS_WORKER_ID=manual:salvo \
+  -e SLACK_WEB_BRIDGE_URL=http://192.168.50.130:8787 \
+  -e SLACK_WEB_BRIDGE_TOKEN_FILE="$HOME/.config/switchboard/slack-bridge-token" \
+  -- "$(go env GOPATH)/bin/ops-mcp-user"
 claude mcp get ops
 ```
 
@@ -54,7 +57,10 @@ the old binary last makes a forgotten step fail loudly in `/mcp`:
 ```bash
 cd ~/projects/personal/switchboard && git switch main && go install ./cmd/ops-mcp-user
 claude mcp remove --scope user ops
-claude mcp add --scope user ops -e DATABASE_URL='${OPS_DATABASE_URL}' -e OPS_WORKER_ID=manual:salvo -- "$(go env GOPATH)/bin/ops-mcp-user"
+claude mcp add --scope user ops -e DATABASE_URL='${OPS_DATABASE_URL}' -e OPS_WORKER_ID=manual:salvo \
+  -e SLACK_WEB_BRIDGE_URL=http://192.168.50.130:8787 \
+  -e SLACK_WEB_BRIDGE_TOKEN_FILE="$HOME/.config/switchboard/slack-bridge-token" \
+  -- "$(go env GOPATH)/bin/ops-mcp-user"
 rm -f "$(go env GOPATH)/bin/ops-mcp-read"
 ```
 
@@ -256,6 +262,24 @@ full `ops` does not, although both arrive as `mcp:manual:salvo`.
   environment — verified at the first install (2026-09-10). If `/mcp` shows the
   server failing with `DATABASE_URL is not set` or a connection error, re-add it
   with the literal DSN (the same exposure as `~/.pgpass`).
+
+## The Slack bridge (SWT-77, send_slack_reply)
+
+Since SWT-77 the user profile lists `send_slack_reply`, and `ops-mcp-user` arms exactly ONE send seam —
+the Slack bridge, HTTP only — from the two `SLACK_WEB_BRIDGE_*` values in the registration above. Without
+them the verb refuses by name before writing anything. The token is the one the dashboard uses (k8s
+secret `switchboard-slack-bridge`); put it in a file only you can read, on each workstation:
+
+```bash
+umask 077 && mkdir -p ~/.config/switchboard
+kubectl -n ops get secret switchboard-slack-bridge -o jsonpath='{.data.SLACK_WEB_BRIDGE_TOKEN}' \
+  | base64 -d > ~/.config/switchboard/slack-bridge-token
+```
+
+(On 192.168.50.30, which has no kubectl, `scp` the file from this box and `chmod 600` it.) The repo's
+`.mcp.json` points the full-profile `ops-mcp` at the same file. Check: `curl -s -o /dev/null -w '%{http_code}'
+-X POST -H "Authorization: Bearer $(cat ~/.config/switchboard/slack-bridge-token)"
+http://192.168.50.130:8787/status` prints 200 (401 without the header).
 
 ## The swb-status skill
 
