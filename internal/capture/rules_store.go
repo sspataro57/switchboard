@@ -566,24 +566,6 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 				return stats, err
 			}
 			stats.Appended++
-			// SWT-72 D3/D7: the attach is activity on the task — a comment, a
-			// direct email, a Slack message — and the board puts it in INCOMING
-			// for review. Log first, THEN the mark (a crash between the two
-			// leaves today's behaviour); a closed target is skipped by the tool,
-			// so the revive and reopen below keep their SWT-45/SWT-36 meaning.
-			// Two exclusions: the merged/closed PR notice (the next call closes
-			// the task, and surfacing a row to close it is noise) and a comm
-			// (SWT-74 D3: the mark MOVES to the comm task — the new row is the
-			// thing to look at, and surfacing the target too would double the rows).
-			if !decision.prClose && !decision.comm {
-				marked, err := markRuleActivity(ctx, ex, cfg.Actor, pm, *decision.taskID, *decision.extSystem, *decision.extKey)
-				if err != nil {
-					return stats, err
-				}
-				if marked {
-					stats.Activity++
-				}
-			}
 			// SWT-74 D3: an ARMED rule's attach from a person makes its OWN comm
 			// task, in this order — create (through create_task), record the id
 			// on the decision (the claim is spent; a later failure must not lose
@@ -658,6 +640,29 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 				}
 				if reopened {
 					stats.Reopened++
+				}
+			}
+			// SWT-72 D3/D7: the attach is activity on the task — a comment, a
+			// direct email, a Slack message — and the board puts it in INCOMING
+			// for review. The mark comes LAST, after the revive/reopen above
+			// (SWT-80): it skips a closed target by design, so run before the
+			// reopen it skipped exactly the tasks a comment brings back, and they
+			// came back to QUEUE instead of INCOMING. After the reopen a revived
+			// or reopened task is open and gets the mark; a comment on a closed
+			// task nothing reopened (resurface, notifier copy, a refused revive,
+			// his own action) is still skipped. A crash before the mark leaves the
+			// task reopened in QUEUE — the log line is already there.
+			// Two exclusions: the merged/closed PR notice (it just closed the
+			// task, and surfacing a row to close it is noise) and a comm
+			// (SWT-74 D3: the mark MOVES to the comm task — the new row is the
+			// thing to look at, and surfacing the target too would double the rows).
+			if !decision.prClose && !decision.comm {
+				marked, err := markRuleActivity(ctx, ex, cfg.Actor, pm, *decision.taskID, *decision.extSystem, *decision.extKey)
+				if err != nil {
+					return stats, err
+				}
+				if marked {
+					stats.Activity++
 				}
 			}
 		}

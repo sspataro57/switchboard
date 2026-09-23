@@ -30,7 +30,9 @@ package capture_test
 // MUTATIONS THAT MUST TURN THIS FILE RED (SPEC "Mutations"):
 //   - key the capture hook on the channel or the rule kind -> BlindToChannelAndRule
 //     (the José case).
-//   - drop the closed-task skip in task_mark_activity -> ClosedTargetsAreUntouched.
+//   - drop the closed-task skip in task_mark_activity -> the SWT-80 negatives in
+//     swt80_closed_not_reopened_integration_test.go (closed and NOT reopened).
+//   - mark BEFORE the revive/reopen (SWT-80) -> ReopenedTargetsAreMarkedAfterTheReopen.
 //   - move the mark before appendRuleLog -> TheLogComesFirst (the audit order).
 //   - skip the mark in shadow mode... is REQUIRED: ShadowMarksNothing.
 //
@@ -222,16 +224,28 @@ func TestCaptureActivity_Integration_TheLogComesFirst(t *testing.T) {
 	}
 	if len(seq) != 2 || seq[0] != "task_append_log" || seq[1] != "task_mark_activity" {
 		t.Errorf("audit sequence = %v, want [task_append_log task_mark_activity] (criterion 8: after "+
-			"appendRuleLog succeeds and before the prClose/revive/reopen branch)", seq)
+			"appendRuleLog succeeds; on an OPEN task the revive/reopen branch makes no call, so the pair is adjacent — "+
+			"SWT-80 moved the mark after that branch, see TestRegression_SWT80_AuditOrder_*)", seq)
 	}
 }
 
-// Criterion 11: a capture attach onto a CLOSED task leaves activity_at NULL —
-// and the SWT-45 revive still happens. That is what keeps closed-task work
-// (SWT-45's revive, SWT-53's chat-on-closed-task) out of this ticket for free:
-// both branches run AFTER the mark, so the task is still closed when the mark
-// is attempted and the mark SELF-EXCLUDES (D3).
-func TestCaptureActivity_Integration_ClosedTargetsAreUntouched(t *testing.T) {
+// Criterion 11, AMENDED by SWT-80 (bug revived-task-not-in-incoming, swb #553;
+// docs/bugs/revived-task-not-in-incoming_DIAGNOSIS.md, "Proposed fix scope" ->
+// Tests 2). This test used to be ClosedTargetsAreUntouched and asserted that a
+// revive (SWT-45) or a dismissal reopen (SWT-36) left activity_at NULL and
+// Activity == 0. That PINNED THE BUG: the mark ran BEFORE the reopen, the tool
+// skipped the still-closed task, the reopen then opened it, and the close had
+// already stamped reviewed_at — so every activity-revived task sat in QUEUE
+// (production #381, #452, #155). The fix orders log -> reopen/revive -> mark,
+// so a task the message brought back IS marked with that message.
+//
+// The closed-and-NOT-reopened cases (resurface, notifier copy, refused revive,
+// own action, refused dismissal reopen) still must be skipped; they live in
+// swt80_closed_not_reopened_integration_test.go, each with its column read back
+// and its skipped task_mark_activity audit row.
+//
+// MUTATION: put the mark back before reviveRuleTask/reopenRuleTask -> red.
+func TestCaptureActivity_Integration_ReopenedTargetsAreMarkedAfterTheReopen(t *testing.T) {
 	ctx := context.Background()
 	s := newCRVSuite(t, ctx)
 	craRequire0039(t, ctx, s.pool)
@@ -241,45 +255,66 @@ func TestCaptureActivity_Integration_ClosedTargetsAreUntouched(t *testing.T) {
 	s.humanClose(t, ctx, revived)
 	s.mentionRule(t, ctx, true) // revive = true
 	now := s.dbNow(t, ctx)
-	s.mailMsg(t, ctx, "jose.g@avviato.example", "inbound", "CRV-7003 is back",
+	mail := s.mailMsg(t, ctx, "jose.g@avviato.example", "inbound", "CRV-7003 is back",
 		"CRV-7003 needs another look", now, now)
 	st := s.pass(t, ctx, "live")
 
-	if at, _ := craActivity(t, ctx, s, revived); at != nil {
-		t.Errorf("an attach onto a CLOSED task set activity_at=%v. Criterion 11 / D3: a closed task is a SKIP "+
-			"(task_closed), which is what keeps SWT-45 and SWT-53 out of this ticket by construction", at)
-	}
 	if st.Revived != 1 {
-		t.Errorf("RulesStats.Revived = %d, want 1 — the revive still happens; the mark runs BEFORE it and "+
-			"self-excludes (criterion 11)", st.Revived)
+		t.Errorf("RulesStats.Revived = %d, want 1 — the SWT-45 revive still happens", st.Revived)
 	}
 	if got := s.status(t, ctx, revived); got == "closed" {
-		t.Errorf("the revived task is still closed (%q); the mark must not have swallowed the revive", got)
+		t.Errorf("the revived task is still closed (%q)", got)
 	}
-	// The revive DOES surface it, through SWT-45's own column — unchanged.
-	if sat, _ := s.surfaced(t, ctx, revived); sat == nil {
-		t.Errorf("the revive did not set surfaced_at; SWT-45's path is untouched by this ticket")
+	if at, by := craActivity(t, ctx, s, revived); at == nil || by == nil || *by != mail {
+		t.Errorf("a REVIVED task has activity_at=%v activity_by=%v, want set / %d (the reviving message). SWT-80: "+
+			"the mark must run AFTER the revive, or the tool sees a closed task, skips, and the revived task sits "+
+			"in QUEUE (production #381)", at, by, mail)
 	}
-	if st.Activity != 0 {
-		t.Errorf("RulesStats.Activity = %d on a closed-target pass, want 0 (criterion 11)", st.Activity)
+	if !craNeedsReview(t, ctx, s, revived) {
+		t.Errorf("the revived task is not needs-review (activity_at > reviewed_at); the close stamped reviewed_at, " +
+			"so only a mark AFTER the revive puts it in INCOMING (SWT-80)")
+	}
+	if st.Activity != 1 {
+		t.Errorf("RulesStats.Activity = %d on a revive, want 1 (SWT-80)", st.Activity)
+	}
+	// SWT-45's own column is unchanged by the fix.
+	if sat, sby := s.surfaced(t, ctx, revived); sat == nil || sby == nil || *sby != mail {
+		t.Errorf("the revive left surfaced_at=%v surfaced_by=%v, want set / %d; SWT-45's path is unchanged", sat, sby, mail)
 	}
 
 	// (b) SWT-36's dismissal shape: a dismissed task, reopened by the attach.
 	dismissed := craSeedTask(t, ctx, s, "CRV-7004")
 	craDismiss(t, ctx, s, dismissed)
 	later := s.dbNow(t, ctx)
-	s.jiraMsg(t, ctx, "CRV-7004", later, later)
+	comment := s.jiraMsg(t, ctx, "CRV-7004", later, later)
 	st2 := s.pass(t, ctx, "live")
 
-	if at, _ := craActivity(t, ctx, s, dismissed); at != nil {
-		t.Errorf("an attach onto a DISMISSED task set activity_at=%v; criterion 11", at)
-	}
 	if st2.Reopened != 1 {
-		t.Errorf("RulesStats.Reopened = %d, want 1 — SWT-36's guarded reopen still fires (criterion 11)", st2.Reopened)
+		t.Errorf("RulesStats.Reopened = %d, want 1 — SWT-36's guarded reopen still fires", st2.Reopened)
 	}
-	if st2.Activity != 0 {
-		t.Errorf("RulesStats.Activity = %d, want 0 (criterion 11)", st2.Activity)
+	if at, by := craActivity(t, ctx, s, dismissed); at == nil || by == nil || *by != comment {
+		t.Errorf("a dismissal-REOPENED task has activity_at=%v activity_by=%v, want set / %d (SWT-80: production #452)",
+			at, by, comment)
 	}
+	if !craNeedsReview(t, ctx, s, dismissed) {
+		t.Errorf("the reopened task is not needs-review (activity_at > reviewed_at); SWT-80")
+	}
+	if st2.Activity != 1 {
+		t.Errorf("RulesStats.Activity = %d on a dismissal reopen, want 1 (SWT-80)", st2.Activity)
+	}
+}
+
+// craNeedsReview is the board's predicate (internal/dashboard/board.go):
+// an open task whose activity_at is later than reviewed_at.
+func craNeedsReview(t *testing.T, ctx context.Context, s *crvSuite, task int64) bool {
+	t.Helper()
+	var ok bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT status <> 'closed' AND activity_at IS NOT NULL AND (reviewed_at IS NULL OR activity_at > reviewed_at)
+		   FROM tasks WHERE id=$1`, task).Scan(&ok); err != nil {
+		t.Fatalf("read needs-review of task %d: %v", task, err)
+	}
+	return ok
 }
 
 // Criterion 8 says "live mode only". A shadow pass records what it WOULD do and

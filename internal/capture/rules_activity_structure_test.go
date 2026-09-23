@@ -99,7 +99,11 @@ func TestCaptureActivity_ThePRCloseExclusionIsSpelledOnce(t *testing.T) {
 	if logBranch < 0 {
 		t.Fatalf("EvaluateRules has no actionTaskLog branch")
 	}
-	rel := strings.Index(body[logBranch:], "markRuleActivity(")
+	// AMENDED by SWT-80 (revived-task-not-in-incoming): the TARGET's mark is the
+	// call on *decision.taskID — the comm task's mark (SWT-74, on commID) sits in
+	// the same branch, and once the target's mark moves below the revive/reopen
+	// chain the FIRST call in the branch is no longer the target's.
+	rel := craTargetMark(body[logBranch:])
 	if rel < 0 {
 		t.Fatalf("EvaluateRules' actionTaskLog branch never calls markRuleActivity (criterion 8)")
 	}
@@ -121,5 +125,23 @@ func TestCaptureActivity_ThePRCloseExclusionIsSpelledOnce(t *testing.T) {
 		t.Errorf("the markRuleActivity call is not guarded by decision.prClose. Criterion 12 / D3: \"capture "+
 			"skips the mark when decision.prClose is set (SWT-54's merged/closed PR notice). The next call "+
 			"closes the task; surfacing a row in order to close it one statement later is noise\":\n%s", window)
+	}
+}
+
+// craTargetMark finds the markRuleActivity call whose task argument is
+// *decision.taskID (the attach TARGET), or -1.
+func craTargetMark(s string) int {
+	from := 0
+	for {
+		i := strings.Index(s[from:], "markRuleActivity(")
+		if i < 0 {
+			return -1
+		}
+		at := from + i
+		end := strings.Index(s[at:], ")")
+		if end > 0 && strings.Contains(s[at:at+end], "*decision.taskID") {
+			return at
+		}
+		from = at + len("markRuleActivity(")
 	}
 }

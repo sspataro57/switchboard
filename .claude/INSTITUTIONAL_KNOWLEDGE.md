@@ -3100,7 +3100,7 @@ did not author, from the GitHub notification mail he already receives. Runbook:
 - **Two tools.** `task_mark_activity {task_id, message_id, reason}` — spine-facing (capture as
   `capture:{connector}`, promote as `promote:{lane}`), off BOTH MCP profiles (F7: absence is the boundary),
   not humanOnly; errors on a non-inbound message (invariant 5), SKIPS a closed task (so SWT-45 revive and
-  SWT-36 reopen, which run after it, keep their meaning), same-message no-op, writes nothing else (no event,
+  SWT-36 reopen — which since SWT-80 run BEFORE it — keep their meaning), same-message no-op, writes nothing else (no event,
   no `updated_at`). `task_requeue {task_id, priority?, note?}` — humanOnly (interactive `mcp:manual:salvo`,
   dashboard, opsctl pass; workers refused), both MCP profiles, `swb requeue <id>`; refuses closed by name,
   stamps `reviewed_at`, lifts `holding → ready` only, priority through the SHARED `applyPriority` (omitted =
@@ -3109,7 +3109,7 @@ did not author, from the GitHub notification mail he already receives. Runbook:
 - **"Needs review" is `activity_at > reviewed_at`** on an open task — monotone stamps, never a cleared
   column, so a later message re-surfaces and a double-tap is a no-op.
 - **The hook is channel-, rule- and assignee-blind**: it sits in `EvaluateRules`' single `task_log` branch
-  (after `appendRuleLog`, before revive/reopen) and in the promoter's `attached` branch. The ONE exclusion is
+  (after `appendRuleLog` and, since SWT-80, after revive/reopen) and in the promoter's `attached` branch. The ONE exclusion is
   `decision.prClose` (the next call closes the task). A claude task in flight surfaces too and keeps its
   yellow light (`lightFor` never reads the four display-only facts).
 - **D11: an inquiry ask ALWAYS becomes its own task.** `Decide` on `LaneInquiry` with an OPEN thread task
@@ -3142,6 +3142,13 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   sequence for an overriding create is `create_task, link_external_ref, task_set_source_thread,
   task_mark_activity, task_mark_surfaced`. Test fixtures that seed a rule-created task strip the seed's
   `task_mark_activity` audit row (and its `policy_decisions` child first — FK).
+- **LANDMINE (SWT-80, revived-task-not-in-incoming): a skip-closed mark placed BEFORE a status-changing call
+  is a silent no-op for exactly the case that changes status.** SWT-72 called `task_mark_activity` before
+  capture's revive/reopen and promote's `reopenDismissed`; the tool skips a closed task and audits `ok`, the
+  reopen then opens it, and the close already stamped `reviewed_at` — so every activity-revived/reopened task
+  sat in QUEUE (3 of 3 in prod: #452, #155, #381), and criterion 11's test PINNED that outcome. The skip is
+  right (resurface, notifier copies, refused revives, D8); the ORDER was wrong: mark AFTER the reopen. An `ok`
+  audit row is not proof a stamp landed — read the result's `skipped` or the column.
 
 ## Slack watch sweep (SWT-75, slack-watch-sweep)
 
