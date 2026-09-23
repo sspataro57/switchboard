@@ -86,6 +86,11 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		// are the policy matrix (channel_mismatch, kill switch, rate limit)
 		// and the handler's LoadBusy refusal. See delivery_calendar.go.
 		{"book_calendar_block", validateDeliveryIDOnly, bookCalendarBlock},
+		// SWT-77: the slack_reply auto tier's verb — draft + approve + send
+		// in one audited call, from the caller's own text. NOT human-only (D6);
+		// sendShaped + freezeGated, channel pinned by the policy loader. See
+		// delivery_slack.go.
+		{"send_slack_reply", validateSendSlackReply, sendSlackReplyTool},
 		{"mark_delivery_sent", validateDeliveryIDOnly, markDeliverySent},
 		{"mark_delivery_failed", validateDeliveryIDOnly, markDeliveryFailed},
 		{"prefill_delivery", validateDeliveryIDOnly, prefillDelivery},

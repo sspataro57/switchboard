@@ -23,6 +23,13 @@ package main
 // directory inside it. Move the FILE (`git mv cmd/ops-mcp-read/main.go
 // cmd/ops-mcp-user/main.go`); the old test was removed with this commit.
 //
+// SWT-77 (slack-auto-tier, Salvador 2026-09-22): ONE exception, pinned
+// exactly. send_slack_reply is on the user profile, so the binary arms the
+// Slack send seam — tools.SetSlackSender, once, from the slackweb HTTP bridge.
+// No other connector import, no other Set* seam, and never
+// NewDeliveryBridgeFromEnv / NewCommandBridge (the command bridge runs a
+// script named by the environment).
+//
 // ZERO I/O beyond parsing this directory's non-test sources and one os.Stat.
 // Every file is scanned (a second file could wire a seam), and package names
 // are resolved from each file's imports (an aliased import must not slip past).
@@ -42,15 +49,16 @@ import (
 
 const (
 	toolsPath     = "github.com/sspataro57/switchboard/internal/tools"
+	slackwebPath  = "github.com/sspataro57/switchboard/internal/connector/slackweb"
 	mcpserverPath = "github.com/sspataro57/switchboard/internal/mcpserver"
 )
 
-func TestUserBinary_BuildsOnlyTheUserProfileAndArmsNothing(t *testing.T) {
+func TestUserBinary_BuildsOnlyTheUserProfileAndArmsOnlySlack(t *testing.T) {
 	names, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
 	}
-	userProfile, files := 0, 0
+	userProfile, slackSeam, files := 0, 0, 0
 	for _, name := range names {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
@@ -65,7 +73,7 @@ func TestUserBinary_BuildsOnlyTheUserProfileAndArmsNothing(t *testing.T) {
 		local := map[string]string{}
 		for _, imp := range f.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
-			if strings.Contains(path, "/internal/connector/") {
+			if strings.Contains(path, "/internal/connector/") && path != slackwebPath {
 				t.Errorf("%s imports %s — the connector packages are where senders come from; the user "+
 					"binary must not be able to wire one", name, path)
 			}
@@ -90,6 +98,10 @@ func TestUserBinary_BuildsOnlyTheUserProfileAndArmsNothing(t *testing.T) {
 				return true
 			}
 			switch pkg := local[id.Name]; {
+			case pkg == toolsPath && sel.Sel.Name == "SetSlackSender":
+				slackSeam++
+			case pkg == slackwebPath && sel.Sel.Name != "NewHTTPBridge" && sel.Sel.Name != "TokenFromEnv":
+				t.Errorf("%s calls slackweb.%s — the user binary builds only the HTTP bridge", name, sel.Sel.Name)
 			case pkg == toolsPath && strings.HasPrefix(sel.Sel.Name, "Set"):
 				t.Errorf("%s calls tools.%s — the user binary arms no seam (no sender, no booker)", name, sel.Sel.Name)
 			case pkg == mcpserverPath && sel.Sel.Name == "New":
@@ -108,6 +120,10 @@ func TestUserBinary_BuildsOnlyTheUserProfileAndArmsNothing(t *testing.T) {
 	}
 	if files == 0 {
 		t.Fatal("POSITIVE CONTROL FAILED: no non-test .go file in cmd/ops-mcp-user was scanned")
+	}
+	if slackSeam != 1 {
+		t.Errorf("ops-mcp-user calls tools.SetSlackSender %d time(s), want exactly 1 — send_slack_reply is on "+
+			"the user profile and is dead without it (SWT-77)", slackSeam)
 	}
 	if userProfile != 1 {
 		t.Errorf("ops-mcp-user builds the user profile %d time(s), want exactly 1 — the positive control that "+

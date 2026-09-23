@@ -56,11 +56,13 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		// join BOTH profiles — "routing is one verb and one read" — so full
 		// 28 → 30 and user 16 → 18. Read: 3, unchanged (the fail-closed floor
 		// gains nothing).
-		{ProfileFull, 30},
+		// slack-auto-tier (SWT-77) criterion 17: send_slack_reply joins BOTH
+		// profiles — full 30 → 31, user 18 → 19. Read: 3, unchanged.
+		{ProfileFull, 31},
 		{ProfileRead, 3},
 		// SWT-56 (signal-session-name) criterion 34: task_context joins the user
 		// profile, pinned read-only — user 14 → 15; full unchanged (it lists it).
-		{ProfileUser, 18},
+		{ProfileUser, 19},
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()

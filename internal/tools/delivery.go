@@ -104,6 +104,34 @@ const (
 // dashboard hides "Not in Slack" while it holds).
 const SendAttemptLease = sendAttemptLease
 
+// slackSendDispatchTimeout bounds one bridge /send call:
+// defaultSlackSendDispatchTimeout, or SLACK_SEND_DISPATCH_TIMEOUT (a Go
+// duration) CLAMPED to sendQueueMaxWait. A click takes seconds and a busy leaf
+// answers 202 at once, so the default is generous; unparseable or
+// non-positive falls back. The clamp keeps the bound inside the send lease: a
+// cut-off row is left unsettled for the lease to protect, which means nothing
+// if the bound itself outlasts it.
+func slackSendDispatchTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("SLACK_SEND_DISPATCH_TIMEOUT"))
+	if raw == "" {
+		return defaultSlackSendDispatchTimeout
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		slog.Warn("SLACK_SEND_DISPATCH_TIMEOUT is not a positive duration; using the default",
+			"value", raw, "default", defaultSlackSendDispatchTimeout)
+		return defaultSlackSendDispatchTimeout
+	}
+	if d > sendQueueMaxWait {
+		slog.Warn("SLACK_SEND_DISPATCH_TIMEOUT clamped: the bound must fit inside the send attempt lease",
+			"value", raw, "clamped_to", sendQueueMaxWait, "lease", sendAttemptLease)
+		return sendQueueMaxWait
+	}
+	return d
+}
+
+const defaultSlackSendDispatchTimeout = 3 * time.Minute
+
 // slackSendQueueMaxWait is the max_queue_ms sendSlackReply puts in the
 // request: sendQueueMaxWait, or SLACK_SEND_QUEUE_MAX_WAIT (a Go duration)
 // CLAMPED to it — a larger value would let the leaf hold a send past the
@@ -2010,6 +2038,87 @@ func sendJiraComment(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) 
 
 // ---- slack_reply send (SWT-12) --------------------------------------------------
 
+// slackSendRateLock serializes the transactions that move a slack_reply row to
+// 'sending', so the hourly count taken inside them is exact (SWT-77). A member
+// of the repo's 0x5157_00NN family; no test enforces uniqueness across the
+// family, so grep for 0x5157 before adding a key.
+const slackSendRateLock = int64(0x5157_0078)
+
+// refuseSlackOverHourlyLimit counts slack_reply attempts in the last hour the
+// way the policy loader does ('sent' or 'sending', by sent_at falling back to
+// send_attempted_at) and refuses at the limit.
+func refuseSlackOverHourlyLimit(ctx context.Context, q querier) error {
+	var n int
+	if err := q.QueryRow(ctx,
+		`SELECT count(*) FROM deliveries
+		 WHERE channel='slack_reply' AND status IN ('sent','sending')
+		   AND COALESCE(sent_at, send_attempted_at) >= now() - interval '1 hour'`).Scan(&n); err != nil {
+		return fmt.Errorf("count recent slack_reply sends: %w", err)
+	}
+	if limit := policy.HourlyLimit(); n >= limit {
+		return fmt.Errorf("channel slack_reply hit the hourly send limit (%d)", limit)
+	}
+	return nil
+}
+
+// refuseSendingFrozen refuses while the global kill switch is on. lock takes
+// FOR SHARE on the flag row so the check orders against set_sending_frozen;
+// only a caller inside the transaction that commits 'sending' needs it.
+func refuseSendingFrozen(ctx context.Context, q querier, lock bool) error {
+	sql := `SELECT (value->>'frozen')::boolean FROM ops_flags WHERE name='sending_frozen'`
+	if lock {
+		// FOR SHARE on an absent row locks nothing, and no migration seeds the
+		// flag: on a fresh or restored db a first set_sending_frozen could
+		// commit after this read and before 'sending' (codex review). So make
+		// the row exist first, in this transaction. ON CONFLICT DO NOTHING
+		// waits for a concurrent uncommitted insert of the row and then reads
+		// its committed value; a freeze upsert racing OUR insert waits for our
+		// commit. Either way the two are ordered.
+		if _, err := q.Exec(ctx,
+			`INSERT INTO ops_flags (name, value) VALUES ('sending_frozen', '{"frozen": false}')
+			 ON CONFLICT (name) DO NOTHING`); err != nil {
+			return fmt.Errorf("ensure sending_frozen row: %w", err)
+		}
+		sql += ` FOR SHARE`
+	}
+	var frozen *bool
+	if err := q.QueryRow(ctx, sql).Scan(&frozen); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("read sending_frozen: %w", err)
+	}
+	if frozen != nil && *frozen {
+		return errors.New("global kill switch is on: all sending transitions are frozen")
+	}
+	return nil
+}
+
+// refuseSlackWorkspaceNotSendable is the per-workspace go-live gate: the
+// workspace's synthetic account carries send_enabled, mirroring gmail's
+// convention. EnsureAccount inserts it false and never updates it, so a new
+// workspace is off by default. sendSlackReply checks it at send time;
+// send_slack_reply also checks it before drafting, so a refused call leaves no
+// row (SWT-77).
+func refuseSlackWorkspaceNotSendable(ctx context.Context, q querier, targetRef string) error {
+	parsed, err := slackweb.ParseTargetURL(targetRef)
+	if err != nil {
+		return fmt.Errorf("invalid slack_reply target_ref: %w", err)
+	}
+	accountEmail := strings.ToLower(parsed.WorkspaceID) + "@slack-web.local"
+	var sendEnabled bool
+	err = q.QueryRow(ctx,
+		`SELECT send_enabled FROM source_accounts WHERE provider=$1 AND account_email=$2`,
+		slackweb.Provider, accountEmail).Scan(&sendEnabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("Slack workspace %s has no ingested account; run the connector first", parsed.WorkspaceID)
+	}
+	if err != nil {
+		return fmt.Errorf("resolve Slack workspace %s account: %w", parsed.WorkspaceID, err)
+	}
+	if !sendEnabled {
+		return fmt.Errorf("Slack workspace %s is not send-enabled", parsed.WorkspaceID)
+	}
+	return nil
+}
+
 // sendSlackReply clicks Send through the Slack Web connector's bridge.
 //
 // Unlike gmail there is no reservable external id: a browser click exposes no
@@ -2066,26 +2175,44 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		}
 		targetRef = *target
 
-		// The workspace's synthetic account carries the per-workspace go-live
-		// gate, mirroring gmail's send_enabled convention. EnsureAccount inserts
-		// it false and never updates it, so a new workspace is off by default.
-		parsed, err := slackweb.ParseTargetURL(targetRef)
-		if err != nil {
-			return fmt.Errorf("invalid slack_reply target_ref: %w", err)
+		if err := refuseSlackWorkspaceNotSendable(ctx, tx, targetRef); err != nil {
+			return err
 		}
-		accountEmail := strings.ToLower(parsed.WorkspaceID) + "@slack-web.local"
-		var sendEnabled bool
+		// The kill switch and the hourly limit again, at the moment the row
+		// goes 'sending' (SWT-77, codex review). Policy read both in a snapshot
+		// before the handler ran, so a freeze pressed in between, or N
+		// concurrent sends that all saw the last slot, would otherwise get
+		// through. FOR SHARE orders the freeze read against
+		// set_sending_frozen's upsert (the row is ensured first; see
+		// refuseSendingFrozen). The channel lock
+		// makes the count exact across every slack_reply send path: held to
+		// this commit only, never across the bridge call.
+		if err := refuseSendingFrozen(ctx, tx, true); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, slackSendRateLock); err != nil {
+			return fmt.Errorf("lock slack_reply send rate: %w", err)
+		}
+		if err := refuseSlackOverHourlyLimit(ctx, tx); err != nil {
+			return err
+		}
+		// The duplicate guard's send-time half, under the same channel lock,
+		// so it holds across BOTH paths (codex review): the same words to the
+		// same conversation never go 'sending' twice while one is unresolved,
+		// whether the other came from send_slack_reply or the human two-step.
+		// This row stays approved; resolve the earlier one first.
+		var dupID int64
 		err = tx.QueryRow(ctx,
-			`SELECT send_enabled FROM source_accounts WHERE provider=$1 AND account_email=$2`,
-			slackweb.Provider, accountEmail).Scan(&sendEnabled)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("Slack workspace %s has no ingested account; run the connector first", parsed.WorkspaceID)
+			`SELECT id FROM deliveries
+			 WHERE channel='slack_reply' AND status='sending' AND target_ref=$1 AND body=$2 AND id<>$3
+			 ORDER BY id LIMIT 1`, targetRef, body, deliveryID).Scan(&dupID)
+		if err == nil {
+			return fmt.Errorf("delivery %d already carries these words to this conversation and is still unresolved (sending); "+
+				"check Slack, then record it with mark_delivery_sent or mark_delivery_failed before sending delivery %d",
+				dupID, deliveryID)
 		}
-		if err != nil {
-			return fmt.Errorf("resolve Slack workspace %s account: %w", parsed.WorkspaceID, err)
-		}
-		if !sendEnabled {
-			return fmt.Errorf("Slack workspace %s is not send-enabled", parsed.WorkspaceID)
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("check for an unresolved duplicate: %w", err)
 		}
 
 		// send_attempted_at marks this attempt as IN FLIGHT: send_settled_at stays
@@ -2114,7 +2241,19 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 	}
 
 	maxQueue := slackSendQueueMaxWait()
-	outcome, sendErr := slackSender.Send(ctx, targetRef, google.ScrubAIAttribution(body), maxQueue)
+	// The bridge's HTTP client has no timeout (exports take minutes) and an
+	// MCP call carries no deadline, so the dispatch gets its own bound (SWT-77,
+	// codex review): send_slack_reply holds its admission lock across this
+	// call, and a hung /send would otherwise wedge every later one. Blowing it
+	// is the ambiguous outcome, UNSETTLED (see below) — never a resend.
+	dispatchCtx, cancelDispatch := context.WithTimeout(ctx, slackSendDispatchTimeout())
+	outcome, sendErr := slackSender.Send(dispatchCtx, targetRef, google.ScrubAIAttribution(body), maxQueue)
+	// Read before cancelDispatch, which would cancel it regardless. Non-nil
+	// means the call was cut off from OUR side — our dispatch bound, the
+	// caller's cancel or deadline, or send_slack_reply's overall deadline —
+	// with the request possibly already at the leaf.
+	dispatchCutOff := dispatchCtx.Err() != nil
+	cancelDispatch()
 
 	// Constructed AFTER the call, never before: WithTimeout fixes an absolute
 	// deadline at creation, so a window opened up-front would already be spent by
@@ -2149,6 +2288,33 @@ func sendSlackReply(ctx context.Context, pool *pgxpool.Pool, deliveryID int64) (
 		// is not re-approvable and nothing retries it. Only the export matcher
 		// or a human (mark_delivery_sent / mark_delivery_failed) resolves it.
 		// send_settled_at closes the in-flight window so a human MAY resolve it.
+		//
+		// EXCEPT when the call was cut off from our side (the dispatch bound,
+		// or any cancel or deadline of the caller's): the leaf ignores a
+		// dropped connection and may still click for up to sendQueueMaxWait +
+		// sendQueueClickAllowance. Settling here would lift the lease early and
+		// let a human mark it failed and resend while the first click is still
+		// coming — a double post. So record the diagnostic and leave it
+		// UNSETTLED: the lease protects it exactly like a crashed sender, and
+		// the caller (and send_slack_reply's admission lock) is still freed.
+		// Only an answer FROM the bridge settles an ambiguous attempt.
+		if dispatchCutOff {
+			tag, err := pool.Exec(settleCtx,
+				`UPDATE deliveries SET error=$2, updated_at=now() WHERE id=$1`+fenceArg3,
+				deliveryID, sendErr.Error(), attemptedAt)
+			if err != nil {
+				return nil, fmt.Errorf("slack send outcome unknown (%v) AND recording it failed (%v); "+
+					"delivery %d is stuck in sending with no diagnostic", sendErr, err, deliveryID)
+			}
+			if tag.RowsAffected() == 0 {
+				// The export matcher or a human resolved it while we waited.
+				return nil, fmt.Errorf("slack send was cut off before the bridge answered, and delivery %d was "+
+					"resolved by another actor meanwhile — check its status: %w", deliveryID, sendErr)
+			}
+			return nil, fmt.Errorf("slack send (outcome unknown: the call was cut off before the bridge answered, "+
+				"delivery %d left sending; the Mac mini may still click it, so it cannot be marked failed until the "+
+				"send lease ends): %w", deliveryID, sendErr)
+		}
 		if _, err := pool.Exec(settleCtx,
 			`UPDATE deliveries SET send_settled_at=now(), error=$2, updated_at=now() WHERE id=$1`+fenceArg3,
 			deliveryID, sendErr.Error(), attemptedAt); err != nil {

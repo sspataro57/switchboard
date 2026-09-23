@@ -27,6 +27,11 @@ package orchestrator_test
 // controls pass today and must keep passing — they are what stops the fix from
 // being "return nil" or "skip whenever channel is not gmail".
 
+// AMENDED by slack-auto-tier (SWT-77) D8: the fixtures here now carry
+// Status "done_locally". R8 fires only for a task task_mark_delivered can move
+// (done_locally, delivered, closed); a status-less fixture would read as "unknown"
+// and correctly yield nothing. The status gate itself is rules_r8_status_test.go.
+
 import (
 	"testing"
 
@@ -45,7 +50,7 @@ func TestEvaluate_R8_CalendarDeliverySentFiresNothing(t *testing.T) {
 	// fire all three actions here. Nothing but the channel may make the
 	// difference.
 	facts := orch.Facts{
-		Task: orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard"},
+		Task: orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard", Status: "done_locally"},
 		Orchestrations: []orch.Orchestration{
 			{Rule: "delivery_task", TaskID: workTask, CreatedTaskID: deliverTask},
 		},
@@ -136,12 +141,12 @@ func TestEvaluate_R8_CalendarDeliverySentFiresNothing(t *testing.T) {
 			ID: eventID, TaskID: workTask, Type: "delivery_sent",
 			Payload: fbPayload("delivery_id", float64(deliveryID), "channel", "calendar"),
 		}
-		bare := orch.Facts{Task: orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard"}}
+		bare := orch.Facts{Task: orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard", Status: "done_locally"}}
 		if actions := orch.Evaluate(ev, bare, orch.Config{}); len(actions) != 0 {
 			t.Errorf("calendar booking with no R3 record produced %s, want none", dump(actions))
 		}
 		already := orch.Facts{
-			Task: orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard"},
+			Task: orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard", Status: "done_locally"},
 			Orchestrations: []orch.Orchestration{
 				{Rule: "delivery_task", TaskID: workTask, CreatedTaskID: deliverTask},
 				{Rule: "delivery_lifecycle", TaskID: workTask},

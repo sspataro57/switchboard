@@ -19,6 +19,7 @@ import (
 
 	"github.com/sspataro57/switchboard/internal/audit"
 	"github.com/sspataro57/switchboard/internal/connector/google"
+	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/mcpserver"
 	"github.com/sspataro57/switchboard/internal/policy"
@@ -79,6 +80,16 @@ func run() error {
 			return fmt.Errorf("configure calendar booker: %w", err)
 		}
 		tools.SetCalendarBooker(booker)
+	}
+
+	// SWT-77: send_slack_reply is agent-facing, so this binary must wire the
+	// Slack bridge — without it every call would fail "no Slack send adapter
+	// wired". Absent configuration leaves the seam nil and the verb refused by
+	// name before any row is written.
+	if bridge, err := slackweb.NewDeliveryBridgeFromEnv(); err != nil {
+		return fmt.Errorf("configure Slack bridge: %w", err)
+	} else if bridge != nil {
+		tools.SetSlackSender(bridge)
 	}
 
 	adapter := mcpserver.New(ex, workerID)

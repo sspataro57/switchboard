@@ -157,3 +157,29 @@ func TestSlackSendQueueMaxWait_ClampAndFallback(t *testing.T) {
 		})
 	}
 }
+
+// SWT-77: SLACK_SEND_DISPATCH_TIMEOUT is a Go duration bounding one /send;
+// empty, unparseable and non-positive all fall back to the default.
+func TestSlackSendDispatchTimeout_Fallback(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want time.Duration
+	}{
+		{"", defaultSlackSendDispatchTimeout},
+		{"45s", 45 * time.Second},
+		{"5m", 5 * time.Minute},
+		{"garbage", defaultSlackSendDispatchTimeout},
+		{"0", defaultSlackSendDispatchTimeout},
+		{"-1m", defaultSlackSendDispatchTimeout},
+		{"90", defaultSlackSendDispatchTimeout}, // no unit: not a duration
+		{"10m", sendQueueMaxWait},
+		{"30m", sendQueueMaxWait}, // clamped inside the send lease
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			t.Setenv("SLACK_SEND_DISPATCH_TIMEOUT", tc.env)
+			if got := slackSendDispatchTimeout(); got != tc.want {
+				t.Errorf("SLACK_SEND_DISPATCH_TIMEOUT=%q gives %v, want %v", tc.env, got, tc.want)
+			}
+		})
+	}
+}

@@ -23,6 +23,11 @@ package orchestrator_test
 // Dedup on task: a prior `delivery_lifecycle` record => no-op. A `delivery_confirmed`
 // event fires no rule.
 
+// AMENDED by slack-auto-tier (SWT-77) D8: the fixtures here now carry
+// Status "done_locally". R8 fires only for a task task_mark_delivered can move
+// (done_locally, delivered, closed); a status-less fixture would read as "unknown"
+// and correctly yield nothing. The status gate itself is rules_r8_status_test.go.
+
 import (
 	"testing"
 
@@ -50,7 +55,7 @@ func TestEvaluate_R8_DeliverySent(t *testing.T) {
 
 	t.Run("marks work task delivered + closes the Deliver task + records", func(t *testing.T) {
 		f := orch.Facts{
-			Task:           orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard"},
+			Task:           orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard", Status: "done_locally"},
 			Orchestrations: []orch.Orchestration{priorR3},
 		}
 		actions := orch.Evaluate(mkEvent(), f, orch.Config{})
@@ -82,7 +87,7 @@ func TestEvaluate_R8_DeliverySent(t *testing.T) {
 
 	t.Run("no delivery_task record (manual dashboard draft): mark + record, no close", func(t *testing.T) {
 		f := orch.Facts{
-			Task:           orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard"},
+			Task:           orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard", Status: "done_locally"},
 			Orchestrations: nil, // delivery created outside R3 -> nothing to close
 		}
 		actions := orch.Evaluate(mkEvent(), f, orch.Config{})
@@ -99,7 +104,7 @@ func TestEvaluate_R8_DeliverySent(t *testing.T) {
 
 	t.Run("dedup: delivery_lifecycle already recorded on N -> no actions", func(t *testing.T) {
 		f := orch.Facts{
-			Task: orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard"},
+			Task: orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard", Status: "done_locally"},
 			Orchestrations: []orch.Orchestration{
 				priorR3,
 				{Rule: "delivery_lifecycle", TaskID: workTask},
@@ -117,7 +122,7 @@ func TestEvaluate_R8_DeliveryConfirmedFiresNothing(t *testing.T) {
 	const workTask = int64(9)
 	ev := orch.Event{ID: 801, TaskID: workTask, Type: "delivery_confirmed", Payload: fbPayload("delivery_id", float64(700))}
 	f := orch.Facts{
-		Task:           orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard"},
+		Task:           orch.TaskFacts{ID: workTask, ProjectSlug: "acme", ProjectDelivery: "dashboard", Status: "done_locally"},
 		Orchestrations: []orch.Orchestration{{Rule: "delivery_task", TaskID: workTask, CreatedTaskID: 55}},
 	}
 	if actions := orch.Evaluate(ev, f, orch.Config{}); len(actions) != 0 {

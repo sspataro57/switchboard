@@ -1518,6 +1518,9 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 
 `slack_reply` is an **approve**-tier channel: switchboard clicks Send through the
 connector's bridge after `approve_delivery`. Verified 2026-07-29 (switchboard half).
+**Corrected 2026-09-22 (SWT-77):** `slack_reply` is now **auto**-tier through
+`send_slack_reply`; the approve path below still exists for rows drafted without a
+go-ahead. See "Slack replies on the auto tier (SWT-77)".
 
 - **Nothing sends until the leaf ships.** The `/send` route and `send` CLI op do
   not exist in `sspataro57/slackconnector` yet. A leaf 404 is a 4xx, which is a
@@ -3255,3 +3258,92 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   3000 chars above the marker and the notes 35–41 already fill them, so 42's note sits ABOVE 34's with a
   remark saying why. `internal/classify` lines that contain a banned regex's literal fail structure tests
   even inside comments.
+
+## Slack replies on the auto tier (SWT-77, slack-auto-tier)
+
+- **Tier change, 2026-09-22.** Salvador: "auto for every conversation — claude always asks approval so the
+  double gate is just annoying for slack". `send_slack_reply {task_id, target_ref, text}` drafts
+  (`draftDelivery`), approves (bookCalendarBlock's shape + an `approvals` row naming the actor) and sends
+  (`sendSlackReply`, including SWT-76's 202/queued branch) in one executor call. Both MCP profiles, no
+  pins. `slackSender.Send` still has ONE call site (a structure test pins it).
+- **`approval_source` stays `'switchboard'` (D3).** It answers *which authority let the row out*; policy
+  gated it. The auto-tier marker is the tool NAME in `audit_events`, and `approvals.decided_by` says which
+  session. Do not invent `'auto'`: `sendSlackReply` requires `'switchboard'`, and widening that check is
+  the only thing between the bridge and a row whose gate is unknown.
+- **Channel pin (D5/D5a).** The verb has no `delivery_id` at policy time, so `pgSnapshotLoader.Load` pins
+  `Channel` from `policy.toolChannel` by tool name, and the pin WINS over a stray `delivery_id` in the args.
+  `Decide` also has a by-name `channel_mismatch` deny for this tool; with the pin it is unreachable in
+  production today and is tested only at the `Decide` layer. The real channel guarantee is the handler's:
+  it inserts `channel='slack_reply'` itself.
+- **Worker consoles can post (D6).** The full profile is the workers' surface. The brakes are
+  `send_enabled` per workspace, the hourly limit, `set_sending_frozen` (the verb is `freezeGated`), and an
+  audit row per call. The WHEN rule lives in the tool description and `Instructions`; code cannot enforce it.
+- **LANDMINE (D7): never narrow this verb with `mcpHumanOnly`.** `matrix.Check` routes an `mcpHumanOnly`
+  tool that passes the actor check to the STATIC allow-list, which never loads a snapshot — so the kill
+  switch, rate limit and channel branch would silently stop applying. Narrowing it to humans means
+  reordering `Check` so `snapshotGated` wins first. `TestMatrix_SendSlackReply_RoutesThroughTheLoader`
+  pins the routing.
+- **R8 no longer records a lifecycle key for a task it cannot mark delivered (D8).** `ruleDeliveryLifecycle`
+  returns zero actions unless the task is `done_locally`, `delivered` or `closed` (the set
+  `task_mark_delivered` accepts). Before this, any `delivery_sent` on an ordinary task stamped the dedup key
+  and muted that task's LATER real delivery. On 2026-09-22 two production tasks already carried such a
+  muted key (Step 0e); clearing them is out of scope.
+- **Duplicate guard (D10).** Refused while a `slack_reply` row with the same canonical `target_ref` and the
+  same scrubbed body is `sending` (in flight, ambiguous or queued) or `approved` (one Send away — an orphan of
+  a crash between approve and dispatch, or the human two-step in progress; codex review). The refusal names
+  the row and points at `mark_delivery_sent` / `mark_delivery_failed`, or at /deliveries for an approved one.
+  Same words are fine again once that row is `sent`/`failed`/`rejected`.
+  Exact against other `send_slack_reply` calls under the admission lock below; a concurrent human
+  two-step on the same words is caught only once its row is `approved`.
+- **Both MCP binaries now wire the Slack sender (Salvador, 2026-09-22).** `ops-mcp` via
+  `NewDeliveryBridgeFromEnv`; `ops-mcp-user` via `NewHTTPBridge` ONLY, from `SLACK_WEB_BRIDGE_URL` +
+  `SLACK_WEB_BRIDGE_TOKEN_FILE` in the MCP config's env block (no shell exports them). This reverses
+  SWT-35/37's "user binary arms no seam" for exactly one seam; `main_structure_test.go` pins one
+  `SetSlackSender` call, the slackweb import as the only connector, and no other `Set*`. The SPEC missed
+  this — go-reviewer caught it: without it every MCP call drafted, approved, and then failed.
+- **Every send-half refusal runs BEFORE the draft** (no sender wired, workspace not ingested or not
+  send-enabled; `refuseSlackWorkspaceNotSendable` is extracted from `sendSlackReply`, which still
+  re-checks at send time). The verb takes text, so a retry mints a NEW row, and an orphaned `approved`
+  row would sit on /deliveries one Send click from a double post.
+- **The kill switch is re-checked at SEND time (codex review).** Policy reads `sending_frozen` in a
+  snapshot before the handler runs; `sendSlackReply` now re-reads it `FOR SHARE` in the transaction that
+  commits `sending`, so a freeze pressed in between still stops the click — for `send_delivery`'s Slack
+  branch too (stricter, never looser). `send_slack_reply` also checks it before drafting, so a frozen call
+  writes no row. The HOURLY LIMIT is re-counted in the same phase-1 transaction under advisory lock
+  `0x5157_0078`, so it is exact on every slack_reply path (codex re-review).
+- **A send may CREATE the `sending_frozen` flag row.** Phase 1 runs `INSERT … ('sending_frozen',
+  '{"frozen": false}') ON CONFLICT DO NOTHING` before its `FOR SHARE` read: FOR SHARE on an absent row locks
+  nothing, and no migration seeds it, so on a fresh or restored db a first freeze could otherwise commit
+  between the read and `sending`. Absent already meant "not frozen" everywhere, so the seeded row changes
+  no outcome; production has had the row since 2026-09-07.
+- **The duplicate guard also runs at SEND time**, in phase 1 under `0x5157_0078`: no other `slack_reply`
+  row with the same `target_ref` + body may be `sending`. That covers the human `send_delivery` racing a
+  `send_slack_reply` with the same words (the refused row stays `approved`).
+- **The bridge dispatch is bounded** (`SLACK_SEND_DISPATCH_TIMEOUT`, default 3m). The bridge HTTP client has
+  no timeout and MCP calls carry no deadline, and `send_slack_reply` holds its admission lock across the
+  call, so one hung `/send` would otherwise wedge every later one. **Blowing it leaves the row UNSETTLED**
+  (diagnostic in `error`): the leaf ignores a dropped connection and can still click for up to
+  `sendQueueMaxWait + sendQueueClickAllowance`, so settling would lift the lease at 3m and let a human mark
+  it failed and resend into a double post. The same holds for ANY cut-off from our side — a caller's
+  cancel or deadline included (codex sixth round): only an answer from the bridge settles an ambiguous
+  attempt. (Changed 2026-09-22: a caller cancel used to settle.) Visible effect: a dashboard Slack Send
+  that hits the dashboard's 60s timeout now leaves that task un-closable and hides "Not in Slack" for up to
+  the 15m lease, and its flash shows the executor's audit-complete failure rather than the lease guidance
+  (SPEC future work).
+- **The send-time duplicate check has no time window, on purpose.** An unresolved `sending` row blocks the
+  same words to that conversation until someone resolves it (mark sent/failed); the reconciler flags stuck
+  rows. Blocking a repeated "ok" is the safe direction.
+- **Admission lock `0x5157_0077` (session).** `send_slack_reply` holds it from its gates through the send,
+  so concurrent identical calls post once. **LANDMINE: it is taken by polling `pg_try_advisory_lock`,
+  releasing the connection between tries — never `pg_advisory_lock`.** A blocking waiter holds a pooled
+  connection; enough waiters starve the holder (which needs the pool for draft/approve/send) and every call
+  deadlocks. `TestSlackAuto_ConcurrentIdenticalCallsPostOnce` fans out 3× the pool size under a 60s
+  context and fails fast with the blocking form. The holder keeps the lock across the bridge call (bounded
+  by the dispatch timeout above); waiters are capped at 60s and then refused by name, drafting nothing. The
+  whole call also carries a deadline (wait + dispatch + 1m), and a pool of fewer than 2 connections is
+  refused by name: the holder keeps one connection for the lock and needs another for its work.
+- **The 0x5157_00NN key family has no uniqueness test.** `classify/structure_test.go` only pins 0x5157_0022's
+  owner (despite older comments saying it scans for collisions). Grep for `0x5157` before adding a key.
+- **Test lesson.** `quoteJSON` in `delivery_upwork_target_test.go` escapes only quotes and backslashes; a
+  test sending newlines through it builds invalid JSON and fails at "parse args". The SWT-77 tests use
+  `ssrJSON` (json.Marshal).

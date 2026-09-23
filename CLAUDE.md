@@ -127,6 +127,7 @@ approval-without-edit rate, promoted manually)
 | Email client-facing                    | approve     |
 | Upwork replies                         | assisted (draft → copy/prefill → scraper confirms sent) |
 | Upwork initial follow-up               | approve, existing threads only, ≤2 touches |
+| Slack replies (all conversations)      | auto (send_slack_reply: draft+approve+send in one executor call; draft→approve→send stays for words without a go-ahead) |
 | Calendar own blocks                    | auto (always via availability service propose_slots) |
 | Calendar invites w/ others             | approve     |
 | GitHub: branch/draft-PR own repos      | auto        |

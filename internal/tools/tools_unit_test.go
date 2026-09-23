@@ -137,6 +137,11 @@ var allToolNames = []string{
 	// human_only); MCP-listed in both profiles. EXPECTED RED until
 	// tools.Register wires it.
 	"task_signal",
+	// slack-auto-tier (SWT-77) criterion 1: the slack_reply auto tier's verb —
+	// draft + approve + send in one audited call. sendShaped and freezeGated,
+	// NOT humanOnly (D4/D6); MCP-listed in both profiles. EXPECTED RED until
+	// tools.Register wires it.
+	"send_slack_reply",
 }
 
 func TestRegister_AllToolsRegistered(t *testing.T) {
@@ -251,6 +256,10 @@ func TestValidate_RejectsMissingRequiredArgs(t *testing.T) {
 		// The accept half lives in signal_test.go, which calls validateSignal
 		// directly for the nil-pool reason given above for task_dismiss.
 		"task_signal",
+		// slack-auto-tier (SWT-77) criterion 2: send_slack_reply needs task_id,
+		// target_ref AND text; {} is illegal. The per-field refusals and the
+		// accept half live in delivery_slack_validate_test.go.
+		"send_slack_reply",
 	}
 
 	for _, name := range toolsUnderTest {
