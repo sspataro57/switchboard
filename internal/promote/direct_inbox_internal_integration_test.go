@@ -154,8 +154,12 @@ func TestRegression_SWT78_DMSkipsBothInquiryInboxes(t *testing.T) {
 	dm := seed("dm", "D0DMIKATIE", "dm", "Katie", "can we move tomorrow's call to 3?")
 	// A C… group DM (decision 3), from the raw type only.
 	group := seed("mpdm", "C0DMIMPDM", "group_dm", "Dana Ruiz", "can one of you confirm the date?")
-	// The control: the same ask in a public channel keeps the classifier.
-	channel := seed("chan", "C0DMIGENERAL", "public_channel", "Dana Ruiz", "can someone confirm the date?")
+	// The control: the same ask in a public channel keeps the classifier. Since
+	// SWT-79 ("channels is only when they mention me") a channel message reaches
+	// the inquiry lane only when it @-mentions Salvador, so the control carries
+	// the mention; without it this POSITIVE CONTROL now correctly fails
+	// (slack-channel-mentions criterion 10, an expected amendment).
+	channel := seed("chan", "C0DMIGENERAL", "public_channel", "Dana Ruiz", "@Salvador can someone confirm the date?")
 
 	reg := executor.NewRegistry()
 	tools.Register(reg, pool)

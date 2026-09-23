@@ -651,6 +651,42 @@ DMs skip qwen", "one task per conversation", "make qwen say yes when unsure".
 
 ---
 
+### Channel messages reach qwen only when they mention him (SWT-79, slack-channel-mentions)
+Salvador, 2026-09-23: "channels is only when they mention me"; a channel @-mention → "qwen decides"; "a-million
+is generally not collaboratory. we only respond to mentions on those channels".
+- **The gate is a recorded capture fact** (`capture_decisions.channel_unmentioned`, migration 0043, CHECK only
+  on `attributed`), set by ONE post-decision step in `decideMessage` (the decision itself is now
+  `decideMessageInner`, which `prFallThrough` recurses into, so the fact is never applied twice).
+  `replyfold.InquiryEligibleLatestSQL` excludes it from BOTH inboxes via the `latest` row — no Go-side skip
+  (the SWT-40 starvation landmine) and no SQL spelling of the mention.
+- **Mentions are display names in the text** (`@Salvador`, `@Salvador Spataro`, `@SalvadorSpataro`); the leaf
+  stores no `<@U…>` ids (pre-check 0b). `slackweb.MentionsOwner` is the one spelling, plain Go (the domain
+  rule needs a lookahead RE2 lacks). Only his own outbound messages carry the sender "Salvador" (0c), so the
+  bare name is unambiguous today.
+- **Promote:** `addressed()` counts a channel mention; the body is read for that predicate only.
+- **Edits (codex + go-reviewer):** the Slack sink re-ingests a changed message (`UpdateRaw` bumps
+  `ingested_at`, the normalizer overwrites `body_text`). Each capture pass runs `recheckEditedMentions`
+  over every Slack message ingested in the LAST HOUR (0043's `raw_source_items_ingested_at_idx`),
+  recomputes the fact from the current text on its NEWEST decision in ANY mode (the row the inboxes read as
+  `latest`) when that is `attributed`, and writes it
+  BOTH ways (an added mention clears the flag, a removed one sets it; reason suffixes say which).
+  **No "re-ingested after the decision" comparison:** a pass in another connector can read the old text
+  before the sink writes the edit, stamping the decision after the re-ingest; a time test would never
+  re-look. Every edit refreshes `ingested_at`, so it gets an hour of re-checks. It updates the any-mode
+  newest row (codex round 3), so a newer shadow/gate/route row cannot keep a stale fact.
+  Accepted residual: the normalizer does not take capture's lock, so an edit normalized mid-pass stays stale
+  until the next pass (minutes) — self-healing inside the hour window.
+- **Known residual: gate and route rows** do not carry the fact (they default to false = eligible). A Slack
+  channel message reaches them only via a ticket key on a gated project or no matching rule at all — 0 such
+  Slack rows in the 60 days before shipping. Worst case is an extra qwen call; promote still requires a
+  mention (or his prior post in the thread) to make a task.
+- **Cost measured before shipping (0d, 30 days):** 53 non-mention channel verdicts (44 false, 9 true), none
+  ever promoted — the gate lost nothing. #a-millon had 0 mentions in 30 days (0e).
+- **#a-millon** moved from `bulk` to its own `a-millon` project (0043 row; `bulk` stays un-armed because it
+  holds 24 newsletter sender rules). Rule swap order: arm `inquiry_promote_after`, add the new priority-99
+  rule (rule 63 still wins the tie by id), THEN disable 63 — never the reverse, or the channel falls through
+  to the collaboratory catch-all.
+
 ## The seven invariants (review checklist form)
 
 These are normative in `CLAUDE.md` ("Non-negotiable invariants"); this is the

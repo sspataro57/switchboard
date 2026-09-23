@@ -669,7 +669,7 @@ deterministic gate, which reports the first failing reason:
 | `stale` | sent more than 72h ago |
 | `pending` | sent less than 1h ago: the grace, so a reply can land first |
 | `answered` | Salvador posted on the thread (or in the DM or conversation) after the ask |
-| `not_addressed` | not gmail, not a 1:1 Slack DM, and not a thread he posted on before the ask |
+| `not_addressed` | not gmail, not a 1:1 Slack DM, not a Slack channel message that mentions him (SWT-79), and not a thread he posted on before the ask |
 | `claude_task` | the thread's open or dismissed task is not `assignee_type=human`: it is never attached to (no log on a worker's task), never reopened, and never shadowed by a second task (C-D13) |
 
 A gated verdict writes nothing and is counted in the stats line's `gated`

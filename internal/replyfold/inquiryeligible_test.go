@@ -61,7 +61,14 @@ func TestInquiryEligibleLatestSQL_IsTheWidenedPredicate(t *testing.T) {
 			"two WHERE clauses and an unparenthesised OR would swallow the clauses around it", sql)
 	}
 	for _, want := range []struct{ frag, why string }{
-		{"latest.action = 'attributed' or (", "the existing admission, unchanged, OR-ed with the new branch"},
+		// AMENDED deliberately by slack-channel-mentions (SWT-79 criterion 8): this
+		// fragment pinned the old attributed-only text. The attributed branch now
+		// excludes a Slack channel message capture flagged as not mentioning
+		// Salvador ("channels is only when they mention me"), read from the SAME
+		// any-mode `latest` row.
+		{"(latest.action = 'attributed' and not latest.channel_unmentioned) or (",
+			"SWT-79 D1/D2: the attributed admission AND NOT the capture-recorded channel_unmentioned fact, " +
+				"parenthesised, OR-ed with the resurface branch"},
 		{"live.action = 'task_log' and live.resurface",
 			"the new branch reads the latest LIVE decision: a task_log capture RECORDED as resurfacing (CC3: the " +
 				"lanes only read the fact; CC5b: the resurface branch reads only live decisions)"},
@@ -197,6 +204,70 @@ func TestInquiryEligibleLatestSQL_IsTheOneSpelling(t *testing.T) {
 		if strings.Contains(norm, "p.id = latest.project_id") {
 			t.Errorf("%s's %s joins projects on latest.project_id; a resurfaced message is attributed by its LIVE "+
 				"row (replyfold.InquiryProjectIDSQL)", in.rel, strings.TrimSpace(in.decl))
+		}
+	}
+}
+
+// ---- slack-channel-mentions (SWT-79) criteria 8 and 9 ---------------------------
+
+// Criterion 8: the resurface branch is BYTE-IDENTICAL (SWT-53 unchanged), and
+// the fact is read from `latest` (any mode: a newer shadow row decides), never
+// from `live`.
+func TestSWT79_InquiryEligibleLatestSQL_ResurfaceBranchByteIdentical(t *testing.T) {
+	const resurface = `OR (live.action = 'task_log' AND live.resurface
+	       AND EXISTS (SELECT 1 FROM tasks lt WHERE lt.id = live.task_id AND lt.status = 'closed')))`
+	if !strings.Contains(replyfold.InquiryEligibleLatestSQL, resurface) {
+		t.Errorf("InquiryEligibleLatestSQL's resurface branch is not byte-identical to SWT-53's:\n%s\nwant it to "+
+			"contain:\n%s", replyfold.InquiryEligibleLatestSQL, resurface)
+	}
+	sql := rfNorm(replyfold.InquiryEligibleLatestSQL)
+	if !strings.Contains(sql, "not latest.channel_unmentioned") {
+		t.Errorf("InquiryEligibleLatestSQL does not exclude `latest.channel_unmentioned`:\n%s", sql)
+	}
+	if strings.Contains(sql, "live.channel_unmentioned") {
+		t.Errorf("InquiryEligibleLatestSQL reads channel_unmentioned from the LIVE row; criterion 10: a newer shadow "+
+			"row decides in either direction, so it is the any-mode `latest` row's fact:\n%s", sql)
+	}
+}
+
+// Criterion 9: both inboxes' `latest` LATERALs select cd.channel_unmentioned
+// (the spliced predicate reads latest.channel_unmentioned, so a missing select
+// is a SQL error), and neither inbox spells the exclusion itself.
+func TestSWT79_BothInboxesSelectTheColumnAndSpellNoAdmission(t *testing.T) {
+	root := filepath.Join("..", "..")
+	for _, in := range []struct{ rel, decl string }{
+		{"internal/classify/store.go", "const inboxWhereInquiry"},
+		{"internal/promote/inquiry.go", "\nfunc inquiryInbox("},
+	} {
+		b, err := os.ReadFile(filepath.Join(root, in.rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", in.rel, err)
+		}
+		src := string(b)
+		i := strings.Index(src, in.decl)
+		if i < 0 {
+			t.Fatalf("%s no longer declares %q", in.rel, strings.TrimSpace(in.decl))
+		}
+		region := src[i:]
+		if strings.HasPrefix(in.decl, "const") {
+			if j := strings.Index(region, "\n\n"); j > 0 {
+				region = region[:j]
+			}
+		} else if j := strings.Index(region[1:], "\nfunc "); j > 0 {
+			region = region[:j+1]
+		}
+		norm := rfNorm(region)
+		lateral := regexp.MustCompile(`join lateral \(select ([^)]*?) from capture_decisions cd`).FindStringSubmatch(norm)
+		if lateral == nil {
+			t.Errorf("%s's %s: no `JOIN LATERAL (SELECT … FROM capture_decisions cd` found", in.rel, strings.TrimSpace(in.decl))
+			continue
+		}
+		if !strings.Contains(lateral[1], "cd.channel_unmentioned") {
+			t.Errorf("%s's `latest` LATERAL selects %q, without cd.channel_unmentioned (criterion 9)", in.rel, lateral[1])
+		}
+		if strings.Contains(norm, "latest.channel_unmentioned") {
+			t.Errorf("%s's %s spells latest.channel_unmentioned itself; the exclusion lives in "+
+				"replyfold.InquiryEligibleLatestSQL only (one spelling)", in.rel, strings.TrimSpace(in.decl))
 		}
 	}
 }

@@ -107,9 +107,11 @@ const JoinSQL = `
 //
 // The branches:
 //
-//   - `latest.action = 'attributed'`: the existing admission, byte-identical, in
-//     ANY mode (C2: a gate resolution, a route row or a shadow re-point is the
-//     message's current attribution);
+//   - `latest.action = 'attributed'`: the existing admission, in ANY mode (C2: a
+//     gate resolution, a route row or a shadow re-point is the message's current
+//     attribution) — EXCEPT a decision capture recorded as a Slack channel
+//     message that does not mention Salvador (SWT-79, channel_unmentioned; read
+//     from the same `latest` row, so a newer row decides either way);
 //   - or the latest LIVE decision is a `task_log` that capture RECORDED as
 //     resurfacing (the lanes only read the fact, CC3), onto a task that is STILL
 //     closed. "Still closed" is re-read here at both stages, so a task reopened
@@ -125,7 +127,7 @@ const JoinSQL = `
 // logged_on_closed_task line, or dropped if that project is not armed.
 // Parenthesised as one expression, because it is AND-ed into WHERE clauses.
 const InquiryEligibleLatestSQL = `
-	  (latest.action = 'attributed'
+	  ((latest.action = 'attributed' AND NOT latest.channel_unmentioned)
 	   OR (live.action = 'task_log' AND live.resurface
 	       AND EXISTS (SELECT 1 FROM tasks lt WHERE lt.id = live.task_id AND lt.status = 'closed')))`
 
