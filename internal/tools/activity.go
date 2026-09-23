@@ -19,8 +19,11 @@ package tools
 //
 // Semantics, under the tasks row lock:
 //   - a missing or non-inbound message is an ERROR (invariant 5 at the verb);
-//   - a closed task is skipped (SWT-45's revive and SWT-36's reopen run AFTER
-//     this call, so a closed ticket's task stays theirs);
+//   - a closed task is skipped: a comment on a closed task that nothing
+//     reopened (resurface, a notifier copy, a refused revive, his own action)
+//     must not surface it. SWT-45's revive and SWT-36's reopen therefore run
+//     BEFORE this call (SWT-80), so the task they bring back is open when it
+//     is marked and lands in INCOMING;
 //   - the same message twice is a no-op, so a replay never re-surfaces a row
 //     the human already reviewed;
 //   - otherwise activity_at = now() and activity_by_message_id = the message,

@@ -198,16 +198,6 @@ func act(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, v Verdi
 		if err := recordTask(ctx, pool, promoID, d.TaskID); err != nil {
 			return err
 		}
-		// SWT-72 D3: the attach is activity on the task; the board puts it in
-		// INCOMING. Lane-agnostic: the tool skips a closed target, which is
-		// what the inquiry lane's remaining attach (a dismissed task) always is.
-		marked, err := markVerdictActivity(ctx, ex, v, d.TaskID)
-		if err != nil {
-			return err
-		}
-		if marked {
-			stats.Activity++
-		}
 		// SWT-36 D10: the log line first, then the guarded reopen — a
 		// crash between the two leaves exactly today's behaviour. The task
 		// id is recorded BEFORE the reopen for the ordering reason below:
@@ -221,6 +211,19 @@ func act(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor, v Verdi
 			if reopened {
 				stats.Reopened++
 			}
+		}
+		// SWT-72 D3: the attach is activity on the task; the board puts it in
+		// INCOMING. AFTER the reopen (SWT-80): the tool skips a closed target,
+		// and the inquiry lane's remaining attach (a dismissed task) is closed
+		// until reopenDismissed brings it back — marked before, it came back to
+		// QUEUE (#155). A reopen the guard refused leaves it closed and skipped.
+		// Lane-agnostic: one call, no lane branch.
+		marked, err := markVerdictActivity(ctx, ex, v, d.TaskID)
+		if err != nil {
+			return err
+		}
+		if marked {
+			stats.Activity++
 		}
 	default: // "task" | "review"
 		taskID, err := createVerdictTask(ctx, ex, v, d)

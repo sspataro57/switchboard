@@ -180,6 +180,10 @@ trace. A monotone `reviewed_at` keeps the history, and a later activity re-surfa
 - a **closed** task is a skip (`task_closed`) — which is what keeps closed-task work out of this
   ticket for free: the SWT-36 reopen and SWT-45 revive branches run AFTER the mark, so the task is
   still closed when the mark is attempted and the mark self-excludes;
+  **Superseded 2026-09-23 (SWT-80, revived-task-not-in-incoming):** this ordering meant a task a comment
+  revived or reopened came back to QUEUE, never INCOMING (#381, #452, #155). The mark now runs AFTER the
+  revive/reopen in capture and in promote; the tool's closed-skip stays, so a comment that reopens nothing
+  still does not surface a closed task.
 - the **same message twice** is a no-op (`already_marked_by_message`), so `activity_at` never moves
   on a replay;
 - otherwise `activity_at = now()`, `activity_by_message_id = the message`.
@@ -192,8 +196,8 @@ trace. A monotone `reviewed_at` keeps the history, and a later activity re-surfa
 
 | Path | Call site | Actor | In practice |
 |---|---|---|---|
-| capture `task_log` attach — ANY channel, ANY rule kind | `internal/capture/rules_store.go`, the `actionTaskLog` branch, right after `appendRuleLog` and before the prClose/revive/reopen branch | `capture:{connector}` (`cfg.Actor`) | shapes 1, 2, 4: the whole point of the ticket |
-| promoter attach | `internal/promote/store.go`, `act`'s `"attached"` branch, after `recordTask` and before `reopenDismissed` | `promote:{lane}` (`actorFor(v.Lane)`) | **personal lane only** after D11; the inquiry lane's remaining attach targets a dismissed (closed) task, so the mark is a skip |
+| capture `task_log` attach — ANY channel, ANY rule kind | `internal/capture/rules_store.go`, the `actionTaskLog` branch, after `appendRuleLog` and — since SWT-80 — AFTER the prClose/revive/reopen branch | `capture:{connector}` (`cfg.Actor`) | shapes 1, 2, 4: the whole point of the ticket |
+| promoter attach | `internal/promote/store.go`, `act`'s `"attached"` branch, after `recordTask` and — since SWT-80 — AFTER `reopenDismissed` | `promote:{lane}` (`actorFor(v.Lane)`) | **personal lane only** after D11; the inquiry lane's remaining attach targets a dismissed (closed) task, so the mark is a skip |
 
 **Does the promoter still need the hook at all?** Yes, but narrowly. After D11 no ASK is ever
 attached, so the inquiry lane's only `attached` decision is rule 2's dismissed-task reopen, whose
@@ -444,19 +448,21 @@ measures how often it happens so the question can be answered with data.
 ### Part 3 — the attach paths
 
 8. **Capture.** In `EvaluateRules`' `actionTaskLog` branch, live mode only: after `appendRuleLog`
-   succeeds and before the prClose/revive/reopen branch, `markRuleActivity` calls
+   succeeds and (since SWT-80) AFTER the prClose/revive/reopen branch, `markRuleActivity` calls
    `task_mark_activity {task_id, message_id: pm.msg.ID, reason:"capture: …"}` as `cfg.Actor` —
    unless `decision.prClose` is set. An error fails the pass (the `appendRuleLog` policy).
    `RulesStats` gains `Activity int`, counted from `marked:true` and printed by the existing counter
    line.
-9. **Promoter.** In `act`'s `"attached"` branch, after `recordTask` and before `reopenDismissed`,
+9. **Promoter.** In `act`'s `"attached"` branch, after `recordTask` and (since SWT-80) AFTER `reopenDismissed`,
    `markVerdictActivity` calls the same tool as `actorFor(v.Lane)`. `Stats` gains `Activity int`.
    Dry runs call nothing.
 10. **Blind to channel and rule** (the José case): an integration test drives a `body_regex`
     gmail-sourced rule and a `sender` Slack-sourced rule onto the same task and asserts both set
     `activity_at`. Neither new function contains a channel or rule-kind literal.
 11. **Closed targets untouched:** a capture attach onto a closed task (SWT-45 revive and SWT-36
-    dismissal shapes) leaves `activity_at` NULL, and the revive/reopen still happens.
+    dismissal shapes) leaves `activity_at` NULL, and the revive/reopen still happens. **Reversed by SWT-80:**
+    a revived or reopened task IS marked (the mark runs after the reopen); only a closed task that nothing
+    reopened stays unmarked.
 12. **A PR merge/close notice does not surface** (`decision.prClose`): `activity_at` stays NULL and
     the task is closed as today.
 
