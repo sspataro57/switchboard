@@ -34,7 +34,10 @@ import (
 // prompt — quoted reply history is cut from the target and from each context
 // message (StripQuotedHistory). The version moves because the same message now
 // yields a different prompt, and a v1 and a v2 verdict must be tellable apart.
-const InquiryPromptVersion = "inquiry-v2"
+//
+// inquiry-v3 (SWT-78): the SYSTEM prompt's tie-break flips from precision to
+// recall — "when unsure, needs_reply = true" — on Salvador's decision.
+const InquiryPromptVersion = "inquiry-v3"
 
 // InquirySchemaName is this contract's structured-output name.
 const InquirySchemaName = "inquiry_verdict"
@@ -67,10 +70,14 @@ var InquiryVerdictSchema = json.RawMessage(`{
 // (per-sender prompts are rules in a costume — the same rule the other two
 // lanes follow). It is bilingual on the same terms.
 //
-// THE OBJECTIVE LEANS ON PRECISION, unlike the other two lanes, and the prompt
-// says why in one line: a missed bill is a late fee, but a false "someone is
-// waiting on you" in a client channel is a false alarm on a surface that has to
-// be trusted, and this population is mostly chatter.
+// THE TIE-BREAK LEANS ON RECALL since SWT-78 (Salvador, 2026-09-23: "Make qwen
+// say yes when unsure. That will create a task and claude would decide with a
+// smarter model"). It was precision (criterion 8 of the inquiry lane), and a
+// false "no reply needed" is read by NOTHING — the message is simply never
+// seen again (on 2026-09-22 that dropped 16 of 22 DMs to him). A false "yes"
+// becomes a task a stronger model or he dismisses in seconds. The list of
+// what is NOT an ask stays: recall is the tie-break, not a licence to flag
+// every bot notice.
 const InquirySystemPrompt = `You read one message from a work conversation and decide whether it contains
 an inquiry that needs a REPLY FROM THE RECIPIENT.
 
@@ -98,9 +105,11 @@ needs_reply = false, which is most of this conversation:
 If the message asks something the recipient has already answered in the
 transcript shown, that is needs_reply = false. Answering twice is not the job.
 
-PRECISION IS THE OBJECTIVE. A false "someone is waiting on you" costs trust in
-a surface the recipient is meant to rely on, and most messages here are
-chatter. When you are genuinely torn, answer false.
+WHEN UNSURE, ANSWER TRUE. A false "no reply needed" is never looked at again:
+the person waiting is simply ignored. A false "someone is waiting on you"
+becomes a task that a reviewer closes in seconds. Recall is the tie-break —
+the list of what is not an ask above still stands, so a bot notice or a plain
+"thanks" is still false.
 
 Fields:
   needs_reply  true or false, as above.

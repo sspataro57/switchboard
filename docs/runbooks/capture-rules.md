@@ -832,6 +832,47 @@ and there is no tool to pick up those misses. A shadow re-point
 ("Re-pointing already-decided messages" above) does not help here, because
 the resurface path reads only live decisions.
 
+## Slack DMs are always tasks (SWT-78)
+
+A person's Slack DM or group DM to Salvador never goes to the inquiry lane (qwen). At capture's
+attribution-only exit it is decided onto its CONVERSATION's task: `task_log` onto the open one (a human
+task with no external ref whose source thread is any thread of that DM), else `task` — one task per
+conversation until he closes or dismisses it; the next DM then opens a new one. Channels are unchanged
+(attribution → inquiry lane). The Jira app's DMs are unchanged (notifier list). His own messages are never
+decided (inbound only). The decision row reads `DM task: …` in its reason and carries no external key.
+
+Messages decided `attributed` before this shipped cannot be re-decided (the live claim is forever).
+Backfill them by id:
+
+```
+opsctl capture-rules direct-backfill --message 403016,403664 --dry-run   # what it would do, writes nothing
+opsctl capture-rules direct-backfill --message 403016,403664             # oldest first; idempotent
+```
+
+It runs the same decision and executor calls, writes no capture_decisions row, and logs
+`capture: DM backfill (SWT-78) …` on the conversation task for every message (a second run finds that line
+and skips). Non-DMs, app DMs and outbound ids are reported as skipped.
+If a run dies between `create_task` and its log line, the next run finds the task by its body (the DM
+marker plus the `message_id:` line) and finishes it instead of creating a second one.
+
+**Rolling it out (or rolling back).** A live capture decision is forever, and ANY connector's capture pass
+decides every pending message. So every capture writer — `connector-google-watch`,
+`connector-slackweb-watch`, the one-shot connector CronJobs, `pipelined` if it runs capture, and `opsctl` —
+must run the same image, in ONE apply. A DM an old binary decides during the roll stays `attributed` and
+goes to qwen. After the roll, sweep the window and backfill whatever it claimed:
+
+```
+docs/bugs/slack-messages-not-becoming-tasks_repro.sh $(date +%F)          # FAIL lines with "| dm |" are the DMs to backfill
+opsctl capture-rules direct-backfill --message <those ids> --dry-run
+opsctl capture-rules direct-backfill --message <those ids>
+```
+
+**Known gap (sibling repo):** group DMs are recognised by the raw `conversation.type='group_dm'`. The Slack
+leaf types a conversation by its id prefix on targeted/explicit-URL reads (`slackconnector`
+`export.ts conversationTypeForId`), so a `C…`-id group DM read that way is stored `public_channel` and
+stays on the inquiry lane. Today `slack_watch` holds only 1:1 DMs, so no such read happens; do not add a
+`C…` group DM to `slack_watch` until the leaf types it from Slack's own metadata.
+
 ## Comm rules (SWT-74, comms-inbox)
 
 A rule armed with `comm_task` turns a PERSON's message it files onto an OPEN task into its own

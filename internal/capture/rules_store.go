@@ -281,6 +281,11 @@ type pendingMessage struct {
 	threadID *int64
 	channel  string
 	sentAt   time.Time
+	// rawConvType is the raw observation's conversation.type ('dm',
+	// 'group_dm', 'public_channel', …; '' for non-Slack), read from
+	// raw_source_items.raw_json in pendingMessageCols. SWT-78: a group DM is
+	// only knowable here — 40 of 53 production group DMs have C… ids.
+	rawConvType string
 }
 
 // ruleDecision is one capture_decisions row before it is written.
@@ -341,6 +346,18 @@ type ruleDecision struct {
 	// no other path owns, decided by the pure resurfaces(). WRITTEN to
 	// capture_decisions.resurface: the inquiry lanes read it from there.
 	resurface bool
+
+	// direct (SWT-78): a person's Slack DM decided onto its CONVERSATION task —
+	// `task` (none open) or `task_log` (onto it) — with external_system and
+	// external_key NULL. Carried, never a column: the NULL ref and the reason
+	// are what the row records. directConv is the conversation's thread key
+	// (slackweb.ConversationThreadKey), the unit "one task per conversation"
+	// counts in.
+	direct     bool
+	directConv string
+	// directNoThread: the conversation task found carries no source thread
+	// (an interrupted create); the attach records it.
+	directNoThread bool
 }
 
 // simulatedRefs is DryRunRules' stand-in for the external_refs rows its own
@@ -461,6 +478,14 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 			stats.Matched++
 		}
 		if cfg.Mode != RulesModeLive {
+			continue
+		}
+		// SWT-78: a DM decision carries NULL external_system/key, so it has its
+		// own act — the switch below dereferences both on every branch.
+		if decision.direct {
+			if err := actDirect(ctx, pool, ex, cfg.Actor, decisionID, pm, winner, decision, &stats); err != nil {
+				return stats, err
+			}
 			continue
 		}
 
@@ -814,7 +839,8 @@ const (
 	             COALESCE(nt.thread_key,''), COALESCE(m.sender,''), COALESCE(m.subject,''),
 	             COALESCE(m.body_text,''), COALESCE(m.external_message_id,''),
 	             COALESCE(nt.participants,'[]'::jsonb), COALESCE(m.channel,''),
-	             COALESCE(m.sent_at, m.created_at)`
+	             COALESCE(m.sent_at, m.created_at),
+	             COALESCE(ri.raw_json->'conversation'->>'type','')`
 	pendingMessageFrom = `
 	        FROM normalized_messages m
 	        LEFT JOIN raw_source_items ri ON ri.id = m.raw_source_item_id
@@ -829,7 +855,7 @@ func scanPendingMessage(row interface{ Scan(dest ...any) error }) (pendingMessag
 	var participants []byte
 	if err := row.Scan(&pm.msg.ID, &pm.rawItemID, &pm.threadID, &pm.msg.Source, &pm.msg.ThreadKey,
 		&pm.msg.Sender, &pm.msg.Subject, &pm.msg.BodyText, &pm.msg.ExternalMessageID,
-		&participants, &pm.channel, &pm.sentAt); err != nil {
+		&participants, &pm.channel, &pm.sentAt, &pm.rawConvType); err != nil {
 		return pm, fmt.Errorf("scan pending message: %w", err)
 	}
 	pm.msg.Participants = parseThreadParticipants(participants)
@@ -891,12 +917,24 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 		// avoid. Turning arbitrary chatter into tasks is triage's job.
 		d.reason = fmt.Sprintf("rule %d (%s) attributes to %s; no external_system, so attribution only",
 			winner.rule.ID, winner.rule.Kind, winner.rule.Project)
+		// SWT-78: a person's DM does not stop at attribution — that sent it to
+		// the inquiry lane, where qwen dropped 16 of 22 on 2026-09-22. It is
+		// decided HERE onto its conversation's task, and a task/task_log live
+		// decision keeps it out of both inquiry inboxes by construction.
+		if ok, why := directConversationTask(directFacts(pm, winner)); ok {
+			return decideDirect(ctx, pool, mode, pm, d, winner, sim, why)
+		}
 		return d, winner, nil
 	case outcome.externalKey == "":
 		// An empty key must never become an external_refs row: external_key='' would
 		// collide every keyless message of that system onto ONE task, forever.
 		d.reason = fmt.Sprintf("rule %d (%s) attributes to %s; external_system %s but no key could be derived",
 			winner.rule.ID, winner.rule.Kind, winner.rule.Project, winner.extSystem)
+		// SWT-78 (codex review): every exit that leaves a DM merely attributed
+		// sends it to the inquiry lane, so each one takes the DM path.
+		if ok, why := directConversationTask(directFacts(pm, winner)); ok {
+			return decideDirect(ctx, pool, mode, pm, d, winner, sim, why)
+		}
 		return d, winner, nil
 	}
 
@@ -913,6 +951,9 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 		if !ok {
 			d.reason = fmt.Sprintf("rule %d (%s) attributes to %s; github key %q is not a pull request, so "+
 				"attribution only", winner.rule.ID, winner.rule.Kind, winner.rule.Project, key)
+			if ok, why := directConversationTask(directFacts(pm, winner)); ok {
+				return decideDirect(ctx, pool, mode, pm, d, winner, sim, why)
+			}
 			return d, winner, nil
 		}
 		prRef, key = ref, github.PRKey(ref)
@@ -1066,6 +1107,19 @@ func decideMessage(ctx context.Context, pool *pgxpool.Pool, mode string, pm pend
 			prNotice:      d.prNotice != "",
 		})
 		d.resurface = resurface
+		// SWT-78 item E: a person's DM that would resurface onto a CLOSED
+		// ticket task goes to its conversation task instead — resurfacing is
+		// the inquiry lane, and no DM goes to qwen. The closed ticket gets
+		// nothing (no log, no reopen): the DM is about the conversation.
+		if resurface {
+			if ok, why := directConversationTask(directFacts(pm, winner)); ok {
+				base := ruleDecision{action: actionAttributed, projectID: d.projectID,
+					matchedRuleID: d.matchedRuleID, matchedRuleIDs: d.matchedRuleIDs, ambiguous: d.ambiguous,
+					reason: fmt.Sprintf("rule %d (%s): %s %s is linked to closed task %d; a DM does not resurface",
+						winner.rule.ID, winner.rule.Kind, system, key, taskID)}
+				return decideDirect(ctx, pool, mode, pm, base, winner, sim, why)
+			}
+		}
 		// comms-inbox (SWT-74 D2): does this attach make its own comm task?
 		// Decided from VALUES — the rule's column, the task's status, the three
 		// sender facts — and worded by mode: a live pass REQUESTS, a shadow pass

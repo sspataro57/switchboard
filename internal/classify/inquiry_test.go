@@ -35,7 +35,7 @@ package classify_test
 //	type Lane struct { Name, WorkerType, System, PromptVersion, LabelsPath string; Contract Contract }
 //
 //	var  LaneInquiry Lane
-//	const InquiryPromptVersion = "inquiry-v2" (SWT-70: quoted history cut from the user prompt)
+//	const InquiryPromptVersion = "inquiry-v3" (SWT-70: quoted history cut from the user prompt; SWT-78: recall tie-break)
 //	const InquirySystemPrompt  = `…`
 //	var   InquiryVerdictSchema json.RawMessage
 //
@@ -189,9 +189,10 @@ func TestLaneInquiry_ValuesAndTheThirdSpelling(t *testing.T) {
 			"others (SWT-23 criterion 11's defect, third instance)",
 			classify.LaneInquiry.WorkerType, "classify_inquiry")
 	}
-	// SWT-70 moved it: the user prompt's rendering changed (quoted history is cut).
-	if classify.InquiryPromptVersion != "inquiry-v2" {
-		t.Errorf("classify.InquiryPromptVersion = %q, want \"inquiry-v2\"", classify.InquiryPromptVersion)
+	// SWT-70 moved it (quoted history cut from the user prompt); SWT-78 moved it
+	// again (the system prompt's tie-break flipped to recall).
+	if classify.InquiryPromptVersion != "inquiry-v3" {
+		t.Errorf("classify.InquiryPromptVersion = %q, want \"inquiry-v3\"", classify.InquiryPromptVersion)
 	}
 	if classify.LaneInquiry.PromptVersion != classify.InquiryPromptVersion {
 		t.Errorf("LaneInquiry.PromptVersion = %q, want %q — one spelling, or the stamp in ai_runs.input "+
@@ -614,23 +615,25 @@ func TestInquiryPrompt_SaysWhatCountsWhatDoesNotAndTheObjective(t *testing.T) {
 			"translated; a prompt that does not say so invites a translation pass nobody can compare against")
 	}
 
-	// CRITERION 8 — the objective, and it is the OPPOSITE of the other two lanes.
-	if !regexp.MustCompile(`precision`).MatchString(lower) {
-		t.Errorf("the inquiry prompt does not state a PRECISION-leaning objective (criterion 8). The other " +
-			"two lanes say RECALL IS THE OBJECTIVE, and copying that sentence here is the likeliest way to " +
-			"get this prompt wrong")
+	// CRITERION 8, REVERSED by SWT-78 (Salvador, 2026-09-23: "Make qwen say yes
+	// when unsure. That will create a task and claude would decide with a
+	// smarter model"): the tie-break is RECALL. A false needs_reply=false is
+	// read by nothing — 16 of 22 DMs to him were dropped that way on 09-22.
+	if !regexp.MustCompile(`when unsure, answer true`).MatchString(lower) {
+		t.Errorf("the inquiry prompt does not tell the model to answer TRUE when unsure (SWT-78). A false " +
+			"'no reply needed' is never looked at again; a false 'yes' becomes a task a reviewer closes")
 	}
-	if regexp.MustCompile(`recall is the objective`).MatchString(lower) {
-		t.Errorf("the inquiry prompt carries the other lanes' \"RECALL IS THE OBJECTIVE\" sentence. " +
-			"Criterion 8: a missed bill is a late fee (recall), but a false 'someone is waiting on you' in " +
-			"a client channel is a false alarm on a surface Salvador is expected to TRUST, and this lane's " +
-			"population is mostly chatter")
+	if regexp.MustCompile(`precision is the objective|when you are genuinely torn, answer false`).MatchString(lower) {
+		t.Errorf("the inquiry prompt still carries the precision tie-break SWT-78 reversed")
 	}
 	// And the one line saying WHY, so the next reader does not "fix" it back.
-	if !regexp.MustCompile(`false alarm|trust|waiting on you`).MatchString(lower) {
-		t.Errorf("the inquiry prompt states the precision objective without the one line of reasoning " +
-			"criterion 8 asks for. A stated objective with no argument is an objective the next session " +
-			"reverses to match the other two prompts")
+	if !regexp.MustCompile(`never looked at again`).MatchString(lower) {
+		t.Errorf("the inquiry prompt states the recall tie-break without its reason. A stated objective " +
+			"with no argument is an objective the next session reverses")
+	}
+	// The not-an-ask list still stands: recall is the tie-break, not a licence.
+	if !regexp.MustCompile(`automated notification`).MatchString(lower) {
+		t.Errorf("the inquiry prompt lost its list of what is NOT an ask; SWT-78 flips only the tie-break")
 	}
 
 	// Criterion 6, prompt side: no link contract on this lane.

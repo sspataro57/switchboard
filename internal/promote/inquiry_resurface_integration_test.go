@@ -357,8 +357,12 @@ func TestPromoteInquiryResurface_Integration_ACapturePassBecomesAReadyTaskOnTheD
 	s.rsClose(t, ctx, bucket)
 	logsBefore := s.count(t, ctx, `SELECT count(*) FROM task_events WHERE task_id=$1 AND event_type='log'`, bucket)
 
-	dm := slackKey("D0IQPRS1", "")
-	msg, raw := s.rsMessage(t, ctx, "rs-capture", dm, "slack", "asunda45", "can you check IQW-10355?", s.ago(2*time.Hour))
+	// SWT-78: a person's Slack DM no longer resurfaces (capture puts it on its
+	// conversation task), so criterion 14's capture-owned resurfaced row starts
+	// from a direct EMAIL — always addressed (addressed()), resurfaced the same
+	// way. The variable keeps its name: it is the message's own conversation.
+	dm := "gmail:itest-iqprs1"
+	msg, raw := s.rsMessage(t, ctx, "rs-capture", dm, "gmail", "asunda45", "can you check IQW-10355?", s.ago(2*time.Hour))
 	if _, err := capture.EvaluateRules(ctx, s.pool, s.ex,
 		capture.RulesConfig{Mode: capture.RulesModeLive, Actor: rsCaptureActor}); err != nil {
 		t.Fatalf("capture.EvaluateRules(live): %v", err)
