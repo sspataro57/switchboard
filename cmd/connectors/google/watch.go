@@ -461,6 +461,7 @@ func idleOnce(ctx context.Context, deps idleDeps, acct google.Account, wake chan
 		// A wait and not an error: an error here would write an imap_idle error
 		// run every time an ingest pass overlaps, which is the cry-wolf failure
 		// this locking was added to avoid.
+		fmt.Printf("watch: idle %s skipped: an ingest pass holds the account lock\n", acct.Email)
 		_ = deps.Sleep(ctx, backoffMin)
 		return nil
 	}
@@ -485,14 +486,30 @@ func idleOnce(ctx context.Context, deps idleDeps, acct google.Account, wake chan
 	if err != nil {
 		return err
 	}
+	// SWT-81: every IDLE session's life is logged, one line each way. INBOX
+	// arrivals were sometimes missed for stretches (up to 75 min) with no error
+	// and no record of whether a session was open, refreshing, or being ended
+	// by the server; these lines are that record. Logging only.
+	opened := time.Now()
+	fmt.Printf("watch: idle %s open\n", acct.Email)
 	select {
 	case <-idleCtx.Done():
 		// Refresh interval elapsed with no news; reopen. Not an error.
+		if ctx.Err() == nil {
+			fmt.Printf("watch: idle %s refresh after %s\n", acct.Email, time.Since(opened).Round(time.Second))
+		}
 		return nil
 	case _, ok := <-ch:
 		if !ok {
+			// A GUARD, not an expected path: the production source
+			// (google.IMAPClientSource.Idle) closes the channel only after ctx is
+			// done, so today this cannot fire — a server-ended IDLE is logged by
+			// the source itself ("imap: idle … ended before we stopped it").
+			// Kept for another source or a future library that closes early.
+			fmt.Printf("watch: idle %s closed without news after %s\n", acct.Email, time.Since(opened).Round(time.Second))
 			return nil
 		}
+		fmt.Printf("watch: idle %s fired after %s\n", acct.Email, time.Since(opened).Round(time.Second))
 		select {
 		case wake <- acct.Email:
 		default: // a wake-up is already queued; one pass covers both

@@ -828,7 +828,22 @@ func (s *IMAPClientSource) Idle(ctx context.Context, folder string) (<-chan stru
 	go func() {
 		// IDLE is re-issued by the caller; RFC 2177 requires a refresh at least
 		// every 29 minutes, and MAIL_IDLE_REFRESH keeps us inside that.
-		idleDone <- conn.Idle(stop, nil)
+		err := conn.Idle(stop, nil)
+		// SWT-81, logging only: how the IDLE command ended. The error used to be
+		// dropped, and nothing reads idleDone until the caller's refresh, so a
+		// session the server ended (or a connection that died) looked exactly
+		// like a quiet healthy one until the next refresh — and INBOX arrivals
+		// in that window waited for the reconcile sweep. Username is the mailbox
+		// login (already logged elsewhere); never the password or token.
+		select {
+		case <-stop:
+			if err != nil {
+				fmt.Printf("imap: idle %s %s stop returned an error: %v\n", s.Username, folder, err)
+			}
+		default:
+			fmt.Printf("imap: idle %s %s ended before we stopped it (server or connection): %v\n", s.Username, folder, err)
+		}
+		idleDone <- err
 	}()
 
 	go func() {
