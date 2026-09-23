@@ -184,6 +184,12 @@ go run ./cmd/opsctl call --tool mark_delivery_sent --args '{"delivery_id":456}'
 
 ## What happens when the browser is busy (SWT-76)
 
+> **Update 2026-09-22 21:51Z (slackconnector main 45bc3ae): a send now preempts.** `/send` stops a running full
+> or targeted export at its next checkpoint, clicks, then reruns the export with the time left in its budget.
+> So behind a sweep the normal answer is a **sync 200 within seconds**; a **202** now only happens behind a
+> draft or another send; **503** is still the pre-click refusal. Nothing needs to wait for a "free window"
+> before sending. The table below still describes the three possible answers.
+
 The mini has one browser, and since SWT-75 it is busy a good share of the day (a targeted
 pass every 3 min, a rotation export every 30 min). An approved `slack_reply` sent through
 `send_delivery` now has three outcomes at the leaf, decided **before any browser work**:

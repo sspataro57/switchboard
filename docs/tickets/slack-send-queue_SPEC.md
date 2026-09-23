@@ -105,6 +105,12 @@ the `prefill_delivery` assisted path are untouched.
 
 ### the leaf's half (`/home/salvo/projects/personal/slackconnector`)
 
+> **Superseded 2026-09-22 21:51Z (slackconnector main 45bc3ae):** the leaf now PREEMPTS. A `/send` (and the
+> MCP prepareSend/sendReply) stops a running full or targeted export at its next checkpoint, clicks, then reruns
+> the export from the start with the time left in its budget. Behind a sweep, `/send` returns a sync 200 in
+> seconds; 202 only happens behind a draft or another send; 503 is still the pre-click refusal. The
+> "never preempts" statements below describe the leaf as it was when this SPEC was written.
+
 - **One queue owns the one browser.** `JobQueue` is non-preemptive priority: interactive ahead of any
   waiting sweep, a sweep only starts when nothing interactive is waiting, nothing preempts a running job
   (`src/browser/job-queue.ts:13-22`, `:143-146`, `:184-197`).
@@ -905,7 +911,8 @@ is the version gate, which removes the deploy ordering constraint).
 - **`prefill_delivery` over the same acceptance path**, if the assisted tier ever becomes unattended.
 - **Counting watch passes toward `ReconcileUnconfirmed` with a per-phase threshold**, which would shorten
   the alarm horizon from ~90 minutes to minutes without the false-flag risk SWT-75 D6 avoided.
-- **A yielding rotation** — checking between conversation reads whether interactive work waits — which
+- **A yielding rotation** (roughly DONE on the leaf side, 2026-09-22 45bc3ae: a send preempts a running export
+  at its next checkpoint) — checking between conversation reads whether interactive work waits — which
   would remove D3's up-front refusal entirely. It is a preemption change to the leaf's export loop and
   wants its own risk budget.
 - **Surfacing queued/unconfirmed Slack deliveries on `/funnel`**, so a stuck one is visible without

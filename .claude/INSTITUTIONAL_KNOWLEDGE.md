@@ -3313,6 +3313,11 @@ did not author, from the GitHub notification mail he already receives. Runbook:
 
 ## Slack sends queue behind a busy browser (SWT-76, slack-send-queue)
 
+- **Update 2026-09-22 21:51Z (leaf, slackconnector 45bc3ae): a send PREEMPTS a running export** at its next
+  checkpoint, clicks, then reruns the export within its original budget. Behind a sweep `/send` is a sync 200
+  in seconds; 202 only behind a draft or another send; 503 still the pre-click refusal. Wording below that
+  says the leaf "never preempts" predates this.
+
 - **What it is.** An approved `slack_reply` that meets a busy browser on the mini (a rotation export, an
   overrun) is no longer 503'd into `failed`: switchboard sends `max_queue_ms` (10 min) and the leaf
   answers **202 + job id** (accepted, clicks in the next gap, ahead of the next sweep) instead. The row
