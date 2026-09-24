@@ -36,6 +36,7 @@ const directTaskBodyMarker = "Captured deterministically: a Slack DM is always a
 func directFacts(pm pendingMessage, winner storedRule) directInput {
 	return directInput{
 		slack:       pm.channel == slackweb.Channel,
+		upwork:      pm.channel == upworkChannel,
 		dm:          slackweb.IsDirectMessageKey(pm.msg.ThreadKey),
 		groupDM:     pm.rawConvType == "group_dm",
 		blankSender: blankSender(pm.msg.Sender),
@@ -55,6 +56,10 @@ func directFacts(pm pendingMessage, winner storedRule) directInput {
 //
 // The second arm (codex review) finds a DM task whose provenance was never
 // recorded — a pass that died between create_task and task_set_source_thread.
+// $4 (exact) turns off the rooted-thread fold for an Upwork conversation: its
+// key is used whole, and a room id may contain ':', so "A:B" must never fold
+// into "A".
+//
 // Its BODY names the conversation (directTaskArgs' `conversation:` line under
 // directTaskBodyMarker), so it is still this conversation's task: the next DM
 // attaches to it (and actDirect records the missing provenance) instead of
@@ -63,7 +68,7 @@ const directConversationSQL = `
 	SELECT t.id, t.source_thread_id IS NULL
 	  FROM tasks t
 	  LEFT JOIN normalized_threads nt ON nt.id = t.source_thread_id
-	 WHERE ((nt.thread_key = $1 OR left(nt.thread_key, length($1) + 1) = $1 || ':')
+	 WHERE ((nt.thread_key = $1 OR (NOT $4 AND left(nt.thread_key, length($1) + 1) = $1 || ':'))
 	        OR (t.source_thread_id IS NULL AND left(t.body, length($3)) = $3
 	            AND strpos(t.body, E'\nconversation: ' || $1 || E'\n') > 0))
 	   AND t.project_id = $2
@@ -73,13 +78,25 @@ const directConversationSQL = `
 	 ORDER BY t.created_at, t.id
 	 LIMIT 1`
 
+// directConversationKey is the unit "one task per conversation" counts in. A
+// Slack DM's conversation is its channel key with any rooted thread folded in
+// (slackweb.ConversationThreadKey). An Upwork message's thread IS its
+// conversation (one thread per room): its thread key, used whole and never
+// parsed, so the Upwork key format keeps its one spelling in the connector.
+func directConversationKey(pm pendingMessage) (string, bool) {
+	if pm.channel == upworkChannel {
+		return pm.msg.ThreadKey, strings.TrimSpace(pm.msg.ThreadKey) != ""
+	}
+	return slackweb.ConversationThreadKey(pm.msg.ThreadKey)
+}
+
 // decideDirect turns base (the attribution: project, rule, matched ids) into
 // the DM decision: task_log onto the conversation's open task, else task. The
 // reason keeps base's text and adds why, then what a live pass requests or a
 // shadow pass would do (SWT-45 criterion 25's wording rule).
 func decideDirect(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendingMessage,
 	base ruleDecision, winner storedRule, sim simulatedRefs, why string) (ruleDecision, storedRule, error) {
-	conv, ok := slackweb.ConversationThreadKey(pm.msg.ThreadKey)
+	conv, ok := directConversationKey(pm)
 	if !ok {
 		// A DM whose thread key does not parse cannot be counted into a
 		// conversation; keep the attribution rather than guess one.
@@ -99,7 +116,8 @@ func decideDirect(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendi
 		}
 	}
 	if !found {
-		err := pool.QueryRow(ctx, directConversationSQL, conv, winner.projectID, directTaskBodyMarker).
+		err := pool.QueryRow(ctx, directConversationSQL, conv, winner.projectID, directTaskBodyMarker,
+			pm.channel == upworkChannel).
 			Scan(&taskID, &d.directNoThread)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):

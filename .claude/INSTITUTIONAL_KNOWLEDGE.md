@@ -3471,3 +3471,8 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
   `push-state.json` holds per-task memory; delete it to start fresh (the first pass records
   everything and nudges nothing). The log is `push.log`, and `swb-push status` shows the live view.
 - Refuses to run with Claude Code `editorMode: vim` (typed text would be run as editor commands).
+- **No-console email (swb #610):** a task that is new, or has new activity, in a project with no live
+  Claude session in a mapped window (or whose window runs two sessions) gets an email through
+  `~/.claude/notify-email.py`, batched at most once per `mail_every_s` (default 600). Memory lives under the
+  pseudo-window `_no_console`, and every project is seeded from the `projects` table, so an empty project's
+  first task still emails. Mute a project with `notify_skip` in push.json.

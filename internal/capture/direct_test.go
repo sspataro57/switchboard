@@ -58,6 +58,7 @@ import (
 func dtIn(channel, threadKey, rawType, sender string, notifiers []string) directInput {
 	return directInput{
 		slack:       channel == slackweb.Channel,
+		upwork:      channel == upworkChannel,
 		dm:          slackweb.IsDirectMessageKey(threadKey),
 		groupDM:     rawType == "group_dm",
 		blankSender: blankSender(sender),
@@ -92,7 +93,9 @@ func TestRegression_SWT78_DirectConversationTask_WhoTakesTheDMPath(t *testing.T)
 		{"a human whose name merely CONTAINS a notifier entry is still a person (equality, not substring)", "slack",
 			"slack:T0360B84U:DSAV4HJ2F", "dm", "Jiraiya Smith", jira, true, ""},
 		{"not slack: a gmail thread is never a Slack DM", "gmail", "gmail:thread-D123", "", "Dana <d@x.test>", jira, false, ""},
-		{"not slack even with a group_dm-looking raw type", "upwork", "upwork:room:D123", "group_dm", "Dana", jira, false, ""},
+		{"an Upwork client's message: a room is 1:1 with him (swb #610)", "upwork", "upwork_x:room:r1", "", "Erica Rapa", jira, true, ""},
+		{"an Upwork message from a notifier", "upwork", "upwork_x:room:r1", "", "Jira", jira, false, "notifier"},
+		{"an Upwork message with no sender", "upwork", "upwork_x:room:r1", "", " ", jira, false, "sender"},
 	}
 	for _, tc := range cases {
 		got, why := directConversationTask(dtIn(tc.channel, tc.key, tc.rawType, tc.sender, tc.notifiers))
@@ -117,10 +120,10 @@ func TestRegression_SWT78_DirectConversationTask_DistinctReasons(t *testing.T) {
 		t.Fatalf("CONTROL: a slack 1:1 DM from a named non-notifier sender does not apply")
 	}
 	offs := map[string]directInput{
-		"not slack":    {slack: false, dm: true},
-		"not a DM":     {slack: true},
-		"blank sender": {slack: true, dm: true, blankSender: true},
-		"notifier":     {slack: true, dm: true, notifier: true},
+		"not slack or upwork": {slack: false, dm: true},
+		"not a DM":            {slack: true},
+		"blank sender":        {slack: true, dm: true, blankSender: true},
+		"notifier":            {slack: true, dm: true, notifier: true},
 	}
 	seen := map[string]string{}
 	for name, in := range offs {
@@ -146,10 +149,15 @@ func TestRegression_SWT78_DirectConversationTask_TruthTable(t *testing.T) {
 			for _, group := range bools {
 				for _, blank := range bools {
 					for _, notifier := range bools {
-						in := directInput{slack: slack, dm: dm, groupDM: group, blankSender: blank, notifier: notifier}
-						want := slack && (dm || group) && !blank && !notifier
-						if got, why := directConversationTask(in); got != want {
-							t.Errorf("directConversationTask(%+v) = %v (%q), want %v", in, got, why, want)
+						for _, upwork := range bools {
+							if slack && upwork {
+								continue // one channel per message
+							}
+							in := directInput{slack: slack, upwork: upwork, dm: dm, groupDM: group, blankSender: blank, notifier: notifier}
+							want := (upwork || slack && (dm || group)) && !blank && !notifier
+							if got, why := directConversationTask(in); got != want {
+								t.Errorf("directConversationTask(%+v) = %v (%q), want %v", in, got, why, want)
+							}
 						}
 					}
 				}

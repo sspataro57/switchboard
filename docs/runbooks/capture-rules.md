@@ -875,6 +875,17 @@ conversation until he closes or dismisses it; the next DM then opens a new one. 
 (attribution → inquiry lane). The Jira app's DMs are unchanged (notifier list). His own messages are never
 decided (inbound only). The decision row reads `DM task: …` in its reason and carries no external key.
 
+**Upwork conversations too (swb #610, 2026-09-24).** An Upwork message (`channel = 'upwork'`) that a
+capture rule attributed to a project is a DM by nature: a client's room is 1:1 with him. It takes the
+same path, with the room's thread key as the conversation, matched EXACTLY (a room id may contain `:`,
+so the Slack rooted-thread fold is off). A keyed rule such as town-ai's rule 56 still makes its
+external-ref task on a room's first message and logs onto it while it is open. Once that task is closed,
+a later message opens or joins the room's conversation task, instead of logging onto the closed task
+and resurfacing to the inquiry lane. Prospects have no rule, so they stay unmatched and CRM-side. The
+task body still says "a Slack DM is always actionable": that marker is how recovery finds an interrupted
+create, so it is not renamed. The backfill also takes a message whose live decision is a `task_log` with
+`resurface = true` (the lost Upwork shape). Run for 490493 and 491848, which created task 611.
+
 Messages decided `attributed` before this shipped cannot be re-decided (the live claim is forever).
 Backfill them by id:
 

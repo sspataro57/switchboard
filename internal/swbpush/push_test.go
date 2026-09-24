@@ -34,7 +34,7 @@ func primed(old ...Task) Seen {
 
 func TestPlan_FirstSightRecordsEverythingAndSendsNothing(t *testing.T) {
 	seen := Seen{}
-	tasks := []Task{{1, "collaboratory", "", t0.Add(-time.Hour)}}
+	tasks := []Task{{1, "collaboratory", "", t0.Add(-time.Hour), ""}}
 	if n := Plan(cfg(), []Session{sess("collab", "idle", time.Hour)}, tasks, seen, t0, always); len(n) != 0 {
 		t.Fatalf("first sight nudged: %+v", n)
 	}
@@ -48,8 +48,8 @@ func TestPlan_FirstSightRecordsEverythingAndSendsNothing(t *testing.T) {
 
 func TestPlan_NewTaskNudgesIdleAndBusy_AndSettlesOnlyOnApply(t *testing.T) {
 	for _, turn := range []string{"idle", "busy"} {
-		seen := primed(Task{1, "collaboratory", "", t0.Add(-time.Hour)})
-		tasks := []Task{{1, "collaboratory", "", t0.Add(-time.Hour)}, {2, "collaboratory", "", t0.Add(-time.Minute)}}
+		seen := primed(Task{1, "collaboratory", "", t0.Add(-time.Hour), ""})
+		tasks := []Task{{1, "collaboratory", "", t0.Add(-time.Hour), ""}, {2, "collaboratory", "", t0.Add(-time.Minute), ""}}
 		n := Plan(cfg(), []Session{sess("collab", turn, time.Hour)}, tasks, seen, t0, always)
 		if len(n) != 1 || n[0].Pane != "%collab" || !strings.Contains(n[0].Text, "collaboratory queue") {
 			t.Fatalf("%s: nudges %+v, want one for collaboratory", turn, n)
@@ -73,23 +73,23 @@ func TestPlan_NewTaskNudgesIdleAndBusy_AndSettlesOnlyOnApply(t *testing.T) {
 func TestPlan_LateCommitStillCounts(t *testing.T) {
 	// Task 3's now() is OLDER than task 2's, but it committed after task 2 was
 	// seen: a single high-water mark would miss it forever.
-	seen := primed(Task{2, "collaboratory", "", t0})
-	tasks := []Task{{2, "collaboratory", "", t0}, {3, "collaboratory", "", t0.Add(-time.Second)}}
+	seen := primed(Task{2, "collaboratory", "", t0, ""})
+	tasks := []Task{{2, "collaboratory", "", t0, ""}, {3, "collaboratory", "", t0.Add(-time.Second), ""}}
 	if n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, tasks, seen, t0, always); len(n) != 1 {
 		t.Fatalf("late-committed task not noticed: %+v", n)
 	}
 }
 
 func TestPlan_ActivityOnAKnownTaskCounts(t *testing.T) {
-	seen := primed(Task{1, "collaboratory", "", t0.Add(-time.Hour)})
-	tasks := []Task{{1, "collaboratory", "", t0}}
+	seen := primed(Task{1, "collaboratory", "", t0.Add(-time.Hour), ""})
+	tasks := []Task{{1, "collaboratory", "", t0, ""}}
 	if n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, tasks, seen, t0, always); len(n) != 1 {
 		t.Fatalf("new activity on a known task not noticed: %+v", n)
 	}
 }
 
 func TestPlan_Gates(t *testing.T) {
-	tasks := []Task{{2, "collaboratory", "", t0}}
+	tasks := []Task{{2, "collaboratory", "", t0, ""}}
 	for _, tc := range []struct {
 		name     string
 		ss       []Session
@@ -112,7 +112,7 @@ func TestPlan_Gates(t *testing.T) {
 }
 
 func TestPlan_BusySessionIgnoresTheComposer(t *testing.T) {
-	n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, []Task{{2, "collaboratory", "", t0}}, primed(), t0,
+	n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, []Task{{2, "collaboratory", "", t0, ""}}, primed(), t0,
 		func(string) bool { t.Fatal("a busy session's screen was read"); return false })
 	if len(n) != 1 || n[0].Typed {
 		t.Fatalf("busy: %+v, want one hook nudge", n)
@@ -122,7 +122,7 @@ func TestPlan_BusySessionIgnoresTheComposer(t *testing.T) {
 func TestPlan_DeadPaneDoesNotFreezeTheWindow(t *testing.T) {
 	dead := sess("collab", "idle", time.Hour)
 	dead.Pane, dead.LiveCmd = "%9", "bash"
-	n := Plan(cfg(), []Session{sess("collab", "busy", 0), dead}, []Task{{2, "collaboratory", "", t0}}, primed(), t0, always)
+	n := Plan(cfg(), []Session{sess("collab", "busy", 0), dead}, []Task{{2, "collaboratory", "", t0, ""}}, primed(), t0, always)
 	if len(n) != 1 || n[0].Pane != "%collab" {
 		t.Fatalf("a leftover non-claude pane blocked the window: %+v", n)
 	}
@@ -130,22 +130,22 @@ func TestPlan_DeadPaneDoesNotFreezeTheWindow(t *testing.T) {
 
 func TestPlan_OwnTasksNeverNudge_EvenWhenReleased(t *testing.T) {
 	seen := primed()
-	mine := []Task{{5, "switchboard", "sbc", t0.Add(-time.Minute)}}
+	mine := []Task{{5, "switchboard", "sbc", t0.Add(-time.Minute), ""}}
 	if n := Plan(cfg(), []Session{sess("sbc", "idle", time.Hour)}, mine, seen, t0, always); len(n) != 0 {
 		t.Fatalf("nudged about its own task: %+v", n)
 	}
-	released := []Task{{5, "switchboard", "", t0.Add(-time.Minute)}}
+	released := []Task{{5, "switchboard", "", t0.Add(-time.Minute), ""}}
 	if n := Plan(cfg(), []Session{sess("sbc", "idle", time.Hour)}, released, seen, t0, always); len(n) != 0 {
 		t.Errorf("releasing its own task nudged the session: %+v", n)
 	}
-	other := append(released, Task{6, "switchboard", "collab", t0})
+	other := append(released, Task{6, "switchboard", "collab", t0, ""})
 	if n := Plan(cfg(), []Session{sess("sbc", "idle", time.Hour)}, other, seen, t0, always); len(n) != 1 {
 		t.Errorf("another session's task is news for this one: %+v", n)
 	}
 }
 
 func TestPlan_PrunesTasksOutOfPlay(t *testing.T) {
-	seen := primed(Task{1, "collaboratory", "", t0})
+	seen := primed(Task{1, "collaboratory", "", t0, ""})
 	Plan(cfg(), []Session{sess("collab", "busy", 0)}, nil, seen, t0, always)
 	if _, ok := seen[Key("collab", "collaboratory")][1]; ok {
 		t.Errorf("a task out of play stays in memory")
@@ -153,7 +153,7 @@ func TestPlan_PrunesTasksOutOfPlay(t *testing.T) {
 }
 
 func TestPlan_TwoQueuesOneLine(t *testing.T) {
-	tasks := []Task{{1, "collaboratory", "", t0}, {2, "a-millon", "", t0}}
+	tasks := []Task{{1, "collaboratory", "", t0, ""}, {2, "a-millon", "", t0, ""}}
 	n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, tasks, primed(), t0, always)
 	if len(n) != 1 || !strings.Contains(n[0].Text, "a-millon, collaboratory queue") || len(n[0].Settle) != 2 {
 		t.Fatalf("got %+v", n)
@@ -201,5 +201,52 @@ func TestComposerHolds(t *testing.T) {
 	}
 	if ComposerHolds("Do you want to proceed?\n"+marker+"1. Yes\n", text) {
 		t.Errorf("a dialog counted as holding the nudge")
+	}
+}
+
+func TestUnattended(t *testing.T) {
+	projects := []string{"collaboratory", "a-millon", "town-ai", "smoke"}
+	c := cfg()
+	c.NotifySkip = []string{"smoke"}
+	collab := sess("collab", "busy", 0)
+	seen := Seen{}
+	// First pass: everything already there is first sight.
+	old := []Task{{1, "collaboratory", "", t0.Add(-time.Hour), "old"}}
+	if got, _ := Unattended(c, []Session{collab}, projects, old, seen); len(got) != 0 {
+		t.Fatalf("first sight emailed: %+v", got)
+	}
+	tasks := append(old,
+		Task{2, "town-ai", "", t0, "Erica Rapa: login bug"},   // first task of an empty project
+		Task{3, "collaboratory", "", t0, "watched by collab"}, // a console has it
+		Task{4, "smoke", "", t0, "muted"},                     // notify_skip
+	)
+	got, settle := Unattended(c, []Session{collab}, projects, tasks, seen)
+	if len(got) != 1 || got[0].ID != 2 {
+		t.Fatalf("got %+v, want only town-ai's #2", got)
+	}
+	if again, _ := Unattended(c, []Session{collab}, projects, tasks, seen); len(again) != 1 {
+		t.Errorf("an unsent email is not retried")
+	}
+	seen.Apply(settle)
+	if again, _ := Unattended(c, []Session{collab}, projects, tasks, seen); len(again) != 0 {
+		t.Errorf("emailed twice: %+v", again)
+	}
+	// The collab console goes away: collaboratory's NEW work now emails.
+	tasks = append(tasks, Task{5, "collaboratory", "", t0.Add(time.Minute), "nobody watching"})
+	if got, _ := Unattended(c, nil, projects, tasks, seen); len(got) != 1 || got[0].ID != 5 {
+		t.Errorf("with no live console, got %+v, want #5", got)
+	}
+	subj, body := Mail([]Task{tasks[1]})
+	if !strings.Contains(subj, "1 new task") || !strings.Contains(body, "#2") || !strings.Contains(body, "Erica Rapa") {
+		t.Errorf("mail = %q / %q", subj, body)
+	}
+}
+
+func TestUnattended_TwoSessionsInAWindowIsNoConsole(t *testing.T) {
+	two := []Session{sess("collab", "busy", 0), func() Session { s := sess("collab", "idle", time.Hour); s.Pane = "%9"; return s }()}
+	seen := Seen{Key(UnattendedWindow, "collaboratory"): {}}
+	got, _ := Unattended(cfg(), two, []string{"collaboratory"}, []Task{{7, "collaboratory", "", t0, "x"}}, seen)
+	if len(got) != 1 {
+		t.Errorf("a window Plan will not nudge (two sessions) counted as watched: %+v", got)
 	}
 }
