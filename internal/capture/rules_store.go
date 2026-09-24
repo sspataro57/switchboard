@@ -126,7 +126,7 @@ type RulesConfig struct {
 // Appended. Revived (SWT-45) counts closed tasks the revive form of task_reopen
 // answered reopened:true for (also counted in Appended); SurfacedCreated counts
 // tasks an overriding rule created and task_mark_surfaced surfaced (also
-// counted in TasksCreated).
+// counted in TasksCreated); SurfacedOpen (SWT-82) is zero in shadow mode too.
 //
 // Deferred (SWT-45 J17) counts messages the own-action guard left undecided
 // because the ticket's Jira thread is not yet known synced past them: no
@@ -155,6 +155,10 @@ type RulesStats struct {
 	Reopened        int
 	Revived         int
 	SurfacedCreated int
+	// SurfacedOpen (SWT-82) counts OPEN tasks a person's Jira comment surfaced
+	// (task_mark_surfaced answered surfaced:true; also counted in Appended).
+	// Live only.
+	SurfacedOpen    int
 	Deferred        int
 	Blind           int
 	Resurfaced      int
@@ -665,6 +669,19 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 					stats.Activity++
 				}
 			}
+			// SWT-82: surfacing LAST, as on the create branch. A crash before it
+			// leaves today's behaviour (logged, marked, closable by the reconciler).
+			if decision.surface {
+				surfaced, err := markRuleSurfacedWhy(ctx, ex, cfg.Actor, pm, *decision.taskID,
+					fmt.Sprintf("capture: a person's Jira comment, message %d on %s %s, on an open task",
+						pm.msg.ID, *decision.extSystem, *decision.extKey))
+				if err != nil {
+					return stats, err
+				}
+				if surfaced {
+					stats.SurfacedOpen++
+				}
+			}
 		}
 	}
 	return stats, nil
@@ -1108,7 +1125,8 @@ func decideMessageInner(ctx context.Context, pool *pgxpool.Pool, mode string, pm
 		case activity && existing.status == "closed":
 			// SWT-45 J9: activity on a CLOSED task revives it; the handler
 			// decides (ingested after the close, an open dismissal included).
-			// Activity on an OPEN task only logs (J10), or the ticket-closed
+			// Activity on an OPEN task only logs (J10; SWT-82's person's comment
+			// below is the one exception), or the ticket-closed
 			// email would pin every done ticket's task open.
 			verdict, note, err := ownActionGuard(ctx, pool, pm, key)
 			if err != nil {
@@ -1131,6 +1149,22 @@ func decideMessageInner(ctx context.Context, pool *pgxpool.Pool, mode string, pm
 			d.dismissalID = existing.dismissalID
 			d.reason += fmt.Sprintf("; task %d was dismissed (%s); reopen requested against dismissal %d",
 				taskID, existing.dismissalCode, existing.dismissalID)
+		}
+		// SWT-82: a person's Jira comment on an OPEN task surfaces it, so the
+		// reconciler holds it as it holds a revived one. The one exception to
+		// J10; commentHolds says which copies qualify and why the rest do not.
+		if hold, why := commentHolds(commentHoldInput{
+			activity:      activity,
+			status:        existing.status,
+			connectorCopy: pm.channel == jira.Channel,
+			externalID:    pm.msg.ExternalMessageID,
+			blankSender:   blankSender(pm.msg.Sender),
+			notifier:      notifierSender(pm.msg.Sender, winner.notifiers),
+		}); hold {
+			d.surface = true
+			d.reason += "; " + why + "; " + surfacing
+		} else if why != "" {
+			d.reason += "; " + why
 		}
 		// chat-on-closed-task CC3: does this log onto a CLOSED task resurface
 		// the message through the inquiry lane? Decided here, where the status,
@@ -1900,11 +1934,18 @@ func markRuleActivity(ctx context.Context, ex *executor.Executor, actor string,
 // against a done ticket instead of closing it in the same tick.
 func markRuleSurfaced(ctx context.Context, ex *executor.Executor, actor string,
 	pm pendingMessage, taskID int64, system, key string) (bool, error) {
+	return markRuleSurfacedWhy(ctx, ex, actor, pm, taskID,
+		fmt.Sprintf("capture: created by activity, message %d on %s %s", pm.msg.ID, system, key))
+}
+
+// markRuleSurfacedWhy is task_mark_surfaced with the caller's reason: the
+// create branch's (above) and SWT-82's person's comment on an open task.
+func markRuleSurfacedWhy(ctx context.Context, ex *executor.Executor, actor string,
+	pm pendingMessage, taskID int64, reason string) (bool, error) {
 	args, err := json.Marshal(map[string]any{
 		"task_id":    taskID,
 		"message_id": pm.msg.ID,
-		"reason": fmt.Sprintf("capture: created by activity, message %d on %s %s",
-			pm.msg.ID, system, key),
+		"reason":     reason,
 	})
 	if err != nil {
 		return false, fmt.Errorf("marshal task_mark_surfaced args for task %d: %w", taskID, err)

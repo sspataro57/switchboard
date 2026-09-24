@@ -70,7 +70,7 @@ func TestCaptureCounterLines_PrintRevivedAndSurfacedCreated(t *testing.T) {
 		}
 		rel := strings.TrimPrefix(filepath.ToSlash(path), "../../")
 		printers = append(printers, rel)
-		for _, want := range []string{`\"revived\":%d`, `\"surfaced_created\":%d`} {
+		for _, want := range []string{`\"revived\":%d`, `\"surfaced_created\":%d`, `\"surfaced_open\":%d`} {
 			if !strings.Contains(src, want) {
 				t.Errorf("%s prints the capture counters without %s. Criterion 28: zeros included — "+
 					"a revive that happened and a revive that could not happen must not print the same line, "+

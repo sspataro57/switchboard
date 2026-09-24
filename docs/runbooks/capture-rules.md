@@ -563,9 +563,16 @@ it is activity after the close: it revives the task and the reconciler holds it
 open. Jira Cloud batches notification mail, so closing a Treetop ticket will
 often leave its task back on the board until one hand close, which sticks.
 
+**The one exception (SWT-82).** A PERSON'S comment as the Jira connector copies it
+(`…:comment:{id}`, not a notifier, not blank), matched by an activity rule on an
+open task that nobody is actively working, surfaces the task. The reconciler then
+holds it against a delivered (TT-In QA) or done ticket instead of closing it
+seconds later. Emails and the ticket-description copy still only log.
+
 **Counters.** Every `capture_rules:` line prints `"revived"` (closed tasks
 revived) and `"surfaced_created"` (tasks an activity rule created and
-surfaced), zeros included. The `capture_gate:` line prints both as 0 always,
+surfaced) and `"surfaced_open"` (open tasks a person's comment surfaced,
+SWT-82), zeros included. The `capture_gate:` line prints all three as 0 always,
 because the gate never revives or surfaces.
 
 **Rollback.** `opsctl call --tool capture_rule_set_enabled --args
