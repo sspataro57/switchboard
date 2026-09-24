@@ -48,6 +48,10 @@ const taskListInPlay = "in_play"
 // never report a count task_list will not return.
 const inPlayPredicate = `t.status NOT IN ('closed','delivered')`
 
+// InPlayPredicate exports inPlayPredicate for read-only consumers outside the
+// executor (cmd/swb-push), so their "open" is task_list's.
+const InPlayPredicate = inPlayPredicate
+
 // taskStatuses is the tasks.status CHECK (migrations/0001_initial.sql). An
 // unknown status is a validation error, never an empty list: `status=redy` must
 // not read as "nothing ready". Pinned to the live CHECK by an integration test.

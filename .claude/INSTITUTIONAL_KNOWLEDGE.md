@@ -3454,3 +3454,20 @@ did not author, from the GitHub notification mail he already receives. Runbook:
 - **Test lesson.** `quoteJSON` in `delivery_upwork_target_test.go` escapes only quotes and backslashes; a
   test sending newlines through it builds invalid JSON and fails at "parse args". The SWT-77 tests use
   `ssrJSON` (json.Marshal).
+
+## swb-push: queue nudges into local Claude sessions (2026-09-24)
+
+`cmd/swb-push` runs on the workstation as the systemd user service `swb-push.service`
+(`~/.config/systemd/user/`, `ExecStart=%h/go/bin/swb-push`, `RestartPreventExitStatus=3`).
+It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && systemctl --user restart swb-push`.
+- **Input contract, outside this repo:** `~/.claude/swb-hook.py`'s `presence()` writes
+  `pane`, `window`, `turn` (busy|idle|prompt|gone) and `turn_at` (float epoch) into
+  `~/.claude/swb/sessions/<sid>.json`. If you rename one of those fields, swb-push goes quiet.
+- **Delivery:** an IDLE session gets the line typed, and Enter is sent only after a re-capture
+  shows the input box holding exactly that line. A BUSY session is never typed into:
+  the nudge goes to `~/.claude/swb/nudges/<sid>.txt`, and the hook's Stop handler turns it into a
+  continuation (`decision: block`). A session showing a permission prompt gets nothing.
+- **Config:** `~/.claude/swb/push.json` maps tmux window → project slugs, and is re-read every pass.
+  `push-state.json` holds per-task memory; delete it to start fresh (the first pass records
+  everything and nudges nothing). The log is `push.log`, and `swb-push status` shows the live view.
+- Refuses to run with Claude Code `editorMode: vim` (typed text would be run as editor commands).
