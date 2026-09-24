@@ -3,6 +3,8 @@ package tools
 // task_mark_surfaced (SWT-45 J7): records that a task CREATED by an overriding
 // capture rule was put on the board by activity, so the Jira reconciler holds
 // it open instead of closing a done ticket's brand-new task in the same tick.
+// Since SWT-82 capture also calls it for a person's Jira comment on an OPEN
+// task (capture.commentHolds).
 //
 // SPINE-FACING, deliberately NOT in internal/mcpserver/schemas.go — the
 // task_set_source_thread shape. The MCP adapter passes arguments through (F7),

@@ -46,7 +46,8 @@ type Observation struct {
 	DeliveredStatuses []string
 	// SurfacedAt is tasks.surfaced_at (SWT-45 J11), a VALUE: the last time
 	// something other than this pass put the task on the board — an activity
-	// revive, an overriding-rule creation, or a human's plain reopen. Zero =
+	// revive, an overriding-rule creation, a person's Jira comment on an open
+	// task (SWT-82), or a human's plain reopen. Zero =
 	// NULL, and then every decision is byte-identical to SWT-32/34's.
 	SurfacedAt time.Time
 	// SurfacedByMessageID is tasks.surfaced_by_message_id; 0 = NULL (a human's

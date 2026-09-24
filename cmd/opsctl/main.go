@@ -742,9 +742,9 @@ func runCaptureRulesRun(argv []string) error {
 	// Printed unconditionally, zeros included, and before the error check: a pass
 	// that matched nothing and a pass that never ran must not look the same.
 	fmt.Printf("capture_rules: {\"mode\":%q,\"considered\":%d,\"matched\":%d,\"unmatched\":%d,"+
-		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
+		"\"tasks_created\":%d,\"appended\":%d,\"reopened\":%d,\"revived\":%d,\"surfaced_created\":%d,\"surfaced_open\":%d,\"deferred\":%d,\"blind\":%d,\"resurfaced\":%d,"+
 		"\"pr_author_skipped\":%d,\"pr_closed\":%d,\"activity\":%d,\"comm_tasks\":%d}\n",
-		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated, stats.Deferred, stats.Blind, stats.Resurfaced,
+		cfg.Mode, stats.Considered, stats.Matched, stats.Unmatched, stats.TasksCreated, stats.Appended, stats.Reopened, stats.Revived, stats.SurfacedCreated, stats.SurfacedOpen, stats.Deferred, stats.Blind, stats.Resurfaced,
 		stats.PRAuthorSkipped, stats.PRClosed, stats.Activity, stats.CommTasks)
 	if err != nil {
 		return fmt.Errorf("capture rules: %w", err)
