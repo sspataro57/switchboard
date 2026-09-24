@@ -18,6 +18,12 @@
 // dialog), nothing is submitted; the line waits as "pending" and is submitted
 // on a later pass once the box shows it alone again.
 //
+// A task that lands where NO console watches (no live Claude session in a
+// window mapped to its project) emails him instead, batched: at most one mail
+// per mail_every_s (default 10 min), through ~/.claude/notify-email.py
+// (swb #610: "the watcher should notify me a task landed and there is no
+// console for it").
+//
 // One instance at a time: an flock on ~/.claude/swb/push.lock.
 //
 //	swb-push          run until SIGINT/SIGTERM
@@ -106,9 +112,10 @@ func main() {
 	}
 	log.Printf("start (%s), windows=%v", map[bool]string{true: "once", false: "loop"}[mode == "once"], loadConfig().Windows)
 	waiting := map[string]pending{}
+	var lastMail time.Time
 	for {
 		cfg := loadConfig() // edits to push.json apply on the next pass
-		if err := pass(ctx, pool, cfg, waiting); err != nil {
+		if err := pass(ctx, pool, cfg, waiting, &lastMail); err != nil {
 			log.Printf("pass failed: %v", err)
 		}
 		if mode == "once" {
@@ -126,8 +133,8 @@ func main() {
 	}
 }
 
-func pass(ctx context.Context, pool *pgxpool.Pool, cfg swbpush.Config, waiting map[string]pending) error {
-	tasks, err := queueTasks(ctx, pool, cfg)
+func pass(ctx context.Context, pool *pgxpool.Pool, cfg swbpush.Config, waiting map[string]pending, lastMail *time.Time) error {
+	projects, tasks, err := queueTasks(ctx, pool)
 	if err != nil {
 		return err
 	}
@@ -164,7 +171,31 @@ func pass(ctx context.Context, pool *pgxpool.Pool, cfg swbpush.Config, waiting m
 		waiting[n.Pane] = pending{n.Text, n.Settle}
 		log.Printf("nudge %s (%s) typed but NOT submitted: the input box changed before Enter; pending", n.Window, n.Pane)
 	}
+	unwatched, settle := swbpush.Unattended(cfg, sessions, projects, tasks, seen)
+	if len(unwatched) > 0 && time.Since(*lastMail) >= time.Duration(cfg.MailEveryS)*time.Second {
+		subject, body := swbpush.Mail(unwatched)
+		if err := mailHim(subject, body); err != nil {
+			log.Printf("no-console mail for %d task(s) failed (retried next pass): %v", len(unwatched), err)
+		} else {
+			seen.Apply(settle)
+			*lastMail = time.Now()
+			log.Printf("mailed: %s", subject)
+		}
+	}
 	return saveSeen(seen)
+}
+
+// mailHim sends through the workstation's notifier (the masked alias it is
+// configured for). "send now" mode: the notifier's idle on/off switch is for
+// idle pings, not for this.
+func mailHim(subject, body string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(os.Getenv("HOME"), ".claude", "notify-email.py"), body, subject, "0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("notify-email.py: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // finishPending submits a pending nudge once the pane's box holds it alone
@@ -255,41 +286,41 @@ func submitIfHeld(pane, text string) bool {
 	return tmux("send-keys", "-t", pane, "Enter") == nil
 }
 
-func queueTasks(ctx context.Context, pool *pgxpool.Pool, cfg swbpush.Config) ([]swbpush.Task, error) {
-	var slugs []string
-	for _, s := range cfg.Windows {
-		slugs = append(slugs, s...)
-	}
-	if len(slugs) == 0 {
-		return nil, nil
-	}
+// queueTasks reads every project slug and every in-play task, in one READ
+// ONLY transaction.
+func queueTasks(ctx context.Context, pool *pgxpool.Pool) ([]string, []swbpush.Task, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, fmt.Errorf("begin read-only: %w", err)
+		return nil, nil, fmt.Errorf("begin read-only: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var projects []string
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(array_agg(slug ORDER BY slug), '{}') FROM projects`).Scan(&projects); err != nil {
+		return nil, nil, fmt.Errorf("read projects: %w", err)
+	}
 	rs, err := tx.Query(ctx,
 		`SELECT t.id, p.slug,
 		        CASE WHEN t.working_state IS NOT NULL THEN COALESCE(t.working_session, '') ELSE '' END,
-		        GREATEST(t.created_at, COALESCE(t.activity_at, t.created_at), COALESCE(t.surfaced_at, t.created_at))
+		        GREATEST(t.created_at, COALESCE(t.activity_at, t.created_at), COALESCE(t.surfaced_at, t.created_at)),
+		        t.title
 		   FROM tasks t JOIN projects p ON p.id = t.project_id
-		  WHERE `+tools.InPlayPredicate+` AND p.slug = ANY($1)`, slugs)
+		  WHERE `+tools.InPlayPredicate)
 	if err != nil {
-		return nil, fmt.Errorf("read queues: %w", err)
+		return nil, nil, fmt.Errorf("read queues: %w", err)
 	}
 	defer rs.Close()
 	var out []swbpush.Task
 	for rs.Next() {
 		var t swbpush.Task
-		if err := rs.Scan(&t.ID, &t.Slug, &t.Session, &t.At); err != nil {
-			return nil, fmt.Errorf("scan queue row: %w", err)
+		if err := rs.Scan(&t.ID, &t.Slug, &t.Session, &t.At, &t.Title); err != nil {
+			return nil, nil, fmt.Errorf("scan queue row: %w", err)
 		}
 		out = append(out, t)
 	}
 	if err := rs.Err(); err != nil {
-		return nil, fmt.Errorf("read queues: %w", err)
+		return nil, nil, fmt.Errorf("read queues: %w", err)
 	}
-	return out, nil
+	return projects, out, nil
 }
 
 // hookState is the part of a swb-hook.py session file swb-push reads.
@@ -434,7 +465,7 @@ func vimMode() bool {
 
 func status(ctx context.Context, pool *pgxpool.Pool) {
 	cfg := loadConfig()
-	tasks, err := queueTasks(ctx, pool, cfg)
+	_, tasks, err := queueTasks(ctx, pool)
 	if err != nil {
 		fmt.Println("queues:", err)
 	}

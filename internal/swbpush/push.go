@@ -25,6 +25,11 @@ type Config struct {
 	PollS    int                 `json:"poll_s"`
 	MinIdleS int                 `json:"min_idle_s"`
 	Windows  map[string][]string `json:"windows"` // tmux window name -> project slugs
+	// MailEveryS batches the "no console" email (swb #610): at most one per
+	// this many seconds, listing every unattended task since the last one.
+	MailEveryS int `json:"mail_every_s"`
+	// NotifySkip lists projects whose unattended tasks never email.
+	NotifySkip []string `json:"notify_skip"`
 }
 
 // Defaults fills unset fields.
@@ -34,6 +39,9 @@ func (c Config) Defaults() Config {
 	}
 	if c.MinIdleS <= 0 {
 		c.MinIdleS = 20
+	}
+	if c.MailEveryS <= 0 {
+		c.MailEveryS = 600
 	}
 	return c
 }
@@ -58,6 +66,7 @@ type Task struct {
 	Slug    string
 	Session string
 	At      time.Time
+	Title   string // for the "no console" email only; a nudge never carries it
 }
 
 // Seen is the watcher's memory, per (window, project): the At it last settled
@@ -254,4 +263,98 @@ func squash(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// UnattendedWindow is Seen's pseudo-window for tasks no console watches.
+const UnattendedWindow = "_no_console"
+
+// Unattended is swb #610's second half (Salvador: "the watcher should notify me
+// a task landed and there is no console for it"): the tasks that are new since
+// last settled, in projects with NO live Claude session in a window mapped to
+// them, minus NotifySkip. Same memory rules as Plan: a project seen for the
+// first time counts only what arrives after, out-of-play tasks are pruned, and
+// the caller applies the returned Seen only after the email went out.
+//
+// projects is every project slug: a project with no task in play yet is still
+// "seen", so its FIRST task emails (town-ai's case) instead of passing as a
+// first sight.
+func Unattended(cfg Config, sessions []Session, projects []string, tasks []Task, seen Seen) ([]Task, Seen) {
+	cfg = cfg.Defaults()
+	// Watched means Plan can nudge it: the window's ONLY live Claude session
+	// (Plan skips a window with two), under its own name.
+	perWindow := map[string]int{}
+	for _, s := range sessions {
+		if s.LiveCmd == "claude" {
+			perWindow[s.LiveWindow]++
+		}
+	}
+	watched := map[string]bool{}
+	for _, s := range sessions {
+		if s.LiveCmd != "claude" || s.Window != s.LiveWindow || perWindow[s.LiveWindow] != 1 {
+			continue
+		}
+		for _, slug := range cfg.Windows[s.LiveWindow] {
+			watched[slug] = true
+		}
+	}
+	skip := map[string]bool{}
+	for _, slug := range cfg.NotifySkip {
+		skip[slug] = true
+	}
+	bySlug := map[string][]Task{}
+	for _, slug := range projects {
+		bySlug[slug] = nil
+	}
+	for _, t := range tasks {
+		bySlug[t.Slug] = append(bySlug[t.Slug], t)
+	}
+	var out []Task
+	settle := Seen{}
+	for slug, ts := range bySlug {
+		key := Key(UnattendedWindow, slug)
+		first := seen[key] == nil
+		if first {
+			seen[key] = map[int64]time.Time{}
+		}
+		live := map[int64]bool{}
+		for _, t := range ts {
+			live[t.ID] = true
+			prev, known := seen[key][t.ID]
+			switch {
+			case first || watched[slug] || skip[slug]:
+				// a console has it (its nudge is the notice), or it is muted
+				seen[key][t.ID] = t.At
+			case !known || t.At.After(prev):
+				if settle[key] == nil {
+					settle[key] = map[int64]time.Time{}
+				}
+				settle[key][t.ID] = t.At
+				out = append(out, t)
+			}
+		}
+		for id := range seen[key] {
+			if !live[id] {
+				delete(seen[key], id)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Slug != out[j].Slug {
+			return out[i].Slug < out[j].Slug
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, settle
+}
+
+// Mail is the "no console" email: subject and body.
+func Mail(tasks []Task) (subject, body string) {
+	subject = fmt.Sprintf("swb: %d new task(s) with no console", len(tasks))
+	var b strings.Builder
+	b.WriteString("New in swb, and no Claude session is watching these projects:\n\n")
+	for _, t := range tasks {
+		fmt.Fprintf(&b, "  #%d  %-14s %s\n", t.ID, t.Slug, t.Title)
+	}
+	b.WriteString("\nMap a window to the project in ~/.claude/swb/push.json, or open a session for it.\n")
+	return subject, b.String()
 }

@@ -22,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/sspataro57/switchboard/internal/connector/slackweb"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/textmatch"
 )
@@ -132,16 +131,21 @@ func DirectBackfill(ctx context.Context, pool *pgxpool.Pool, ex *executor.Execut
 		// (go-reviewer). A pending message is the live pass's to decide, and one
 		// already decided task/task_log (e.g. by the fixed pass) is done —
 		// backfilling either would log and mark it twice.
-		live, err := directBackfillLiveAction(ctx, pool, pm.msg.ID)
+		//
+		// swb #610 adds the other lost shape: a task_log onto a CLOSED task that
+		// resurfaced to the inquiry lane (resurface=true). The log changed
+		// nothing on the board, and for a project whose inquiry lane is not
+		// armed (town-ai) nothing ever read it. Erica Rapa's Upwork messages.
+		live, resurfaced, err := directBackfillLiveAction(ctx, pool, pm.msg.ID)
 		if err != nil {
 			return st, err
 		}
-		if live != actionAttributed {
+		if live != actionAttributed && !(live == actionTaskLog && resurfaced) {
 			st.Skipped++
 			if live == "" {
 				live = "none yet (pending)"
 			}
-			fmt.Fprintf(out, "msg %d  skipped: live decision is %s, not attributed\n", pm.msg.ID, live)
+			fmt.Fprintf(out, "msg %d  skipped: live decision is %s, not attributed or a resurfaced task_log\n", pm.msg.ID, live)
 			continue
 		}
 		// Recovery (codex review): a previous run that died after create_task
@@ -164,7 +168,7 @@ func DirectBackfill(ctx context.Context, pool *pgxpool.Pool, ex *executor.Execut
 					return st, err
 				}
 			}
-			conv, _ := slackConversationOf(pm)
+			conv, _ := directConversationKey(pm)
 			if err := directBackfillLog(ctx, ex, pm, orphan, conv); err != nil {
 				return st, err
 			}
@@ -244,18 +248,19 @@ func directBackfillDone(ctx context.Context, pool *pgxpool.Pool, messageID int64
 
 // directBackfillLiveAction is the message's live capture decision action, ""
 // when it has none.
-func directBackfillLiveAction(ctx context.Context, pool *pgxpool.Pool, messageID int64) (string, error) {
+func directBackfillLiveAction(ctx context.Context, pool *pgxpool.Pool, messageID int64) (string, bool, error) {
 	var action string
+	var resurface bool
 	err := pool.QueryRow(ctx,
-		`SELECT action FROM capture_decisions WHERE message_id=$1 AND mode='live' ORDER BY id DESC LIMIT 1`,
-		messageID).Scan(&action)
+		`SELECT action, resurface FROM capture_decisions WHERE message_id=$1 AND mode='live' ORDER BY id DESC LIMIT 1`,
+		messageID).Scan(&action, &resurface)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		return "", false, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("read live decision of message %d: %w", messageID, err)
+		return "", false, fmt.Errorf("read live decision of message %d: %w", messageID, err)
 	}
-	return action, nil
+	return action, resurface, nil
 }
 
 // directBackfillOrphan finds a task a DM create_task made FROM this message
@@ -277,10 +282,6 @@ func directBackfillOrphan(ctx context.Context, pool *pgxpool.Pool, messageID int
 		return 0, false, fmt.Errorf("look for an unfinished backfill task for message %d: %w", messageID, err)
 	}
 	return id, thread != nil, nil
-}
-
-func slackConversationOf(pm pendingMessage) (string, bool) {
-	return slackweb.ConversationThreadKey(pm.msg.ThreadKey)
 }
 
 func directBackfillLog(ctx context.Context, ex *executor.Executor, pm pendingMessage, taskID int64, conv string) error {

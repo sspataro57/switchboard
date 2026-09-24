@@ -19,18 +19,34 @@ package capture
 
 import "fmt"
 
+// upworkChannel is normalized_messages.channel for Upwork messages. The
+// connector passes it through from the CRM's communications.channel, whose
+// only value in production has ever been "upwork" (2,442 rows; see the
+// upworkcrm roomkey test). If the CRM ever writes another value, those
+// messages quietly fall back to the old path. Nothing here reads the Upwork
+// thread-key format (the SWT-19 one-spelling rule).
+const upworkChannel = "upwork"
+
 // directInput is everything directConversationTask reads.
 type directInput struct {
 	slack       bool // pm.channel == slackweb.Channel, computed by the caller
+	upwork      bool // pm.channel == upworkChannel: a client's Upwork room is 1:1 with him, a DM by nature
 	dm          bool // slackweb.IsDirectMessageKey(thread key): a 1:1 DM, rooted or not
 	groupDM     bool // raw conversation.type == 'group_dm', read from the COLUMN (C… ids are ambiguous)
 	blankSender bool // blankSender(sender)                      — resurface.go's spelling
 	notifier    bool // notifierSender(sender, winner.notifiers) — resurface.go's spelling
 }
 
-// directConversationTask is true iff the message is Slack AND a DM or group DM
-// AND the sender is not blank AND not on the project's notifier list (the Jira
-// app's author id is an ordinary U… id; the list is how a bot is told apart).
+// directConversationTask is true iff the message is (Slack AND a DM or group DM)
+// OR Upwork, AND the sender is not blank AND not on the project's notifier list
+// (the Jira app's author id is an ordinary U… id; the list is how a bot is told
+// apart).
+//
+// Upwork (swb #610, Salvador 2026-09-24: town-ai "only message me using
+// upwork … those messages should create tasks"): every Upwork conversation is
+// a client's room with him, so it is a DM by nature. Only a message a capture
+// rule attributed reaches this predicate, so prospects with no rule stay
+// CRM-side.
 // The string is the reason fragment the decision row records: FIRST CAUSE
 // WINS, and every false outcome names its own cause.
 //
@@ -39,9 +55,9 @@ type directInput struct {
 // today's attribution-only decision.
 func directConversationTask(in directInput) (bool, string) {
 	switch {
-	case !in.slack:
-		return false, "not a DM task: the message is not Slack"
-	case !in.dm && !in.groupDM:
+	case !in.slack && !in.upwork:
+		return false, "not a DM task: the message is neither Slack nor Upwork"
+	case in.slack && !in.dm && !in.groupDM:
 		return false, "not a DM task: the conversation is a channel, so the inquiry lane decides"
 	case in.blankSender:
 		return false, "not a DM task: the message has no sender identity (blank sender)"
@@ -49,7 +65,10 @@ func directConversationTask(in directInput) (bool, string) {
 		return false, "not a DM task: the sender is on the project's notifier list"
 	}
 	kind := "a DM"
-	if !in.dm {
+	switch {
+	case in.upwork:
+		kind = "an Upwork conversation"
+	case !in.dm:
 		kind = "a group DM"
 	}
 	return true, fmt.Sprintf("DM task: a person's message in %s is always actionable (SWT-78); no classifier", kind)
