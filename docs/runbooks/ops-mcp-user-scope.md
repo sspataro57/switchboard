@@ -206,7 +206,7 @@ Recovery:
   file) can tell it to call `task_signal` with `working`, `needs_input` or `clear` on any HUMAN
   `holding`/`ready`/`blocked` task, not only the one it is working on.
 - **Why it stays open.** Since SWT-56 the board shows a self-reported session name (the
-  `session` argument, from ListAgents), which nothing verifies: a prompt-injected session can
+  `session` argument, since swb 431 the tmux window name the swb hook states), which nothing verifies: a prompt-injected session can
   still signal any human task, and can now do it under any name. No identity plumbing binds a
   name to a session process, so this is a documented residual (Codex review, 2026-09-14).
 - **The damage.** Unchanged: a wrong light or a wrong name. A false yellow, a false red, or a
@@ -370,8 +370,10 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
   It is read-only here, whatever the task's status or claim: the profile pins
   `worker_id:""` and `require_read_only:"true"`.
 - "swb start 412" (or a session starting work on a swb task) → `task_signal` with
-  `working` and the session's name as `session` (from ListAgents' `This session is
-  <name>`): the row turns yellow on the board, with that name at the start of the title.
+  `working` and the session's swb name as `session` (the tmux window name, else the last
+  folder of the working directory, as the SessionStart hook states it: `Your swb session name
+  is <name>`; swb 431): the row turns yellow on the board, with that name at the start of the
+  title. That first signal binds the task, and the swb hook keeps the light from then on.
 - "swb stop 412" → `task_signal` with `clear`: the session paused or switched away
   unfinished.
 - **Waiting and answering.** Just before a session stops to ask Salvador something,

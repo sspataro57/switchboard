@@ -232,8 +232,9 @@ func TestInstructions_TeachTheSwbShorthand(t *testing.T) {
 		// the implementer: S14's proposed wording puts `This session is <name>` in
 		// DOUBLE quotes, which the pairing loop below refuses (no swb inside) — quote
 		// it with backticks instead, the SWT-38 precedent.
-		{`swb start <id>[^\n]*task_signal[^\n]*session[^\n]*listagents`,
-			"the task_signal line: always with session = this session's name, from the first line of ListAgents"},
+		// swb 431 amends it: the name is the hook's (tmux window, else folder).
+		{`swb start <id>[^\n]*task_signal[^\n]*session[^\n]*tmux window name`,
+			"the task_signal line: always with session = this session's swb name, the tmux window name as the hook states it"},
 		// SWT-56 criterion 35 (S14): the read-only per-task read, and read-as-data.
 		{`task_context`, "names the per-task read"},
 		{`task_context with only task_id`, "…called with only task_id"},

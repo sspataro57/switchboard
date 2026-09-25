@@ -200,7 +200,7 @@ func TestSignalSession_Integration_MissingSessionLeavesTheRow(t *testing.T) {
 				t.Errorf("%s with session %q was accepted; S2 requires a session", state, sess)
 				continue
 			}
-			for _, w := range []string{"missing session", "ListAgents", "This session is"} {
+			for _, w := range []string{"missing session", "tmux window name", "Your swb session name is"} {
 				if !strings.Contains(err.Error(), w) {
 					t.Errorf("%s with session %q refused with %q, which does not say %q (S3.2: tells it how to find its name)",
 						state, sess, err, w)
