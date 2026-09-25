@@ -128,8 +128,12 @@ func newRSFSuite(t *testing.T, ctx context.Context) *rsfSuite {
 	// collaboratory's shape: gate off, client set. notifier_senders is left at
 	// its DEFAULT here; the tests that need a list set it through the column.
 	s.project = s.insID(t, ctx,
-		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality, ticket_assignee_gate)
-		 VALUES ($1,$1,'itest-capcc-client','manual','dashboard','/tmp/itest-capcc','any',false) RETURNING id`, rsfSlug)
+		// swb 650: inquiry lane ARMED (collaboratory's prod shape), so this suite keeps testing
+		// the resurface path; an unarmed project reopens the task instead (swb650 tests).
+		`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality, ticket_assignee_gate,
+		                       ai_inquiry, inquiry_promote_after)
+		 VALUES ($1,$1,'itest-capcc-client','manual','dashboard','/tmp/itest-capcc','any',false,
+		         true, now() - interval '1 day') RETURNING id`, rsfSlug)
 	s.insID(t, ctx,
 		`INSERT INTO capture_rules (project_id, criteria_type, pattern, external_system, key_regex, priority, enabled, note)
 		 VALUES ($1,'body_regex',$2,'jira',NULL,90,true,'itest-capcc rule10') RETURNING id`, s.project, rsfRule10)

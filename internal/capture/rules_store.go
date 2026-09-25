@@ -270,6 +270,12 @@ type storedRule struct {
 	// read from the COLUMN with the rules. This is its one reader:
 	// notifierSender matches a sender against it by equality.
 	notifiers []string
+	// inquiryArmed is the rule's project having an armed inquiry lane
+	// (projects.ai_inquiry AND inquiry_promote_after IS NOT NULL, the
+	// promoter's own predicate), read with the rules (swb 650). A message that
+	// would resurface onto a closed task of an UNARMED project is read by
+	// nothing, so it reopens the task into INCOMING instead.
+	inquiryArmed bool
 	// commTask is capture_rules.comm_task (SWT-74 D1), read from the COLUMN
 	// with the rules — the ONLY reader. An armed rule's task_log attach from a
 	// person becomes its own INCOMING task (comm.go decides).
@@ -729,7 +735,8 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		`SELECT r.id, p.slug, p.name, r.criteria_type, r.pattern, r.key_regex, r.priority, r.enabled,
 		        r.project_id, COALESCE(r.subproject,''), COALESCE(r.external_system,''),
 		        COALESCE(r.url_template,''), p.ticket_assignee_gate, r.revive, r.addressed,
-		        r.pr_review, r.exclude_pr_authors, p.notifier_senders, r.comm_task
+		        r.pr_review, r.exclude_pr_authors, p.notifier_senders, r.comm_task,
+		        (p.ai_inquiry AND p.inquiry_promote_after IS NOT NULL)
 		   FROM capture_rules r
 		   JOIN projects p ON p.id = r.project_id
 		  WHERE r.enabled
@@ -745,7 +752,8 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		if err := rows.Scan(&s.rule.ID, &s.rule.Project, &s.projectName, &s.rule.Kind, &s.rule.Pattern,
 			&s.rule.ExternalKeyRegex, &s.rule.Priority, &s.rule.Enabled,
 			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate, &s.gateOn,
-			&s.revive, &s.addressed, &s.prReview, &s.excludePRAuthors, &s.notifiers, &s.commTask); err != nil {
+			&s.revive, &s.addressed, &s.prReview, &s.excludePRAuthors, &s.notifiers, &s.commTask,
+			&s.inquiryArmed); err != nil {
 			return nil, fmt.Errorf("scan capture rule: %w", err)
 		}
 		// Rule.Source is the evaluator's carrier for `external_system` (Evaluate
@@ -1180,7 +1188,6 @@ func decideMessageInner(ctx context.Context, pool *pgxpool.Pool, mode string, pm
 			blankSender:   blankSender(pm.msg.Sender),
 			prNotice:      d.prNotice != "",
 		})
-		d.resurface = resurface
 		// SWT-78 item E: a person's DM that would resurface onto a CLOSED
 		// ticket task goes to its conversation task instead — resurfacing is
 		// the inquiry lane, and no DM goes to qwen. The closed ticket gets
@@ -1194,6 +1201,25 @@ func decideMessageInner(ctx context.Context, pool *pgxpool.Pool, mode string, pm
 				return decideDirect(ctx, pool, mode, pm, base, winner, sim, why)
 			}
 		}
+		// swb 650 (Salvador, 2026-09-25: "those are supposed to be on
+		// incoming"): resurfacing hands the message to the inquiry lane, and a
+		// project without an armed lane has nothing to read it — Lyle Deitch's
+		// replies on closed foundry tasks 500 and 465 were lost that way. Such a
+		// message reopens the task instead, through the same revive form of
+		// task_reopen Jira activity uses (the handler refuses a message ingested
+		// before the close), and the activity mark after it puts the task in
+		// INCOMING. Every other resurfaces() clause still holds: a notifier, a
+		// blank sender, a connector copy or a PR notice never gets here.
+		// Not on a gated project (SWT-45 J18's reason): its tasks come back
+		// only through the gate's own resolution, never around the assignee
+		// check.
+		if resurface && !winner.inquiryArmed && !winner.gateOn {
+			resurface = false
+			d.revive = true
+			why = fmt.Sprintf("logged onto closed task %d; %s has no armed inquiry lane, so a reopen into INCOMING "+
+				"instead of resurfacing (swb 650): %s", taskID, winner.rule.Project, requested)
+		}
+		d.resurface = resurface
 		// comms-inbox (SWT-74 D2): does this attach make its own comm task?
 		// Decided from VALUES — the rule's column, the task's status, the three
 		// sender facts — and worded by mode: a live pass REQUESTS, a shadow pass
