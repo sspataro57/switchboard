@@ -107,6 +107,11 @@ type boardData struct {
 	// boardPageInterval, never from the request.
 	RefreshMode string
 	PageSeconds int
+	// SWT-89: the script's live-update attributes. All three come from consts
+	// or package vars, never from the request.
+	StreamURL    string
+	RetrySeconds int
+	BoardVersion string
 }
 
 // BoardTimeZone is Salvador's day for the board (SWT-52 D5): a task closed
@@ -286,6 +291,9 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		RenderedAt:       renderedAt,
 		RefreshMode:      refreshKey,
 		PageSeconds:      int(boardPageInterval / time.Second),
+		StreamURL:        "/tasks/stream",
+		RetrySeconds:     int(boardLiveRetry / time.Second),
+		BoardVersion:     boardVersion,
 		ProjectLabel:     projectLabel(r.URL.Query().Get("project")),
 		KioskURL:         kioskURL(r.URL.Query().Get("project")),
 	}

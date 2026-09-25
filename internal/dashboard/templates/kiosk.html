@@ -32,8 +32,9 @@
   </div>
   <script>
   (function () {
-    // The SHELL goes fullscreen, never the board: the board reloads itself
-    // every few seconds, and a reload ends its own document's fullscreen.
+    // The SHELL goes fullscreen, never the board: the board still navigates
+    // (row taps, verbs, a version reload), and a navigation ends its own
+    // document's fullscreen.
     var gate = document.getElementById("gate");
     var root = document.documentElement;
     document.getElementById("enter").addEventListener("click", function () {

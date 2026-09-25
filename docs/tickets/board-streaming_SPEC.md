@@ -245,7 +245,9 @@ connection, a lost NOTIFY), the board is never more than a minute stale.
   The script must not spell the section keys. It reads them from the ids, and
   `TestTasksTemplate_NoIncoming` still bans the word anywhere in `tasks.html`.
 - **Only changed rows flip.** A row counts as changed if its `href` is new to its panel, or if its
-  `className` or its `.r` link's `textContent` differs from the old row with the same `href`. It then
+  `className` (minus the `flip` animation class) or its `.r` link's text, excluding the `.el` elapsed
+  cell, differs from the old row with the same `href`. The elapsed cell moves on its own every minute
+  (amended in review, 2026-09-25: comparing it would flip every in-progress row on each tick). It then
   gets the existing `flip` class, for visible rows only. Unchanged rows do not animate. This is a
   comparison of what Go rendered twice, not a fact computed in JS.
 - **Phone:** the window scroll position is left alone, with no `scrollTo`. Verify it in the smoke.

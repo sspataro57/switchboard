@@ -225,15 +225,15 @@
     <div class="signblock"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2.5 19h19v2h-19zM22.1 9.6c-.2-.8-1-1.3-1.8-1.1L15 10 8.1 3.5l-1.9.5 4.1 7.2-5 1.3-2-1.5-1.4.4 1.8 3.2.8 1.3 1.6-.4 5.3-1.4 4.4-1.2 5.3-1.4c.8-.2 1.3-1.1 1-1.9z"/></svg></div>
     <h1>Switchboard <small>{{.ProjectLabel}}</small></h1>
     <div class="spacer"></div>
-    <div class="tally">{{range .Tally.Items}}<span class="{{.Class}}"><b>{{.Count}}</b>{{.Label}}</span>{{end}}</div>
+    <div class="tally" data-live="tally">{{range .Tally.Items}}<span class="{{.Class}}"><b>{{.Count}}</b>{{.Label}}</span>{{end}}</div>
     <div class="clock" id="clock" aria-hidden="true"><span></span><span></span><i>:</i><span></span><span></span></div>
     <p class="muted"><a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">{{if not .AutoRefresh}}auto-refresh: turn on{{else}}auto-refresh: turn off{{end}}</a></p>
     <button type="button" class="fs" id="fs" data-kiosk="{{.KioskURL}}">⛶ FULL</button>
   </header>
   {{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
-  {{with .OrchAlert}}<p id="orchestrator-health" class="orch-bad">orchestrator {{.Verdict}}: backlog {{.Backlog}}, cursor {{.Cursor}} of {{.Head}} — {{if eq .Verdict "stalled"}}it is running but not draining events{{else}}lifecycle rules (Deliver tasks, unblocking, claim expiry) are not running{{end}}. <a href="/funnel">funnel</a></p>{{end}}
+  <div data-live="alert">{{with .OrchAlert}}<p id="orchestrator-health" class="orch-bad">orchestrator {{.Verdict}}: backlog {{.Backlog}}, cursor {{.Cursor}} of {{.Head}} — {{if eq .Verdict "stalled"}}it is running but not draining events{{else}}lifecycle rules (Deliver tasks, unblocking, claim expiry) are not running{{end}}. <a href="/funnel">funnel</a></p>{{end}}</div>
 
-  <main>
+  <main data-live="main">
   {{range .Panes}}
   <div class="col col-{{.Key}}">
   {{range .Sections}}
@@ -322,7 +322,7 @@
   </main>
 
   <footer class="ticker">
-    <span>Overall · {{.Tally.Open}} open · {{.Tally.DoneToday}} done today</span>
+    <span data-live="counts">Overall · {{.Tally.Open}} open · {{.Tally.DoneToday}} done today</span>
   <p class="muted" id="light-legend">Lights:
     <span class="legend-light light-done"></span>green: done ·
     <span class="legend-light light-working"></span>yellow: in progress ·
@@ -331,32 +331,42 @@
     <span class="legend-light light-next"></span>blue: next in queue ·
     <span class="legend-light light-none"></span>grey ring: not queued (holding, blocked, queued behind another, or dismissed). Hover a light for its reason.
     A red or yellow light shows its Claude session's name at the start of the title: reply in that session.</p>
-    {{if .AutoRefresh}}<p id="auto-refresh" class="muted">auto-refresh on (every {{.RefreshSeconds}} s, last refreshed {{.RenderedAt}})</p>{{end}}
+    {{if .AutoRefresh}}<p id="auto-refresh" class="muted" data-live="indicator">auto-refresh on (last refreshed {{.RenderedAt}})</p>{{end}}
+    <p id="live-down" class="muted" hidden>live updates down — polling every {{.RefreshSeconds}} s</p>
     <details class="board-notes"><summary>notes</summary><div class="popup">
   <p class="muted">Queues are filters on the one tasks table. Tasks closed today stay (green) until midnight America/New_York; dismissed tasks leave at once; ?status=closed shows every closed task.</p>
     </div></details>
   </footer>
-  <script data-reload="{{.ReloadURL}}" data-interval="{{.RefreshSeconds}}" data-page-interval="{{.PageSeconds}}" data-refresh="{{.RefreshMode}}">
+  <script data-reload="{{.ReloadURL}}" data-interval="{{.RefreshSeconds}}" data-page-interval="{{.PageSeconds}}" data-refresh="{{.RefreshMode}}" data-stream="{{.StreamURL}}" data-retry="{{.RetrySeconds}}" data-version="{{.BoardVersion}}">
   (function () {
     // SWT-67: the board's one script. It runs on every board page: the wall
     // clock, the panel paging, the FULL button and the wake lock need no
-    // auto-refresh. The reload loop (SWT-52 D15, SWT-57 L6) arms only when
-    // data-refresh is "on": never while the tab is hidden, a form control has
-    // focus or holds unsaved input, a popup is open — or (B13) a panel has not
-    // finished showing its pages. A postponed reload is re-armed, never lost.
+    // live updates. Live updates (SWT-89, replacing SWT-52 D15's reload loop)
+    // arm only when data-refresh is "on": the server pushes a payload-free
+    // "change" over the event stream, and the board re-fetches its own URL and
+    // swaps the marked [data-live] regions in place. Go renders every fact; this
+    // script only moves server-rendered nodes. While the stream is down it polls
+    // in place; a new page version or an expired session reloads once.
     var me = document.currentScript;
     var target = me.getAttribute("data-reload");
     var ms = (parseInt(me.getAttribute("data-interval"), 10) || 5) * 1000;
     var pageMs = (parseInt(me.getAttribute("data-page-interval"), 10) || 9) * 1000;
     var refreshOn = me.getAttribute("data-refresh") === "on";
-    var timer = null;
+    var streamURL = me.getAttribute("data-stream");
+    var retryMs = (parseInt(me.getAttribute("data-retry"), 10) || 5) * 1000;
+    var version = me.getAttribute("data-version");
+    var flashAged = false; // the flash may go once it has shown data-interval seconds
+    setTimeout(function () { flashAged = true; }, ms);
     var phone = window.matchMedia("(max-width: 760px)");
     var panels = [];
-    var cycleDone = true;
     var ticks = 0;
     var longest = 1;
+    var wanted = false, inflight = false, waitTimer = null, pollTimer = null, retryTimer = null, source = null;
+    var down = document.getElementById("live-down");
     function dirty() {
-      var fields = document.querySelectorAll("form input, form textarea");
+      // Only controls inside a live region matter: a swap never touches the
+      // headbar's filter form, so typing there never holds an update.
+      var fields = document.querySelectorAll("[data-live] form input, [data-live] form textarea");
       for (var i = 0; i < fields.length; i++) {
         var f = fields[i];
         if (f.type === "checkbox" || f.type === "radio") {
@@ -367,7 +377,7 @@
       }
       // A select is dirty when its selection differs from the one its markup
       // selects: the last option marked selected, else the first option.
-      var selects = document.querySelectorAll("form select");
+      var selects = document.querySelectorAll("[data-live] form select");
       for (var j = 0; j < selects.length; j++) {
         var opts = selects[j].options, want = 0;
         for (var k = 0; k < opts.length; k++) {
@@ -379,33 +389,123 @@
       }
       return false;
     }
-    function pageCycleBusy() {
-      // Paging at 9 s and reloads at 5 s: a reload before the last page was
-      // drawn would make every page but the first unreachable.
-      if (!cycleDone) return true;
-      for (var i = 0; i < panels.length; i++) {
-        if (panels[i].page !== 1) return true;
-      }
-      return false;
-    }
     function busy() {
+      // A swap waits (it is never dropped) while the tab is hidden or he is
+      // using something inside a live region: an open row popup, a focused or
+      // half-typed control.
       if (document.hidden) return true;
-      if (document.querySelector("details[open]")) return true;
+      if (document.querySelector("[data-live] details[open]")) return true;
       var a = document.activeElement;
-      if (a && a.form && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(a.tagName)) return true;
-      if (pageCycleBusy()) return true;
+      if (a && a.form && a.closest && a.closest("[data-live]") && /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(a.tagName)) return true;
       return dirty();
     }
-    function tick() {
-      if (busy()) { arm(); return; }
-      location.replace(target);
+    function reload() { location.replace(target); }
+    function request() { wanted = true; attempt(); }
+    function attempt() {
+      clearTimeout(waitTimer);
+      if (!wanted || inflight) return;
+      if (busy()) { waitTimer = setTimeout(attempt, 1000); return; }
+      wanted = false;
+      inflight = true;
+      // A half-open connection (a sleeping tablet's wifi) must not hold the
+      // single fetch forever: abort after 15 s and try again on the next signal.
+      var ctl = window.AbortController ? new AbortController() : null;
+      var abortTimer = ctl ? setTimeout(function () { ctl.abort(); }, 15000) : null;
+      fetch(target, { credentials: "same-origin", cache: "no-store", redirect: "manual", signal: ctl ? ctl.signal : undefined }).then(function (res) {
+        // Any redirect means the session is gone (dev login or an identity
+        // provider on another host): reload once and let login answer.
+        if (res.type === "opaqueredirect" || res.redirected) { reload(); return null; }
+        // A deploy's gap answers 502/503: keep the page, try again later.
+        if (!res.ok) return null;
+        if ((res.headers.get("Content-Type") || "").indexOf("text/html") !== 0) { reload(); return null; }
+        return res.text();
+      }).then(function (text) {
+        if (text) swap(text);
+      }).catch(function () {}).then(function () {
+        clearTimeout(abortTimer);
+        inflight = false;
+        if (wanted) attempt();
+      });
+    }
+    function rowKey(r) { var a = r.querySelector("a.r"); return a ? a.getAttribute("href") : ""; }
+    // What Go rendered for the row, minus what moves by itself: the elapsed cell
+    // (it ticks every minute) and the animation class left by a page turn.
+    function rowSig(r) {
+      var a = r.querySelector("a.r"), text = "";
+      if (a) {
+        var cells = a.children;
+        for (var i = 0; i < cells.length; i++) if (!cells[i].classList.contains("el")) text += cells[i].textContent + "|";
+      }
+      return r.className.replace(/\bflip\b/g, "").trim() + "|" + text;
+    }
+    function swap(text) {
+      var doc = new DOMParser().parseFromString(text, "text/html");
+      var next = doc.querySelector("script[data-version]");
+      if (!next || next.getAttribute("data-version") !== version) { reload(); return; }
+      var olds = document.querySelectorAll("[data-live]");
+      var pairs = [];
+      for (var i = 0; i < olds.length; i++) {
+        var name = olds[i].getAttribute("data-live");
+        var fresh = doc.querySelector('[data-live="' + name + '"]');
+        if (!fresh) { reload(); return; }
+        pairs.push([olds[i], fresh]);
+      }
+      // Remember each panel's page and rows, keyed by the section id Go renders.
+      var pages = {}, before = {};
+      for (var p = 0; p < panels.length; p++) {
+        pages[panels[p].key] = panels[p].page;
+        var seen = {};
+        for (var r = 0; r < panels[p].rows.length; r++) seen[rowKey(panels[p].rows[r])] = rowSig(panels[p].rows[r]);
+        before[panels[p].key] = seen;
+      }
+      for (var j = 0; j < pairs.length; j++) pairs[j][0].replaceWith(document.importNode(pairs[j][1], true));
+      if (flashAged) {
+        var flash = document.querySelector(".flash");
+        if (flash) flash.hidden = true;
+      }
+      collect();
+      var changed = [];
+      for (var q = 0; q < panels.length; q++) {
+        var pn = panels[q];
+        if (pages[pn.key]) pn.page = pages[pn.key];
+        var old = before[pn.key] || {};
+        for (var s = 0; s < pn.rows.length; s++) {
+          var k = rowKey(pn.rows[s]);
+          if (!(k in old) || old[k] !== rowSig(pn.rows[s])) changed.push(pn.rows[s]);
+        }
+      }
+      layout(false);
+      for (var c = 0; c < changed.length; c++) {
+        if (changed[c].hidden) continue;
+        void changed[c].offsetWidth;
+        changed[c].style.animationDelay = "0ms";
+        changed[c].classList.add("flip");
+      }
+    }
+    function setLive(on) {
+      if (down) down.hidden = on;
+      if (on) { clearInterval(pollTimer); pollTimer = null; }
+      else if (!pollTimer) pollTimer = setInterval(request, ms);
+    }
+    function connect() {
+      source = new EventSource(streamURL);
+      source.addEventListener("open", function () { setLive(true); request(); });
+      source.addEventListener("change", request);
+      source.addEventListener("error", function () {
+        setLive(false);
+        // CONNECTING: the browser retries by itself. CLOSED (503, login, wrong
+        // type): open a new stream after data-retry.
+        if (source.readyState === EventSource.CLOSED) {
+          clearTimeout(retryTimer);
+          retryTimer = setTimeout(connect, retryMs);
+        }
+      });
     }
     function arm() {
       if (!refreshOn) return;
-      clearTimeout(timer);
-      timer = setTimeout(tick, ms);
+      if (!source) connect();
     }
-    document.addEventListener("visibilitychange", arm);
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) attempt(); });
     arm();
 
     // Paging shows and hides the rows the server rendered; it builds none.
@@ -431,12 +531,10 @@
         var h = p.rows.length ? p.rows[0].offsetHeight : 0; // offsetHeight: a row mid-flip is transformed nearly flat
         p.per = phone.matches || !h ? p.rows.length || 1 : Math.max(1, Math.floor((p.box.clientHeight + 1) / h));
         p.pages = Math.max(1, Math.ceil(p.rows.length / p.per));
-        if (p.page > p.pages) p.page = 1;
+        if (p.page > p.pages) p.page = p.pages; // a panel that shrank keeps its nearest page
         if (p.pages > longest) longest = p.pages;
         show(p, flip);
       }
-      ticks = 0;
-      cycleDone = longest < 2;
     }
     function turn() {
       if (document.hidden || document.querySelector("details[open]")) return;
@@ -448,19 +546,26 @@
         p.page = home ? 1 : (p.page % p.pages) + 1;
         show(p, true);
       }
-      if (home) { ticks = 0; cycleDone = true; }
+      if (home) ticks = 0;
     }
     // A finished flip leaves its class behind, and a row with an animation in
     // effect becomes the containing block of its fixed popup. Drop the class.
     document.addEventListener("animationend", function (e) {
       if (e.target.classList && e.target.classList.contains("flip")) e.target.classList.remove("flip");
     });
-    var boxes = document.querySelectorAll(".panel");
-    for (var b = 0; b < boxes.length; b++) {
-      var box = boxes[b].querySelector(".rows");
-      if (!box) continue;
-      panels.push({ box: box, pg: boxes[b].querySelector(".pg"), rows: box.querySelectorAll(".row"), page: 1, pages: 1, per: 1 });
+    // Panels are (re)collected after every swap; each is keyed by the id of the
+    // heading Go renders, so its page survives the swap.
+    function collect() {
+      panels = [];
+      var boxes = document.querySelectorAll(".panel");
+      for (var b = 0; b < boxes.length; b++) {
+        var box = boxes[b].querySelector(".rows");
+        if (!box) continue;
+        var head = boxes[b].querySelector("h2[id]");
+        panels.push({ key: head ? head.id : String(b), box: box, pg: boxes[b].querySelector(".pg"), rows: box.querySelectorAll(".row"), page: 1, pages: 1, per: 1 });
+      }
     }
+    collect();
     document.body.classList.add("paged");
     layout(true);
     window.addEventListener("resize", function () { layout(false); });
@@ -477,8 +582,8 @@
     clock();
     setInterval(clock, 5000);
 
-    // FULL. A reload ends a document's fullscreen and this page reloads itself,
-    // so the board never goes fullscreen on its own: inside the /kiosk shell it
+    // FULL. A reload ends a document's fullscreen, and the board still navigates
+    // (a row tap, a verb, a version reload), so the board never goes fullscreen on its own: inside the /kiosk shell it
     // toggles the SHELL's fullscreen (the tap counts for the parent too);
     // anywhere else it opens the shell.
     var fs = document.getElementById("fs");

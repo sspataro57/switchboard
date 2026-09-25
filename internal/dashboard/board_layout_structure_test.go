@@ -22,11 +22,19 @@ package dashboard
 //   - the advanced <details> rendered with `open` → AdvancedFilterPopup.
 //   - the three advanced inputs moved into a separate popup form → AdvancedFilterPopup, HeaderBandsInOrder.
 //   - the summary's {{if .AdvancedFilters}} marker dropped → AdvancedFilterPopup.
-//   - details[open] removed from busy(), or the page-not-1 clause → ScriptContract.
+//   - details[open] removed from busy() → ScriptContract. (SWT-89 retired the page-not-1 clause.)
 //   - the legend put back above the sections → LegendAndNoteAtTheBottom (and the amended LegendAndRingStyles).
 //   - the <details class="row-verbs"> moved INSIDE the row <a> → RowVerbsOutsideTheRowLink.
 //   - two <script> blocks (paging split out) → ScriptContract.
 //   - a Columns field added to boardData → BuildsSectionsAndAdvancedFilters.
+//
+// AMENDED by board-streaming (SWT-89, docs/tickets/board-streaming_SPEC.md,
+// criterion 25): TestTasksTemplate_ScriptContract moves fetch( from the banned
+// list to the required list, gains criterion 20(a)'s required tokens, and loses
+// criterion 28's page-not-1 clause — B13 is retired by S7, because a swap keeps
+// each panel's page instead of reloading every panel to page 1.
+// TestTasksTemplate_NoBranchNoHTMXNoRawHTML adds live.go to its scan. Nothing
+// else changes.
 
 import (
 	"go/ast"
@@ -560,15 +568,20 @@ func TestTasksTemplate_ScriptContract(t *testing.T) {
 			"second {{if .AutoRefresh}})")
 	}
 	for _, want := range []string{"setTimeout", "location.replace(", "document.hidden", "activeElement",
-		"defaultValue", "defaultSelected", "details[open]", "requestFullscreen", "wakeLock", "textContent"} {
+		"defaultValue", "defaultSelected", "details[open]", "requestFullscreen", "wakeLock", "textContent",
+		// SWT-89 criterion 20(a): the stream, the in-place fetch and the swap.
+		"fetch(", "EventSource", "DOMParser", "parseFromString(", "importNode(", "replaceWith(", "[data-live",
+		"data-version", ".redirected"} {
 		if !strings.Contains(script, want) {
-			t.Errorf("the script lacks %q (criterion 27)", want)
+			t.Errorf("the script lacks %q (criterion 27, SWT-89 criterion 20a)", want)
 		}
 	}
 	if !strings.Contains(script, `addEventListener("visibilitychange"`) && !strings.Contains(script, `addEventListener('visibilitychange'`) {
 		t.Errorf("the script does not re-arm on visibilitychange via addEventListener (criterion 27)")
 	}
-	for _, banned := range []string{"fetch(", "XMLHttpRequest", "htmx", "location.search", "location.href", "innerHTML",
+	// SWT-89: fetch( moved to the required list above (the swap fetches the
+	// board's own server-rendered URL); the rest of the ban is unchanged.
+	for _, banned := range []string{"XMLHttpRequest", "htmx", "location.search", "location.href", "innerHTML",
 		"localStorage", "sessionStorage", "onchange"} {
 		if strings.Contains(script, banned) {
 			t.Errorf("the script contains %q. Criterion 27 / B11: paging SHOWS and HIDES server-rendered rows — it "+
@@ -598,7 +611,8 @@ func TestTasksTemplate_ScriptContract(t *testing.T) {
 		t.Errorf("the wake lock's promise rejection is not swallowed with .catch (B18-3)")
 	}
 
-	// Criterion 28: busy() postpones on all FIVE conditions.
+	// Criterion 28: busy() postpones on these FOUR conditions. SWT-89 removed the
+	// fifth (B13's page-not-1 clause): a swap preserves each panel's page (S7).
 	const fn = "function busy()"
 	b := strings.Index(script, fn)
 	if b < 0 {
@@ -617,11 +631,6 @@ func TestTasksTemplate_ScriptContract(t *testing.T) {
 		if !strings.Contains(busy, want.frag) {
 			t.Errorf("busy() does not postpone on %q — %s (criterion 28). busy():\n%s", want.frag, want.why, busy)
 		}
-	}
-	if !regexp.MustCompile(`(?i)page`).MatchString(busy) {
-		t.Errorf("busy() has no page-not-1 clause. Criterion 28 / B13: with paging at 9 s and reloads at 5 s, a reload "+
-			"would reset every panel to page 1 before page 2 was ever drawn — the second page would be unreachable "+
-			"exactly when he is watching. busy():\n%s", busy)
 	}
 
 	if n := strings.Count(s, "onchange"); n != 1 {
@@ -1012,6 +1021,7 @@ func TestTasksTemplate_DeparturesStyles(t *testing.T) {
 }
 
 // ---- criterion 17: no branch, no HTMX, no raw HTML -------------------------------------------
+// AMENDED — ADDITIVELY — by SWT-89: live.go joins the scanned file list.
 // AMENDED — ADDITIVELY — by SWT-67: display.go joins the scanned file list, so
 // the new display helpers cannot reach the page through template.HTML either
 // (B9: a custom property whose value is digits is the safest thing to put
@@ -1030,7 +1040,9 @@ func TestTasksTemplate_NoBranchNoHTMXNoRawHTML(t *testing.T) {
 			t.Errorf("tasks.html contains %q (criterion 17)", banned)
 		}
 	}
-	for _, f := range []string{"sections.go", "board.go", "lights.go", "display.go"} {
+	for _, f := range []string{"sections.go", "board.go", "lights.go", "display.go",
+		// SWT-89 criterion 21: the hub and the stream handler join the scan.
+		"live.go"} {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			t.Errorf("read %s: %v (criterion 17 scans the whole path to the page)", f, err)
