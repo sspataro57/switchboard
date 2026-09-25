@@ -280,6 +280,11 @@ type storedRule struct {
 	// with the rules — the ONLY reader. An armed rule's task_log attach from a
 	// person becomes its own INCOMING task (comm.go decides).
 	commTask bool
+	// alwaysTask is capture_rules.always_task (swb 703, migration 0045), read
+	// from the COLUMN with the rules: a keyless rule whose every match from a
+	// sender becomes a task on its thread's open task, in INCOMING, before any
+	// classifier (directConversationTask).
+	alwaysTask bool
 }
 
 // pendingMessage is one inbound message the pass must decide about.
@@ -741,7 +746,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 		        r.project_id, COALESCE(r.subproject,''), COALESCE(r.external_system,''),
 		        COALESCE(r.url_template,''), p.ticket_assignee_gate, r.revive, r.addressed,
 		        r.pr_review, r.exclude_pr_authors, p.notifier_senders, r.comm_task,
-		        (p.ai_inquiry AND p.inquiry_promote_after IS NOT NULL)
+		        (p.ai_inquiry AND p.inquiry_promote_after IS NOT NULL), r.always_task
 		   FROM capture_rules r
 		   JOIN projects p ON p.id = r.project_id
 		  WHERE r.enabled
@@ -758,7 +763,7 @@ func loadRules(ctx context.Context, pool *pgxpool.Pool) ([]storedRule, error) {
 			&s.rule.ExternalKeyRegex, &s.rule.Priority, &s.rule.Enabled,
 			&s.projectID, &s.subproject, &s.extSystem, &s.urlTemplate, &s.gateOn,
 			&s.revive, &s.addressed, &s.prReview, &s.excludePRAuthors, &s.notifiers, &s.commTask,
-			&s.inquiryArmed); err != nil {
+			&s.inquiryArmed, &s.alwaysTask); err != nil {
 			return nil, fmt.Errorf("scan capture rule: %w", err)
 		}
 		// Rule.Source is the evaluator's carrier for `external_system` (Evaluate

@@ -478,6 +478,8 @@ func parseCaptureRuleAdd(argv []string, extra ...func(*flag.FlagSet)) (string, j
 		"(exact, case-insensitive) or '*'+suffix, e.g. '*[bot]'; needs --pr-review")
 	commTask := fs.Bool("comm-task", false, "SWT-74: a person's message this rule files onto an OPEN task becomes "+
 		"its own INCOMING task (a comm to answer, route or dismiss); needs --external-system, refused with --pr-review")
+	alwaysTask := fs.Bool("always-task", false, "swb 703: every message this KEYLESS rule attributes becomes a task "+
+		"on its thread's open task, in INCOMING, before any classifier; refused with --external-system")
 	for _, declare := range extra {
 		declare(fs)
 	}
@@ -523,6 +525,9 @@ func parseCaptureRuleAdd(argv []string, extra ...func(*flag.FlagSet)) (string, j
 	if *commTask {
 		payload["comm_task"] = true
 	}
+	if *alwaysTask {
+		payload["always_task"] = true
+	}
 	if *prReview {
 		payload["pr_review"] = true
 	}
@@ -555,11 +560,16 @@ func runCaptureRulesTry(argv []string) error {
 	// CandidateRule has no activity fields, so try would silently prove a
 	// DIFFERENT rule than the one add would store. Refuse them by name.
 	var activity struct {
-		Revive    bool `json:"revive"`
-		Addressed bool `json:"addressed"`
+		Revive     bool `json:"revive"`
+		Addressed  bool `json:"addressed"`
+		AlwaysTask bool `json:"always_task"`
 	}
 	if err := json.Unmarshal(raw, &activity); err != nil {
 		return fmt.Errorf("read candidate args: %w", err)
+	}
+	if activity.AlwaysTask {
+		return fmt.Errorf("capture-rules try: --always-task refused: try does not simulate always_task rules " +
+			"(swb 703); it would decide the candidate as attribution only, which is not the rule add would store")
 	}
 	if activity.Revive || activity.Addressed {
 		return fmt.Errorf("capture-rules try: --revive/--addressed refused: try does not simulate activity rules " +
@@ -637,7 +647,7 @@ func runCaptureRulesList(argv []string) error {
 		`SELECT r.id, p.slug, COALESCE(r.subproject,''), r.criteria_type, r.pattern,
 		        COALESCE(r.external_system,''), COALESCE(r.key_regex,''), COALESCE(r.url_template,''),
 		        r.priority, r.enabled, COALESCE(r.note,''), r.revive, r.addressed,
-		        r.pr_review, r.exclude_pr_authors
+		        r.pr_review, r.exclude_pr_authors, r.always_task
 		   FROM capture_rules r JOIN projects p ON p.id = r.project_id
 		  ORDER BY r.priority DESC, r.id`)
 	if err != nil {
@@ -650,11 +660,11 @@ func runCaptureRulesList(argv []string) error {
 		var id int64
 		var slug, subproject, criteria, pattern, extSystem, keyRegex, urlTemplate, note string
 		var priority int
-		var enabled, revive, addressed, prReview bool
+		var enabled, revive, addressed, prReview, alwaysTask bool
 		var excludePRAuthors []string
 		if err := rows.Scan(&id, &slug, &subproject, &criteria, &pattern,
 			&extSystem, &keyRegex, &urlTemplate, &priority, &enabled, &note, &revive, &addressed,
-			&prReview, &excludePRAuthors); err != nil {
+			&prReview, &excludePRAuthors, &alwaysTask); err != nil {
 			return fmt.Errorf("scan capture_rule: %w", err)
 		}
 		n++
@@ -670,7 +680,9 @@ func runCaptureRulesList(argv []string) error {
 		// The key derivation on its own line: it is what turns a match into a
 		// task, and "attribution only, no task" is the difference between a rule
 		// that files tickets and one that only labels a message (SPEC §3).
-		if extSystem == "" {
+		if extSystem == "" && alwaysTask {
+			fmt.Printf("      -> always a task: one per thread, in INCOMING, no classifier (swb 703)\n")
+		} else if extSystem == "" {
 			fmt.Printf("      -> attribution only (no external_system, so no task)\n")
 		} else {
 			detail := fmt.Sprintf("      -> %s key", extSystem)

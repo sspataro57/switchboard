@@ -35,10 +35,16 @@ type directInput struct {
 	groupDM     bool // raw conversation.type == 'group_dm', read from the COLUMN (C… ids are ambiguous)
 	blankSender bool // blankSender(sender)                      — resurface.go's spelling
 	notifier    bool // notifierSender(sender, winner.notifiers) — resurface.go's spelling
+	// alwaysTask (swb 703): the winning rule's capture_rules.always_task. A
+	// non-Slack message it attributes (mail) is a task, one per thread; a Slack
+	// channel message keeps SWT-78/79's policy (D6) (Salvador,
+	// 2026-09-25: Pines Property Management mail "should always pop in incoming
+	// as personal").
+	alwaysTask bool
 }
 
 // directConversationTask is true iff the message is (Slack AND a DM or group DM)
-// OR Upwork, AND the sender is not blank AND not on the project's notifier list
+// OR Upwork OR (not Slack AND its rule is always_task, swb 703), AND the sender is not blank AND not on the project's notifier list
 // (the Jira app's author id is an ordinary U… id; the list is how a bot is told
 // apart).
 //
@@ -55,14 +61,19 @@ type directInput struct {
 // today's attribution-only decision.
 func directConversationTask(in directInput) (bool, string) {
 	switch {
-	case !in.slack && !in.upwork:
+	case !in.slack && !in.upwork && !in.alwaysTask:
 		return false, "not a DM task: the message is neither Slack nor Upwork"
 	case in.slack && !in.dm && !in.groupDM:
+		// Also for an always_task rule (swb 703 review): a Slack channel keeps
+		// SWT-78/79's policy — the mention gate and the inquiry lane decide.
 		return false, "not a DM task: the conversation is a channel, so the inquiry lane decides"
 	case in.blankSender:
 		return false, "not a DM task: the message has no sender identity (blank sender)"
 	case in.notifier:
 		return false, "not a DM task: the sender is on the project's notifier list"
+	}
+	if in.alwaysTask && !in.upwork && !in.slack {
+		return true, "always-task rule: every message its rule attributes is actionable (swb 703); no classifier"
 	}
 	kind := "a DM"
 	switch {
