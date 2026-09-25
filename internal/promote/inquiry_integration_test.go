@@ -686,8 +686,10 @@ func TestPromoteInquiry_Integration_OldestFirst(t *testing.T) {
 	}
 	var title string
 	s.pool.QueryRow(ctx, `SELECT title FROM tasks WHERE id=$1`, *pa.taskID).Scan(&title)
-	if title != "Ann: first ask" {
-		t.Errorf("task title = %q, want %q — the OLDEST verdict creates", title, "Ann: first ask")
+	// swb 384 / SWT-87: the title names the stored sender (Dana Ruiz), not the
+	// model's asker (Ann).
+	if title != "Dana Ruiz: first ask" {
+		t.Errorf("task title = %q, want %q — the OLDEST verdict creates", title, "Dana Ruiz: first ask")
 	}
 }
 
@@ -929,8 +931,9 @@ func TestPromoteInquiry_Integration_CreateShapeOrderAndExactText(t *testing.T) {
 	t2 := s.taskOf(t, ctx, m2)
 	var title2, body2 string
 	s.pool.QueryRow(ctx, `SELECT title, body FROM tasks WHERE id=$1`, t2).Scan(&title2, &body2)
-	if want := textmatch.NormalizedPrefix(sender+": short ask", 120); title2 != want {
-		t.Errorf("no-asker title = %q, want %q (the sender fallback)", title2, want)
+	// swb 384 / SWT-87: the sender reads as its display name, not the raw From.
+	if want := textmatch.NormalizedPrefix("Katie Byeluri: short ask", 120); title2 != want {
+		t.Errorf("no-asker title = %q, want %q (the sender's display name)", title2, want)
 	}
 	if !strings.Contains(body2, "\nasker: (none)\n") {
 		t.Errorf("no-asker body does not carry `asker: (none)`:\n%s", body2)

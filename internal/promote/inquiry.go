@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/mail"
 	"strconv"
 	"strings"
 	"time"
@@ -226,14 +227,41 @@ func addressed(c InquiryCandidate) bool {
 	}
 }
 
-// inquiryTitle is C-D9's title: `{asker, else sender}: {ask}`, cut with the
-// ONE spelling (textmatch.NormalizedPrefix).
-func inquiryTitle(asker, sender, ask string) string {
-	who := asker
-	if who == "" {
-		who = sender
+// inquiryTitle is "{sender}: {ask}" (swb 384 / SWT-87). The name is the
+// message's STORED sender, never the model's asker: on José's email (message
+// 341859) the model named Katie, who was only quoted inside it, and the board
+// sent attention to the wrong colleague. The asker stays in the body as the
+// model's reading. The sender is shortened to its display name (a mail From
+// "José Garcia <jose.g@avviato.com>" reads "José Garcia"). An empty ask falls
+// back to the subject; with neither, the title is the sender alone, never a
+// dangling "Name: ".
+func inquiryTitle(sender, subject, ask string) string {
+	who := senderLabel(sender)
+	what := strings.TrimSpace(ask)
+	if what == "" {
+		what = strings.TrimSpace(subject)
 	}
-	return textmatch.NormalizedPrefix(orNone(who)+": "+ask, titleLimit)
+	if what == "" {
+		return textmatch.NormalizedPrefix(who, titleLimit)
+	}
+	return textmatch.NormalizedPrefix(who+": "+what, titleLimit)
+}
+
+// senderLabel is a stored sender as a person's name: a mail From's display
+// name, else its address; any other sender (a Slack display name) as it is;
+// "(unknown sender)" when blank.
+func senderLabel(sender string) string {
+	s := strings.TrimSpace(sender)
+	if s == "" {
+		return "(unknown sender)"
+	}
+	if a, err := mail.ParseAddress(s); err == nil {
+		if n := strings.TrimSpace(a.Name); n != "" {
+			return n
+		}
+		return a.Address
+	}
+	return s
 }
 
 // inquiryBody is C-D9's deterministic body: one `key: value` line each, in a
@@ -487,7 +515,7 @@ func inquiryInbox(ctx context.Context, pool *pgxpool.Pool, maxAge time.Duration)
 		v.Asker, v.Channel = f.Asker, f.Channel
 		v.ThreadKey, v.ThreadScope = f.StoredKey, f.ThreadScope
 		v.StoredThreadID, v.ExternalMessageID = f.StoredThreadID, f.ExternalMessageID
-		v.Title = inquiryTitle(f.Asker, f.Sender, f.Ask)
+		v.Title = inquiryTitle(f.Sender, f.Subject, f.Ask)
 
 		c := InquiryCandidate{
 			AskKind: f.AskKind, Channel: f.Channel, ThreadKey: f.StoredKey, ThreadScope: f.ThreadScope,
