@@ -1157,6 +1157,7 @@ func tdNormalize(page string, id int64) string {
 	// masking it would make the golden depend on which serial ids this run drew.
 	n := strconv.FormatInt(id, 10)
 	s = strings.ReplaceAll(s, "task "+n+"</title>", "task {{ID}}</title>")
+	s = strings.ReplaceAll(s, "<small>Task "+n+"</small>", "<small>Task {{ID}}</small>") // the sign (swb 692)
 	return strings.ReplaceAll(s, "<h1>#"+n+" ", "<h1>#{{ID}} ")
 }
 

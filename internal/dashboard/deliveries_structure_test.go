@@ -61,12 +61,15 @@ func TestDeliveriesTemplate_DenyAndRedoForm(t *testing.T) {
 		{`name="redraft" value="false">Deny</button>`, "Deny: rejected, never sent, no new draft"},
 		{`name="redraft" value="true">Redo</button>`, "Redo: rejected, and the drafts worker writes a fresh one"},
 		{`href="/deliveries?status=rejected"`, "the filter links gain `rejected`"},
-		{`.status-rejected`, "the rejected status gets a style"},
+		{`class="status-{{.Status}}"`, "each status, rejected included, gets its class (the rules live in static/swb-1.css since swb 692)"},
 		{`redraft requested`, "a rejected row shows \"redraft requested\" under its status when set"},
 	} {
 		if !strings.Contains(s, want.frag) {
 			t.Errorf("deliveries.html lacks %s — %s (criterion 30)", want.frag, want.why)
 		}
+	}
+	if css, err := staticFS.ReadFile("static/swb-1.css"); err != nil || !strings.Contains(string(css), ".status-rejected") {
+		t.Errorf("static/swb-1.css has no .status-rejected rule (criterion 30, moved by swb 692): %v", err)
 	}
 	if n := strings.Count(s, "onchange"); n != 0 {
 		t.Errorf("deliveries.html has %d onchange attribute(s), want 0 (criterion 30): nothing on this page may "+
