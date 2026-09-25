@@ -140,8 +140,12 @@ func newCRVSuite(t *testing.T, ctx context.Context) *crvSuite {
 
 	proj := func(slug string, gate bool) int64 {
 		return s.id(t, ctx,
-			`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality, ticket_assignee_gate)
-			 VALUES ($1,$1,'itest-caprev-client','manual','dashboard','/tmp/itest-caprev','any',$2) RETURNING id`, slug, gate)
+			// swb 650: inquiry lane ARMED, so a non-reviving rule's message on a closed task keeps
+			// the resurface path these tests pin; an unarmed project reopens it (swb650 tests).
+			`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality, ticket_assignee_gate,
+			                       ai_inquiry, inquiry_promote_after)
+			 VALUES ($1,$1,'itest-caprev-client','manual','dashboard','/tmp/itest-caprev','any',$2,
+			         true, now() - interval '1 day') RETURNING id`, slug, gate)
 	}
 	// ticket_assignee_gate named EXPLICITLY on both: 0023 defaults it false, and a
 	// fixture that leaned on the default would exercise the gate half not at all.

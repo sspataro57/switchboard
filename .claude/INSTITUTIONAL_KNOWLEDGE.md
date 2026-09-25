@@ -2957,6 +2957,24 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   resurrect a catch-all, and the reconciler would bounce it. The resurfaced ask
   becomes a Holding task on the message's OWN conversation (body line
   `logged_on_closed_task: N`), and the bucket stays closed.
+- **Since swb 650 (SWT-88, 2026-09-25) that holds only where the inquiry lane is
+  ARMED.** On a project without an armed lane (`ai_inquiry AND
+  inquiry_promote_after IS NOT NULL`, the promoter's predicate) and without the
+  ticket gate, a message that would resurface onto a closed task reopens it
+  instead. It goes through the revive form of `task_reopen`, then the activity
+  mark puts it in INCOMING. Salvador: "those are supposed to be on incoming".
+  Lyle Deitch's foundry replies had been read by nothing.
+  - Every other `resurfaces()` clause still holds.
+  - There is no `needs_reply` filter as the armed lane has, so a "thanks" also
+    reopens.
+  - The residual: a rule on an unarmed project whose key is a CONSTANT (a bucket,
+    rule 10's shape) would now reopen a catch-all. No enabled rule has that
+    shape (checked 2026-09-25: foundry/ahs rules key per thread, and Upwork
+    rooms go to conversation tasks first). Never add one without a
+    `key_regex`.
+  - The same change widens SWT-45 J18 ("revive is Jira activity only"): a
+    non-Jira message now revives on unarmed, ungated projects. The gate
+    exclusion keeps J18's reason.
 
 ## Mail history without tasks (MSN onboarding, 2026-09-19)
 

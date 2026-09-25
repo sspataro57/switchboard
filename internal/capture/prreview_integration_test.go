@@ -157,8 +157,12 @@ func newPRRSuite(t *testing.T, ctx context.Context, o prrOpts) *prrSuite {
 
 	proj := func(slug string) int64 {
 		return s.id(t, ctx,
-			`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality)
-			 VALUES ($1,$1,'itest-prr-client','manual','dashboard','/tmp/itest-prr','any') RETURNING id`, slug)
+			// swb 650: inquiry lane ARMED, so a comment on a closed review task keeps the
+			// resurface path these tests pin; an unarmed project reopens it (swb650 tests).
+			`INSERT INTO projects (name, slug, client, execution, delivery, repo_path, ai_locality,
+			                       ai_inquiry, inquiry_promote_after)
+			 VALUES ($1,$1,'itest-prr-client','manual','dashboard','/tmp/itest-prr','any',
+			         true, now() - interval '1 day') RETURNING id`, slug)
 	}
 	s.collab = proj(prrCollab)
 	s.reengine = proj(prrReengine)
