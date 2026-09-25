@@ -41,7 +41,31 @@ func directFacts(pm pendingMessage, winner storedRule) directInput {
 		groupDM:     pm.rawConvType == "group_dm",
 		blankSender: blankSender(pm.msg.Sender),
 		notifier:    notifierSender(pm.msg.Sender, winner.notifiers),
+		alwaysTask:  winner.alwaysTask,
 	}
+}
+
+// alwaysTaskBodyMarker opens the body of a task an always_task rule made for a
+// message that is not a DM (swb 703): the SWT-78 marker names Slack DMs, and
+// the recovery reads whichever marker the conversation's kind carries.
+const alwaysTaskBodyMarker = "Captured deterministically: its capture rule marks this sender always actionable (swb 703)"
+
+// directIsDM reports the SWT-78 kinds: a Slack DM or group DM, or an Upwork
+// room. Anything else on the direct path came through an always_task rule.
+func directIsDM(pm pendingMessage) bool {
+	if pm.channel == upworkChannel {
+		return true
+	}
+	return pm.channel == slackweb.Channel &&
+		(slackweb.IsDirectMessageKey(pm.msg.ThreadKey) || pm.rawConvType == "group_dm")
+}
+
+// directMarker is the body marker for pm's kind of direct task.
+func directMarker(pm pendingMessage) string {
+	if directIsDM(pm) {
+		return directTaskBodyMarker
+	}
+	return alwaysTaskBodyMarker
 }
 
 // directConversationSQL finds the DM conversation's OPEN task (SWT-78
@@ -56,7 +80,8 @@ func directFacts(pm pendingMessage, winner storedRule) directInput {
 //
 // The second arm (codex review) finds a DM task whose provenance was never
 // recorded — a pass that died between create_task and task_set_source_thread.
-// $4 (exact) turns off the rooted-thread fold for an Upwork conversation: its
+// $4 (exact) turns off the rooted-thread fold for any non-Slack conversation
+// (an Upwork room; an always_task rule's mail thread, swb 703): its
 // key is used whole, and a room id may contain ':', so "A:B" must never fold
 // into "A".
 //
@@ -84,7 +109,9 @@ const directConversationSQL = `
 // conversation (one thread per room): its thread key, used whole and never
 // parsed, so the Upwork key format keeps its one spelling in the connector.
 func directConversationKey(pm pendingMessage) (string, bool) {
-	if pm.channel == upworkChannel {
+	// swb 703: an always_task rule's non-Slack message (mail) counts per its
+	// thread, used whole, like an Upwork room.
+	if pm.channel != slackweb.Channel {
 		return pm.msg.ThreadKey, strings.TrimSpace(pm.msg.ThreadKey) != ""
 	}
 	return slackweb.ConversationThreadKey(pm.msg.ThreadKey)
@@ -100,7 +127,7 @@ func decideDirect(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendi
 	if !ok {
 		// A DM whose thread key does not parse cannot be counted into a
 		// conversation; keep the attribution rather than guess one.
-		base.reason += "; DM task skipped: thread key does not name a Slack conversation"
+		base.reason += "; direct task skipped: the thread key does not name a conversation"
 		return base, winner, nil
 	}
 	d := base
@@ -116,8 +143,8 @@ func decideDirect(ctx context.Context, pool *pgxpool.Pool, mode string, pm pendi
 		}
 	}
 	if !found {
-		err := pool.QueryRow(ctx, directConversationSQL, conv, winner.projectID, directTaskBodyMarker,
-			pm.channel == upworkChannel).
+		err := pool.QueryRow(ctx, directConversationSQL, conv, winner.projectID, directMarker(pm),
+			pm.channel != slackweb.Channel).
 			Scan(&taskID, &d.directNoThread)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
@@ -212,7 +239,7 @@ func directTaskArgs(pm pendingMessage, winner storedRule, conv string) map[strin
 		title = label + ": " + head
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s, via capture rule %d (%s %q).\n\n", directTaskBodyMarker,
+	fmt.Fprintf(&b, "%s, via capture rule %d (%s %q).\n\n", directMarker(pm),
 		winner.rule.ID, winner.rule.Kind, winner.rule.Pattern)
 	fmt.Fprintf(&b, "conversation: %s\n", conv)
 	fmt.Fprintf(&b, "channel: %s\n", ruleOrNone(pm.channel))

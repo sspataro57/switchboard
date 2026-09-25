@@ -92,6 +92,11 @@ type captureRuleAddArgs struct {
 	// rule never reaches the task_log branch: an inert flag) and is refused
 	// with pr_review (GitHub mail is a notice stream with its own review tasks).
 	CommTask bool `json:"comm_task,omitempty"`
+	// swb 703: always_task = every message this KEYLESS rule attributes from a
+	// sender becomes a task on its thread's open task, in INCOMING, before any
+	// classifier. Refused with an external_system (migration 0045's CHECK): a
+	// keyed rule already makes its key's task.
+	AlwaysTask bool `json:"always_task,omitempty"`
 }
 
 // excludePRAuthorRe / excludeBotSuffixRe are criterion 2's two shapes of an
@@ -162,6 +167,12 @@ func parseCaptureRuleAdd(args []byte) (captureRuleAddArgs, error) {
 		return a, fmt.Errorf("url_template %q must contain the {key} placeholder", a.URLTemplate)
 	}
 
+	// swb 703, migration 0045's CHECK, refused here first so the error names
+	// the field.
+	if a.AlwaysTask && a.ExternalSystem != "" {
+		return a, errors.New("always_task requires a keyless rule (no external_system): a keyed rule already makes " +
+			"or logs onto its key's task, so the flag would be inert")
+	}
 	// SWT-74 criterion 18, migration 0040's CHECK, refused here first so the
 	// error names the FIELDS: capture_rules cannot be edited, so the operator
 	// gets one chance at a rule.
@@ -279,12 +290,13 @@ func captureRuleAdd(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 	err = pool.QueryRow(ctx,
 		`INSERT INTO capture_rules
 		   (project_id, subproject, criteria_type, pattern, external_system, key_regex, url_template, priority, note,
-		    revive, addressed, pr_review, exclude_pr_authors, comm_task)
+		    revive, addressed, pr_review, exclude_pr_authors, comm_task, always_task)
 		 VALUES ($1, NULLIF($2,''), $3, $4, NULLIF($5,''), NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,''), $10, $11,
-		         $12, $13, $14)
+		         $12, $13, $14, $15)
 		 RETURNING id`,
 		projectID, a.Subproject, a.CriteriaType, a.Pattern, a.ExternalSystem,
-		a.KeyRegex, a.URLTemplate, priority, a.Note, a.Revive, a.Addressed, a.PRReview, exclude, a.CommTask).Scan(&ruleID)
+		a.KeyRegex, a.URLTemplate, priority, a.Note, a.Revive, a.Addressed, a.PRReview, exclude, a.CommTask,
+		a.AlwaysTask).Scan(&ruleID)
 	if err != nil {
 		return nil, fmt.Errorf("insert capture rule (one rule per project+criteria_type+pattern — "+
 			"disable the existing one with capture_rule_set_enabled instead of re-adding?): %w", err)

@@ -92,8 +92,11 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		// AMENDED — not deleted — by board-streaming (SWT-89): 0044 adds the
 		// board_changed NOTIFY triggers, guarded by internal/dashboard
 		// TestMigration0044_Shape and the board-live integration suite.
-		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 40 && v != 41 && v != 42 && v != 43 && v != 44 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 40: comms-inbox, 41: slack-watch-sweep, 42: slack-send-queue, 43: slack-channel-mentions, 44: board-streaming)", e.Name())
+		// AMENDED — not deleted — by always-task (swb 703, SWT-93): 0045 adds
+		// capture_rules.always_task and its keyless CHECK, guarded by internal/capture
+		// TestAlwaysTask_Integration_* (swb703_always_task_integration_test.go).
+		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 40 && v != 41 && v != 42 && v != 43 && v != 44 && v != 45 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 40: comms-inbox, 41: slack-watch-sweep, 42: slack-send-queue, 43: slack-channel-mentions, 44: board-streaming, 45: always-task)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {

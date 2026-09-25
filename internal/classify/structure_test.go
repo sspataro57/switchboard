@@ -1246,7 +1246,10 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// diverges with no error anywhere.
 		// SWT-89: 44 is board-streaming's (0044_board_changed_notify.sql), noted here
 		// below the marker so the window guards above it keep their reach.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 && n != 39 && n != 40 && n != 41 && n != 42 && n != 43 && n != 44 {
+		// swb 703: 45 is always-task's (0045_capture_rule_always_task.sql:
+		// capture_rules.always_task and CHECK capture_rules_always_task_keyless),
+		// named by docs/tickets/always-task_SPEC.md's data-model section.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 && n != 39 && n != 40 && n != 41 && n != 42 && n != 43 && n != 44 && n != 45 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}

@@ -272,9 +272,9 @@ func directBackfillOrphan(ctx context.Context, pool *pgxpool.Pool, messageID int
 	var thread *int64
 	err := pool.QueryRow(ctx,
 		`SELECT id, source_thread_id FROM tasks
-		  WHERE body LIKE $1 AND body ~ $2
+		  WHERE (body LIKE $1 OR body LIKE $3) AND body ~ $2
 		  ORDER BY id LIMIT 1`,
-		directTaskBodyMarker+"%", `(^|\n)message_id: `+fmt.Sprint(messageID)+`\n`).Scan(&id, &thread)
+		directTaskBodyMarker+"%", `(^|\n)message_id: `+fmt.Sprint(messageID)+`\n`, alwaysTaskBodyMarker+"%").Scan(&id, &thread)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}
