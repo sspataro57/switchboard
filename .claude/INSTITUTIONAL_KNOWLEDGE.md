@@ -3491,6 +3491,11 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
   `push-state.json` holds per-task memory; delete it to start fresh (the first pass records
   everything and nudges nothing). The log is `push.log`, and `swb-push status` shows the live view.
 - Refuses to run with Claude Code `editorMode: vim` (typed text would be run as editor commands).
+- **A background agent's hook calls carry `agent_id` (SWT-90, 2026-09-25).** A subagent's tool
+  calls fire the parent session's PostToolUse hook with the same session_id. The hook's `presence()`
+  used to mark the session busy on them, so an idle session with a running background agent looked
+  busy for an hour and swb-push left its nudge for a turn end that had already happened. Now only
+  events without `agent_id` move the turn state.
 - **No-console email (swb #610):** a task that is new, or has new activity, in a project with no live
   Claude session in a mapped window (or whose window runs two sessions) gets an email through
   `~/.claude/notify-email.py`, batched at most once per `mail_every_s` (default 600). Memory lives under the
