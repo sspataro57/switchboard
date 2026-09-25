@@ -2396,6 +2396,21 @@ decides under the tasks row lock and restores `closed_from_status` (else
   a long-suspended connector's backlog is stamped "now" and can reopen for
   old mail, bounded by capture's 720h live horizon. Callers pass IDS only; the
   handler also refuses a non-inbound `message_id` with an ERROR (invariant 5).
+  **Amended by SWT-91 (2026-09-25) for BOT COPIES only.** The Slack leaf
+  ingests the Jira app's DMs ~1 h late, once per workspace, so collaboratory's
+  dismissed tasks came back in two same-second bursts 30 min apart for events
+  from before the dismissal. Capture (the notifier list's one reader) now passes
+  `notifier_copy: true` when the sender is on `projects.notifier_senders`, and
+  the verb (`staleCopy` in close.go, both guarded forms) then skips a Slack copy
+  outright (`slack_notifier_copy`) and any other copy SENT more than 20 min
+  before the put-down (`message_sent_before_dismissal` / `_close`). A person's
+  message keeps the pure ingest clock: Slack's p50 ingest lag is ~30 min
+  (measured 2026-09-25), so a send window on people would swallow real late
+  replies. The gate path (reengine only) never passes the flag: it does not
+  load the notifier list, so a gated project that gains one needs the list on
+  the hold first. The Slack rule covers ANY Slack name on the list, justified by
+  the Jira app (its events come from the Jira connector anyway); a Slack-only
+  bot added to a list would silently never reopen anything.
 - **D3's scope.** Only a DISMISSAL reopens. Plain `task_close` (orchestrator,
   hand-run), R8's Deliver-task close, reconciler closes and `delivered` tasks
   keep their old behaviour (promote's Q3 fall-through; capture's silent log).

@@ -72,6 +72,12 @@ line.
 - Every inbound sender counts, notification bots included. The owner's word is "ingested", and
   the prod measurement (Verification §4) shows the rate before go-live.
 
+> **Amended 2026-09-25 (SWT-91, docs/bugs/stale-copy-reopens.md):** a caller may add
+> `notifier_copy: true` (capture, from `projects.notifier_senders`). It can only SUPPRESS a
+> reopen: a Slack copy never reopens, any other copy sent more than 20 min before the put-down
+> skips. Times and channel are still read from columns (D4 holds for them). A person's message
+> keeps D2 unchanged.
+
 **D2: the clock is the INGEST time.**
 - The rule: reopen iff `normalized_messages.created_at > task_dismissals.created_at`, strictly.
 - It is not the send time (`sent_at`), for four reasons:

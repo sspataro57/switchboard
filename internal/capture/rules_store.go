@@ -325,6 +325,11 @@ type ruleDecision struct {
 	// tasks.surfaced_* (the SWT-36 D7 precedent).
 	revive  bool
 	surface bool
+	// notifierCopy (SWT-91): the message's sender is on the project's notifier
+	// list, so the revive or dismissal reopen above asks task_reopen to treat
+	// it as a copy (notifier_copy): a Slack copy never reopens, any other one
+	// only inside the send window. Carried, never a column; the reason says it.
+	notifierCopy bool
 	// deferred: the own-action guard (J17) could not yet decide, so NO row is
 	// written and the message stays pending — the live claim is not spent.
 	deferred bool
@@ -635,7 +640,7 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 				}
 			} else if decision.revive {
 				revived, err := reviveRuleTask(ctx, ex, cfg.Actor, pm, *decision.taskID,
-					*decision.extSystem, *decision.extKey)
+					*decision.extSystem, *decision.extKey, decision.notifierCopy)
 				if err != nil {
 					return stats, err
 				}
@@ -644,7 +649,7 @@ func EvaluateRules(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executo
 				}
 			} else if decision.dismissalID != 0 {
 				reopened, err := reopenRuleTask(ctx, ex, cfg.Actor, pm, *decision.taskID, decision.dismissalID,
-					*decision.extSystem, *decision.extKey)
+					*decision.extSystem, *decision.extKey, decision.notifierCopy)
 				if err != nil {
 					return stats, err
 				}
@@ -1157,6 +1162,14 @@ func decideMessageInner(ctx context.Context, pool *pgxpool.Pool, mode string, pm
 			d.dismissalID = existing.dismissalID
 			d.reason += fmt.Sprintf("; task %d was dismissed (%s); reopen requested against dismissal %d",
 				taskID, existing.dismissalCode, existing.dismissalID)
+		}
+		// Set before swb 650's revive below on purpose: that path sits behind
+		// resurfaces(), which refuses a notifier, so it never needs the flag. If
+		// that clause ever moves, move this after it.
+		if (d.revive || d.dismissalID != 0) && notifierSender(pm.msg.Sender, winner.notifiers) {
+			d.notifierCopy = true
+			d.reason += "; a notifier copy (SWT-91): a Slack copy never reopens, any other only if sent " +
+				"inside task_reopen's send window before the put-down"
 		}
 		// SWT-82: a person's Jira comment on an OPEN task surfaces it, so the
 		// reconciler holds it as it holds a revived one. The one exception to
@@ -1821,14 +1834,18 @@ func appendRuleLog(ctx context.Context, ex *executor.Executor, actor string,
 // linkRuleRef policy: the live claim is spent, and a silently swallowed
 // failure would leave the dismissed task down with nothing saying why.
 func reopenRuleTask(ctx context.Context, ex *executor.Executor, actor string,
-	pm pendingMessage, taskID, dismissalID int64, system, key string) (bool, error) {
-	args, err := json.Marshal(map[string]any{
+	pm pendingMessage, taskID, dismissalID int64, system, key string, notifierCopy bool) (bool, error) {
+	a := map[string]any{
 		"task_id":      taskID,
 		"dismissal_id": dismissalID,
 		"message_id":   pm.msg.ID,
 		"reason": fmt.Sprintf("capture: new inbound %s message %d on %s %s",
 			ruleOrNone(pm.channel), pm.msg.ID, system, key),
-	})
+	}
+	if notifierCopy {
+		a["notifier_copy"] = true
+	}
+	args, err := json.Marshal(a)
 	if err != nil {
 		return false, fmt.Errorf("marshal task_reopen args for task %d: %w", taskID, err)
 	}
@@ -1855,14 +1872,18 @@ func reopenRuleTask(ctx context.Context, ex *executor.Executor, actor string,
 // skip (not_closed, message_predates_close). An error fails the pass, the
 // reopenRuleTask policy.
 func reviveRuleTask(ctx context.Context, ex *executor.Executor, actor string,
-	pm pendingMessage, taskID int64, system, key string) (bool, error) {
-	args, err := json.Marshal(map[string]any{
+	pm pendingMessage, taskID int64, system, key string, notifierCopy bool) (bool, error) {
+	a := map[string]any{
 		"task_id":    taskID,
 		"message_id": pm.msg.ID,
 		"revive":     true,
 		"reason": fmt.Sprintf("capture: new inbound %s activity, message %d on %s %s",
 			ruleOrNone(pm.channel), pm.msg.ID, system, key),
-	})
+	}
+	if notifierCopy {
+		a["notifier_copy"] = true
+	}
+	args, err := json.Marshal(a)
 	if err != nil {
 		return false, fmt.Errorf("marshal task_reopen (revive) args for task %d: %w", taskID, err)
 	}
