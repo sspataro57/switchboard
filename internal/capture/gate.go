@@ -453,7 +453,12 @@ func applyGate(ctx context.Context, pool *pgxpool.Pool, ex *executor.Executor,
 		stats.Appended++
 		// SWT-36 D10: log first, THEN the guarded reopen.
 		if d.DismissalID != 0 {
-			reopened, err := reopenRuleTask(ctx, ex, GateActor, h.pm, d.TaskID, d.DismissalID, h.system, h.key)
+			reopened, err := reopenRuleTask(ctx, ex, GateActor, h.pm, d.TaskID, d.DismissalID, h.system, h.key,
+				// SWT-91: no notifier_copy. The gate never loads the notifier list
+				// (loadRules is its one reader), and the only gated project
+				// (reengine, 2026-09-25) has none. A gated project that gains one
+				// needs the list carried on the hold first.
+				false)
 			if err != nil {
 				return err
 			}

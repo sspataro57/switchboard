@@ -206,6 +206,11 @@ type reopenArgs struct {
 	DismissalID int64  `json:"dismissal_id,omitempty"`
 	MessageID   int64  `json:"message_id,omitempty"`
 	Revive      bool   `json:"revive,omitempty"`
+	// NotifierCopy (SWT-91): the caller judged the message a notifier's copy
+	// (the Jira app, a CI bot) by the project's notifier list, which capture alone
+	// reads. It arms staleCopy; a person's message never sets it. Guarded and
+	// revive forms only.
+	NotifierCopy bool `json:"notifier_copy,omitempty"`
 }
 
 func (a reopenArgs) guarded() bool { return a.DismissalID != 0 || a.MessageID != 0 }
@@ -220,6 +225,9 @@ func validateReopen(args []byte) error {
 	}
 	if a.Reason == "" {
 		return errors.New("missing reason")
+	}
+	if a.NotifierCopy && !a.Revive && !a.guarded() {
+		return errors.New("notifier_copy needs message_id: it qualifies an activity reopen or revive, never a plain reopen")
 	}
 	if a.Revive {
 		// SWT-45 criterion 9. A revive without a message would run as a PLAIN
@@ -353,6 +361,9 @@ const (
 //	(c) the dismissal must be this task's, open  — else skipped: dismissal_not_open
 //	(d) message.created_at > dismissal.created_at, strictly, on the ONE Postgres
 //	    clock (D2: ingest time, never sent_at)   — else skipped: message_predates_dismissal
+//	(d2) SWT-91 staleCopy, notifier_copy only: a Slack copy, or one SENT more
+//	    than reopenSendWindow before the dismissal — else skipped:
+//	    slack_notifier_copy, message_sent_before_dismissal
 //	(e) transition to closed_from_status when it is an open status, else ready
 //	    (D5), and stamp the dismissal with the message.
 func reopenGuarded(ctx context.Context, pool *pgxpool.Pool, a reopenArgs) ([]byte, error) {
@@ -408,6 +419,12 @@ func reopenGuarded(ctx context.Context, pool *pgxpool.Pool, a reopenArgs) ([]byt
 		}
 		if !overtaken {
 			result["skipped"] = skipMessagePredates
+			return nil
+		}
+		if skip, err := staleCopy(ctx, tx, a, dismissedAt, skipSentBeforeDismissal); err != nil {
+			return err
+		} else if skip != "" {
+			result["skipped"] = skip
 			return nil
 		}
 
@@ -488,6 +505,58 @@ func restoreTarget(ctx context.Context, tx pgx.Tx, taskID int64, closedFrom stri
 // down.
 const skipMessagePredatesClose = "message_predates_close"
 
+// SWT-91 stale-copy-reopens: the two skips a notifier's late COPY earns,
+// checked after the ingest clock in both guarded forms.
+//
+// D2's ingest clock alone let a copy of an event from BEFORE the put-down bring
+// the task back whenever the copy happened to be ingested after it: the Slack
+// leaf ingests the Jira app's DMs about an hour late, once per workspace, so
+// collaboratory's dismissed tasks came back in two bursts 30 minutes apart
+// (2026-09-25, #70/#377 and five more). Salvador (2026-09-25): both guards,
+// and only for bot copies — a person's message keeps D2 untouched, because
+// Slack's own ingest lag (p50 ~30 min) would swallow real late replies.
+const (
+	skipSentBeforeDismissal = "message_sent_before_dismissal"
+	skipSentBeforeClose     = "message_sent_before_close"
+	skipSlackNotifierCopy   = "slack_notifier_copy"
+)
+
+// reopenSendWindow is how far before the put-down a notifier copy may have been
+// SENT and still reopen it when ingested after. The measured worst Jira poll
+// lag is ~14.5 min and gmail's p95 ~13.5 min (2026-09-25), so 20 min keeps a
+// notification he could not yet have seen and drops the hour-late ones. A NULL
+// sent_at leaves the ingest clock alone.
+const reopenSendWindow = 20 * time.Minute
+
+// staleCopy decides the two SWT-91 skips for a caller-flagged notifier copy
+// against a task put down at putDown (a value this transaction read from
+// Postgres). "" means neither applies, and always when the caller did not flag
+// the message. The facts are COLUMNS: the channel and sent_at.
+//
+// A Slack copy never reopens: the Jira app's Slack DM repeats an event the Jira
+// connector carries itself. Any other notifier copy (a Jira email, which IMAP
+// IDLE can deliver before the Jira poll) reopens only inside the send window.
+func staleCopy(ctx context.Context, tx pgx.Tx, a reopenArgs, putDown time.Time, sentBefore string) (string, error) {
+	if !a.NotifierCopy {
+		return "", nil
+	}
+	var slack, stale bool
+	if err := tx.QueryRow(ctx,
+		`SELECT m.channel = 'slack',
+		        m.sent_at IS NOT NULL AND m.sent_at < $2::timestamptz - make_interval(secs => $3)
+		   FROM normalized_messages m WHERE m.id = $1`,
+		a.MessageID, putDown, reopenSendWindow.Seconds()).Scan(&slack, &stale); err != nil {
+		return "", fmt.Errorf("read the copy facts of message %d: %w", a.MessageID, err)
+	}
+	switch {
+	case slack:
+		return skipSlackNotifierCopy, nil
+	case stale:
+		return sentBefore, nil
+	}
+	return "", nil
+}
+
 // reviveGuarded is the activity revive (SWT-45 J6), the third form of
 // task_reopen, inside ONE transaction under the tasks row lock (the lock
 // task_dismiss and reopenGuarded take, in the same order):
@@ -510,6 +579,8 @@ const skipMessagePredatesClose = "message_predates_close"
 //	    revive); a close written without stamping it (hand SQL, a fixture INSERT)
 //	    leaves the guard before the real close (a message ingested in between
 //	    revives). It is spelled here and nowhere else.
+//	(d2) SWT-91 staleCopy (notifier_copy only) against the same guard — else skipped:
+//	    slack_notifier_copy, message_sent_before_close
 //	(e) the target is restoreTarget(closed_from_status)
 //	(f) closeTransition to the target
 //	(g) stamp the open dismissal, if any, with the message (exactly one row)
@@ -565,6 +636,12 @@ func reviveGuarded(ctx context.Context, pool *pgxpool.Pool, a reopenArgs) ([]byt
 		}
 		if !after {
 			result["skipped"] = skipMessagePredatesClose
+			return nil
+		}
+		if skip, err := staleCopy(ctx, tx, a, guard, skipSentBeforeClose); err != nil {
+			return err
+		} else if skip != "" {
+			result["skipped"] = skip
 			return nil
 		}
 
