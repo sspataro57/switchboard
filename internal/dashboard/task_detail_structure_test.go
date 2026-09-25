@@ -395,29 +395,26 @@ func TestMailThreadCaps_OneSpelling(t *testing.T) {
 	}
 }
 
-// ---- criterion 15's other half: the shared <style> block only GAINS rules ------
+// ---- criterion 15's other half: the page style ---------------------------------
 //
-// "Files likely to touch" gives task.html "CSS for the summary line only". The
-// <style> block renders on EVERY task page, including the 33-of-51 no-link
-// ones, so it is the one part of criterion 15's byte comparison that cannot be
-// literal — the integration golden excludes it and this test pins it instead.
+// swb 692 (Salvador, 2026-09-25: "the looks and feel on all the screens should
+// match the board style and branding") replaced task.html's own light <style>
+// block with the shared static/swb-1.css. What the SWT-65 pin protected still
+// holds there: <pre> wraps (a long body stays readable at his 1000px tablet
+// width, section D) and tables collapse to the page width.
 func TestTaskTemplate_StyleBlockKeepsItsRules(t *testing.T) {
 	s := tdTaskHTML(t)
-	for _, rule := range []string{
-		"body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }",
-		"h1 { font-size: 1.2rem; }",
-		"h2 { font-size: .95rem; margin: 1.3rem 0 .3rem; color: #555; }",
-		"table { border-collapse: collapse; width: 100%; }",
-		"th, td { border: 1px solid #ddd; padding: .35rem .55rem; text-align: left; font-size: .87rem; }",
-		"th { background: #f5f5f5; }",
-		"pre { background: #f7f7f7; border: 1px solid #e2e2e2; padding: .6rem; white-space: pre-wrap; }",
-		"nav a { margin-right: .8rem; }",
-		".muted { color: #777; font-size: .8rem; }",
-	} {
-		if !strings.Contains(s, rule) {
-			t.Errorf("task.html's <style> block lost the unchanged rule %q (criterion 15: nothing outside the "+
-				"{{if .SourceMessage}} block changes). white-space: pre-wrap on <pre> is also what makes a long "+
-				"body readable without horizontal scroll at his 1000px tablet width (section D)", rule)
+	if !strings.Contains(s, `href="/static/swb-1.css"`) {
+		t.Fatalf("task.html does not link static/swb-1.css (swb 692)")
+	}
+	css, err := staticFS.ReadFile("static/swb-1.css")
+	if err != nil {
+		t.Fatalf("read static/swb-1.css: %v", err)
+	}
+	for _, rule := range []string{"white-space: pre-wrap", "table { border-collapse: collapse; width: 100%;"} {
+		if !strings.Contains(string(css), rule) {
+			t.Errorf("static/swb-1.css lost %q: a long body must stay readable without horizontal scroll at his "+
+				"1000px tablet width (section D)", rule)
 		}
 	}
 }

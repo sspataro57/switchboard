@@ -544,6 +544,8 @@ type taskDetail struct {
 	// SourceMessage is nil for the MAJORITY of tasks — everything hand-made or
 	// plan-derived. Nil renders nothing at all, not an empty section (SWT-65).
 	SourceMessage *sourceMessage
+	// BackURL is the board view he came from (boardBackURL), else /tasks.
+	BackURL string
 }
 
 type eventRow struct {
@@ -669,9 +671,33 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 		d.SourceMessage = sm
 	}
 
+	d.BackURL = boardBackURL(r)
 	if err := s.tmpl.ExecuteTemplate(w, "task.html", d); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// boardBackURL is the task page's Back link: the board view he came from, so
+// its filters survive the round trip. Only a Referer on THIS host whose path is
+// exactly /tasks qualifies, and the link is REBUILT from boardKeys (criterion
+// 17: nothing from the caller is echoed), so it can never leave the dashboard.
+// Anything else — no Referer, another page, another host — is plain /tasks.
+// No script: a server-side read.
+func boardBackURL(r *http.Request) string {
+	ref, err := url.Parse(r.Referer())
+	if err != nil || !strings.EqualFold(ref.Host, r.Host) || ref.Path != "/tasks" {
+		return "/tasks"
+	}
+	q, keep := ref.Query(), url.Values{}
+	for _, k := range boardKeys {
+		if v := q.Get(k); v != "" {
+			keep.Set(k, v)
+		}
+	}
+	if len(keep) == 0 {
+		return "/tasks"
+	}
+	return "/tasks?" + keep.Encode()
 }
 
 // ---- /briefs -------------------------------------------------------------------
