@@ -32,6 +32,15 @@ package dashboard
 // the hidden refresh input, the banned tokens, the one-onchange count — and
 // changes exactly two: the script now sits OUTSIDE {{if .AutoRefresh}} and
 // carries data-refresh and data-page-interval beside the two SWT-52 attributes.
+//
+// AMENDED by board-streaming (SWT-89, docs/tickets/board-streaming_SPEC.md,
+// criterion 25), in TestTasksTemplate_AutoRefreshToggleIndicatorAndOneScript
+// only: the indicator golden becomes criterion 19's (no "every 5 s" — the board
+// is pushed now); fetch( moves from the banned list to "exactly once" (the one
+// in-place fetch); criterion 20(b)'s string-to-DOM sinks join the banned list;
+// criterion 17's three data attributes are required. Everything else is
+// unchanged. TestListTasks_RefreshIsARenderFlagNotAQuery gains criterion 15's
+// check that StreamURL, RetrySeconds and BoardVersion never come from r.URL.
 
 import (
 	"go/ast"
@@ -187,6 +196,26 @@ func TestListTasks_RefreshIsARenderFlagNotAQuery(t *testing.T) {
 			t.Errorf("listTasks uses %s: the interval never comes from the request (D15: refresh=0.1 must not flood pg-main)", banned)
 		}
 	}
+	// SWT-89 criterion 15: the three stream fields are set from consts or vars,
+	// never from the request. Every line that names one must not read r.URL, a
+	// query, a form or a header.
+	for _, f := range []string{"StreamURL", "RetrySeconds", "BoardVersion"} {
+		if !strings.Contains(body, f) {
+			t.Errorf("listTasks never sets %s (SWT-89 criterion 15)", f)
+			continue
+		}
+		for _, line := range strings.Split(body, "\n") {
+			if !strings.Contains(line, f) {
+				continue
+			}
+			for _, src := range []string{"r.URL", "Query()", "FormValue", "Header", "PathValue"} {
+				if strings.Contains(line, src) {
+					t.Errorf("listTasks sets %s from the request (%s): %q. SWT-89 criterion 15 / D15: the stream URL, the "+
+						"retry delay and the page version come from consts or vars only", f, src, strings.TrimSpace(line))
+				}
+			}
+		}
+	}
 	// No SQL inside a branch conditioned on the refresh flag.
 	fset := token.NewFileSet()
 	src, err := os.ReadFile("board.go")
@@ -259,7 +288,10 @@ func TestTasksTemplate_AutoRefreshToggleIndicatorAndOneScript(t *testing.T) {
 			"auto-refresh off (criterion 31)")
 	}
 
-	const indicator = `<p id="auto-refresh" class="muted">auto-refresh on (every {{.RefreshSeconds}} s, last refreshed {{.RenderedAt}})</p>`
+	// SWT-89 criterion 19: the words drop "every {{.RefreshSeconds}} s" (the board
+	// is pushed, not reloaded on a timer), the <p> gains data-live="indicator",
+	// and it stays child-free.
+	const indicator = `<p id="auto-refresh" class="muted" data-live="indicator">auto-refresh on (last refreshed {{.RenderedAt}})</p>`
 	if !strings.Contains(block, indicator) {
 		t.Errorf("the %s block lacks the indicator %s (criterion 31)", cond, indicator)
 	}
@@ -285,10 +317,12 @@ func TestTasksTemplate_AutoRefreshToggleIndicatorAndOneScript(t *testing.T) {
 	si := strings.Index(s, "<script")
 	tag := s[si : si+strings.Index(s[si:], ">")+1]
 	for _, attr := range []string{`data-reload="{{.ReloadURL}}"`, `data-interval="{{.RefreshSeconds}}"`,
-		`data-page-interval="{{.PageSeconds}}"`, `data-refresh="{{.RefreshMode}}"`} {
+		`data-page-interval="{{.PageSeconds}}"`, `data-refresh="{{.RefreshMode}}"`,
+		// SWT-89 criterion 17: the stream URL, the re-open delay and the page version.
+		`data-stream="{{.StreamURL}}"`, `data-retry="{{.RetrySeconds}}"`, `data-version="{{.BoardVersion}}"`} {
 		if !strings.Contains(tag, attr) {
 			t.Errorf("the <script> tag lacks %s: the script reads every knob from a server-rendered data attribute, "+
-				"never from the URL (criterion 31, SWT-67 criterion 27). Tag: %s", attr, tag)
+				"never from the URL (criterion 31, SWT-67 criterion 27, SWT-89 criterion 17). Tag: %s", attr, tag)
 		}
 	}
 	i := strings.Index(s, "<script")
@@ -305,11 +339,21 @@ func TestTasksTemplate_AutoRefreshToggleIndicatorAndOneScript(t *testing.T) {
 	if !strings.Contains(script, `addEventListener("visibilitychange"`) && !strings.Contains(script, `addEventListener('visibilitychange'`) {
 		t.Errorf("the refresh script does not re-arm on visibilitychange via addEventListener (criterion 31)")
 	}
-	for _, banned := range []string{"fetch(", "XMLHttpRequest", "htmx", "location.search", "location.href", "innerHTML",
-		"localStorage", "sessionStorage", "onchange"} {
+	// SWT-89: fetch( leaves the banned list — the board fetches its own
+	// server-rendered URL exactly once per swap — and criterion 20(b)'s
+	// string-to-DOM sinks join it. D15's other bans are unchanged.
+	if n := strings.Count(script, "fetch("); n != 1 {
+		t.Errorf("the refresh script calls fetch( %d times, want exactly 1 (SWT-89 criterion 20c: one in-place fetch of "+
+			"data-reload)", n)
+	}
+	for _, banned := range []string{"XMLHttpRequest", "htmx", "location.search", "location.href", "innerHTML",
+		"localStorage", "sessionStorage", "onchange",
+		// SWT-89 criterion 20(b).
+		"outerHTML =", "insertAdjacentHTML", "document.write", "createContextualFragment", "eval(", "new Function",
+		"srcdoc"} {
 		if strings.Contains(script, banned) {
-			t.Errorf("the refresh script contains %q; D15: it builds no URL, fetches nothing, rewrites no DOM, stores "+
-				"nothing (and the one-onchange count covers the script too)", banned)
+			t.Errorf("the refresh script contains %q; D15: it builds no URL, parses no HTML string into the live DOM, "+
+				"stores nothing (and the one-onchange count covers the script too)", banned)
 		}
 	}
 	// Outside the project select, no inline event handler anywhere.

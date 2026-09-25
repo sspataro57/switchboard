@@ -1,10 +1,11 @@
 package dashboard
 
-// SWT-67 B21: the full-screen shell. A full-page reload exits the browser's
-// fullscreen, and the board's auto-refresh IS a full-page reload, so FULL on
-// /tasks itself would last until the next refresh. GET /kiosk holds the board
-// in an iframe instead: the shell's document goes fullscreen once, on a tap,
-// and the board reloads inside it. It reads nothing and executes nothing.
+// SWT-67 B21: the full-screen shell. A full-page navigation exits the browser's
+// fullscreen. Since SWT-89 the board updates in place, but it still navigates
+// (a row tap, a verb's redirect, a version reload after a deploy, a login), so
+// FULL on /tasks itself would end at the first of those. GET /kiosk holds the
+// board in an iframe instead: the shell's document goes fullscreen once, on a
+// tap, and the board navigates inside it. It reads nothing and executes nothing.
 
 import (
 	"net/http"

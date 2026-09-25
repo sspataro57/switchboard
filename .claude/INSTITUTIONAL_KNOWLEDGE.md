@@ -2589,6 +2589,10 @@ activity (SWT-45)".
 
 ## Board lights, auto-refresh and session signals (SWT-52, board-status-lights)
 
+> SWT-89 (board-streaming, 2026-09-25): D15's timed reload loop is superseded. With refresh=on the board is
+> pushed over SSE and swaps regions in place; see "Board streaming" below. The load statement's cadence is revised
+> there: one render per change, at most one per 2 s in a burst, one per 60 s idle, 5 s only while the stream is down.
+
 > SWT-67: the one `<script>` now renders on EVERY board page and the reload loop arms from
 > `data-refresh="on"` (`if (!refreshOn) return;` in `arm()`), not from a template conditional. See
 > "Board departures view".
@@ -2695,7 +2699,9 @@ activity (SWT-45)".
   popups) — the markup never renders one open, so an open one is his; a popup
   left open pauses reloads, and the "last refreshed" time shows it.
 - **Load (D15's cost statement, pg-main is shared).** One refresh is exactly one
-  normal board render; there is no refresh-only query. Per visible tab, every 5 s:
+  normal board render; there is no refresh-only query. Per visible tab, every 5 s
+  (since SWT-89: per change, at most one per 2 s in a burst, one per 60 s idle;
+  every 5 s only while the stream is down):
 
   | Statement | Count |
   |-----------|-------|
@@ -2997,6 +3003,8 @@ did not author, from the GitHub notification mail he already receives. Runbook:
   lost to none of them.
 
 ## Board departures view (SWT-67, board-departures)
+
+> SWT-89: B13's page-cycle wait is retired. A swap keeps each panel's page, so an update no longer waits for page 1.
 
 - **What it is.** `/tasks` is a dark split-flap departures board: two panes of panels that page instead of
   scrolling, a sign header (tallies, clock, FULL), a ticker footer, and a machine-status list under 760px.
@@ -3491,8 +3499,25 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
   `push-state.json` holds per-task memory; delete it to start fresh (the first pass records
   everything and nudges nothing). The log is `push.log`, and `swb-push status` shows the live view.
 - Refuses to run with Claude Code `editorMode: vim` (typed text would be run as editor commands).
+- **A background agent's hook calls carry `agent_id` (SWT-90, 2026-09-25).** A subagent's tool
+  calls fire the parent session's PostToolUse hook with the same session_id. The hook's `presence()`
+  used to mark the session busy on them, so an idle session with a running background agent looked
+  busy for an hour and swb-push left its nudge for a turn end that had already happened. Now only
+  events without `agent_id` move the turn state.
 - **No-console email (swb #610):** a task that is new, or has new activity, in a project with no live
   Claude session in a mapped window (or whose window runs two sessions) gets an email through
   `~/.claude/notify-email.py`, batched at most once per `mail_every_s` (default 600). Memory lives under the
   pseudo-window `_no_console`, and every project is seeded from the `projects` table, so an empty project's
   first task still emails. Mute a project with `notify_skip` in push.json.
+
+## Board streaming (board-streaming, SWT-89, 2026-09-25)
+
+The /tasks board no longer reloads on a timer; it is pushed. Supersedes SWT-52 D15's reload loop and SWT-67 B13's page-cycle wait.
+- **Channel:** migration 0044's `board_changed_notify()` runs `pg_notify('board_changed', '<table>:<id>')` from row triggers on `tasks`, `task_dismissals`, `classify_promotions` and `external_refs` (INSERT/DELETE, plus UPDATE only `WHEN (OLD.* IS DISTINCT FROM NEW.*)`). It is NOT the orchestrator's `task_events` channel, which is incomplete for the board: `task_mark_activity`, `create_task` and a `task_signal` refresh write no event. `projects` and `normalized_messages` are tick-only.
+- **Coverage guard:** `boardNotifyTables` / `boardTickOnlyTables` in `internal/dashboard/live.go`. A structure test fails if the board's SQL reads a table in neither list, so a new board query must decide which list it belongs in.
+- **Hub:** one `BoardHub` per dashboard process. `pool.Acquire` then `Hijack()` (the LISTEN never shrinks the render pool), `application_name = 'switchboard-board-live'`. Coalescing: 250 ms leading edge, at most one per 2 s, always a trailing broadcast, plus a 60 s tick for time-only facts. Going blind closes every stream, and the hub reconnects with backoff and one catch-up broadcast.
+- **SSE:** `GET /tasks/stream` runs no SQL and carries no data (`event: change`, a `: ping` every 20 s). **`cmd/dashboard` must never set a `WriteTimeout`**: it cuts every stream. `X-Accel-Buffering: no` keeps ingress-nginx from buffering. If pings arrive in a lump after a roll, add `proxy-buffering: "off"` to the Ingresses.
+- **Page:** five `data-live` regions (alert, tally, main, counts, indicator). The script fetches its own `data-reload` URL, parses it with DOMParser and `replaceWith(importNode(...))`. innerHTML and friends are banned. A new `data-version` (the template hash), a redirect or a non-HTML answer means one full reload. 502/503 keep the page. Panels keep their page, and only changed rows flip.
+- **Sessions are in memory:** a dashboard restart logs every browser out, so an open board reloads once into login after a deploy. This is pre-existing, not a regression. The fetch uses `redirect: "manual"`, so this also works once OIDC is on and login redirects to another host: a cross-origin redirect would otherwise make fetch fail silently and leave the board polling forever.
+- **Column types on the triggered tables:** `WHEN (OLD.* IS DISTINCT FROM NEW.*)` needs an equality operator for every column, checked per UPDATE, not at CREATE. A `json` or `xml` column would fail every UPDATE of a row with a value there. `TestBoardLive_Integration_NoColumnTypeWithoutEquality` guards it; use jsonb.
+- **HTTP/1.1 residual:** six or more board tabs on the plain-http host exhaust the browser's per-host connections. The tablet's https host is HTTP/2.

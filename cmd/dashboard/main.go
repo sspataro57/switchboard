@@ -104,6 +104,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// SWT-89: one LISTEN per process, pushed to every open board over SSE.
+	// /healthz does not depend on it: a blind hub degrades boards to polling,
+	// it never gets the pod that serves approvals restarted.
+	hub := dashboard.NewBoardHub(pool)
+	go hub.Run(ctx) // returns only when ctx ends; errors are logged and retried inside
+	srv.SetBoardHub(hub)
 
 	addr := os.Getenv("DASHBOARD_ADDR")
 	if addr == "" {

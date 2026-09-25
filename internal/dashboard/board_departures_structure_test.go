@@ -47,6 +47,19 @@ package dashboard
 //   - the @font-face src put back on fonts.gstatic.com -> NoThirdPartyURL.
 //   - /static/ wrapped in s.auth.Require -> StaticRouteIsOpenAndTheRestIsNot.
 //   - a woff2 replaced by a placeholder -> StaticAssets.
+//
+// AMENDED by board-streaming (SWT-89, docs/tickets/board-streaming_SPEC.md,
+// criterion 25):
+//   - ByteUnchangedFragmentsSurviveTheRestyle: the indicator fragment becomes
+//     criterion 19's (no "every … s"; data-live="indicator").
+//   - OneAutoRefreshConditionalWrappingTheIndicatorOnly: the SPEC says
+//     "unchanged", but its probe `<p id="auto-refresh" class="muted">` (closing
+//     `>` included) cannot match the criterion-19 indicator, which carries
+//     data-live="indicator" before the `>`. The probe is re-pinned to the new
+//     opening tag; every other assertion (one conditional, one <p, no script,
+//     no toggle) is unchanged.
+//   - UntouchedHelpersStayUntouched: additive, per criterion 15 — the untouched
+//     helpers learn none of the three stream fields.
 
 import (
 	"crypto/sha256"
@@ -314,7 +327,10 @@ func TestBoardPageInterval_IsNineSecondsAndNeverAURLValue(t *testing.T) {
 // fails in practice, by a new field leaking into an old function.
 func TestBoardDepartures_UntouchedHelpersStayUntouched(t *testing.T) {
 	newNames := []string{"Remark", "Elapsed", "ProjectHue", "HighPriority", "Panes", "Tally", "PageSeconds",
-		"ProjectLabel", "RefreshMode", "StateAgeMinutes", "boardPanes", "boardTallies", "remarkFor", "elapsedFor"}
+		"ProjectLabel", "RefreshMode", "StateAgeMinutes", "boardPanes", "boardTallies", "remarkFor", "elapsedFor",
+		// SWT-89 criterion 15: the stream fields and their sources stay out of the
+		// filter, redirect and URL helpers.
+		"StreamURL", "RetrySeconds", "BoardVersion", "boardVersion", "boardLiveRetry"}
 	for _, fn := range []string{"boardQuery", "boardBack", "boardRefreshURLs", "boardAdvanced", "boardURL",
 		"boardDayStart", "reopenMarkers", "dismissTaskAction", "closeTaskAction"} {
 		body := funcBodySrc(t, "board.go", fn)
@@ -436,7 +452,8 @@ func TestTasksTemplate_ByteUnchangedFragmentsSurviveTheRestyle(t *testing.T) {
 		`<a id="advanced-clear" href="{{.ClearAdvancedURL}}">clear advanced</a>`,
 		`<a id="auto-refresh-toggle" href="{{.RefreshToggleURL}}">`,
 		`{{if not .AutoRefresh}}`,
-		`<p id="auto-refresh" class="muted">auto-refresh on (every {{.RefreshSeconds}} s, last refreshed {{.RenderedAt}})</p>`,
+		// SWT-89 criterion 19: the indicator's words and its data-live marker.
+		`<p id="auto-refresh" class="muted" data-live="indicator">auto-refresh on (last refreshed {{.RenderedAt}})</p>`,
 		`{{if .Flash}}`,
 		`{{with .OrchAlert}}`,
 		`<p class="muted" id="light-legend">`,
@@ -479,8 +496,9 @@ func TestTasksTemplate_OneAutoRefreshConditionalWrappingTheIndicatorOnly(t *test
 	if !ok {
 		t.Fatalf("the {{if .AutoRefresh}} block is never closed")
 	}
-	if !strings.Contains(block, `<p id="auto-refresh" class="muted">`) {
-		t.Errorf("the {{if .AutoRefresh}} block does not hold the indicator (criterion 20)")
+	// SWT-89: re-pinned to criterion 19's opening tag (data-live="indicator").
+	if !strings.Contains(block, `<p id="auto-refresh" class="muted" data-live="indicator">`) {
+		t.Errorf("the {{if .AutoRefresh}} block does not hold the indicator (criterion 20, SWT-89 criterion 19)")
 	}
 	if strings.Contains(block, "<script") {
 		t.Errorf("the {{if .AutoRefresh}} block still holds the <script>. Criterion 20 / B12: the clock, the paging, " +

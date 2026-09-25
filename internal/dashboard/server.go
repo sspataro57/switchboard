@@ -50,6 +50,9 @@ type Server struct {
 	ex   Exec
 	auth *Auth
 	tmpl *template.Template
+	// live is the process's board hub (SWT-89); nil answers the stream 503 and
+	// open boards poll in place.
+	live *BoardHub
 }
 
 func NewServer(pool *pgxpool.Pool, ex Exec, auth *Auth) (*Server, error) {
@@ -85,6 +88,8 @@ func (s *Server) Handler() http.Handler {
 	})))
 	// SWT-10: full board, task detail, briefs, plan review, exports.
 	mux.Handle("GET /tasks", s.auth.Require(http.HandlerFunc(s.listTasks)))
+	// SWT-89: the board's change stream. The literal wins over {id} (Go 1.22 mux).
+	mux.Handle("GET /tasks/stream", s.auth.Require(http.HandlerFunc(s.boardStream)))
 	mux.Handle("GET /tasks/{id}", s.auth.Require(http.HandlerFunc(s.showTask)))
 	// SWT-67 B21: the full-screen shell around the board (kiosk.go).
 	mux.Handle("GET /kiosk", s.auth.Require(http.HandlerFunc(s.showKiosk)))
