@@ -170,7 +170,8 @@ func TestSkill_SessionNameAndTaskContext(t *testing.T) {
 	body := doc[4+end:]
 	lower := strings.ToLower(body)
 
-	for _, tok := range []string{"ListAgents", "This session is", "session", "task_context", "worker_id",
+	// swb 431: the hook's "Your swb session name is" replaces ListAgents' "This session is".
+	for _, tok := range []string{"Your swb session name is", "tmux window", "session", "task_context", "worker_id",
 		"task_signal {task_id, state, session}"} {
 		if !strings.Contains(body, tok) {
 			t.Errorf("%s never mentions %q (criteria 23, 35)", skillRel, tok)
@@ -192,14 +193,14 @@ func TestSkill_SessionNameAndTaskContext(t *testing.T) {
 	}
 	s := lower[step[0]:stepEnd]
 	for _, want := range []struct{ re, why string }{
-		{`listagents`, "call ListAgents once per session, before the first signal"},
-		{`deferred|toolsearch`, "it may be a deferred tool: load it first"},
-		{`this session is <name>`, "the name comes from its first line"},
-		{`\[ref\]`, "…with a trailing [ref] dropped"},
+		{`tmux window name`, "the name is the tmux window name (swb 431)"},
+		{`last folder of its working`, "…else the last folder of the working directory"},
+		{`your swb session name is <name>`, "the hook states it at session start"},
+		{`rewrites any other name`, "…and rewrites any other name"},
 		{`(?s)needs_input.{0,200}session|session.{0,200}needs_input`, "pass it as session on every working and needs_input signal"},
 		{`clear`, "…and on clear too"},
-		{`renam`, "if Salvador renames the session, call ListAgents again"},
-		{`\(no listagents\)`, "the S10 fallback: <repo basename> (no ListAgents)"},
+		{`do not call .?listagents`, "ListAgents' name is no longer the board's"},
+		{`\(no hook\)`, "the fallback without the hook: <repo basename> (no hook)"},
 		{`the board will show this session as`, "the S10 one-line notice"},
 	} {
 		if !regexp.MustCompile(want.re).MatchString(s) {
@@ -208,8 +209,8 @@ func TestSkill_SessionNameAndTaskContext(t *testing.T) {
 	}
 
 	for _, want := range []struct{ re, why string }{
-		{`(?s)refus.{0,200}session.{0,300}listagents.{0,200}retry once`,
-			"step 4: a refusal naming session is YOUR argument error — call ListAgents and retry once"},
+		{`(?s)refus.{0,200}session.{0,300}your swb session name is.{0,200}retry once`,
+			"step 5: a refusal naming session is YOUR argument error — pass the hook's name and retry once"},
 		{`nothing verifies it`, "step 5: the board shows the name you pass, but nothing verifies it"},
 		{`still the only guard against a wrong light`, "…so the rule is still the only guard against a wrong light"},
 		{`(?s)task_context.{0,160}never pass .?worker_id|never pass .?worker_id.{0,160}task_context`,

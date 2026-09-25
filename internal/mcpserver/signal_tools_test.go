@@ -88,14 +88,15 @@ func TestTaskSignalSchema(t *testing.T) {
 		if sp.MaxLength == nil || *sp.MaxLength != tools.SessionNameMax {
 			t.Errorf("task_signal session maxLength = %v, want tools.SessionNameMax = %d", sp.MaxLength, tools.SessionNameMax)
 		}
-		for _, want := range []string{"ListAgents", "This session is <name>", "required for working and needs_input",
-			"the name only, not the [ref]"} {
+		for _, want := range []string{"tmux window name", "Your swb session name is <name>", "required for working and needs_input",
+			"the name only"} { // swb 431: the hook's name replaces SWT-56's ListAgents name
 			if !strings.Contains(sp.Description, want) {
 				t.Errorf("task_signal session description does not say %q (criterion 20): %q", want, sp.Description)
 			}
 		}
 	}
-	const always = "Always pass session (your name from ListAgents) with working and needs_input: the board shows it so " +
+	const always = "Always pass session (your swb session name: the tmux window name, else the last folder of the working " +
+		"directory, exactly as the SessionStart hook states it) with working and needs_input: the board shows it so " +
 		"Salvador knows which session to reply in."
 	if !strings.Contains(tl.Description, always) {
 		t.Errorf("task_signal description lacks %q (criterion 20)", always)

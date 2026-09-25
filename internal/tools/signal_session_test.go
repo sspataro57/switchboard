@@ -99,11 +99,11 @@ func TestNormalizeSessionName_Refuses(t *testing.T) {
 		wantIn   []string
 	}
 	cases := []refusal{
-		{"empty", "", []string{"missing session", "ListAgents", "This session is"}},
-		{"blank", "   ", []string{"missing session", "ListAgents", "This session is"}},
+		{"empty", "", []string{"missing session", "tmux window name", "Your swb session name is"}},
+		{"blank", "   ", []string{"missing session", "tmux window name", "Your swb session name is"}},
 		{"201 runes", emoji200() + "x", []string{"200"}},
-		{"the whole ListAgents line", "This session is kube-c7 [x]", []string{"pass only the <name>"}},
-		{"the whole line, lower case", "this session is kube-c7", []string{"pass only the <name>"}},
+		{"the whole ListAgents line", "This session is kube-c7 [x]", []string{"pass only the session name"}},
+		{"the whole line, lower case", "this session is kube-c7", []string{"pass only the session name"}},
 	}
 	// Every refused rune is named by %U.
 	for _, tc := range []struct {
@@ -179,7 +179,7 @@ func TestValidateSignal_Session(t *testing.T) {
 			{"no session", `{"task_id":412,"state":"` + st + `"}`, "missing session"},
 			{"empty session", `{"task_id":412,"state":"` + st + `","session":""}`, "missing session"},
 			{"blank session", `{"task_id":412,"state":"` + st + `","session":"   "}`, "missing session"},
-			{"the whole line", `{"task_id":412,"state":"` + st + `","session":"This session is kube-c7 [x]"}`, "pass only the <name>"},
+			{"the whole line", `{"task_id":412,"state":"` + st + `","session":"This session is kube-c7 [x]"}`, "pass only the session name"},
 			{"a tab", `{"task_id":412,"state":"` + st + `","session":"kube\tc7"}`, "U+0009"},
 		} {
 			err := validateSignal([]byte(tc.args))

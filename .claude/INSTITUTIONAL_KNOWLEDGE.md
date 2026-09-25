@@ -2609,7 +2609,9 @@ activity (SWT-45)".
   `none`. A filter can hide a queue's head, never promote the second task.
 - **Session state is three columns on `tasks` (0033 + 0036), not a status.**
   SWT-56 added `working_session`, the signalling session's self-reported name
-  (ListAgents' `This session is <name>`). Only three files write the columns
+  (since swb 431 the tmux window name, else the working directory's last folder, as
+  ~/.claude/swb-hook.py states and enforces it; SWT-56 originally used ListAgents'
+  `This session is <name>`). Only three files write the columns
   (structure scan, allow-list with minimum counts), in four statements (signal
   set/clear, close, reopen, claim). `TestWorkingSession_TravelsWithWorkingState`
   requires every literal that NULLs or sets `working_state` to NULL or set

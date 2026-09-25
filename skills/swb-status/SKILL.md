@@ -39,38 +39,45 @@ one of its tools.
      do not use `task_get_next` to read a task.
 
 3. **Your session name.**
-   - Call `ListAgents` once per session, before your first signal. It may be a
-     deferred tool: load it first (ToolSearch).
-   - Take the name from its first line, `This session is <name> [ref]`: the text
-     after `This session is `, with a trailing ` [ref]` dropped. For example
-     `This session is kube-c7 [d5130d]` gives `kube-c7`.
-   - Remember it for the conversation, and pass it as `session` on EVERY
-     `working` and `needs_input` signal, and on `clear` too.
-   - If Salvador renames the session, call `ListAgents` again.
-   - If `ListAgents` is not among your tools (even after ToolSearch), errors, or
-     prints no `This session is` line, pass `<basename of the working
-     directory> (no ListAgents)`, for example `kube (no ListAgents)`, and tell
-     him once, in one line: "the board will show this session as <that>".
+   - It is this session's tmux window name, else the last folder of its working
+     directory (Salvador, 2026-09-21). You do not work it out yourself: the swb
+     hook states it at session start, in a line that reads
+     `Your swb session name is <name>`. Use exactly that name.
+   - Pass it as `session` on EVERY `working` and `needs_input` signal, and on
+     `clear` too.
+   - The hook rewrites any other name you pass, so a different name only adds a
+     second event. Do not call `ListAgents` for this: its name is a different
+     thing and no longer what the board shows.
+   - If no such line reached you (the hook is not installed on this machine),
+     pass `<basename of the working directory> (no hook)`, for example
+     `kube (no hook)`, and tell him once, in one line:
+     "the board will show this session as <that>".
 
 4. **When to signal** (`task_signal {task_id, state, session}`):
-   - When you start working on the task: `working`.
-   - Each time you log a step with `task_append_log`, or at least every hour on
-     long work: `working` again. This keeps the light fresh; after 2 hours without
-     a signal the board shows the task as possibly dead (a hollow yellow ring).
-   - Immediately BEFORE you stop to ask him something and end your turn:
-     `needs_input`, with your `session` so the red light names where to reply.
-     Then ask in the console as normal. If `notify-idle` applies, use it too: the
-     red light and the email are different channels, so do both, not one in
-     place of the other.
-   - When his reply arrives, as your first action: `working`.
+   - When you start working on the task: `working`. That one signal BINDS this
+     session to the task.
+   - After that, where the swb hook is installed, it keeps the light for you:
+     `working` whenever a prompt arrives or a tool runs, `needs_input` when your
+     turn ends or a permission prompt shows, `clear` when the session exits.
+     Signalling those yourself is still harmless, never wrong.
+   - Without the hook, keep it yourself: `working` each time you log a step with
+     `task_append_log`, or at least every hour on long work (after 2 hours
+     without a signal the board shows the task as possibly dead, a hollow yellow
+     ring); `needs_input`, with your `session`, immediately BEFORE you stop to
+     ask him something and end your turn, so the red light names where to reply;
+     and, when his reply arrives, as your first action: `working`.
+   - Either way, ask in the console as normal. If `notify-idle` applies, use it
+     too: the red light and the email are different channels, so do both, not
+     one in place of the other.
    - When you pause or switch away unfinished, or he says `swb stop <id>`: `clear`.
    - When you finish: `task_close` with a one-line outcome ("swb done"). That makes
      the row green and clears the state, so do not also send `clear`. Do not close
      a task you did not signal or that he did not hand you.
 
 5. **A refused signal.**
-   - A refusal that names `session` is YOUR argument error: fix it (call
-     `ListAgents`, pass only the `<name>`) and retry once.
+   - A refusal that names `session` is YOUR argument error: fix it (pass the
+     name from the hook's `Your swb session name is <name>` line, the name only)
+     and retry once.
    - Any other refusal (a closed task, or one held by a worker's claim): tell him
      once, in one line. Do not retry it or work around it.
 

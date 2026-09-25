@@ -50,35 +50,39 @@ func SignalStates() []string { return append([]string(nil), signalStates...) }
 var signalSettable = map[string]bool{"holding": true, "ready": true, "blocked": true}
 
 // SessionNameMax is the longest session name task_signal stores, in runes
-// (SWT-56 S3): Claude Code's own session-name cap, so any name ListAgents
-// prints fits. The board truncates visually, never in storage. Spelled once.
+// (SWT-56 S3): Claude Code's own session-name cap. The swb hook truncates the
+// tmux window or folder name to it, so the name it states always fits. The board truncates visually, never in storage. Spelled once.
 const SessionNameMax = 200
 
 type signalArgs struct {
 	TaskID int64  `json:"task_id"`
 	State  string `json:"state"`
-	// Session is the calling session's name from ListAgents' first line, "This
-	// session is <name> [ref]" (SWT-56 S1): required on working and needs_input,
-	// optional on clear. Self-reported data, never authority.
+	// Session is the calling session's swb name: its tmux window name, else the
+	// last folder of its working directory, as ~/.claude/swb-hook.py states it
+	// at session start (swb 431, superseding SWT-56 S1's ListAgents name):
+	// required on working and needs_input, optional on clear. Self-reported
+	// data, never authority.
 	Session string `json:"session,omitempty"`
 	// WorkerID is injected by the MCP adapter and recorded in the event; it is
 	// never used as authority (the actor on the call is).
 	WorkerID string `json:"worker_id,omitempty"`
 }
 
-// NormalizeSessionName is SWT-56 S3, in order: trim; empty is "missing"; the
-// whole ListAgents line is refused; at most SessionNameMax runes; every rune
+// NormalizeSessionName is SWT-56 S3, in order: trim; empty is "missing"; a
+// pasted "This session is …" line (ListAgents', the pre-431 source) is refused; at most SessionNameMax runes; every rune
 // printable (unicode.IsPrint) or the ZWJ that joined emoji need. It returns the
 // trimmed name, the only rewrite. A refused value is echoed by %.64q, so a
 // pasted blob cannot flood the error or the audit row.
 func NormalizeSessionName(s string) (string, error) {
 	if sessionBlank(s) {
-		return "", errors.New(`missing session: working and needs_input need this session's name — call ListAgents ` +
-			`once and pass the <name> from its first line, "This session is <name> [ref]"`)
+		return "", errors.New(`missing session: working and needs_input need this session's swb name — its tmux ` +
+			`window name, else the last folder of its working directory, exactly as the SessionStart hook states it: ` +
+			`"Your swb session name is <name>"`)
 	}
 	name := strings.TrimSpace(s)
 	if strings.HasPrefix(strings.ToLower(name), "this session is") {
-		return "", fmt.Errorf(`session %.64q: pass only the <name> from "This session is <name> [ref]", not the whole line`, name)
+		return "", fmt.Errorf(`session %.64q: pass only the session name (the <name> in "Your swb session name is <name>"), `+
+			`not a whole "This session is …" line`, name)
 	}
 	if n := utf8.RuneCountInString(name); n > SessionNameMax {
 		return "", fmt.Errorf("session %.64q is %d characters; the cap is %d", name, n, SessionNameMax)
@@ -86,7 +90,7 @@ func NormalizeSessionName(s string) (string, error) {
 	for _, r := range name {
 		if !unicode.IsPrint(r) && r != 0x200D {
 			return "", fmt.Errorf("session %.64q contains %U, which is not a printable character; "+
-				"pass the plain <name> from ListAgents", name, r)
+				"pass the plain session name", name, r)
 		}
 	}
 	return name, nil
