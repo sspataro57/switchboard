@@ -1158,6 +1158,7 @@ func tdNormalize(page string, id int64) string {
 	n := strconv.FormatInt(id, 10)
 	s = strings.ReplaceAll(s, "task "+n+"</title>", "task {{ID}}</title>")
 	s = strings.ReplaceAll(s, "<small>Task "+n+"</small>", "<small>Task {{ID}}</small>") // the sign (swb 692)
+	s = strings.ReplaceAll(s, `action="/tasks/`+n+`/`, `action="/tasks/{{ID}}/`)         // the verbs (swb 722)
 	return strings.ReplaceAll(s, "<h1>#"+n+" ", "<h1>#{{ID}} ")
 }
 
@@ -1464,5 +1465,34 @@ func TestTaskDetail_Integration_StatementCost(t *testing.T) {
 			t.Errorf("the task detail render issued a write: %q. Invariant 3 is satisfied by ABSENCE here — showTask "+
 				"is a read-only handler and stays one (criterion 23)", s)
 		}
+	}
+}
+
+// swb 722: the task page's Requeue is fed by the tasks COLUMNS (activity_at,
+// reviewed_at), not a fixture. MUTATION: break showTask's needs_review SELECT
+// (or its Scan) -> the first assertion goes red.
+func TestTaskPage_Integration_RequeueFollowsTheActivityColumns(t *testing.T) {
+	dashGuard(t)
+	ctx := context.Background()
+	pool := dashPool(t, ctx)
+	defer pool.Close()
+	cleanupTaskDetail(t, ctx, pool)
+	defer cleanupTaskDetail(t, ctx, pool)
+	f := seedTaskDetail(t, ctx, pool)
+	ts, client := newDashServer(t, ctx, pool)
+	defer ts.Close()
+
+	requeue := fmt.Sprintf(`action="/tasks/%d/requeue"`, f.t5)
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET activity_at = now(), reviewed_at = NULL WHERE id=$1`, f.t5); err != nil {
+		t.Fatal(err)
+	}
+	if page := tdGetTask(t, client, ts.URL, f.t5); !strings.Contains(page, requeue) {
+		t.Errorf("unreviewed activity: the task page offers no Requeue")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tasks SET reviewed_at = activity_at + interval '1 second' WHERE id=$1`, f.t5); err != nil {
+		t.Fatal(err)
+	}
+	if page := tdGetTask(t, client, ts.URL, f.t5); strings.Contains(page, requeue) {
+		t.Errorf("reviewed activity: the task page still offers Requeue")
 	}
 }

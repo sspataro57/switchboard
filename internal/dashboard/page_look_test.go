@@ -3,7 +3,9 @@ package dashboard
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"html/template"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -121,3 +123,86 @@ func TestSharedStylesheet_KeepsTheBoardsTokens(t *testing.T) {
 }
 
 const swb1CSSHash = "ca9b2ee2802dbd8b16797586079042a2a09c04aeaf27f96d828a79ad51894eae"
+
+// swb 722: the task page carries the board's verbs, posting to the board's
+// endpoints with the board view's filters as hidden fields. Done shows only on
+// an open human task; Requeue only when the task needs review.
+func TestTaskPage_CarriesTheBoardsVerbs(t *testing.T) {
+	tmpl, err := template.ParseFS(templateFS, "templates/*.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{tmpl: tmpl}
+	render := func(d taskDetail) string {
+		var b strings.Builder
+		if err := srv.tmpl.ExecuteTemplate(&b, "task.html", d); err != nil {
+			t.Fatal(err)
+		}
+		return b.String()
+	}
+	d := taskDetail{taskRow: taskRow{ID: 707, Title: "t", Status: "ready", AssigneeType: "human"},
+		BackURL: "/tasks?project=personal", BackFilters: map[string]string{"project": "personal"}}
+	page := render(d)
+	for _, want := range []string{`action="/tasks/707/close"`, `action="/tasks/707/dismiss"`, `action="/tasks/707/attach"`,
+		`<input type="hidden" name="project" value="personal">`, `name="reason_code"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("task page lacks %s", want)
+		}
+	}
+	if strings.Contains(page, `/tasks/707/requeue`) {
+		t.Errorf("Requeue shown on a task that does not need review")
+	}
+	d.NeedsReview = true
+	if !strings.Contains(render(d), `action="/tasks/707/requeue"`) {
+		t.Errorf("Requeue missing on a task that needs review")
+	}
+	d.AssigneeType, d.NeedsReview = "claude", false
+	if strings.Contains(render(d), `/tasks/707/close`) {
+		t.Errorf("Done shown on a claude task (the board shows it on human rows only)")
+	}
+	d.AssigneeType, d.Status = "human", "closed"
+	if strings.Contains(render(d), `/tasks/707/close`) {
+		t.Errorf("Done shown on a closed task")
+	}
+}
+
+func TestTaskPage_NeedsReviewMatchesTheBoard(t *testing.T) {
+	src, err := os.ReadFile("board.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	norm := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	if !strings.Contains(norm(string(src)), norm(needsReviewSQL)+" AS needs_review") {
+		t.Errorf("boardLightFacts' needs_review no longer reads %q: the task page's Requeue would drift from the board's",
+			needsReviewSQL)
+	}
+}
+
+// swb 722: the verbs' hidden fields are the Referer board view's boardKeys only,
+// escaped. MUTATIONS: range the Referer's whole query -> flash leaks; drop the
+// host check -> the foreign case fills.
+func TestBoardBackValues_FeedsOnlyBoardKeysEscaped(t *testing.T) {
+	r := httptest.NewRequest("GET", "https://switchboard.sspataro.com/tasks/707", nil)
+	r.Header.Set("Referer", `https://switchboard.sspataro.com/tasks?project=a"><script>x&flash=hi&status=ready`)
+	v := boardBackValues(r)
+	if v.Get("flash") != "" || v.Get("status") != "ready" || v.Get("project") != `a"><script>x` {
+		t.Errorf("boardBackValues = %v, want project and status only", v)
+	}
+	tmpl, err := template.ParseFS(templateFS, "templates/*.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	d := taskDetail{taskRow: taskRow{ID: 707, Status: "ready", AssigneeType: "human"},
+		BackFilters: map[string]string{"project": v.Get("project")}}
+	if err := tmpl.ExecuteTemplate(&b, "task.html", d); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), `"><script>`) {
+		t.Errorf("a hostile filter value reached the page unescaped")
+	}
+	r.Header.Set("Referer", "https://evil.example/tasks?project=x")
+	if got := boardBackValues(r); len(got) != 0 {
+		t.Errorf("a foreign Referer fed %v", got)
+	}
+}

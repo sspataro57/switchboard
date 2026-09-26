@@ -98,8 +98,11 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		// AMENDED — not deleted — by sources-slow (swb 709): 0046 adds two partial
 		// indexes on raw_source_items, guarded by internal/dashboard
 		// TestSources_CountersMatchTheirIndexes.
-		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 40 && v != 41 && v != 42 && v != 43 && v != 44 && v != 45 && v != 46 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 40: comms-inbox, 41: slack-watch-sweep, 42: slack-send-queue, 43: slack-channel-mentions, 44: board-streaming, 45: always-task, 46: sources-slow)", e.Name())
+		// AMENDED — not deleted — for job-agent (2026-09-26): 0047 widens
+		// external_refs.system to accept 'job_agent' (a95b40a); its rationale is the
+		// migration's own header.
+		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 40 && v != 41 && v != 42 && v != 43 && v != 44 && v != 45 && v != 46 && v != 47 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 40: comms-inbox, 41: slack-watch-sweep, 42: slack-send-queue, 43: slack-channel-mentions, 44: board-streaming, 45: always-task, 46: sources-slow, 47: job-agent refs)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {
