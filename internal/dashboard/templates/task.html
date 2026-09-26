@@ -9,6 +9,13 @@
     .source-message { margin-top: 1.3rem; }
     .source-message summary { font-size: .87rem; padding: .25rem 0; }
     .source-message details { border-top: 1px solid var(--line); }
+    .verbs { display: flex; flex-wrap: wrap; gap: .6rem 1.2rem; margin: 1rem 0 .4rem; padding: .7rem .8rem;
+             background: var(--cell); border: 1px solid var(--line); border-radius: .3rem; }
+    .verbs form { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin: 0; }
+    .verbs input[type=text] { width: 12rem; }
+    .verbs input[type=number] { width: 5.5rem; background: var(--cell-hi); color: var(--white); border: 1px solid #3a3a40;
+                                border-radius: .2rem; padding: .25rem .4rem; }
+    .verbs button.go { background: var(--sign); color: #111; border-color: var(--sign); }
   </style>
 </head>
 <body>
@@ -30,6 +37,48 @@
     <tr><th>parent</th><td>{{if .ParentLink}}<a href="/tasks/{{.ParentLink}}">#{{.ParentLink}}</a>{{else}}—{{end}}</td>
         <th>updated</th><td class="muted">{{.UpdatedAt}}</td></tr>
   </table>
+
+  <!-- swb 722: the board's verbs, posting to the same endpoints; each lands back on the board view he came from. -->
+  <section class="verbs" aria-label="actions">
+    {{if and (eq .AssigneeType "human") (ne .Status "closed")}}
+    <form method="post" action="/tasks/{{.ID}}/close">
+      {{range $k, $v := .BackFilters}}<input type="hidden" name="{{$k}}" value="{{$v}}">{{end}}
+      <input type="text" name="note" placeholder="note (optional)">
+      <button class="go">Done</button>
+    </form>
+    {{end}}
+    <form method="post" action="/tasks/{{.ID}}/dismiss">
+      {{range $k, $v := .BackFilters}}<input type="hidden" name="{{$k}}" value="{{$v}}">{{end}}
+      <select name="reason_code">
+        <option value="not_actionable">not actionable</option>
+        <option value="wrong_kind">wrong kind</option>
+        <option value="duplicate">duplicate</option>
+        <option value="handled_elsewhere">handled elsewhere</option>
+      </select>
+      <input type="text" name="note" placeholder="note (optional)">
+      <button>Dismiss</button>
+    </form>
+    {{if .NeedsReview}}
+    <form method="post" action="/tasks/{{.ID}}/requeue">
+      {{range $k, $v := .BackFilters}}<input type="hidden" name="{{$k}}" value="{{$v}}">{{end}}
+      <select name="priority">
+        <option value="">priority: unchanged</option>
+        <option value="0">0 normal</option>
+        <option value="1">1 elevated</option>
+        <option value="2">2 high</option>
+        <option value="3">3 urgent</option>
+      </select>
+      <input type="text" name="note" placeholder="note (optional)">
+      <button>Requeue</button>
+    </form>
+    {{end}}
+    <form method="post" action="/tasks/{{.ID}}/attach">
+      {{range $k, $v := .BackFilters}}<input type="hidden" name="{{$k}}" value="{{$v}}">{{end}}
+      <input type="number" name="target_task_id" min="1" placeholder="task #" required>
+      <input type="text" name="note" placeholder="note (optional)">
+      <button>Attach</button>
+    </form>
+  </section>
 
   {{if .Body}}<h2>Body</h2><pre>{{.Body}}</pre>{{end}}
   {{- with .SourceMessage}}

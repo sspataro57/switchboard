@@ -27,6 +27,35 @@
         <th>updated</th><td class="muted">{{STAMP}}</td></tr>
   </table>
 
+  
+  <section class="verbs" aria-label="actions">
+    
+    <form method="post" action="/tasks/{{ID}}/close">
+      
+      <input type="text" name="note" placeholder="note (optional)">
+      <button class="go">Done</button>
+    </form>
+    
+    <form method="post" action="/tasks/{{ID}}/dismiss">
+      
+      <select name="reason_code">
+        <option value="not_actionable">not actionable</option>
+        <option value="wrong_kind">wrong kind</option>
+        <option value="duplicate">duplicate</option>
+        <option value="handled_elsewhere">handled elsewhere</option>
+      </select>
+      <input type="text" name="note" placeholder="note (optional)">
+      <button>Dismiss</button>
+    </form>
+    
+    <form method="post" action="/tasks/{{ID}}/attach">
+      
+      <input type="number" name="target_task_id" min="1" placeholder="task #" required>
+      <input type="text" name="note" placeholder="note (optional)">
+      <button>Attach</button>
+    </form>
+  </section>
+
   <h2>Body</h2><pre>NOLINK placeholder card body.
 second line.</pre>
 

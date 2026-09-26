@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -546,6 +547,12 @@ type taskDetail struct {
 	SourceMessage *sourceMessage
 	// BackURL is the board view he came from (boardBackURL), else /tasks.
 	BackURL string
+	// swb 722: the board's verbs on this page. BackFilters are that board
+	// view's boardKeys, posted as hidden fields so a verb lands back on it
+	// (boardBack re-encodes them); NeedsReview is the board's own fact
+	// (boardLightFacts), so Requeue shows exactly when it would on the board.
+	BackFilters map[string]string
+	NeedsReview bool
 }
 
 type eventRow struct {
@@ -671,7 +678,19 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 		d.SourceMessage = sm
 	}
 
-	d.BackURL = boardBackURL(r)
+	back := boardBackValues(r)
+	d.BackURL = boardURL(back)
+	d.BackFilters = map[string]string{}
+	for _, k := range boardKeys {
+		if v := back.Get(k); v != "" {
+			d.BackFilters[k] = v
+		}
+	}
+	// Never fatal: without the fact the page simply offers no Requeue.
+	if err := s.pool.QueryRow(r.Context(), `SELECT `+needsReviewSQL+` FROM tasks t WHERE t.id = $1`, d.ID).
+		Scan(&d.NeedsReview); err != nil {
+		slog.Warn("task page: needs_review read failed; Requeue hidden", "task", d.ID, "err", err)
+	}
 	if err := s.tmpl.ExecuteTemplate(w, "task.html", d); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
@@ -683,21 +702,30 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 // 17: nothing from the caller is echoed), so it can never leave the dashboard.
 // Anything else — no Referer, another page, another host — is plain /tasks.
 // No script: a server-side read.
-func boardBackURL(r *http.Request) string {
+func boardBackURL(r *http.Request) string { return boardURL(boardBackValues(r)) }
+
+// needsReviewSQL is the task page's copy of boardLightFacts' needs_review
+// predicate (SWT-72: unreviewed inbound activity), so Requeue shows on the page
+// exactly when the board shows it (swb 722). The board's query keeps its literal
+// (criterion 28 reads it there); TestTaskPage_NeedsReviewMatchesTheBoard pins
+// the two spellings together.
+const needsReviewSQL = `COALESCE(t.activity_at IS NOT NULL AND (t.reviewed_at IS NULL OR t.activity_at > t.reviewed_at), false)`
+
+// boardBackValues is boardBackURL's filter set: the Referer's boardKeys when
+// the Referer is this host's /tasks, else none.
+func boardBackValues(r *http.Request) url.Values {
+	keep := url.Values{}
 	ref, err := url.Parse(r.Referer())
 	if err != nil || !strings.EqualFold(ref.Host, r.Host) || ref.Path != "/tasks" {
-		return "/tasks"
+		return keep
 	}
-	q, keep := ref.Query(), url.Values{}
+	q := ref.Query()
 	for _, k := range boardKeys {
 		if v := q.Get(k); v != "" {
 			keep.Set(k, v)
 		}
 	}
-	if len(keep) == 0 {
-		return "/tasks"
-	}
-	return "/tasks?" + keep.Encode()
+	return keep
 }
 
 // ---- /briefs -------------------------------------------------------------------
