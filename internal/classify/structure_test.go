@@ -1251,7 +1251,9 @@ func TestMigration0018_IsTheOnlyOneThisTicketAdds(t *testing.T) {
 		// named by docs/tickets/always-task_SPEC.md's data-model section.
 		// swb 709: 46 is sources-slow's (0046_raw_items_flag_indexes.sql: two
 		// partial indexes on raw_source_items), named by docs/bugs/sources-slow.md.
-		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 && n != 39 && n != 40 && n != 41 && n != 42 && n != 43 && n != 44 && n != 45 && n != 46 {
+		// 47 is job-agent's (0047_external_refs_job_agent.sql, a95b40a: external_refs.system
+		// accepts 'job_agent'), accounted for by the migration's own header.
+		if n > 17 && n != 18 && n != 19 && n != 20 && n != 21 && n != 22 && n != 23 && n != 24 && n != 25 && n != 26 && n != 27 && n != 28 && n != 29 && n != 30 && n != 31 && n != 32 && n != 33 && n != 34 && n != 35 && n != 36 && n != 37 && n != 38 && n != 39 && n != 40 && n != 41 && n != 42 && n != 43 && n != 44 && n != 45 && n != 46 && n != 47 {
 			t.Errorf("migrations/%s exists but no ticket's data-model section names it. `ls "+
 				"migrations/` must only show files a SPEC accounts for", e.Name())
 		}
