@@ -3549,6 +3549,15 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
     a pass landing in between used to nudge the session about its own work.
   - Stale keys from abandoned windows (`sbc|switchboard`, `town|town-ai`) are never pruned from
     `push-state.json`. They are harmless: a returning key only re-notifies.
+- **A task a console created never emails "no console" (swb 767, 2026-09-28).** The keto-track
+  session created #764 in project personal, which no console watches, and he got the mail 44 s later.
+  `queueTasks` sets `Task.ByConsole` when a `create_task` audit row with actor `mcp:manual:%`, status
+  `ok` and the same title started within one minute of `tasks.created_at`. The audit row's `task_id`
+  is NULL, which is why it matches on title and time. `Unattended` records such tasks silently; Plan
+  still nudges the project's console (a hand-off to kube reaches kube). `opsctl:*` is deliberately
+  NOT a console: its creates are mostly scripted bulk imports (91 Jira findings on 2026-09-17).
+  Accepted gap: a hand-off a session creates into a project with no console at all emails no one.
+  The SQL is pinned by `cmd/swb-push/queue_integration_test.go`.
 
 ## Board streaming (board-streaming, SWT-89, 2026-09-25)
 

@@ -309,7 +309,15 @@ func queueTasks(ctx context.Context, pool *pgxpool.Pool) ([]string, []swbpush.Ta
 		`SELECT t.id, p.slug,
 		        CASE WHEN t.working_state IS NOT NULL THEN COALESCE(t.working_session, '') ELSE '' END,
 		        GREATEST(t.created_at, COALESCE(t.activity_at, t.created_at), COALESCE(t.surfaced_at, t.created_at)),
-		        t.title
+		        t.title,
+		        -- swb 767: made by an interactive console. create_task's audit row
+		        -- carries no task_id, so match its title within a minute of creation.
+		        EXISTS (SELECT 1 FROM audit_events a
+		                 WHERE a.tool = 'create_task' AND a.status = 'ok'
+		                   AND a.actor LIKE 'mcp:manual:%'
+		                   AND a.args->>'title' = t.title
+		                   AND a.started_at BETWEEN t.created_at - interval '1 minute'
+		                                        AND t.created_at + interval '1 minute')
 		   FROM tasks t JOIN projects p ON p.id = t.project_id
 		  WHERE `+tools.InPlayPredicate)
 	if err != nil {
@@ -319,7 +327,7 @@ func queueTasks(ctx context.Context, pool *pgxpool.Pool) ([]string, []swbpush.Ta
 	var out []swbpush.Task
 	for rs.Next() {
 		var t swbpush.Task
-		if err := rs.Scan(&t.ID, &t.Slug, &t.Session, &t.At, &t.Title); err != nil {
+		if err := rs.Scan(&t.ID, &t.Slug, &t.Session, &t.At, &t.Title, &t.ByConsole); err != nil {
 			return nil, nil, fmt.Errorf("scan queue row: %w", err)
 		}
 		out = append(out, t)
