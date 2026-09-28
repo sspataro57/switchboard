@@ -111,7 +111,7 @@ func seedDlv(t *testing.T, ctx context.Context, pool *pgxpool.Pool) dlvSeed {
 // rowOf returns the <tr> of delivery id on the page.
 func rowOf(t *testing.T, page string, id int64) string {
 	t.Helper()
-	m := regexp.MustCompile(`(?s)<tr>\s*<td>` + strconv.FormatInt(id, 10) + `</td>.*?</tr>`).FindString(page)
+	m := regexp.MustCompile(`(?s)<tr id="d` + strconv.FormatInt(id, 10) + `">.*?</tr>`).FindString(page)
 	if m == "" {
 		t.Fatalf("delivery %d has no row on /deliveries", id)
 	}

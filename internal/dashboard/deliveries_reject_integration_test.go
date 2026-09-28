@@ -62,11 +62,11 @@ func cleanupDenyDash(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
-// ddRow returns the rendered <tr> for delivery id (the template's first cell
-// is <td>{{.ID}}</td>), or "" when the page does not list it.
+// ddRow returns the rendered <tr> for delivery id (the template marks it
+// <tr id="d{{.ID}}">), or "" when the page does not list it.
 func ddRow(page string, id int64) string {
 	for _, seg := range strings.Split(page, "<tr") {
-		if strings.Contains(seg, "<td>"+strconv.FormatInt(id, 10)+"</td>") {
+		if strings.HasPrefix(seg, ` id="d`+strconv.FormatInt(id, 10)+`">`) {
 			return seg
 		}
 	}
