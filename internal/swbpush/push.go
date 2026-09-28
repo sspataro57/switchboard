@@ -56,6 +56,19 @@ type Session struct {
 	TurnAt     time.Time // hook: when Turn last changed
 	LiveWindow string    // tmux, now
 	LiveCmd    string    // tmux pane_current_command, now
+	// Projects is what the session's repo declares in .claude/swb-project
+	// (the hook reads it), so a renamed window keeps its queues (swb 758).
+	Projects []string
+}
+
+// QueuesOf is the project slugs a session watches: its repo's declaration
+// when it has one, else push.json's mapping for its window. A window mapped in
+// push.json whose session declares nothing keeps working unchanged.
+func (c Config) QueuesOf(s Session) []string {
+	if len(s.Projects) > 0 {
+		return s.Projects
+	}
+	return c.Windows[s.LiveWindow]
 }
 
 // Task is one in-play task of a mapped project. At is the newest of
@@ -115,7 +128,8 @@ func (seen Seen) Apply(s Seen) {
 // is retried next pass.
 //
 // A session is nudged only when all of these hold:
-//   - its window is mapped, the hook's name for it is still the pane's window
+//   - it watches a queue (QueuesOf: its repo's declaration, else its window's
+//     push.json mapping), the hook's name for it is still the pane's window
 //     name, and it is the window's ONLY live session (two Claude panes in one
 //     window would both be told to start on the same work);
 //   - the pane runs claude;
@@ -134,8 +148,8 @@ func Plan(cfg Config, sessions []Session, tasks []Task, seen Seen, now time.Time
 	}
 	var out []Nudge
 	for _, s := range sessions {
-		slugs, ok := cfg.Windows[s.LiveWindow]
-		if !ok || s.Window != s.LiveWindow || perWindow[s.LiveWindow] != 1 {
+		slugs := cfg.QueuesOf(s)
+		if len(slugs) == 0 || s.Window != s.LiveWindow || perWindow[s.LiveWindow] != 1 {
 			continue
 		}
 		var changed []string
@@ -154,8 +168,12 @@ func Plan(cfg Config, sessions []Session, tasks []Task, seen Seen, now time.Time
 				live[t.ID] = true
 				prev, known := seen[key][t.ID]
 				switch {
-				case first || t.Session == s.LiveWindow:
+				case t.Session == s.LiveWindow:
 					seen[key][t.ID] = t.At
+				case first && !awaitingMail(seen, t):
+					seen[key][t.ID] = t.At
+				case now.Sub(t.At) < Grace:
+					// Too fresh to judge: decided next pass, recorded nowhere.
 				case !known || t.At.After(prev):
 					if settle[key] == nil {
 						settle[key] = map[int64]time.Time{}
@@ -268,6 +286,26 @@ func squash(s string) string {
 // UnattendedWindow is Seen's pseudo-window for tasks no console watches.
 const UnattendedWindow = "_no_console"
 
+// Grace is how old a task (its At) must be before it nudges or mails. A
+// session creates its own task and signals it a second later; a pass landing
+// in between saw the session's own work as new (swb 758, 11:53:35: #758
+// nudged the session that had just created it).
+const Grace = 15 * time.Second
+
+// awaitingMail: the no-console memory holds t as NOT yet settled (Unattended
+// returned it, and the batched mail has not gone out). A first sight of a
+// (window, slug) key must not swallow it: Unattended settles a watched slug
+// silently in the same pass, so t would be neither nudged nor mailed (swb 758
+// review). A slug the no-console memory has never seen is not awaiting.
+func awaitingMail(seen Seen, t Task) bool {
+	m := seen[Key(UnattendedWindow, t.Slug)]
+	if m == nil {
+		return false
+	}
+	at, ok := m[t.ID]
+	return !ok || t.At.After(at)
+}
+
 // Unattended is swb #610's second half (Salvador: "the watcher should notify me
 // a task landed and there is no console for it"): the tasks that are new since
 // last settled, in projects with NO live Claude session in a window mapped to
@@ -278,7 +316,7 @@ const UnattendedWindow = "_no_console"
 // projects is every project slug: a project with no task in play yet is still
 // "seen", so its FIRST task emails (town-ai's case) instead of passing as a
 // first sight.
-func Unattended(cfg Config, sessions []Session, projects []string, tasks []Task, seen Seen) ([]Task, Seen) {
+func Unattended(cfg Config, sessions []Session, projects []string, tasks []Task, seen Seen, now time.Time) ([]Task, Seen) {
 	cfg = cfg.Defaults()
 	// Watched means Plan can nudge it: the window's ONLY live Claude session
 	// (Plan skips a window with two), under its own name.
@@ -293,7 +331,7 @@ func Unattended(cfg Config, sessions []Session, projects []string, tasks []Task,
 		if s.LiveCmd != "claude" || s.Window != s.LiveWindow || perWindow[s.LiveWindow] != 1 {
 			continue
 		}
-		for _, slug := range cfg.Windows[s.LiveWindow] {
+		for _, slug := range cfg.QueuesOf(s) {
 			watched[slug] = true
 		}
 	}
@@ -321,8 +359,13 @@ func Unattended(cfg Config, sessions []Session, projects []string, tasks []Task,
 			live[t.ID] = true
 			prev, known := seen[key][t.ID]
 			switch {
-			case first || watched[slug] || skip[slug]:
-				// a console has it (its nudge is the notice), or it is muted
+			case first || skip[slug]:
+				seen[key][t.ID] = t.At
+			case now.Sub(t.At) < Grace:
+				// Too fresh: Plan defers it too, so recording it as watched here
+				// would lose it if the console is gone next pass. Decided then.
+			case watched[slug]:
+				// a console has it (its nudge is the notice)
 				seen[key][t.ID] = t.At
 			case !known || t.At.After(prev):
 				if settle[key] == nil {
@@ -355,6 +398,7 @@ func Mail(tasks []Task) (subject, body string) {
 	for _, t := range tasks {
 		fmt.Fprintf(&b, "  #%d  %-14s %s\n", t.ID, t.Slug, t.Title)
 	}
-	b.WriteString("\nMap a window to the project in ~/.claude/swb/push.json, or open a session for it.\n")
+	b.WriteString("\nOpen a session for it. A session watches the projects its repo names in .claude/swb-project,\n" +
+		"else those ~/.claude/swb/push.json maps to its tmux window.\n")
 	return subject, b.String()
 }
