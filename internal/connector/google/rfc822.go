@@ -1,6 +1,7 @@
 package google
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,10 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/htmlindex"
+	"golang.org/x/text/encoding/unicode"
 )
 
 // NormalizeRFC822 turns one raw IMAP envelope into a NormalizedMessage.
@@ -181,11 +186,86 @@ func isOwnAddress(from string, ownEmails map[string]bool) bool {
 	return ownEmails[strings.ToLower(strings.TrimSpace(from))]
 }
 
-// wordDecoder decodes RFC 2047 encoded-words and tolerates charsets Go does not
-// know, returning the raw bytes instead of failing — a subject line in an exotic
-// encoding is worth showing imperfectly, never worth dropping the message for.
+// wordDecoder decodes RFC 2047 encoded-words in their declared charset
+// (windows-1252 from Outlook, big5, iso-8859-x, ...) and tolerates charsets it
+// does not know, returning the raw bytes instead of failing — a subject line in
+// an exotic encoding is worth showing imperfectly, never worth dropping the
+// message for. Before swb 760 EVERY charset got the raw bytes, and
+// toValidUTF8 then read Outlook's em dash (0x97) as the control U+0097.
 var wordDecoder = mime.WordDecoder{
-	CharsetReader: func(_ string, input io.Reader) (io.Reader, error) { return input, nil },
+	CharsetReader: func(label string, input io.Reader) (io.Reader, error) {
+		b, err := io.ReadAll(input)
+		if err != nil {
+			return nil, err
+		}
+		return bytes.NewReader(decodeCharset(b, label)), nil
+	},
+}
+
+// charsetEncoding is the decoder for a declared charset label, by the WHATWG
+// table (so iso-8859-1 and us-ascii decode as windows-1252, as every browser
+// does). nil for UTF-8, an empty label or a label it does not know: those bytes
+// pass through untouched, so correctly encoded mail — and every copy of our own
+// UTF-8 sends, which confirmDeliveryByBodyPrefix compares — never changes.
+func charsetEncoding(label string) encoding.Encoding {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return nil
+	}
+	enc, err := htmlindex.Get(label)
+	if err != nil || enc == unicode.UTF8 || enc == encoding.Replacement {
+		// Replacement (iso-2022-kr, hz-gb-2312, ...) turns any 8-bit input
+		// into a single U+FFFD: raw bytes are strictly better (criterion 10).
+		return nil
+	}
+	if name, _ := htmlindex.Name(enc); name == "x-user-defined" {
+		return nil // maps 0x80-0xFF to private-use runes; latin-1 repair reads better
+	}
+	return enc
+}
+
+// decodeCharset turns b from its declared charset into UTF-8; see
+// charsetEncoding for what passes through untouched. Bytes that are ALREADY
+// valid UTF-8 pass through too, whatever the label: senders that declare
+// iso-8859-1 and send UTF-8 are common (the 2026-09-28 dry run over prod found
+// ~20 recent ones that decoding would have turned into "Â"/"â€" mojibake),
+// while real windows-1252 or big5 text with any byte above 0x7F is almost
+// never valid UTF-8 by accident.
+//
+// A known but WRONG charset is not detected: the x/text decoders substitute
+// U+FFFD for bytes invalid in it rather than failing, so err below is only a
+// guard. 7-bit charsets (iso-2022-jp) are never decoded, because their bytes
+// are valid UTF-8; that is the pre-swb-760 behaviour for them.
+func decodeCharset(b []byte, label string) []byte {
+	enc := charsetEncoding(label)
+	if enc == nil || utf8.Valid(withoutPartialRune(b)) {
+		return b
+	}
+	out, err := enc.NewDecoder().Bytes(b)
+	if err != nil {
+		return b
+	}
+	return out
+}
+
+// withoutPartialRune drops an incomplete UTF-8 sequence at the end of b: a body
+// cut at maxBodyTextBytes can end mid-rune, and one broken tail must not send a
+// mislabelled UTF-8 body through the declared charset (capBody drops the tail
+// afterwards).
+func withoutPartialRune(b []byte) []byte {
+	for i := 1; i <= utf8.UTFMax-1 && i <= len(b); i++ {
+		c := b[len(b)-i]
+		if c < 0x80 {
+			return b // ASCII: nothing partial after it
+		}
+		if utf8.RuneStart(c) {
+			if !utf8.FullRune(b[len(b)-i:]) {
+				return b[:len(b)-i]
+			}
+			return b
+		}
+	}
+	return b
 }
 
 func decodeWord(v string) string {
@@ -197,7 +277,16 @@ func decodeWord(v string) string {
 	if err != nil {
 		return v
 	}
-	return decoded
+	// mime decodes iso-8859-1 (and us-ascii) words itself, never through the
+	// CharsetReader, so Outlook's windows-1252 dash in an iso-8859-1 word comes
+	// back as the C1 control U+0097. No sender means a C1 control in a subject.
+	// Repair invalid bytes FIRST: strings.Map would turn each into U+FFFD.
+	return strings.Map(func(r rune) rune {
+		if r >= 0x80 && r <= 0x9F {
+			return cp1252Rune(byte(r))
+		}
+		return r
+	}, toValidUTF8(decoded))
 }
 
 func parseMailDate(v string) time.Time {
@@ -288,19 +377,19 @@ func walkForText(contentType, encoding string, r io.Reader, depth int) (string, 
 
 	switch {
 	case mediaType == "text/plain":
-		return decodeBody(r, encoding), ""
+		return decodeBody(r, encoding, params["charset"]), ""
 	case mediaType == "text/html":
-		return "", decodeBody(r, encoding)
+		return "", decodeBody(r, encoding, params["charset"])
 	}
 	// Attachments and every other part type are deliberately ignored: this is a
 	// text funnel, and raw_source_items already holds the bytes.
 	return "", ""
 }
 
-// decodeBody applies the transfer encoding. Charset is left as received: Go's
-// stdlib has no charset registry, and mangling unknown bytes would be worse than
-// showing them (criterion 10 — unknown charset yields raw bytes, not an error).
-func decodeBody(r io.Reader, encoding string) string {
+// decodeBody applies the transfer encoding, then the declared charset
+// (swb 760). An unknown charset still yields the raw bytes, not an error
+// (criterion 10); UTF-8 and an undeclared charset are never transcoded.
+func decodeBody(r io.Reader, encoding, charset string) string {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "quoted-printable":
 		r = quotedprintable.NewReader(r)
@@ -311,7 +400,7 @@ func decodeBody(r io.Reader, encoding string) string {
 	if err != nil && len(b) == 0 {
 		return ""
 	}
-	return string(b)
+	return string(decodeCharset(b, charset))
 }
 
 // Go's regexp is RE2: no backreferences, so script and style need one pattern
@@ -396,11 +485,12 @@ func humanBytes(n int) string {
 
 // toValidUTF8 repairs text that is not valid UTF-8.
 //
-// Invalid bytes are almost always latin-1: a sender declared no charset, or
-// declared one Go cannot decode, and the bytes are ISO-8859-1 or windows-1252.
-// Interpreting each stray byte AS a latin-1 code point is lossless for that case
-// (0xa9 becomes ©) and is strictly better than substituting U+FFFD, which would
-// silently corrupt every accented word in the message.
+// Invalid bytes are almost always windows-1252 (or its subset latin-1): a
+// sender declared no charset, or declared one we cannot decode. Each stray byte
+// is read as windows-1252, which is lossless for that case (0xa9 becomes ©,
+// 0x97 becomes —; swb 760, before which 0x80-0x9F became C1 controls) and is
+// strictly better than substituting U+FFFD, which would silently corrupt every
+// accented word in the message.
 //
 // Valid UTF-8 is returned untouched, so correctly-encoded mail never goes through
 // the transcode.
@@ -413,8 +503,11 @@ func toValidUTF8(s string) string {
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
 		if r == utf8.RuneError && size == 1 {
-			// A byte that is not part of a valid sequence: read it as latin-1.
-			b.WriteRune(rune(s[i]))
+			// A byte that is not part of a valid sequence: read it as
+			// windows-1252, which is latin-1 except 0x80-0x9F. Those are
+			// C1 controls in latin-1 and never meant; in windows-1252 they
+			// are the dashes, curly quotes and ellipsis (swb 760).
+			b.WriteRune(cp1252Rune(s[i]))
 			i++
 			continue
 		}
@@ -422,4 +515,20 @@ func toValidUTF8(s string) string {
 		i += size
 	}
 	return b.String()
+}
+
+// cp1252High maps windows-1252 bytes 0x80-0x9F; 0 marks the five undefined
+// ones, which keep their latin-1 reading.
+var cp1252High = [32]rune{
+	0x20AC, 0, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017D, 0,
+	0, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0, 0x017E, 0x0178,
+}
+
+func cp1252Rune(c byte) rune {
+	if c >= 0x80 && c <= 0x9F {
+		if r := cp1252High[c-0x80]; r != 0 {
+			return r
+		}
+	}
+	return rune(c)
 }

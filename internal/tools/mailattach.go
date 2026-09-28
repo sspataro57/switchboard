@@ -649,7 +649,8 @@ var utf8BOM = []byte("\xef\xbb\xbf")
 // attachmentText decides from the CONTENT whether a part is text: no NUL in the
 // first 8 KiB, valid UTF-8 after a BOM, and net/http sniffing says text/*. A
 // declared text/* part whose bytes are not UTF-8 (a charset Go cannot read) is
-// repaired as latin-1 — toValidUTF8's rule.
+// repaired as latin-1. Mail bodies (google.toValidUTF8) read 0x80-0x9F as
+// windows-1252 since swb 760; attachments keep latin-1 until someone needs it.
 func attachmentText(contentType, charset string, data []byte) (string, bool) {
 	window := data
 	if len(window) > mailAttachSniffWindow {
