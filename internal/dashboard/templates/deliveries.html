@@ -5,6 +5,25 @@
   <title>switchboard — deliveries</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="/static/swb-1.css">
+  <style>
+  /* Page-local: swb-1.css is served immutable, so a rule added there never
+     reaches a cached browser. */
+  table.deliveries { table-layout: fixed; }
+  table.deliveries col.c-task { width: 16rem; }
+  table.deliveries col.c-to { width: 20rem; }
+  table.deliveries td { overflow-wrap: anywhere; }
+  table.deliveries .dl-id { font-weight: 600; color: var(--white); }
+  table.deliveries td > [class^="status-"] { margin-top: .4rem; }
+  table.deliveries textarea { min-height: 18rem; }
+  table.deliveries pre { margin: .3rem 0; }
+  table.deliveries .dl-actions { margin-top: .5rem; }
+  table.deliveries .dl-actions input[type=text] { width: auto; min-width: 16rem; }
+  @media (max-width: 900px) {
+    table.deliveries, table.deliveries tbody, table.deliveries tr, table.deliveries td { display: block; width: auto; }
+    table.deliveries colgroup, table.deliveries tr:first-child { display: none; }
+    table.deliveries tr { margin-bottom: .8rem; }
+  }
+  </style>
 </head>
 <body>
   <div class="headbar">
@@ -41,18 +60,19 @@
     <a href="/deliveries?status=rejected">rejected</a>
   </p>
 
-  <table>
-    <tr><th>#</th><th>Task</th><th>Channel</th><th>Goes to</th><th>When</th><th>Status</th><th>Draft</th><th>Actions</th></tr>
+  {{/* Three columns so the words get the room (swb 754): the task cell carries
+       the row's facts (channel, status, when), the recipient has its own, and
+       the draft takes the rest with its commands under it. */}}
+  <table class="deliveries">
+    <colgroup><col class="c-task"><col class="c-to"><col></colgroup>
+    <tr><th>Task</th><th>Goes to</th><th>Draft</th></tr>
     {{range .Deliveries}}
-    <tr>
-      <td>{{.ID}}</td>
-      <td>#{{.TaskID}} {{.TaskTitle}}<div class="muted">by {{.CreatedBy}}</div></td>
-      <td>{{.Channel}}</td>
-      {{/* SWT-44: where the send would go, before approval. Gmail's comes from
-           tools.ResolveGmailRoute, the send path's own resolution. */}}
-      <td>{{if eq .Channel "gmail"}}{{if .From}}<div>From: {{.From}}</div><div>To: {{.To}}</div><div class="muted">Thread: {{.ThreadSubject}}</div>{{end}}{{if .Cc}}<div>Cc: {{.CcText}}</div>{{end}}{{else}}{{.TargetRef}}{{end}}</td>
-      <td>{{if .StartsAt}}{{.StartsAt}} → {{.EndsAt}}{{end}}</td>
-      <td class="status-{{.Status}}">{{.Status}}
+    <tr id="d{{.ID}}">
+      <td>
+        <div class="dl-id">#{{.ID}} · {{.Channel}}</div>
+        <div>task #{{.TaskID}} {{.TaskTitle}}</div>
+        <div class="muted">by {{.CreatedBy}}</div>
+        <div class="status-{{.Status}}">{{.Status}}
         {{if .SentAt}}<div class="muted">sent {{.SentAt}}</div>{{end}}
         {{if .ConfirmedAt}}<div class="muted">confirmed {{.ConfirmedAt}}</div>{{end}}
         {{if .Error}}<div class="muted">err: {{.Error}}</div>{{end}}
@@ -61,7 +81,12 @@
           {{if .RejectionNote}}<div class="muted">reason: {{.RejectionNote}}</div>{{end}}
           {{if .RedraftRequested}}<div class="muted">redraft requested</div>{{end}}
         {{end}}
+        </div>
+        {{if .StartsAt}}<div class="muted">when: {{.StartsAt}} → {{.EndsAt}}</div>{{end}}
       </td>
+      {{/* SWT-44: where the send would go, before approval. Gmail's comes from
+           tools.ResolveGmailRoute, the send path's own resolution. */}}
+      <td>{{if eq .Channel "gmail"}}{{if .From}}<div>From: {{.From}}</div><div>To: {{.To}}</div><div class="muted">Thread: {{.ThreadSubject}}</div>{{end}}{{if .Cc}}<div>Cc: {{.CcText}}</div>{{end}}{{else}}{{.TargetRef}}{{end}}</td>
       <td>
         {{/* SWT-61: the delivery's OWN subject, as readable text, on every row.
              It is a DIFFERENT string from the "Thread:" line in the Goes-to
@@ -79,8 +104,7 @@
         {{else}}
         <pre style="white-space:pre-wrap; font: inherit;">{{.Body}}</pre>
         {{end}}
-      </td>
-      <td>
+        <div class="dl-actions">
         {{if eq .Status "drafted"}}
         {{/* SWT-44: the approve is bound to the words rendered above; an edit
              made after this page loaded makes it refuse. */}}
@@ -136,6 +160,7 @@
           <button name="redraft" value="true">Redo</button>
         </form>
         {{end}}
+        </div>
       </td>
     </tr>
     {{end}}
