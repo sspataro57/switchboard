@@ -3524,6 +3524,29 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
   `~/.claude/notify-email.py`, batched at most once per `mail_every_s` (default 600). Memory lives under the
   pseudo-window `_no_console`, and every project is seeded from the `projects` table, so an empty project's
   first task still emails. Mute a project with `notify_skip` in push.json.
+- **A repo declares its project; the window name is only the fallback (swb 758, 2026-09-28).**
+  push.json mapped switchboard to window `sbc` after the window became `swb` (and town-ai to `town`),
+  so every switchboard task emailed "no console" while this session was live. Now a checkout's
+  `.claude/swb-project` (slugs separated by whitespace or commas, `#` comments) is read by the hook's
+  `declared_projects()` (CLAUDE_PROJECT_DIR and its parents, then cwd and its parents, each stopping
+  at $HOME; only slug-shaped words kept; an unreadable file is logged and skipped, never raised) into
+  the session file's `projects`, and `swbpush.Config.QueuesOf` prefers it over `Windows[LiveWindow]`.
+  It is committed in this repo. In kube and collaboratory-www it is in `.git/info/exclude`, and in
+  town-ai its `.gitignore` already covers `/.claude`. foundry-deitch-audit is not a git repo.
+  Declared on 2026-09-28: switchboard, foundry-deitch-audit (foundry),
+  collaboratory-www (collaboratory a-millon), kube (homelab), town-ai. NOT declared: fnb, infra
+  (foundry repos) and gonoble. Declaring them means every foundry task nudges three consoles.
+  `~/.claude/swb-hook.py projects` prints what the current directory declares.
+- **Two review fixes in `swbpush` (swb 758).**
+  - `awaitingMail`: a first sight of a (window, slug) key records silently only the tasks that the
+    `_no_console` memory already settled. A task that Unattended returned while the batched mail was
+    throttled is new, not old. Without this, a rename or a new declaration dropped it: Plan's first
+    sight recorded it, and Unattended then settled it as watched, so it was neither nudged nor mailed.
+  - `Grace` (15 s): a task younger than that neither nudges nor mails, and is recorded nowhere, so
+    the next pass decides it. A session creates its own task and signals it about a second later, and
+    a pass landing in between used to nudge the session about its own work.
+  - Stale keys from abandoned windows (`sbc|switchboard`, `town|town-ai`) are never pruned from
+    `push-state.json`. They are harmless: a returning key only re-notifies.
 
 ## Board streaming (board-streaming, SWT-89, 2026-09-25)
 

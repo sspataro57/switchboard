@@ -143,12 +143,16 @@ func pass(ctx context.Context, pool *pgxpool.Pool, cfg swbpush.Config, waiting m
 		return err // never guess: a lost memory would re-nudge or miss
 	}
 	sessions := liveSessions()
+	// One clock for the pass: Plan and Unattended must agree on which tasks
+	// are inside the Grace, or one near 15 s is deferred by Plan and settled
+	// as watched by Unattended (swb 758 review, round 3).
+	now := time.Now()
 	finishPending(sessions, seen, waiting)
 	notWaiting := func(pane string) bool {
 		_, busy := waiting[pane]
 		return !busy && composerEmpty(pane)
 	}
-	for _, n := range swbpush.Plan(cfg, sessions, tasks, seen, time.Now(), notWaiting) {
+	for _, n := range swbpush.Plan(cfg, sessions, tasks, seen, now, notWaiting) {
 		if !n.Typed {
 			if err := leaveForHook(n.SID, n.Text); err != nil {
 				log.Printf("nudge %s (%s): %v", n.Window, n.Pane, err)
@@ -171,7 +175,10 @@ func pass(ctx context.Context, pool *pgxpool.Pool, cfg swbpush.Config, waiting m
 		waiting[n.Pane] = pending{n.Text, n.Settle}
 		log.Printf("nudge %s (%s) typed but NOT submitted: the input box changed before Enter; pending", n.Window, n.Pane)
 	}
-	unwatched, settle := swbpush.Unattended(cfg, sessions, projects, tasks, seen)
+	// Unattended AFTER Plan: Plan's first-sight check (awaitingMail) reads the
+	// no-console memory as the previous pass left it; swapping the two lets
+	// Unattended settle a watched task first and Plan swallow it (swb 758).
+	unwatched, settle := swbpush.Unattended(cfg, sessions, projects, tasks, seen, now)
 	if len(unwatched) > 0 && time.Since(*lastMail) >= time.Duration(cfg.MailEveryS)*time.Second {
 		subject, body := swbpush.Mail(unwatched)
 		if err := mailHim(subject, body); err != nil {
@@ -329,6 +336,8 @@ type hookState struct {
 	Window string   `json:"window"`
 	Turn   string   `json:"turn"`
 	TurnAt *float64 `json:"turn_at"`
+	// Projects: the slugs the session's repo declares in .claude/swb-project.
+	Projects []string `json:"projects"`
 }
 
 // liveSessions is the newest session file for each live tmux pane.
@@ -367,7 +376,8 @@ func liveSessions() []swbpush.Session {
 			continue
 		}
 		best[*st.Pane] = swbpush.Session{SID: strings.TrimSuffix(filepath.Base(fn), ".json"), Pane: *st.Pane,
-			Window: st.Window, Turn: st.Turn, TurnAt: at, LiveWindow: p.win, LiveCmd: p.cmd}
+			Window: st.Window, Turn: st.Turn, TurnAt: at, LiveWindow: p.win, LiveCmd: p.cmd,
+			Projects: st.Projects}
 	}
 	list := make([]swbpush.Session, 0, len(best))
 	for _, s := range best {
@@ -476,8 +486,8 @@ func status(ctx context.Context, pool *pgxpool.Pool) {
 	}
 	for _, s := range liveSessions() {
 		fmt.Printf("%-10s %-5s turn=%-6s for %-8s queues=%v\n", s.LiveWindow, s.Pane, s.Turn,
-			time.Since(s.TurnAt).Round(time.Second), cfg.Windows[s.LiveWindow])
-		for _, slug := range cfg.Windows[s.LiveWindow] {
+			time.Since(s.TurnAt).Round(time.Second), cfg.QueuesOf(s))
+		for _, slug := range cfg.QueuesOf(s) {
 			m := seen[swbpush.Key(s.LiveWindow, slug)]
 			if m == nil {
 				fmt.Printf("    %-14s not looked at yet\n", slug)

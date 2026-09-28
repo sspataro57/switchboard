@@ -75,21 +75,21 @@ func TestPlan_LateCommitStillCounts(t *testing.T) {
 	// seen: a single high-water mark would miss it forever.
 	seen := primed(Task{2, "collaboratory", "", t0, ""})
 	tasks := []Task{{2, "collaboratory", "", t0, ""}, {3, "collaboratory", "", t0.Add(-time.Second), ""}}
-	if n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, tasks, seen, t0, always); len(n) != 1 {
+	if n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, tasks, seen, t0.Add(time.Minute), always); len(n) != 1 {
 		t.Fatalf("late-committed task not noticed: %+v", n)
 	}
 }
 
 func TestPlan_ActivityOnAKnownTaskCounts(t *testing.T) {
 	seen := primed(Task{1, "collaboratory", "", t0.Add(-time.Hour), ""})
-	tasks := []Task{{1, "collaboratory", "", t0, ""}}
+	tasks := []Task{{1, "collaboratory", "", t0.Add(-time.Minute), ""}}
 	if n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, tasks, seen, t0, always); len(n) != 1 {
 		t.Fatalf("new activity on a known task not noticed: %+v", n)
 	}
 }
 
 func TestPlan_Gates(t *testing.T) {
-	tasks := []Task{{2, "collaboratory", "", t0, ""}}
+	tasks := []Task{{2, "collaboratory", "", t0.Add(-time.Minute), ""}}
 	for _, tc := range []struct {
 		name     string
 		ss       []Session
@@ -112,7 +112,7 @@ func TestPlan_Gates(t *testing.T) {
 }
 
 func TestPlan_BusySessionIgnoresTheComposer(t *testing.T) {
-	n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, []Task{{2, "collaboratory", "", t0, ""}}, primed(), t0,
+	n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, []Task{{2, "collaboratory", "", t0.Add(-time.Minute), ""}}, primed(), t0,
 		func(string) bool { t.Fatal("a busy session's screen was read"); return false })
 	if len(n) != 1 || n[0].Typed {
 		t.Fatalf("busy: %+v, want one hook nudge", n)
@@ -122,7 +122,7 @@ func TestPlan_BusySessionIgnoresTheComposer(t *testing.T) {
 func TestPlan_DeadPaneDoesNotFreezeTheWindow(t *testing.T) {
 	dead := sess("collab", "idle", time.Hour)
 	dead.Pane, dead.LiveCmd = "%9", "bash"
-	n := Plan(cfg(), []Session{sess("collab", "busy", 0), dead}, []Task{{2, "collaboratory", "", t0, ""}}, primed(), t0, always)
+	n := Plan(cfg(), []Session{sess("collab", "busy", 0), dead}, []Task{{2, "collaboratory", "", t0.Add(-time.Minute), ""}}, primed(), t0, always)
 	if len(n) != 1 || n[0].Pane != "%collab" {
 		t.Fatalf("a leftover non-claude pane blocked the window: %+v", n)
 	}
@@ -138,14 +138,14 @@ func TestPlan_OwnTasksNeverNudge_EvenWhenReleased(t *testing.T) {
 	if n := Plan(cfg(), []Session{sess("sbc", "idle", time.Hour)}, released, seen, t0, always); len(n) != 0 {
 		t.Errorf("releasing its own task nudged the session: %+v", n)
 	}
-	other := append(released, Task{6, "switchboard", "collab", t0, ""})
+	other := append(released, Task{6, "switchboard", "collab", t0.Add(-time.Minute), ""})
 	if n := Plan(cfg(), []Session{sess("sbc", "idle", time.Hour)}, other, seen, t0, always); len(n) != 1 {
 		t.Errorf("another session's task is news for this one: %+v", n)
 	}
 }
 
 func TestPlan_PrunesTasksOutOfPlay(t *testing.T) {
-	seen := primed(Task{1, "collaboratory", "", t0, ""})
+	seen := primed(Task{1, "collaboratory", "", t0.Add(-time.Minute), ""})
 	Plan(cfg(), []Session{sess("collab", "busy", 0)}, nil, seen, t0, always)
 	if _, ok := seen[Key("collab", "collaboratory")][1]; ok {
 		t.Errorf("a task out of play stays in memory")
@@ -153,7 +153,7 @@ func TestPlan_PrunesTasksOutOfPlay(t *testing.T) {
 }
 
 func TestPlan_TwoQueuesOneLine(t *testing.T) {
-	tasks := []Task{{1, "collaboratory", "", t0, ""}, {2, "a-millon", "", t0, ""}}
+	tasks := []Task{{1, "collaboratory", "", t0.Add(-time.Minute), ""}, {2, "a-millon", "", t0.Add(-time.Minute), ""}}
 	n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, tasks, primed(), t0, always)
 	if len(n) != 1 || !strings.Contains(n[0].Text, "a-millon, collaboratory queue") || len(n[0].Settle) != 2 {
 		t.Fatalf("got %+v", n)
@@ -212,7 +212,7 @@ func TestUnattended(t *testing.T) {
 	seen := Seen{}
 	// First pass: everything already there is first sight.
 	old := []Task{{1, "collaboratory", "", t0.Add(-time.Hour), "old"}}
-	if got, _ := Unattended(c, []Session{collab}, projects, old, seen); len(got) != 0 {
+	if got, _ := Unattended(c, []Session{collab}, projects, old, seen, t0.Add(time.Hour)); len(got) != 0 {
 		t.Fatalf("first sight emailed: %+v", got)
 	}
 	tasks := append(old,
@@ -220,20 +220,20 @@ func TestUnattended(t *testing.T) {
 		Task{3, "collaboratory", "", t0, "watched by collab"}, // a console has it
 		Task{4, "smoke", "", t0, "muted"},                     // notify_skip
 	)
-	got, settle := Unattended(c, []Session{collab}, projects, tasks, seen)
+	got, settle := Unattended(c, []Session{collab}, projects, tasks, seen, t0.Add(time.Hour))
 	if len(got) != 1 || got[0].ID != 2 {
 		t.Fatalf("got %+v, want only town-ai's #2", got)
 	}
-	if again, _ := Unattended(c, []Session{collab}, projects, tasks, seen); len(again) != 1 {
+	if again, _ := Unattended(c, []Session{collab}, projects, tasks, seen, t0.Add(time.Hour)); len(again) != 1 {
 		t.Errorf("an unsent email is not retried")
 	}
 	seen.Apply(settle)
-	if again, _ := Unattended(c, []Session{collab}, projects, tasks, seen); len(again) != 0 {
+	if again, _ := Unattended(c, []Session{collab}, projects, tasks, seen, t0.Add(time.Hour)); len(again) != 0 {
 		t.Errorf("emailed twice: %+v", again)
 	}
 	// The collab console goes away: collaboratory's NEW work now emails.
 	tasks = append(tasks, Task{5, "collaboratory", "", t0.Add(time.Minute), "nobody watching"})
-	if got, _ := Unattended(c, nil, projects, tasks, seen); len(got) != 1 || got[0].ID != 5 {
+	if got, _ := Unattended(c, nil, projects, tasks, seen, t0.Add(time.Hour)); len(got) != 1 || got[0].ID != 5 {
 		t.Errorf("with no live console, got %+v, want #5", got)
 	}
 	subj, body := Mail([]Task{tasks[1]})
@@ -245,8 +245,133 @@ func TestUnattended(t *testing.T) {
 func TestUnattended_TwoSessionsInAWindowIsNoConsole(t *testing.T) {
 	two := []Session{sess("collab", "busy", 0), func() Session { s := sess("collab", "idle", time.Hour); s.Pane = "%9"; return s }()}
 	seen := Seen{Key(UnattendedWindow, "collaboratory"): {}}
-	got, _ := Unattended(cfg(), two, []string{"collaboratory"}, []Task{{7, "collaboratory", "", t0, "x"}}, seen)
+	got, _ := Unattended(cfg(), two, []string{"collaboratory"}, []Task{{7, "collaboratory", "", t0, "x"}}, seen, t0.Add(time.Hour))
 	if len(got) != 1 {
 		t.Errorf("a window Plan will not nudge (two sessions) counted as watched: %+v", got)
+	}
+}
+
+// swb 758: switchboard was mapped to window "sbc", the session ran in window
+// "swb", and every switchboard task emailed "no console". A session whose repo
+// declares its project watches it under any window name.
+func TestDeclaredProjects_WatchUnderAnyWindowName(t *testing.T) {
+	swb := sess("swb", "idle", time.Hour) // no push.json mapping for "swb"
+	if len(cfg().QueuesOf(swb)) != 0 {
+		t.Fatalf("POSITIVE CONTROL: window swb is unmapped in cfg(); QueuesOf = %v", cfg().QueuesOf(swb))
+	}
+	seen := Seen{Key(UnattendedWindow, "switchboard"): {}}
+	tasks := []Task{{9, "switchboard", "", t0.Add(-time.Minute), "x"}}
+	if got, _ := Unattended(cfg(), []Session{swb}, []string{"switchboard"}, tasks, seen, t0.Add(time.Hour)); len(got) != 1 {
+		t.Fatalf("without a declaration the renamed window should be unwatched: %+v", got)
+	}
+
+	swb.Projects = []string{"switchboard"}
+	seen = Seen{Key(UnattendedWindow, "switchboard"): {}}
+	if got, _ := Unattended(cfg(), []Session{swb}, []string{"switchboard"}, tasks, seen, t0.Add(time.Hour)); len(got) != 0 {
+		t.Errorf("a declared session did not count as watching: emailed %+v", got)
+	}
+	pseen := Seen{Key("swb", "switchboard"): {}}
+	n := Plan(cfg(), []Session{swb}, tasks, pseen, t0, always)
+	if len(n) != 1 || n[0].Pane != "%swb" || !strings.Contains(n[0].Text, "switchboard queue") {
+		t.Errorf("a declared session was not nudged: %+v", n)
+	}
+}
+
+// The declaration wins over the window's mapping: a repo that says "foundry"
+// in a window push.json maps to collab watches foundry only.
+func TestDeclaredProjects_OverrideTheWindowMapping(t *testing.T) {
+	s := sess("collab", "idle", time.Hour)
+	s.Projects = []string{"foundry"}
+	if got := cfg().QueuesOf(s); len(got) != 1 || got[0] != "foundry" {
+		t.Errorf("QueuesOf = %v, want [foundry]", got)
+	}
+	if got := cfg().QueuesOf(sess("collab", "idle", time.Hour)); len(got) != 2 {
+		t.Errorf("an undeclared session lost its window mapping: %v", got)
+	}
+}
+
+// swb 758 review: a task the no-console memory holds unsettled (the batched
+// mail had not gone out yet) must not be swallowed when a session starts
+// watching under a (window, slug) key it has never had. Unattended settles a
+// watched slug silently, so a silent first sight here would lose it entirely.
+func TestPlan_FirstSightKeepsWhatTheMailStillOwes(t *testing.T) {
+	now := t0.Add(time.Hour)
+	owed := Task{7, "switchboard", "", t0, "arrived while unwatched"}
+	known := Task{8, "switchboard", "", t0.Add(-time.Hour), "already settled"}
+	seen := Seen{Key(UnattendedWindow, "switchboard"): {8: known.At}} // 7 returned, mail throttled
+	swb := sess("swb", "idle", time.Hour)
+	swb.Projects = []string{"switchboard"}
+	n := Plan(cfg(), []Session{swb}, []Task{owed, known}, seen, now, always)
+	if len(n) != 1 || len(n[0].Settle[Key("swb", "switchboard")]) != 1 {
+		t.Fatalf("first sight: nudges %+v, want one for #7 only", n)
+	}
+	if _, ok := n[0].Settle[Key("swb", "switchboard")][7]; !ok {
+		t.Errorf("the owed task is not what the nudge settles: %+v", n[0].Settle)
+	}
+	if _, ok := seen[Key("swb", "switchboard")][8]; !ok {
+		t.Errorf("a task the mail memory already settled should be recorded silently")
+	}
+	// A slug the no-console memory has never seen keeps the old rule: silent.
+	fresh := Seen{}
+	if n := Plan(cfg(), []Session{swb}, []Task{owed}, fresh, now, always); len(n) != 0 {
+		t.Errorf("first sight with no mail memory at all nudged: %+v", n)
+	}
+}
+
+// swb 758, 11:53:35: the session created #758, a pass ran before its
+// task_signal a second later, and the session was nudged about its own task.
+func TestGrace_AFreshTaskWaitsOnePass(t *testing.T) {
+	seen := primed()
+	fresh := []Task{{9, "switchboard", "", t0.Add(-time.Second), ""}}
+	if n := Plan(cfg(), []Session{sess("sbc", "busy", 0)}, fresh, seen, t0, always); len(n) != 0 {
+		t.Fatalf("a task one second old nudged: %+v", n)
+	}
+	if _, ok := seen[Key("sbc", "switchboard")][9]; ok {
+		t.Fatalf("a fresh task was recorded, so it could never nudge later")
+	}
+	// Next pass the creating session has signalled it: its own, never news.
+	mine := []Task{{9, "switchboard", "sbc", t0.Add(-time.Second), ""}}
+	if n := Plan(cfg(), []Session{sess("sbc", "busy", 0)}, mine, seen, t0.Add(30*time.Second), always); len(n) != 0 {
+		t.Errorf("own task nudged after the grace: %+v", n)
+	}
+	// Nobody claims it: after the grace it is news like any other.
+	other := primed()
+	Plan(cfg(), []Session{sess("sbc", "busy", 0)}, fresh, other, t0, always)
+	if n := Plan(cfg(), []Session{sess("sbc", "busy", 0)}, fresh, other, t0.Add(30*time.Second), always); len(n) != 1 {
+		t.Errorf("an unclaimed task never nudged after the grace: %+v", n)
+	}
+	nc := Seen{Key(UnattendedWindow, "town-ai"): {}}
+	tt := []Task{{10, "town-ai", "", t0.Add(-time.Second), "x"}}
+	if got, _ := Unattended(cfg(), nil, []string{"town-ai"}, tt, nc, t0); len(got) != 0 {
+		t.Errorf("a task one second old mailed: %+v", got)
+	}
+	if got, _ := Unattended(cfg(), nil, []string{"town-ai"}, tt, nc, t0.Add(30*time.Second)); len(got) != 1 {
+		t.Errorf("after the grace it did not mail: %+v", got)
+	}
+}
+
+// swb 758 re-review: a fresh task in a WATCHED project must be recorded
+// nowhere, or a console that is gone by the next pass loses it: Plan deferred
+// it, and Unattended would already hold it as settled.
+func TestGrace_FreshTaskOfAConsoleThatVanishesStillMails(t *testing.T) {
+	seen := Seen{Key(UnattendedWindow, "switchboard"): {}}
+	primed := primed()
+	for k, v := range primed {
+		seen[k] = v
+	}
+	sbc := []Session{sess("sbc", "busy", 0)}
+	tt := []Task{{11, "switchboard", "", t0.Add(-time.Second), "x"}}
+	if n := Plan(cfg(), sbc, tt, seen, t0, always); len(n) != 0 {
+		t.Fatalf("fresh task nudged: %+v", n)
+	}
+	if got, _ := Unattended(cfg(), sbc, []string{"switchboard"}, tt, seen, t0); len(got) != 0 {
+		t.Fatalf("fresh task mailed: %+v", got)
+	}
+	if _, ok := seen[Key(UnattendedWindow, "switchboard")][11]; ok {
+		t.Fatalf("a fresh task of a watched project was settled in the no-console memory")
+	}
+	// Next pass the console is gone: it must mail.
+	if got, _ := Unattended(cfg(), nil, []string{"switchboard"}, tt, seen, t0.Add(30*time.Second)); len(got) != 1 {
+		t.Errorf("the task was lost: neither nudged nor mailed")
 	}
 }
