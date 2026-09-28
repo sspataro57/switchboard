@@ -9,15 +9,15 @@
   /* Page-local: swb-1.css is served immutable, so a rule added there never
      reaches a cached browser. */
   table.deliveries { table-layout: fixed; }
-  table.deliveries col.c-task { width: 16rem; }
-  table.deliveries col.c-to { width: 20rem; }
+  table.deliveries col.c-task { width: 22rem; }
+  table.deliveries col.c-act { width: 11rem; }
   table.deliveries td { overflow-wrap: anywhere; }
   table.deliveries .dl-id { font-weight: 600; color: var(--white); }
   table.deliveries td > [class^="status-"] { margin-top: .4rem; }
   table.deliveries textarea { min-height: 18rem; }
   table.deliveries pre { margin: .3rem 0; }
-  table.deliveries .dl-actions { margin-top: .5rem; }
-  table.deliveries .dl-actions input[type=text] { width: auto; min-width: 16rem; }
+  table.deliveries .dl-to { margin-top: .5rem; }
+  table.deliveries td.dl-actions form { margin-bottom: .4rem; }
   @media (max-width: 900px) {
     table.deliveries, table.deliveries tbody, table.deliveries tr, table.deliveries td { display: block; width: auto; }
     table.deliveries colgroup, table.deliveries tr:first-child { display: none; }
@@ -60,12 +60,12 @@
     <a href="/deliveries?status=rejected">rejected</a>
   </p>
 
-  {{/* Three columns so the words get the room (swb 754): the task cell carries
-       the row's facts (channel, status, when), the recipient has its own, and
-       the draft takes the rest with its commands under it. */}}
+  {{/* The draft gets the room (swb 754, 768): column 1 carries every fact about
+       the row (task, channel, status, when, where it goes), column 2 the words,
+       column 3 the commands. */}}
   <table class="deliveries">
-    <colgroup><col class="c-task"><col class="c-to"><col></colgroup>
-    <tr><th>Task</th><th>Goes to</th><th>Draft</th></tr>
+    <colgroup><col class="c-task"><col><col class="c-act"></colgroup>
+    <tr><th>Delivery</th><th>Draft</th><th>Actions</th></tr>
     {{range .Deliveries}}
     <tr id="d{{.ID}}">
       <td>
@@ -83,14 +83,14 @@
         {{end}}
         </div>
         {{if .StartsAt}}<div class="muted">when: {{.StartsAt}} → {{.EndsAt}}</div>{{end}}
+        {{/* SWT-44: where the send would go, before approval. Gmail's comes from
+             tools.ResolveGmailRoute, the send path's own resolution. */}}
+        <div class="dl-to">{{if eq .Channel "gmail"}}{{if .From}}<div>From: {{.From}}</div><div>To: {{.To}}</div><div class="muted">Thread: {{.ThreadSubject}}</div>{{end}}{{if .Cc}}<div>Cc: {{.CcText}}</div>{{end}}{{else}}{{.TargetRef}}{{end}}</div>
       </td>
-      {{/* SWT-44: where the send would go, before approval. Gmail's comes from
-           tools.ResolveGmailRoute, the send path's own resolution. */}}
-      <td>{{if eq .Channel "gmail"}}{{if .From}}<div>From: {{.From}}</div><div>To: {{.To}}</div><div class="muted">Thread: {{.ThreadSubject}}</div>{{end}}{{if .Cc}}<div>Cc: {{.CcText}}</div>{{end}}{{else}}{{.TargetRef}}{{end}}</td>
       <td>
         {{/* SWT-61: the delivery's OWN subject, as readable text, on every row.
-             It is a DIFFERENT string from the "Thread:" line in the Goes-to
-             cell (the thread's is frozen first-writer-wins and goes stale), and
+             It is a DIFFERENT string from the "Thread:" line in column 1
+             (the thread's is frozen first-writer-wins and goes stale), and
              #36 was approved because an empty subject inside an input's value=
              was indistinguishable from one that simply hadn't been read. */}}
         <div>{{if .Subject}}<strong>{{.Subject}}</strong>{{else}}{{if eq .Channel "gmail"}}<em class="muted">(no subject)</em>{{end}}{{end}}</div>
@@ -104,9 +104,10 @@
         {{else}}
         <pre style="white-space:pre-wrap; font: inherit;">{{.Body}}</pre>
         {{end}}
-        <div class="dl-actions">
+      </td>
+      <td class="dl-actions">
         {{if eq .Status "drafted"}}
-        {{/* SWT-44: the approve is bound to the words rendered above; an edit
+        {{/* SWT-44: the approve is bound to the words rendered in this row; an edit
              made after this page loaded makes it refuse. */}}
         <form class="inline" method="post" action="/deliveries/{{.ID}}/approve"><input type="hidden" name="content_hash" value="{{.ContentHash}}"><button>Approve</button></form>
         {{end}}
@@ -160,7 +161,6 @@
           <button name="redraft" value="true">Redo</button>
         </form>
         {{end}}
-        </div>
       </td>
     </tr>
     {{end}}
