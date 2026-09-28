@@ -3534,8 +3534,10 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
   It is committed in this repo. In kube and collaboratory-www it is in `.git/info/exclude`, and in
   town-ai its `.gitignore` already covers `/.claude`. foundry-deitch-audit is not a git repo.
   Declared on 2026-09-28: switchboard, foundry-deitch-audit (foundry),
-  collaboratory-www (collaboratory a-millon), kube (homelab), town-ai. NOT declared: fnb, infra
-  (foundry repos) and gonoble. Declaring them means every foundry task nudges three consoles.
+  collaboratory-www (collaboratory a-millon), kube (homelab), town-ai. NOT declared: gonoble, and
+  **fnb and infra, deliberately** (Salvador, 2026-09-28: "fnb and infra are foundry but must remain
+  undeclared all enters the hub"). Foundry work enters through the hub console, which routes it on;
+  never add a `.claude/swb-project` to foundry-new-build or foundry-new-build-infra.
   `~/.claude/swb-hook.py projects` prints what the current directory declares.
 - **Two review fixes in `swbpush` (swb 758).**
   - `awaitingMail`: a first sight of a (window, slug) key records silently only the tasks that the
