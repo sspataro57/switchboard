@@ -80,6 +80,11 @@ type Task struct {
 	Session string
 	At      time.Time
 	Title   string // for the "no console" email only; a nudge never carries it
+	// ByConsole: an interactive Claude session created it (its create_task
+	// audit row's actor is mcp:manual:*). That session is on it, so it never
+	// emails "no console" (swb 767: #764, keto-track's own task, mailed). It
+	// still nudges the console that watches its project.
+	ByConsole bool
 }
 
 // Seen is the watcher's memory, per (window, project): the At it last settled
@@ -359,7 +364,7 @@ func Unattended(cfg Config, sessions []Session, projects []string, tasks []Task,
 			live[t.ID] = true
 			prev, known := seen[key][t.ID]
 			switch {
-			case first || skip[slug]:
+			case first || skip[slug] || t.ByConsole:
 				seen[key][t.ID] = t.At
 			case now.Sub(t.At) < Grace:
 				// Too fresh: Plan defers it too, so recording it as watched here
