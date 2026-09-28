@@ -401,7 +401,7 @@ func TestReadAttachment_PinnedCasesDecodeExactly(t *testing.T) {
 	}
 	if !bytes.Equal(data, latin1) {
 		t.Errorf("latin1.csv bytes = %q, want the raw ISO-8859-1 bytes %q: the connector transfer-decodes only; "+
-			"the latin-1 repair is internal/tools' (toValidUTF8's rule)", data, latin1)
+			"the latin-1 repair is internal/tools' (latin1Repair)", data, latin1)
 	}
 	if strings.ToLower(att.Charset) != "iso-8859-1" || att.ContentType != "text/csv" {
 		t.Errorf("latin1.csv content_type/charset = %q/%q, want text/csv/iso-8859-1 — without the declared charset "+
