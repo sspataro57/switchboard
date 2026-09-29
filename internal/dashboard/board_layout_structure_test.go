@@ -214,7 +214,9 @@ func TestBoardLightFacts_FirstStatementFormatsTheUpdatedStamp(t *testing.T) {
 // Columns / statusColumn / byStatus bans included, is unchanged.
 
 func TestListTasks_BuildsSectionsAndAdvancedFilters(t *testing.T) {
-	body := funcBodySrc(t, "board.go", "listTasks")
+	// AMENDED — deliberately — by watch-json (SWT-101) criterion 13: the row
+	// building moved, unchanged, into boardView, so this reads listTasks + boardView.
+	body := boardBuildSrc(t)
 	if body == "" {
 		t.Fatalf("board.go declares no listTasks")
 	}
@@ -1054,4 +1056,18 @@ func TestTasksTemplate_NoBranchNoHTMXNoRawHTML(t *testing.T) {
 			}
 		}
 	}
+}
+
+// boardBuildSrc is the source of the board's row building: listTasks' body
+// followed by boardView's (watch-json, SWT-101, D1 and criterion 13). The row-and-
+// section half of listTasks moved, unchanged, into boardView so /watch.json can
+// share it; the body tests that pin row building read both, with every regex and
+// ban otherwise unchanged. "" when board.go declares no listTasks.
+func boardBuildSrc(t *testing.T) string {
+	t.Helper()
+	list := funcBodySrc(t, "board.go", "listTasks")
+	if list == "" {
+		return ""
+	}
+	return list + "\n" + funcBodySrc(t, "board.go", "boardView")
 }

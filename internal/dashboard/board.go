@@ -219,24 +219,25 @@ func (s *Server) boardRows(r *http.Request) ([]TaskExportRow, error) {
 	return out, rows.Err()
 }
 
-func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
+// boardView is the board's row-and-section pipeline, shared by /tasks and
+// /watch.json (watch-json D1): boardRows -> reopenMarkers -> boardLightFacts ->
+// the taskRow loop -> boardSections. The watch's counts are therefore the
+// header's own boardTallies over exactly these sections, never a second SQL.
+func (s *Server) boardView(r *http.Request) (secs []boardSection, facts map[int64]lightFacts, renderedAt string, err error) {
 	rows, err := s.boardRows(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, nil, "", err
 	}
 	markers, err := s.reopenMarkers(r, rows)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, nil, "", err
 	}
 	// SWT-52: the lights' own read (D3), which also returns the render time the
 	// auto-refresh indicator shows (D15). One refresh render is exactly one
 	// ordinary render: the same statements, whatever the refresh key says.
-	facts, renderedAt, err := s.boardLightFacts(r.Context(), rows)
+	facts, renderedAt, err = s.boardLightFacts(r.Context(), rows)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, nil, "", err
 	}
 
 	trs := make([]taskRow, 0, len(rows))
@@ -275,6 +276,15 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		}
 		trs = append(trs, tr)
 	}
+	return boardSections(trs), facts, renderedAt, nil
+}
+
+func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
+	secs, _, renderedAt, err := s.boardView(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	// D15: only refresh=on turns auto-refresh on; the interval is the const.
 	autoRefresh := r.URL.Query().Get("refresh") == "on"
 	refreshKey := ""
@@ -305,7 +315,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	// SWT-57: the rows grouped by their light (unknown statuses land in
 	// "other"), with SWT-59's incoming section first; and the first line's
 	// advanced-filter marker.
-	data.Sections = boardSections(trs)
+	data.Sections = secs
 	data.Panes = boardPanes(data.Sections)
 	data.Tally = boardTallies(data.Sections)
 	data.AdvancedFilters, data.ClearAdvancedURL = boardAdvanced(r.URL.Query())
@@ -414,7 +424,7 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		`SELECT to_char(now() AT TIME ZONE $2, 'HH24:MI:SS'),
 		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today, f.session,
 		        f.updated, f.from_message, f.pr_review, f.state_age_min,
-		        f.needs_review, f.activity_channel, f.activity_sender, f.activity_stamp
+		        f.needs_review, f.activity_channel, f.activity_sender, f.activity_stamp, f.state_unix
 		   FROM (SELECT 1) one
 		   LEFT JOIN (
 		     SELECT t.id, t.status,
@@ -442,7 +452,8 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		                     AND (t.reviewed_at IS NULL OR t.activity_at > t.reviewed_at), false) AS needs_review,
 		            COALESCE(nm.channel, '') AS activity_channel,
 		            COALESCE(nm.sender, '') AS activity_sender,
-		            COALESCE(to_char(t.activity_at AT TIME ZONE $2, 'YYYY-MM-DD HH24:MI:SS.US'), '') AS activity_stamp
+		            COALESCE(to_char(t.activity_at AT TIME ZONE $2, 'YYYY-MM-DD HH24:MI:SS.US'), '') AS activity_stamp,
+		            COALESCE(EXTRACT(EPOCH FROM (t.working_state_at))::bigint, 0) AS state_unix
 		       FROM tasks t
 		       LEFT JOIN normalized_messages nm ON nm.id = t.activity_by_message_id AND @demo.message(nm)
 		      WHERE (t.id = ANY($1) OR t.status = 'ready') AND @demo.task(t)) f ON true`,
@@ -458,9 +469,10 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		var stateToday, stale, closedToday, fromMessage, prReview, needsReview *bool
 		var stateAgeMin *int
 		var activityChannel, activitySender, activityStamp *string
+		var stateUnix *int64
 		if err := q.Scan(&renderedAt, &id, &status, &state, &stateAt, &stateToday, &stale, &dismissal, &closedToday,
 			&session, &updated, &fromMessage, &prReview, &stateAgeMin,
-			&needsReview, &activityChannel, &activitySender, &activityStamp); err != nil {
+			&needsReview, &activityChannel, &activitySender, &activityStamp, &stateUnix); err != nil {
 			return nil, "", fmt.Errorf("scan light facts: %w", err)
 		}
 		if id == nil {
@@ -474,6 +486,7 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 			StateAgeMinutes: *stateAgeMin,
 			NeedsReview:     *needsReview,
 			ActivityChannel: *activityChannel, ActivitySender: *activitySender, ActivityStamp: *activityStamp,
+			StateUnix: *stateUnix,
 		}
 		statusOf[*id] = *status
 		if *status == "ready" {

@@ -132,7 +132,9 @@ func TestBoardActivity_ExportsAndBoardQueryUntouched(t *testing.T) {
 // ---- criteria 30 and 31: listTasks and the remark ---------------------------------
 
 func TestListTasks_SetsTheActivityFields(t *testing.T) {
-	body := funcBodySrc(t, "board.go", "listTasks")
+	// AMENDED — deliberately — by watch-json (SWT-101) criterion 13: the row
+	// building moved, unchanged, into boardView, so this reads listTasks + boardView.
+	body := boardBuildSrc(t)
 	if body == "" {
 		t.Fatalf("board.go declares no listTasks")
 	}
