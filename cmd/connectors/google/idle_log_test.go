@@ -63,13 +63,49 @@ func TestIdleOnce_LogsRefresh(t *testing.T) {
 	}
 }
 
-// The guard path (see watch.go): a source that closes its channel with no
-// update must say so. The production IMAP source cannot reach it today.
+// A source that closes its channel with no update must say so. Since swb 556
+// the production IMAP source does exactly this when the server ends the IDLE.
 func TestIdleOnce_LogsASessionClosedWithoutNews(t *testing.T) {
 	sig := make(chan struct{})
 	close(sig)
 	out := idleLogRun(t, sig, 25*time.Minute)
 	if !strings.Contains(out, "watch: idle salvador@handsonconnect.org closed without news after") {
 		t.Errorf("output %q lacks the closed-without-news line", out)
+	}
+}
+
+// swb 556: the production source now closes its channel when the server ends
+// the IDLE (Gmail's "connection closed"). Mail can land in the gap before the
+// next IDLE starts, and IDLE reports only changes after it starts, so a dropped
+// session asks for one catch-up pass. It also waits backoffMin before
+// reopening, so a server that drops every session at once cannot make the
+// watcher spin.
+func TestIdleOnce_ADroppedSessionWakesACatchUpAndBacksOff(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sig := make(chan struct{})
+	close(sig)
+	sink := newMWFakeSink()
+	conn := &mwFakeConn{log: sink, signal: sig}
+	open := func(context.Context, google.Account) (idleConn, error) { return conn, nil }
+	clock := &mwClock{}
+	wake := make(chan string, 1)
+	if err := idleOnce(ctx, idleDeps{Sink: sink, Open: open, Sleep: clock.Sleep, IdleRefresh: 25 * time.Minute},
+		mwAccount(1, "sspataro@gmail.com"), wake); err != nil {
+		t.Fatalf("idleOnce = %v", err)
+	}
+	select {
+	case got := <-wake:
+		if got != "sspataro@gmail.com" {
+			t.Errorf("wake = %q, want the account", got)
+		}
+	default:
+		t.Errorf("a dropped session asked for no catch-up pass: mail that landed in the gap waits for the sweep")
+	}
+	clock.mu.Lock()
+	slept := append([]time.Duration(nil), clock.slept...)
+	clock.mu.Unlock()
+	if len(slept) != 1 || slept[0] != backoffMin {
+		t.Errorf("slept %v, want one backoffMin (%v) before reopening", slept, backoffMin)
 	}
 }

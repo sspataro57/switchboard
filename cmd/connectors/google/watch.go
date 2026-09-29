@@ -501,12 +501,19 @@ func idleOnce(ctx context.Context, deps idleDeps, acct google.Account, wake chan
 		return nil
 	case _, ok := <-ch:
 		if !ok {
-			// A GUARD, not an expected path: the production source
-			// (google.IMAPClientSource.Idle) closes the channel only after ctx is
-			// done, so today this cannot fire — a server-ended IDLE is logged by
-			// the source itself ("imap: idle … ended before we stopped it").
-			// Kept for another source or a future library that closes early.
+			// swb 556: the server (or the connection) ended the IDLE; the source
+			// closes the channel the moment that happens (before, it held it
+			// open until this refresh, and the mailbox was deaf for up to 25
+			// min). Mail may have landed in the gap and IDLE only reports what
+			// changes after it starts, so ask for one catch-up pass, then wait
+			// backoffMin so a server that drops every session cannot make this
+			// spin. Not an error: Gmail closes idle connections routinely.
 			fmt.Printf("watch: idle %s closed without news after %s\n", acct.Email, time.Since(opened).Round(time.Second))
+			select {
+			case wake <- acct.Email:
+			default: // a wake-up is already queued; one pass covers both
+			}
+			_ = deps.Sleep(ctx, backoffMin)
 			return nil
 		}
 		fmt.Printf("watch: idle %s fired after %s\n", acct.Email, time.Since(opened).Round(time.Second))

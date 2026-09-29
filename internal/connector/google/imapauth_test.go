@@ -71,6 +71,11 @@ type fakeIMAPServer struct {
 	// NO, exactly as Outlook does. Sent base64-encoded.
 	challengeJSON string
 
+	// dropOnIdle (swb 556): answer IDLE's continuation, then hang up, the way
+	// Gmail's "connection closed" ends a session mid-IDLE. Otherwise IDLE waits
+	// for DONE and completes normally.
+	dropOnIdle bool
+
 	mu    sync.Mutex
 	lines []string // every line the client sent, in order
 }
@@ -234,6 +239,18 @@ func (s *fakeIMAPServer) handle(rawConn net.Conn) {
 
 		case upper == "NOOP":
 			write(tag + " OK NOOP completed")
+
+		case upper == "IDLE":
+			write("+ idling")
+			if s.dropOnIdle {
+				return // the deferred Close drops the connection mid-IDLE
+			}
+			done, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			s.record(strings.TrimRight(done, "\r\n"))
+			write(tag + " OK IDLE terminated")
 
 		case upper == "LOGOUT":
 			write("* BYE logging out", tag+" OK LOGOUT completed")

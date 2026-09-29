@@ -48,3 +48,37 @@ Do NOT count an `imap: idle … ended before we stopped it` line that lands with
 signal is an "ended before" line with no refresh/fire beside it (a BYE or a dead connection), followed by
 silence until the next `open`. go-imap restarts IDLE itself every 25 min and re-issues a clean server end
 silently, so a clean end is never logged — and is not a miss.
+
+## Diagnosis and fix (2026-09-29, swb 556)
+
+The lifecycle logging found it on the first real miss. Grady's mail to sspataro@gmail.com was sent at
+14:21:46Z and stored at 14:29:45Z. The watch log (EDT):
+
+```
+10:19:19 watch: idle sspataro@gmail.com open
+10:21:35 imap: idle sspataro@gmail.com INBOX ended before we stopped it (server or connection): imap: connection closed
+                                                   (no "open" for this account again until the next refresh)
+10:29:56 watch: reconcile normalized=3
+```
+
+developer@sspataro.com showed the same at 10:21:02. That is the exact case the reading guide above calls the real
+signal: an "ended before" line with no refresh or fire beside it, then silence.
+
+**Cause:** `IMAPClientSource.Idle` logged the early end but its consumer goroutine only returned on the caller's
+ctx or on an update, so the channel stayed open. `idleOnce` waited on that channel until its 25-minute
+`idleCtx` expired. For the rest of that window the mailbox had no IDLE, and INBOX arrivals waited for the
+10-minute reconcile. The watcher's "closed without news" guard said "today this cannot fire", and that was why.
+
+**Fix:**
+- `Idle` closes its channel as soon as the IDLE command returns for any reason (an `ended` channel, closed after
+  `idleDone` is written, so the cleanup's `<-idleDone` still gets its value).
+- `idleOnce`, on a closed channel, logs "closed without news", sends one catch-up wake (mail can land in the gap,
+  and IDLE reports only changes after it starts), waits `backoffMin` (5 s) so a server dropping every session
+  cannot make it spin, then returns to reopen.
+- Tests:
+  - `TestIMAPClientSource_IdleClosesItsChannelWhenTheServerEndsIt` uses the wire-level fake server with the new
+    `dropOnIdle` option. It printed production's exact log line before the fix and failed.
+  - `TestIMAPClientSource_IdleStaysOpenWhileTheServerHoldsIt` covers the normal path.
+  - `TestIdleOnce_ADroppedSessionWakesACatchUpAndBacksOff` covers the watcher.
+
+Measured in 21 h of one pod before the fix: 4 "ended before" lines, each a dead window of up to 25 minutes.

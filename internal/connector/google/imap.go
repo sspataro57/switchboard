@@ -825,6 +825,10 @@ func (s *IMAPClientSource) Idle(ctx context.Context, folder string) (<-chan stru
 
 	stop := make(chan struct{})
 	idleDone := make(chan error, 1)
+	// ended closes when the IDLE command returns for ANY reason. idleDone keeps
+	// the error for the cleanup below; ended is what the consumer loop watches,
+	// so reading it never steals that value.
+	ended := make(chan struct{})
 	go func() {
 		// IDLE is re-issued by the caller; RFC 2177 requires a refresh at least
 		// every 29 minutes, and MAIL_IDLE_REFRESH keeps us inside that.
@@ -844,6 +848,7 @@ func (s *IMAPClientSource) Idle(ctx context.Context, folder string) (<-chan stru
 			fmt.Printf("imap: idle %s %s ended before we stopped it (server or connection): %v\n", s.Username, folder, err)
 		}
 		idleDone <- err
+		close(ended)
 	}()
 
 	go func() {
@@ -860,6 +865,12 @@ func (s *IMAPClientSource) Idle(ctx context.Context, folder string) (<-chan stru
 		for {
 			select {
 			case <-ctx.Done():
+				return
+			case <-ended:
+				// swb 556: the server (or the connection) ended the IDLE before
+				// we did. Close the channel now so the caller reopens at once;
+				// before this, the session sat dead until the caller's refresh
+				// (up to 25 min) and INBOX waited for the reconcile sweep.
 				return
 			case u, ok := <-updates:
 				if !ok {
