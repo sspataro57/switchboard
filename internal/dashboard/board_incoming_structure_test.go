@@ -42,10 +42,10 @@ func lightFactsStatements(t *testing.T) (body, first, second string) {
 	if body == "" {
 		t.Fatalf("board.go declares no boardLightFacts")
 	}
-	const q = "s.pool.Query("
+	const q = "s.demoQuery("
 	i := strings.Index(body, q)
 	if i < 0 {
-		t.Fatalf("boardLightFacts runs no s.pool.Query")
+		t.Fatalf("boardLightFacts runs no s.demoQuery")
 	}
 	first = body[i:]
 	if j := strings.Index(first[len(q):], q); j >= 0 {
@@ -195,7 +195,7 @@ func TestIncomingSections_IncomingFunctionsDeclaredAndPure(t *testing.T) {
 
 func TestBoardLightFacts_FirstStatementReadsTheIncomingFacts(t *testing.T) {
 	body, first, second := lightFactsStatements(t)
-	if n := strings.Count(body, "s.pool.Query"); n > 2 {
+	if n := strings.Count(body, "s.demoQuery"); n > 2 {
 		t.Errorf("boardLightFacts issues %d statements, want at most two (criterion 5, D15's count)", n)
 	}
 	spans := coalesceSpans(first)
@@ -274,7 +274,9 @@ func TestBoardLightFacts_FirstStatementReadsTheIncomingFacts(t *testing.T) {
 	}
 }
 
-// Criterion 5: the second statement (the queue-head candidates) is byte-unchanged.
+// Criterion 5: the second statement (the queue-head candidates) is byte-unchanged,
+// except demo-mode's @demo.task marker (SWT-99 criterion 10: heads are picked
+// among visible tasks in demo mode; demo-off runs the same text with $on=false).
 // GUARD: passes on main.
 func TestBoardLightFacts_SecondStatementByteUnchanged(t *testing.T) {
 	_, _, second := lightFactsStatements(t)
@@ -285,8 +287,8 @@ func TestBoardLightFacts_SecondStatementByteUnchanged(t *testing.T) {
 	if end < 0 {
 		t.Fatalf("cannot find the end of the second statement")
 	}
-	const want = "s.pool.Query(ctx,\n`SELECT t.id, t.assignee_type, t.project_id, COALESCE(p.slug,''), COALESCE(p.client,''), COALESCE(t.subproject,'')\n" +
-		"FROM tasks t JOIN projects p ON p.id = t.project_id\nWHERE t.status = 'ready'\nORDER BY `+tools.TaskQueueOrder)"
+	const want = "s.demoQuery(ctx,\n`SELECT t.id, t.assignee_type, t.project_id, COALESCE(p.slug,''), COALESCE(p.client,''), COALESCE(t.subproject,'')\n" +
+		"FROM tasks t JOIN projects p ON p.id = t.project_id\nWHERE t.status = 'ready' AND @demo.task(t)\nORDER BY `+tools.TaskQueueOrder)"
 	if got := normSQL(second[:end]); got != normSQL(want) {
 		t.Errorf("boardLightFacts' second statement changed (criterion 5: byte-unchanged):\n got %s\nwant %s", got, normSQL(want))
 	}

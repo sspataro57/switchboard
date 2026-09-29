@@ -168,13 +168,13 @@ func TestBoardLightFacts_FirstStatementFormatsTheUpdatedStamp(t *testing.T) {
 	if body == "" {
 		t.Fatalf("board.go declares no boardLightFacts")
 	}
-	const q = "s.pool.Query"
+	const q = "s.demoQuery"
 	if n := strings.Count(body, q); n > 2 {
 		t.Errorf("boardLightFacts issues %d statements, want at most two (criterion 6, D15's count)", n)
 	}
 	first := strings.Index(body, q+"(")
 	if first < 0 {
-		t.Fatalf("boardLightFacts runs no s.pool.Query")
+		t.Fatalf("boardLightFacts runs no s.demoQuery")
 	}
 	stmt, rest := body[first:], ""
 	if second := strings.Index(stmt[len(q):], q); second >= 0 {

@@ -3570,3 +3570,30 @@ The /tasks board no longer reloads on a timer; it is pushed. Supersedes SWT-52 D
 - **Sessions are in memory:** a dashboard restart logs every browser out, so an open board reloads once into login after a deploy. This is pre-existing, not a regression. The fetch uses `redirect: "manual"`, so this also works once OIDC is on and login redirects to another host: a cross-origin redirect would otherwise make fetch fail silently and leave the board polling forever.
 - **Column types on the triggered tables:** `WHEN (OLD.* IS DISTINCT FROM NEW.*)` needs an equality operator for every column, checked per UPDATE, not at CREATE. A `json` or `xml` column would fail every UPDATE of a row with a value there. `TestBoardLive_Integration_NoColumnTypeWithoutEquality` guards it; use jsonb.
 - **HTTP/1.1 residual:** six or more board tabs on the plain-http host exhaust the browser's per-host connections. The tablet's https host is HTTP/2.
+
+## Demo mode (SWT-99, demo-mode, 2026-09-29)
+
+A read filter on the web dashboard for a live client demo (swb #841, requested by Esteban/Avviato in #833). It is switched only in psql:
+see `docs/runbooks/demo-mode.md`.
+- **One spelling:** `internal/dashboard/demo.go`. Every dashboard read of a guarded table carries an
+  `@demo.<kind>(<alias>)` marker (`task`, `project`, `delivery`, `account`, `message`, `ref`) that `demoSQL`
+  expands to `(NOT $on OR (…))`, so demo-off runs the SAME text. Run queries through `s.demoQuery` /
+  `s.demoQueryRow`. An unexpanded marker is invalid SQL, so a forgotten expansion fails loudly.
+- **The structure test is the guard** (`demo_structure_test.go`). A NEW dashboard query that FROM/JOINs a
+  guarded table without a marker fails it. So does a new pool-taking cross-package call not listed in
+  `demoSeams`. The only exemptions are in `demoExempt`, each with a reason.
+- **Scope per request:** `s.demoScoped` wraps every authenticated route, inside `s.auth.Require(...)`. It is
+  never on /healthz, /static or the login routes. A handler reached without the wrapper sees demo ON with
+  empty lists: nothing, never everything. A failed flag read is a 503.
+- **Verbs** refuse a hidden id exactly like a nonexistent one, BEFORE the executor, so no audit row is written.
+  The checks are `taskVisibleOrRefuse` (inside `executeTask`, plus attach's target), `deliveryVisibleOrRefuse`
+  and `planAction`'s check. Since this ticket, a nonexistent id gets the dashboard's own "not found" flash in
+  both modes.
+- **`tasks.demo_hidden` (0048)** hides a task and all its descendants (a recursive walk at read time), in demo
+  mode only. Only psql writes it. `demo.go` is the only non-test code allowed to name it.
+- **Unit harnesses without a DB** set `Server{demoStub: true}`: the scope loads off and every id is visible.
+  Never set it in production.
+- **LANDMINE: accounts match by email alone, across providers.** `salvador@handsonconnect.org` is both a
+  Gmail mailbox that mixes in Foundry mail and a Jira account. Listing it exposes the mailbox.
+- **Deploy order:** 0048 BEFORE the image. `@demo.task` reads `demo_hidden` on every render, even with
+  demo off.

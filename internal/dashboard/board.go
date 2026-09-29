@@ -163,7 +163,8 @@ func boardQuery(r *http.Request) (string, []any) {
 	             t.title, t.status, t.assignee_type, COALESCE(t.worker_type,''),
 	             t.priority, t.plan_order,
 	             COALESCE(t.created_at::text,''), COALESCE(t.updated_at::text,'')
-	      FROM tasks t JOIN projects p ON p.id = t.project_id`
+	      FROM tasks t JOIN projects p ON p.id = t.project_id
+	     WHERE @demo.task(t)`
 	var conds []string
 	var args []any
 	add := func(cond string, val any) {
@@ -176,11 +177,14 @@ func boardQuery(r *http.Request) (string, []any) {
 	if v := r.URL.Query().Get("status"); v != "" {
 		add("t.status = $%d", v)
 	} else {
+		// The dismissal subquery's @demo.project(p) is redundant (the outer
+		// @demo.task already drops hidden projects): it is the demo structure
+		// scan's marker for this separate literal, and costs one array compare.
 		args = append(args, BoardTimeZone)
 		conds = append(conds, `(t.status <> 'closed'
 		 OR (COALESCE(t.closed_at, t.updated_at) >= `+boardDayStart(fmt.Sprintf("$%d", len(args)))+`
 		     AND NOT EXISTS (SELECT 1 FROM task_dismissals d
-		                      WHERE d.task_id = t.id AND d.reopened_at IS NULL)))`)
+		                      WHERE d.task_id = t.id AND d.reopened_at IS NULL AND @demo.project(p))))`)
 	}
 	if v := r.URL.Query().Get("assignee_type"); v != "" {
 		add("t.assignee_type = $%d", v)
@@ -189,7 +193,7 @@ func boardQuery(r *http.Request) (string, []any) {
 		add("t.subproject = $%d", v)
 	}
 	if len(conds) > 0 {
-		q += " WHERE " + strings.Join(conds, " AND ")
+		q += " AND " + strings.Join(conds, " AND ")
 	}
 	q += " ORDER BY t.id ASC"
 	return q, args
@@ -197,7 +201,7 @@ func boardQuery(r *http.Request) (string, []any) {
 
 func (s *Server) boardRows(r *http.Request) ([]TaskExportRow, error) {
 	q, args := boardQuery(r)
-	rows, err := s.pool.Query(r.Context(), q, args...)
+	rows, err := s.demoQuery(r.Context(), q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("select board: %w", err)
 	}
@@ -306,7 +310,7 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	data.Tally = boardTallies(data.Sections)
 	data.AdvancedFilters, data.ClearAdvancedURL = boardAdvanced(r.URL.Query())
 
-	prows, err := s.pool.Query(r.Context(), `SELECT slug FROM projects ORDER BY slug`)
+	prows, err := s.demoQuery(r.Context(), `SELECT p.slug FROM projects p WHERE @demo.project(p) ORDER BY p.slug`)
 	if err == nil {
 		defer prows.Close()
 		for prows.Next() {
@@ -318,12 +322,15 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bounded: a slow or hung health read degrades to "no line", never a
-	// stalled board (SWT-41 review).
-	hctx, hcancel := context.WithTimeout(r.Context(), 2*time.Second)
-	if h, err := orchestrator.Health(hctx, s.pool, time.Now()); err == nil && h.Verdict != orchestrator.VerdictOK {
-		data.OrchAlert = &h
+	// stalled board (SWT-41 review). Not in demo mode: its backlog, cursor and
+	// head are global event volume (demo-mode criterion 11).
+	if !demoScopeFrom(r.Context()).On {
+		hctx, hcancel := context.WithTimeout(r.Context(), 2*time.Second)
+		if h, err := orchestrator.Health(hctx, s.pool, time.Now()); err == nil && h.Verdict != orchestrator.VerdictOK {
+			data.OrchAlert = &h
+		}
+		hcancel()
 	}
-	hcancel()
 
 	if err := s.tmpl.ExecuteTemplate(w, "tasks.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -403,7 +410,7 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 	facts := map[int64]lightFacts{}
 	statusOf := map[int64]string{}
 	var renderedAt string
-	q, err := s.pool.Query(ctx,
+	q, err := s.demoQuery(ctx,
 		`SELECT to_char(now() AT TIME ZONE $2, 'HH24:MI:SS'),
 		        f.id, f.status, f.state, f.state_at, f.state_today, f.stale, f.dismissal, f.closed_today, f.session,
 		        f.updated, f.from_message, f.pr_review, f.state_age_min,
@@ -437,8 +444,8 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		            COALESCE(nm.sender, '') AS activity_sender,
 		            COALESCE(to_char(t.activity_at AT TIME ZONE $2, 'YYYY-MM-DD HH24:MI:SS.US'), '') AS activity_stamp
 		       FROM tasks t
-		       LEFT JOIN normalized_messages nm ON nm.id = t.activity_by_message_id
-		      WHERE t.id = ANY($1) OR t.status = 'ready') f ON true`,
+		       LEFT JOIN normalized_messages nm ON nm.id = t.activity_by_message_id AND @demo.message(nm)
+		      WHERE (t.id = ANY($1) OR t.status = 'ready') AND @demo.task(t)) f ON true`,
 		ids, BoardTimeZone, tools.WorkingLease.Seconds())
 	if err != nil {
 		return nil, "", fmt.Errorf("select light facts: %w", err)
@@ -481,10 +488,10 @@ func (s *Server) boardLightFacts(ctx context.Context, rows []TaskExportRow) (map
 		return facts, renderedAt, nil
 	}
 
-	c, err := s.pool.Query(ctx,
+	c, err := s.demoQuery(ctx,
 		`SELECT t.id, t.assignee_type, t.project_id, COALESCE(p.slug,''), COALESCE(p.client,''), COALESCE(t.subproject,'')
 		   FROM tasks t JOIN projects p ON p.id = t.project_id
-		  WHERE t.status = 'ready'
+		  WHERE t.status = 'ready' AND @demo.task(t)
 		  ORDER BY `+tools.TaskQueueOrder)
 	if err != nil {
 		return nil, "", fmt.Errorf("select queue candidates: %w", err)
@@ -581,12 +588,12 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 	var parentID *int64
 	var planOrder *int
 	var sourceThreadID *int64
-	err := s.pool.QueryRow(r.Context(),
+	err := s.demoQueryRow(r.Context(),
 		`SELECT t.id, COALESCE(p.slug,''), COALESCE(t.subproject,''), t.parent_id, t.title,
 		        COALESCE(t.body,''), t.status, t.assignee_type, COALESCE(t.worker_type,''),
 		        COALESCE(t.autonomy,''), t.priority, t.plan_order, COALESCE(t.updated_at::text,''),
 		        t.source_thread_id
-		 FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1`, id).
+		 FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id = $1 AND @demo.task(t)`, id).
 		Scan(&d.ID, &d.Project, &d.Subproject, &parentID, &d.Title, &d.Body, &d.Status,
 			&d.AssigneeType, &d.WorkerType, &d.Autonomy, &d.Priority, &planOrder, &d.UpdatedAt,
 			&sourceThreadID)
@@ -594,15 +601,12 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if parentID != nil {
-		d.ParentLink = fmt.Sprintf("%d", *parentID)
-	}
 	if planOrder != nil {
 		d.PlanOrder = fmt.Sprintf("%d", *planOrder)
 	}
 
 	scanTasks := func(q string, args ...any) []taskRow {
-		rows, err := s.pool.Query(r.Context(), q, args...)
+		rows, err := s.demoQuery(r.Context(), q, args...)
 		if err != nil {
 			return nil
 		}
@@ -616,41 +620,24 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 		}
 		return out
 	}
-	d.Children = scanTasks(`SELECT id, title, status, assignee_type FROM tasks WHERE parent_id=$1 ORDER BY plan_order NULLS LAST, id`, d.ID)
+	d.Children = scanTasks(`SELECT t.id, t.title, t.status, t.assignee_type FROM tasks t
+	                         WHERE t.parent_id=$1 AND @demo.task(t) ORDER BY t.plan_order NULLS LAST, t.id`, d.ID)
 	d.Deps = scanTasks(`SELECT t.id, t.title, t.status, t.assignee_type
 	                    FROM task_dependencies dep JOIN tasks t ON t.id = dep.depends_on_task_id
-	                    WHERE dep.task_id=$1 ORDER BY t.id`, d.ID)
+	                    WHERE dep.task_id=$1 AND @demo.task(t) ORDER BY t.id`, d.ID)
 	if parentID != nil {
-		if p := scanTasks(`SELECT id, title, status, assignee_type FROM tasks WHERE id=$1`, *parentID); len(p) == 1 {
+		if p := scanTasks(`SELECT t.id, t.title, t.status, t.assignee_type FROM tasks t WHERE t.id=$1 AND @demo.task(t)`, *parentID); len(p) == 1 {
 			d.Parent = &p[0]
+			// demo-mode criterion 15: the #N link only for a parent that passed @demo.task.
+			d.ParentLink = fmt.Sprintf("%d", *parentID)
 		}
 	}
 
-	if rows, err := s.pool.Query(r.Context(),
-		`SELECT id, event_type, payload::text, COALESCE(created_at::text,'')
-		 FROM task_events WHERE task_id=$1 ORDER BY id DESC LIMIT 50`, d.ID); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var e eventRow
-			if rows.Scan(&e.ID, &e.Type, &e.Payload, &e.At) == nil {
-				d.Events = append(d.Events, e)
-			}
-		}
-	}
-	if rows, err := s.pool.Query(r.Context(),
-		`SELECT id, question, COALESCE(answer,''), status FROM feedback_requests
-		 WHERE task_id=$1 ORDER BY id DESC`, d.ID); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var f feedbackRow
-			if rows.Scan(&f.ID, &f.Question, &f.Answer, &f.Status) == nil {
-				d.Feedback = append(d.Feedback, f)
-			}
-		}
-	}
-	if rows, err := s.pool.Query(r.Context(),
-		`SELECT id, channel, status, COALESCE(subject,''), COALESCE(body,''), COALESCE(sent_at::text,'')
-		 FROM deliveries WHERE task_id=$1 ORDER BY id DESC`, d.ID); err == nil {
+	d.Events = s.taskEvents(r.Context(), d.ID)
+	d.Feedback = s.taskFeedback(r.Context(), d.ID)
+	if rows, err := s.demoQuery(r.Context(),
+		`SELECT d.id, d.channel, d.status, COALESCE(d.subject,''), COALESCE(d.body,''), COALESCE(d.sent_at::text,'')
+		 FROM deliveries d WHERE d.task_id=$1 AND @demo.delivery(d) ORDER BY d.id DESC`, d.ID); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var dl deliveryRow
@@ -659,9 +646,9 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if rows, err := s.pool.Query(r.Context(),
-		`SELECT system, external_key, COALESCE(external_url,'') FROM external_refs
-		 WHERE task_id=$1 ORDER BY id`, d.ID); err == nil {
+	if rows, err := s.demoQuery(r.Context(),
+		`SELECT er.system, er.external_key, COALESCE(er.external_url,'') FROM external_refs er
+		 WHERE er.task_id=$1 AND @demo.ref(er) ORDER BY er.id`, d.ID); err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var ref refRow
@@ -687,13 +674,52 @@ func (s *Server) showTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Never fatal: without the fact the page simply offers no Requeue.
-	if err := s.pool.QueryRow(r.Context(), `SELECT `+needsReviewSQL+` FROM tasks t WHERE t.id = $1`, d.ID).
+	if err := s.demoQueryRow(r.Context(), `SELECT `+needsReviewSQL+` FROM tasks t WHERE t.id = $1 AND @demo.task(t)`, d.ID).
 		Scan(&d.NeedsReview); err != nil {
 		slog.Warn("task page: needs_review read failed; Requeue hidden", "task", d.ID, "err", err)
 	}
 	if err := s.tmpl.ExecuteTemplate(w, "task.html", d); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// taskEvents and taskFeedback are the task page's sub-reads, keyed on an id
+// that already passed @demo.task in showTask (demo-mode criterion 7's allowed
+// exemption; D2: text on a visible task renders unchanged).
+func (s *Server) taskEvents(ctx context.Context, id int64) []eventRow {
+	var out []eventRow
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, event_type, payload::text, COALESCE(created_at::text,'')
+		 FROM task_events WHERE task_id=$1 ORDER BY id DESC LIMIT 50`, id)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e eventRow
+		if rows.Scan(&e.ID, &e.Type, &e.Payload, &e.At) == nil {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (s *Server) taskFeedback(ctx context.Context, id int64) []feedbackRow {
+	var out []feedbackRow
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, question, COALESCE(answer,''), status FROM feedback_requests
+		 WHERE task_id=$1 ORDER BY id DESC`, id)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var f feedbackRow
+		if rows.Scan(&f.ID, &f.Question, &f.Answer, &f.Status) == nil {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // boardBackURL is the task page's Back link: the board view he came from, so
@@ -740,9 +766,9 @@ type briefRow struct {
 func (s *Server) listBriefs(w http.ResponseWriter, r *http.Request) {
 	// The title predicate is exactly the key R7 dedups on — it cannot drift
 	// from the producer without the producer changing first.
-	rows, err := s.pool.Query(r.Context(),
-		`SELECT id, title, COALESCE(body,''), COALESCE(created_at::text,'')
-		 FROM tasks WHERE title LIKE 'Morning brief %' ORDER BY id DESC LIMIT 60`)
+	rows, err := s.demoQuery(r.Context(),
+		`SELECT t.id, t.title, COALESCE(t.body,''), COALESCE(t.created_at::text,'')
+		 FROM tasks t WHERE t.title LIKE $1 AND @demo.task(t) ORDER BY t.id DESC LIMIT 60`, briefTitlePattern)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -827,14 +853,15 @@ type planDetail struct {
 func (s *Server) listPlans(w http.ResponseWriter, r *http.Request) {
 	q := `SELECT pi.id, COALESCE(p.slug,''), pi.source_path, pi.status,
 	             COALESCE(pi.created_at::text,''), COALESCE(pi.decided_by,'')
-	      FROM plan_imports pi JOIN projects p ON p.id = pi.project_id`
+	      FROM plan_imports pi JOIN projects p ON p.id = pi.project_id
+	     WHERE @demo.project(p)`
 	args := []any{}
 	if v := r.URL.Query().Get("status"); v != "" {
-		q += ` WHERE pi.status = $1`
+		q += ` AND pi.status = $1`
 		args = append(args, v)
 	}
 	q += ` ORDER BY pi.id DESC LIMIT 100`
-	rows, err := s.pool.Query(r.Context(), q, args...)
+	rows, err := s.demoQuery(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -860,13 +887,13 @@ func (s *Server) showPlan(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var d planDetail
 	var fields []byte
-	err := s.pool.QueryRow(r.Context(),
+	err := s.demoQueryRow(r.Context(),
 		`SELECT pi.id, COALESCE(p.slug,''), pi.source_path, pi.status,
 		        COALESCE(pi.created_at::text,''), COALESCE(pi.decided_by,''), e.fields
 		 FROM plan_imports pi
 		 JOIN projects p ON p.id = pi.project_id
 		 JOIN ai_extractions e ON e.id = pi.ai_extraction_id
-		 WHERE pi.id = $1`, id).
+		 WHERE pi.id = $1 AND @demo.project(p)`, id).
 		Scan(&d.ID, &d.Project, &d.SourcePath, &d.Status, &d.CreatedAt, &d.DecidedBy, &fields)
 	if err != nil {
 		http.NotFound(w, r)
@@ -1013,6 +1040,11 @@ func (s *Server) attachTaskAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad target_task_id", http.StatusBadRequest)
 		return
 	}
+	// demo-mode criterion 17: the TARGET is refused like not-found too, so an
+	// attach can never reach a hidden (or nonexistent) task.
+	if !s.taskVisibleOrRefuse(w, r, target, boardBack(r)) {
+		return
+	}
 	args := map[string]any{"task_id": taskID, "target_task_id": target}
 	if note := strings.TrimSpace(r.PostFormValue("note")); note != "" {
 		args["note"] = note
@@ -1110,7 +1142,22 @@ func boardURL(v url.Values) string {
 // session actor and redirects back to the plan list.
 func (s *Server) planAction(tool string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		args := fmt.Sprintf(`{"plan_import_id":%s}`, r.PathValue("id"))
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil || id <= 0 {
+			http.Error(w, "bad plan import id", http.StatusBadRequest)
+			return
+		}
+		// demo-mode criterion 17: hidden and nonexistent refuse alike, before the executor.
+		ok, err := s.visiblePlan(r.Context(), demoScopeFrom(r.Context()), id)
+		if err != nil {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if !ok {
+			http.Redirect(w, r, "/plans?"+url.Values{"flash": {fmt.Sprintf("plan import #%d not found", id)}}.Encode(), http.StatusSeeOther)
+			return
+		}
+		args := fmt.Sprintf(`{"plan_import_id":%d}`, id)
 		s.executeTo(w, r, tool, args, "/plans")
 	})
 }

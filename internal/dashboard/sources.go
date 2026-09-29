@@ -85,26 +85,27 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 	// an account with no traffic still appears as a row of zeros rather than
 	// vanishing from the page — an absent connector is exactly what we want to
 	// see.
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.demoQuery(ctx, `
 		SELECT a.id, a.provider, a.account_email, COALESCE(a.auth_type,'oauth'), a.send_enabled,
 		       (SELECT count(*) FROM raw_source_items ri WHERE ri.source_account_id=a.id),
 		       (SELECT count(*) FROM raw_source_items ri WHERE ri.source_account_id=a.id AND ri.normalized_at IS NOT NULL),
 		       (SELECT count(*) FROM raw_source_items ri WHERE ri.source_account_id=a.id AND ri.normalized_at IS NULL),
 		       (SELECT count(*) FROM normalized_messages m
-		          JOIN raw_source_items ri ON ri.id=m.raw_source_item_id WHERE ri.source_account_id=a.id),
+		          JOIN raw_source_items ri ON ri.id=m.raw_source_item_id WHERE ri.source_account_id=a.id AND @demo.message(m)),
 		       (SELECT count(*) FROM normalized_messages m
 		          JOIN raw_source_items ri ON ri.id=m.raw_source_item_id
-		         WHERE ri.source_account_id=a.id AND m.direction='inbound'),
+		         WHERE ri.source_account_id=a.id AND m.direction='inbound' AND @demo.message(m)),
 		       (SELECT count(*) FROM normalized_messages m
 		          JOIN raw_source_items ri ON ri.id=m.raw_source_item_id
-		         WHERE ri.source_account_id=a.id AND m.direction='outbound'),
+		         WHERE ri.source_account_id=a.id AND m.direction='outbound' AND @demo.message(m)),
 		       COALESCE((SELECT to_char(max(m.sent_at),'YYYY-MM-DD HH24:MI') FROM normalized_messages m
-		          JOIN raw_source_items ri ON ri.id=m.raw_source_item_id WHERE ri.source_account_id=a.id), ''),
+		          JOIN raw_source_items ri ON ri.id=m.raw_source_item_id WHERE ri.source_account_id=a.id AND @demo.message(m)), ''),
 		       (SELECT count(*) FROM raw_source_items ri
 		         WHERE ri.source_account_id=a.id AND ri.raw_json->>'truncated' = 'true'),
 		       (SELECT count(*) FROM raw_source_items ri
 		         WHERE ri.source_account_id=a.id AND jsonb_array_length(COALESCE(ri.raw_json->'parts','[]'::jsonb)) > 0)
 		  FROM source_accounts a
+		 WHERE @demo.account(a)
 		 ORDER BY a.provider, a.account_email`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -130,12 +131,12 @@ func (s *Server) listSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chRows, err := s.pool.Query(ctx, `
-		SELECT channel, count(*),
-		       count(*) FILTER (WHERE direction='inbound'),
-		       count(*) FILTER (WHERE direction='outbound'),
-		       COALESCE(min(sent_at)::date::text,''), COALESCE(max(sent_at)::date::text,'')
-		  FROM normalized_messages GROUP BY channel ORDER BY count(*) DESC`)
+	chRows, err := s.demoQuery(ctx, `
+		SELECT nm.channel, count(*),
+		       count(*) FILTER (WHERE nm.direction='inbound'),
+		       count(*) FILTER (WHERE nm.direction='outbound'),
+		       COALESCE(min(nm.sent_at)::date::text,''), COALESCE(max(nm.sent_at)::date::text,'')
+		  FROM normalized_messages nm WHERE @demo.message(nm) GROUP BY nm.channel ORDER BY count(*) DESC`)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

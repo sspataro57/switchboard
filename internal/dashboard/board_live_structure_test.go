@@ -332,7 +332,7 @@ func TestBoardLive_ChannelSpelledOnceInGo(t *testing.T) {
 
 func TestBoardServer_StreamRouteIsAuthenticatedAndBeatsTheIDRoute(t *testing.T) {
 	src := readSrc(t, "server.go")
-	route := regexp.MustCompile(`mux\.Handle\("GET /tasks/stream",\s*s\.auth\.Require\(\s*http\.HandlerFunc\(\s*s\.boardStream\s*\)\s*\)\s*\)`)
+	route := regexp.MustCompile(`mux\.Handle\("GET /tasks/stream",\s*s\.auth\.Require\(\s*s\.demoScoped\(\s*http\.HandlerFunc\(\s*s\.boardStream\s*\)\s*\)\s*\)\s*\)`)
 	if !route.MatchString(src) {
 		t.Errorf(`server.go registers no mux.Handle("GET /tasks/stream", s.auth.Require(http.HandlerFunc(s.boardStream))) ` +
 			`(criterion 10)`)
@@ -342,7 +342,7 @@ func TestBoardServer_StreamRouteIsAuthenticatedAndBeatsTheIDRoute(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)
 	}
-	h := (&Server{auth: auth}).Handler() // no pool, no hub
+	h := (&Server{auth: auth, demoStub: true}).Handler() // no pool, no hub
 	serve := func(req *http.Request) (rec *httptest.ResponseRecorder, panicked any) {
 		rec = httptest.NewRecorder()
 		defer func() { panicked = recover() }()

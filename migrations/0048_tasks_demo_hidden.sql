@@ -1,0 +1,13 @@
+-- 0048_tasks_demo_hidden.sql — tasks.demo_hidden, the per-task hide override for
+-- the dashboard's demo mode (docs/tickets/demo-mode_SPEC.md, Q1 = b).
+--
+-- When the ops_flags row demo_mode is on, the dashboard hides a task whose
+-- project is not allowlisted, AND a task in a visible project that carries
+-- demo_hidden (or whose ancestor does: the walk is read-time, in @demo.task,
+-- internal/dashboard/demo.go). With demo mode off the column changes nothing.
+--
+-- Only psql writes it, from docs/runbooks/demo-mode.md's audit query. No tool,
+-- MCP schema, form or handler reads or takes it (criterion 31). No index: the
+-- walk is by parent_id and tasks is small. No backfill: every task starts
+-- visible.
+ALTER TABLE tasks ADD COLUMN demo_hidden boolean NOT NULL DEFAULT false;

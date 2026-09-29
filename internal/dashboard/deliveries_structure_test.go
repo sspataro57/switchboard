@@ -135,7 +135,7 @@ func TestApproveAction_PassesTheHashAsJSON(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := &captureExec{}
-			s := &Server{ex: ex, auth: auth}
+			s := &Server{ex: ex, auth: auth, demoStub: true}
 			form := url.Values{}
 			if tc.hash != "" {
 				form.Set("content_hash", tc.hash)
@@ -186,7 +186,7 @@ func TestApproveAction_RefusesAPostWithoutTheHash(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := &captureExec{}
-			s := &Server{ex: ex, auth: auth}
+			s := &Server{ex: ex, auth: auth, demoStub: true}
 			req := httptest.NewRequest(http.MethodPost, "/deliveries/7/approve", strings.NewReader(tc.form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			req.SetPathValue("id", "7")
@@ -265,7 +265,7 @@ func TestRejectAction_PassesTheHashAsJSON(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := &captureExec{}
-			s := &Server{ex: ex, auth: auth}
+			s := &Server{ex: ex, auth: auth, demoStub: true}
 			req := httptest.NewRequest(http.MethodPost, "/deliveries/7/reject", strings.NewReader(tc.form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			req.SetPathValue("id", "7")
@@ -304,7 +304,7 @@ func TestRejectAction_RefusesAPostWithoutTheHash(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ex := &captureExec{}
-			s := &Server{ex: ex, auth: auth}
+			s := &Server{ex: ex, auth: auth, demoStub: true}
 			req := httptest.NewRequest(http.MethodPost, "/deliveries/7/reject", strings.NewReader(tc.form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			req.SetPathValue("id", "7")
