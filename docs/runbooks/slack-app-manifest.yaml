@@ -1,0 +1,36 @@
+# Slack app manifest for switchboard's user-token Slack connector (swb 836).
+#
+# Create ONE app per workspace from this file (Avviato, Collaboratory), each an
+# internal app of its own workspace, never one distributed app: internal apps
+# keep Slack's standard API limits. No bot user: every scope is a USER scope, so
+# the token reads what Salvador can read and posts as Salvador, nothing more.
+# Events arrive over Socket Mode (an outbound websocket), so nothing on the
+# homelab is exposed to the internet.
+display_information:
+  name: Switchboard (Salvador)
+  description: Salvador's personal work queue. Reads his conversations and sends the replies he approves, as him.
+  background_color: "#131315"
+settings:
+  socket_mode_enabled: true
+  token_rotation_enabled: false
+  org_deploy_enabled: false
+  is_hosted: false
+  event_subscriptions:
+    user_events:
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+oauth_config:
+  scopes:
+    user:
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      - channels:read
+      - groups:read
+      - im:read
+      - mpim:read
+      - users:read
+      - chat:write
