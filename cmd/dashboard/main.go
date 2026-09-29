@@ -4,6 +4,7 @@
 //
 //	DASHBOARD_ADDR default :8085
 //	OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URL
+//	SWB_WATCH_TOKEN  arms GET /watch.json (the Pebble face; >= 32 bytes, else 404)
 //	DATABASE_URL; GMAIL_CONNECTOR_BRIDGE or OPS_TOKEN_KEY + GOOGLE_CLIENT_SECRET_FILE
 package main
 
@@ -110,6 +111,8 @@ func run() error {
 	hub := dashboard.NewBoardHub(pool)
 	go hub.Run(ctx) // returns only when ctx ends; errors are logged and retried inside
 	srv.SetBoardHub(hub)
+	// watch-json (SWT-101): arms GET /watch.json; unset or short leaves it 404.
+	srv.SetWatchToken(os.Getenv("SWB_WATCH_TOKEN"))
 
 	addr := os.Getenv("DASHBOARD_ADDR")
 	if addr == "" {

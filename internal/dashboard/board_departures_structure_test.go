@@ -264,7 +264,9 @@ func TestBoardData_CarriesPanesAndTally(t *testing.T) {
 }
 
 func TestListTasks_FeedsTheDisplayHelpers(t *testing.T) {
-	body := funcBodySrc(t, "board.go", "listTasks")
+	// AMENDED — deliberately — by watch-json (SWT-101) criterion 13: the row
+	// building moved, unchanged, into boardView, so this reads listTasks + boardView.
+	body := boardBuildSrc(t)
 	if body == "" {
 		t.Fatalf("board.go declares no listTasks")
 	}
@@ -744,11 +746,26 @@ func TestBoardServer_StaticRouteIsOpenAndTheRestIsNot(t *testing.T) {
 			t.Errorf("%q is no longer registered with s.auth.Require (criterion 30: only /healthz and /static/ are open)", r)
 		}
 	}
-	open := regexp.MustCompile(`mux\.Handle(?:Func)?\("(GET|POST) ([^"]*)",\s*(?:func|http\.HandlerFunc|http\.StripPrefix)`)
-	for _, m := range open.FindAllStringSubmatch(src, -1) {
-		if m[2] != "/healthz" && m[2] != "/static/{path...}" {
-			t.Errorf("%s %s is registered WITHOUT s.auth.Require; only /healthz and /static/ are open routes "+
-				"(criterion 30)", m[1], m[2])
+	// AMENDED — deliberately — by watch-json (SWT-101) criterion 13: /watch.json
+	// joins the open list, and ONLY when wrapped in s.watchAuth( (its own
+	// constant-time bearer gate; the courier has no session). The scan now reads
+	// every registration, not only those that start with func / HandlerFunc /
+	// StripPrefix, so a new open route in any spelling is caught.
+	reg := regexp.MustCompile(`mux\.Handle(?:Func)?\("([A-Z]+) ([^"]*)",\s*([^\n]*)`)
+	for _, m := range reg.FindAllStringSubmatch(src, -1) {
+		method, path, rest := m[1], m[2], m[3]
+		if strings.HasPrefix(rest, "s.auth.Require(") {
+			continue
+		}
+		switch {
+		case path == "/healthz", path == "/static/{path...}":
+		case method == "GET" && path == "/watch.json" && strings.HasPrefix(rest, "s.watchAuth("):
+		case path == "/watch.json":
+			t.Errorf("%s /watch.json is registered as %q; the one open data route is allowed only when wrapped in "+
+				"s.watchAuth( (criterion 30 as amended by watch-json criterion 13)", method, rest)
+		default:
+			t.Errorf("%s %s is registered WITHOUT s.auth.Require; only /healthz, /static/ and the s.watchAuth-gated "+
+				"/watch.json are open routes (criterion 30, amended by watch-json criterion 13)", method, path)
 		}
 	}
 }

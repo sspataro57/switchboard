@@ -21,6 +21,9 @@ type light struct{ Class, Label, Session string }
 
 // lightFacts are what boardLightFacts reads beside the status.
 type lightFacts struct {
+	// StateUnix is working_state_at in Unix seconds, 0 when unset. Display-only,
+	// for /watch.json's "since" (watch-json D2): lightFor never reads it.
+	StateUnix int64
 	// OpenDismissalCode is the reason_code of a closed task's newest OPEN
 	// dismissal (reopened_at IS NULL), "" when none.
 	OpenDismissalCode string

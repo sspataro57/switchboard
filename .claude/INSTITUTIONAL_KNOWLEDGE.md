@@ -3597,3 +3597,22 @@ see `docs/runbooks/demo-mode.md`.
   Gmail mailbox that mixes in Foundry mail and a Jira account. Listing it exposes the mailbox.
 - **Deploy order:** 0048 BEFORE the image. `@demo.task` reads `demo_hidden` on every render, even with
   demo off.
+
+## /watch.json for the Pebble face (SWT-101, watch-json, 2026-09-29)
+
+- **Outside the session layer on purpose:** `mux.Handle("GET /watch.json", s.watchAuth(http.HandlerFunc(s.watchJSON)))`,
+  with no `s.auth.Require`, no dev login and no `s.demoScoped`. The bearer token from `SWB_WATCH_TOKEN` is the only
+  gate. Only `sha256(token)` is stored, and it is compared with `subtle.ConstantTimeCompare`. A value that is unset or
+  shorter than 32 bytes gives 404. A wrong or missing token gives 401 `unauthorized`. Every reply is `no-store`.
+  The route is registered even when disabled, so it answers 404 rather than 302 to login.
+- **LAN-only by DNS, not by code:** `switchboard.sspataro.com` has no public record. The plain-http
+  `switchboard.home.arpa` host also reaches the route, so the token would cross the LAN in clear there. Refusing it is
+  future work.
+- **The counts are the board's own.** `boardView` (board.go) is the one row-and-section pipeline behind both /tasks
+  and /watch.json, and the watch applies `boardTallies` to it. Never add a second count query.
+- **Session lists come off the lights:** `watchSessions` in watch.go is pure. A stale working signal is not listed but
+  still counts in in_flight. A session in both lists stays in waiting.
+- **Demo mode is deliberately OFF for the watch** (`watchScope`, `demoOffRoutes`), because it is Salvador's wrist, not
+  a shared screen.
+- **Coverage-scan landmine:** `boardSQLTables` (live_test.go) reads `FROM <ident>` as a table, so
+  `EXTRACT(EPOCH FROM t.col)` is flagged. Wrap the column in parentheses: `EXTRACT(EPOCH FROM (t.col))`.

@@ -343,7 +343,9 @@ func TestBoardLightFacts_NeverReadsThreadSurfacingOrAttached(t *testing.T) {
 // ---- criterion 6: listTasks, taskRow, the exports ------------------------------------
 
 func TestListTasks_SetsIncomingFromTheFacts(t *testing.T) {
-	body := funcBodySrc(t, "board.go", "listTasks")
+	// AMENDED — deliberately — by watch-json (SWT-101) criterion 13: the row
+	// building moved, unchanged, into boardView, so this reads listTasks + boardView.
+	body := boardBuildSrc(t)
 	if body == "" {
 		t.Fatalf("board.go declares no listTasks")
 	}

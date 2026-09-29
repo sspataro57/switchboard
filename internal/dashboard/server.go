@@ -58,6 +58,9 @@ type Server struct {
 	// loads as off and every id counts as visible, so verb and route tests can
 	// run without a pool. Never set in production (NewServer leaves it false).
 	demoStub bool
+	// watchDigest is sha256(SWB_WATCH_TOKEN), set by SetWatchToken (watch.go);
+	// empty leaves /watch.json disabled (404).
+	watchDigest []byte
 }
 
 func NewServer(pool *pgxpool.Pool, ex Exec, auth *Auth) (*Server, error) {
@@ -87,6 +90,12 @@ func (s *Server) Handler() http.Handler {
 		panic(fmt.Sprintf("dashboard: static sub-FS: %v", err)) // embed guarantees the directory
 	}
 	mux.Handle("GET /static/{path...}", http.StripPrefix("/static/", http.FileServerFS(staticSub)))
+
+	// watch-json (SWT-101): the Pebble face's read. Deliberately OUTSIDE the
+	// session layer (no s.auth.Require, no dev login, no demo wrapper): the
+	// bearer token in watchAuth is its only gate, the host is LAN-only, and it
+	// is registered even when disabled so it answers 404, not a login redirect.
+	mux.Handle("GET /watch.json", s.watchAuth(http.HandlerFunc(s.watchJSON)))
 
 	// demo-mode: every authenticated route loads the demo scope once per
 	// request (s.demoScoped, demo.go); /healthz, /static and the login routes

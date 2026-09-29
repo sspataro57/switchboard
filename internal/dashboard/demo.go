@@ -107,6 +107,18 @@ func withDemoScope(ctx context.Context, sc demoScope) context.Context {
 	return context.WithValue(ctx, demoScopeKey{}, sc)
 }
 
+// watchScope puts an explicit OFF scope on the context for /watch.json
+// (watch-json D4): the watch is Salvador's own wrist, never a shared screen,
+// and a demo-filtered watch would hide a session waiting on a hidden project.
+func watchScope(ctx context.Context) context.Context {
+	return withDemoScope(ctx, demoScope{})
+}
+
+// demoOffRoutes names the routes that deliberately read with demo mode OFF.
+var demoOffRoutes = map[string]string{
+	"GET /watch.json": "Salvador's private watch: four counts and his own session names, never on a shared screen",
+}
+
 // demoScopeFrom returns the request's scope. A context without one is a
 // handler reached around the wrapper: it gets demo ON with empty lists, so it
 // shows nothing rather than everything (criterion 2).
