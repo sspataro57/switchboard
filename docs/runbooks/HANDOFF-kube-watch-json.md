@@ -3,7 +3,9 @@
 `GET /watch.json` returns the board's header counts and the waiting and working session names. It is gated only by a
 bearer token, and the dashboard reads the token from `SWB_WATCH_TOKEN`. Without the variable, the route answers 404.
 
-Image: `192.168.50.20:5000/switchboard:<TAG>`, built from `main` at `<COMMIT>`. It includes everything in 0.7.63.
+Image: `192.168.50.20:5000/switchboard:0.7.64`
+(`sha256:530cdf3c84b2c0cfe26c4a6b12461d3193560553b01614caf2ebe91340c45476`), built from `main` at `6d4a1c5`.
+It includes everything in 0.7.63.
 
 ## 1. Secret, BEFORE the roll
 
