@@ -1,14 +1,21 @@
-# Slack app manifest for switchboard's user-token Slack connector (swb 836).
+# Slack app manifest for Relay: a user-token Slack app any team member can
+# connect (swb 836, 837). Switchboard is one subscriber (Salvador's), not the
+# app's identity.
 #
 # Create ONE app per workspace from this file (Avviato, Collaboratory), each an
 # internal app of its own workspace, never one distributed app: internal apps
-# keep Slack's standard API limits. No bot user: every scope is a USER scope, so
-# the token reads what Salvador can read and posts as Salvador, nothing more.
-# Events arrive over Socket Mode (an outbound websocket), so nothing on the
-# homelab is exposed to the internet.
+# keep Slack's standard API limits. No bot user: every scope is a USER scope.
+# Each member who connects authorizes it as themselves, so their token reads
+# only what they can read and posts only as them, and their events go only to
+# the destination they chose.
+#
+# Events arrive over Socket Mode (one outbound websocket for all connected
+# members). The OAuth redirect is the one inbound HTTPS endpoint: it receives
+# a member's authorization code when they connect. The host below is a
+# PLACEHOLDER until the admin decides where Relay runs.
 display_information:
-  name: Switchboard (Salvador)
-  description: Salvador's personal work queue. Reads his conversations and sends the replies he approves, as him.
+  name: Relay
+  description: Connect your Slack to your own work tools. Reads the conversations you're in and sends only the replies you approve, as you.
   background_color: "#131315"
 settings:
   socket_mode_enabled: true
@@ -22,6 +29,8 @@ settings:
       - message.im
       - message.mpim
 oauth_config:
+  redirect_urls:
+    - https://relay.example.com/slack/oauth/callback   # placeholder: set to where Relay runs
   scopes:
     user:
       - channels:history
