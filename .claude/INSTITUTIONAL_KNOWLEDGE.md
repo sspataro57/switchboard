@@ -3019,6 +3019,8 @@ did not author, from the GitHub notification mail he already receives. Runbook:
 
 ## Board departures view (SWT-67, board-departures)
 
+> SWT-102: the opt-in split-flap animation style is its own section, "Board split-flap".
+
 > SWT-89: B13's page-cycle wait is retired. A swap keeps each panel's page, so an update no longer waits for page 1.
 
 - **What it is.** `/tasks` is a dark split-flap departures board: two panes of panels that page instead of
@@ -3616,3 +3618,24 @@ see `docs/runbooks/demo-mode.md`.
   a shared screen.
 - **Coverage-scan landmine:** `boardSQLTables` (live_test.go) reads `FROM <ident>` as a table, so
   `EXTRACT(EPOCH FROM t.col)` is flagged. Wrap the column in parentheses: `EXTRACT(EPOCH FROM (t.col))`.
+
+## Board split-flap (SWT-102, board-splitflap)
+
+- **What it is.** The "flaps" toggle at the end of the `/tasks` topbar picks a second animation style per
+  browser: the tally, headings, visible row cells and footer counts turn character by character through
+  their drums (the Pebble face's `reel.c` rules), and the clock digits fold. Rows (`.flip`) stays the default.
+- **Where the preference lives.** `localStorage["swb.board.anim"] = "flaps"`, off removes it. That one key is
+  the only storage the board uses (B19's "no localStorage" was amended for it); every access is inside
+  `try {} catch (e) {}`. `/kiosk` frames the same origin, so one tap covers the tablet. Hidden on the phone
+  view and under `prefers-reduced-motion`.
+- **The rules are a pure block** between `// flap: pure begin` / `// flap: pure end` at the top of the IIFE.
+  `board_flap_test.go` runs it under `node` against `testdata/flap/golden.json` (test_reel.c's cases). Without
+  node those tests SKIP; run `SWB_REQUIRE_NODE=1 go test -run TestBoardFlap ./internal/dashboard/`. The block
+  may not name document/window/localStorage/Date/performance/setTimeout/this, even in a comment.
+- **Landmines.** A CSS selector `[data-live="counts"]` breaks `TestTasksTemplate_FiveLiveRegions` (it finds
+  the first occurrence). Comments in the script may not say "localStorage" outside a try (the discipline test
+  scans text). Motion runs on `motionMs += FLAP_FRAME_MS`, never a wall clock; `new Date(` stays exactly once.
+- **Diffing is by slot** (panel h2 id, visible index): a page turn or swap aims each slot from what it showed,
+  a same-target re-aim keeps the running plan. A long panel's load rattle is step-capped to finish by
+  `pageMs − 1500`, so on a 40-row panel it runs ~7.5 s: wait that long before asserting "only X changed".
+

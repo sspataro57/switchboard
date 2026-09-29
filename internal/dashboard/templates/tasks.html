@@ -145,6 +145,21 @@
     @keyframes blink { 50% { opacity: .25; } }
     .flip { animation: flip .5s ease-out both; transform-origin: 50% 0; }
     @keyframes flip { 0% { transform: rotateX(-88deg); filter: brightness(.3); } 100% { transform: none; filter: none; } }
+    /* SWT-102: the opt-in "flaps" style. The script turns Text nodes through
+       their drums; only the clock digits get fold layers, and only while they turn. */
+    .flap-toggle { background: none; border: 1px solid #3a3a40; border-radius: .2rem; color: var(--grey); font: inherit;
+                   letter-spacing: inherit; text-transform: inherit; padding: 0 .35rem; cursor: pointer; }
+    .flap-toggle:hover { color: var(--white); }
+    .flap-toggle[aria-pressed="true"] { color: var(--amber); border-color: var(--amber); }
+    body.flaps h2 { font-variant-numeric: tabular-nums; }
+    /* a flapping counts line in proportional type would push the legend along every flip */
+    body.flaps footer.ticker > span { font-family: var(--mono); letter-spacing: 0; }
+    body.flaps .clock span { position: relative; overflow: hidden;
+      background: linear-gradient(#26262a 0 calc(50% - 1px), var(--seam) calc(50% - 1px) calc(50% + 1px), #1c1c1f calc(50% + 1px)); }
+    body.flaps .clock span > b { position: absolute; top: 0; right: 0; bottom: 0; left: 0; padding: inherit; font: inherit;
+      color: inherit; text-align: center; border-radius: inherit; transform-origin: 50% 50%; }
+    body.flaps .clock .flap-top, body.flaps .clock .flap-up { background: #26262a; clip-path: inset(0 0 calc(50% + 1px) 0); }
+    body.flaps .clock .flap-bottom, body.flaps .clock .flap-down { background: #1c1c1f; clip-path: inset(calc(50% + 1px) 0 0 0); }
 
     /* the ticker */
     footer.ticker { flex: none; background: var(--sign); color: #111; font: 600 .95rem var(--head); letter-spacing: .06em; text-transform: uppercase;
@@ -219,6 +234,7 @@
     </div></details>
   </form>
   {{if .AdvancedFilters}}<a id="advanced-clear" href="{{.ClearAdvancedURL}}">clear advanced</a>{{end}}
+  <button type="button" id="flap-toggle" class="flap-toggle" aria-pressed="false" title="split-flap animation (this browser only)" hidden>flaps</button>
   </div>
   </div>
   <header class="sign">
@@ -347,6 +363,76 @@
     // swaps the marked [data-live] regions in place. Go renders every fact; this
     // script only moves server-rendered nodes. While the stream is down it polls
     // in place; a new page version or an expired session reloads once.
+    // flap: pure begin
+    var FLAP_TEXT_MS = 90, FLAP_DIGIT_MS = 150, FLAP_FRAME_MS = 33, FLAP_GAP_MS = 120,
+        FLAP_MIN = 6, FLAP_MAX = 16, FLAP_CELLS = 32;
+    var FLAP_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", FLAP_LOWER = "abcdefghijklmnopqrstuvwxyz", FLAP_DIGITS = "0123456789";
+    function flapActive(pref, reduced, phone) { return pref === "flaps" && !reduced && !phone; }
+    function flapDrumOf(c) {
+      if (c.length !== 1) return null;
+      if (c >= "A" && c <= "Z") return FLAP_UPPER;
+      if (c >= "a" && c <= "z") return FLAP_LOWER;
+      if (c >= "0" && c <= "9") return FLAP_DIGITS;
+      return null;
+    }
+    function flapCell(from, to) {
+      var drum = flapDrumOf(to);
+      if (!drum || from === to) return { to: to, flips: 0, start: 0, drum: null };
+      var size = drum.length, target = drum.indexOf(to);
+      var shown = flapDrumOf(from) === drum ? drum.indexOf(from) : 0;
+      var flips = (target + size - shown) % size;
+      if (flips < FLAP_MIN && size <= 10) flips += size;
+      if (flips < FLAP_MIN) flips = FLAP_MIN;
+      if (flips > FLAP_MAX) flips = FLAP_MAX;
+      return { to: to, flips: flips, start: (target + 2 * size - flips) % size, drum: drum };
+    }
+    function flapAim(shown, target) {
+      var s = Array.from(shown), t = Array.from(target), plan = [];
+      for (var i = 0; i < t.length; i++) {
+        plan.push(i < FLAP_CELLS ? flapCell(i < s.length ? s[i] : " ", t[i]) : { to: t[i], flips: 0, start: 0, drum: null });
+      }
+      return plan;
+    }
+    function flapFlips(plan) { var m = 0; for (var i = 0; i < plan.length; i++) if (plan[i].flips > m) m = plan[i].flips; return m; }
+    function flapAt(plan, flips) {
+      var out = "";
+      for (var i = 0; i < plan.length; i++) {
+        var c = plan[i];
+        out += flips >= c.flips ? c.to : c.drum.charAt((c.start + flips) % c.drum.length);
+      }
+      return out;
+    }
+    function flapPlace(place) { return place === 0 ? [-1, 0, 1, 2] : place === 2 ? [0, 1, 2, 3, 4, 5] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]; }
+    function flapIndex(place, d) { var i = flapPlace(place).indexOf(d); return i < 0 ? 0 : i; }
+    function drumAim(place, shown, target, fullTurn) {
+      var size = flapPlace(place).length;
+      var flips = (flapIndex(place, target) + size - flapIndex(place, shown)) % size;
+      if (flips !== 0 || fullTurn) while (flips < FLAP_MIN) flips += size;
+      return { place: place, from: shown, to: target, flips: flips };
+    }
+    function drumAt(d, flips) {
+      var f = flapPlace(d.place);
+      if (flips >= d.flips) return d.to;
+      return f[(flapIndex(d.place, d.from) + flips) % f.length];
+    }
+    function flapShade(h, full) { if (h * 100 >= full * 85) return 0; return h * 100 >= full * 40 ? 1 : 2; }
+    function flapFold(part) {
+      if (part < 500) return { flap: "upper", scale: Math.cos(Math.PI / 2 * part / 500) };
+      return { flap: "lower", scale: Math.cos(Math.PI / 2 * (1000 - part) / 500) };
+    }
+    function flapLineStep(n, pageMs) { return n > 1 ? Math.floor((pageMs - 1500 - 16 * 90) / (n - 1)) : Infinity; }
+    function flapLineStarts(base, ends, durs, gap, step) {
+      var starts = [], end = [];
+      for (var k = 0; k < durs.length; k++) {
+        var at = base;
+        for (var a = 0; a < k; a++) if (end[a] > base && end[a] + gap > at) at = end[a] + gap;
+        if (k > 0 && base + k * step < at) at = base + k * step;
+        starts.push(at);
+        end.push(durs[k] ? at + durs[k] : ends[k]);
+      }
+      return starts;
+    }
+    // flap: pure end
     var me = document.currentScript;
     var target = me.getAttribute("data-reload");
     var ms = (parseInt(me.getAttribute("data-interval"), 10) || 5) * 1000;
@@ -451,7 +537,7 @@
         pairs.push([olds[i], fresh]);
       }
       // Remember each panel's page and rows, keyed by the section id Go renders.
-      var pages = {}, before = {};
+      var pages = {}, before = {}, shown = flapOn ? flapSnapshot(null) : null;
       for (var p = 0; p < panels.length; p++) {
         pages[panels[p].key] = panels[p].page;
         var seen = {};
@@ -475,6 +561,7 @@
         }
       }
       layout(false);
+      if (shown) { flapAimCells(flapCells(null), shown, 0); return; }
       for (var c = 0; c < changed.length; c++) {
         if (changed[c].hidden) continue;
         void changed[c].offsetWidth;
@@ -508,20 +595,226 @@
     document.addEventListener("visibilitychange", function () { if (!document.hidden) attempt(); });
     arm();
 
+    // SWT-102: the "flaps" style (docs/tickets/board-splitflap_SPEC.md). Chosen
+    // per browser by the topbar toggle, kept in browser storage, never sent to the
+    // server. A cell is one existing Text node whose nodeValue turns through its
+    // drum (the pure rules above); a slot is (panel, visible index), so a page
+    // turn or a swap aims each slot from what it showed. Runs are keyed by slot
+    // and cell, and the frame loop runs only while something turns, on a motion
+    // clock that advances FLAP_FRAME_MS per frame.
+    var FLAP_KEY = "swb.board.anim", motionMs = 0, flapTimer = 0, flapRuns = {};
+    var flapBtn = document.getElementById("flap-toggle");
+    var reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+    function flapPref() { try { return localStorage.getItem(FLAP_KEY); } catch (e) {} return null; }
+    function flapSave(on) {
+      try { if (on) localStorage.setItem(FLAP_KEY, "flaps"); else localStorage.removeItem(FLAP_KEY); } catch (e) {}
+    }
+    var flapWant = flapPref() === "flaps"; // kept for the page even when storage refuses
+    var flapOn = flapActive(flapWant ? "flaps" : null, reduced.matches, phone.matches);
+    document.body.classList.toggle("flaps", flapOn);
+    // The cells of the board, or of one panel's rows: {key, group, line, node}.
+    function flapCells(only) {
+      var out = [];
+      function add(g, line, cls, node) {
+        if (node && node.nodeType === 3) out.push({ key: g + "|" + line + "|" + cls, group: g, line: line, node: node });
+      }
+      function first(el, sel) { var e = el.querySelector(sel); return e && e.firstChild; }
+      if (!only) {
+        var bs = document.querySelectorAll(".tally b");
+        for (var i = 0; i < bs.length; i++) add("tally", 0, "t" + i, bs[i].firstChild);
+        var counts = document.querySelector('[data-live="counts"]');
+        if (counts) add("counts", 0, "c", counts.firstChild);
+      }
+      for (var p = 0; p < panels.length; p++) {
+        var pn = panels[p];
+        if (only && pn !== only) continue;
+        if (!only && pn.head) add(pn.key, 0, "h", pn.head.firstChild);
+        for (var r = 0, slot = 0; r < pn.rows.length; r++) {
+          if (pn.rows[r].hidden) continue;
+          var a = pn.rows[r].querySelector("a.r"), line = 1 + slot++;
+          if (!a) continue;
+          var rem = a.querySelector(".rem");
+          add(pn.key, line, "time", first(a, ".time"));
+          add(pn.key, line, "id", first(a, ".id"));
+          add(pn.key, line, "title", first(a, ".title"));
+          add(pn.key, line, "chip", first(a, ".chip"));
+          add(pn.key, line, "rem", rem && rem.lastChild);
+          add(pn.key, line, "el", first(a, ".el"));
+        }
+      }
+      return out;
+    }
+    function flapSnapshot(only) {
+      var cells = flapCells(only), seen = {};
+      for (var i = 0; i < cells.length; i++) seen[cells[i].key] = cells[i].node.nodeValue;
+      return seen;
+    }
+    function flapWrite(r, s) { if (r.last !== s) { r.last = s; if (r.node.nodeValue !== s) r.node.nodeValue = s; } }
+    function flapFoldClear(span) {
+      var kids = span.querySelectorAll("b");
+      for (var i = 0; i < kids.length; i++) span.removeChild(kids[i]);
+    }
+    function flapEnd(r) {
+      if (r.span) flapFoldClear(r.span);
+      if (r.node.nodeValue !== r.to) r.node.nodeValue = r.to;
+    }
+    function flapSettle() {
+      for (var k in flapRuns) flapEnd(flapRuns[k]);
+      flapRuns = {};
+    }
+    // prv_schedule: a frame is armed only while some run exists, so an idle
+    // board holds no animation timer.
+    function flapArm() {
+      if (flapTimer) return;
+      for (var k in flapRuns) { flapTimer = setTimeout(frame, FLAP_FRAME_MS); return; }
+    }
+    // Aims cells at their current text from the strings in `from` (a missing
+    // slot comes up from blank). A run already heading for the same text keeps
+    // its plan and start (prv_turn's early return) and moves to the new node.
+    // Runs of an aimed group at line >= fromLine that no cell claims settle.
+    function flapAimCells(cells, from, fromLine) {
+      var groups = {}, claimed = {};
+      for (var i = 0; i < cells.length; i++) {
+        (groups[cells[i].group] = groups[cells[i].group] || []).push(cells[i]);
+        claimed[cells[i].key] = true;
+      }
+      for (var k in flapRuns) {
+        var old = flapRuns[k];
+        if (old.group in groups && old.line >= fromLine && !claimed[k]) { flapEnd(old); delete flapRuns[k]; }
+      }
+      for (var g in groups) {
+        var cs = groups[g], n = 0, durs = [], ends = [], fresh = [];
+        for (var c = 0; c < cs.length; c++) if (cs[c].line + 1 > n) n = cs[c].line + 1;
+        for (var l = 0; l < n; l++) { durs.push(0); ends.push(0); fresh.push([]); }
+        for (c = 0; c < cs.length; c++) {
+          var cell = cs[c], to = cell.node.nodeValue, run = flapRuns[cell.key];
+          if (run && run.to === to) {
+            if (run.node !== cell.node) { flapEnd(run); run.node = cell.node; run.last = null; flapWrite(run, run.shown); }
+            continue;
+          }
+          if (run) { flapEnd(run); delete flapRuns[cell.key]; }
+          var shown = cell.key in from ? from[cell.key] : "";
+          if (shown === to) continue;
+          var plan = flapAim(shown, to), flips = flapFlips(plan);
+          if (!flips) continue;
+          run = { node: cell.node, to: to, plan: plan, flips: flips, ms: FLAP_TEXT_MS, start: 0, end: 0, group: g, line: cell.line, last: to };
+          run.shown = flapAt(plan, 0);
+          flapWrite(run, run.shown);
+          flapRuns[cell.key] = run;
+          fresh[cell.line].push(run);
+          if (flips * FLAP_TEXT_MS > durs[cell.line]) durs[cell.line] = flips * FLAP_TEXT_MS;
+        }
+        for (k in flapRuns) {
+          var r = flapRuns[k];
+          if (r.group === g && r.line < n && fresh[r.line].indexOf(r) < 0 && r.end > ends[r.line]) ends[r.line] = r.end;
+        }
+        var starts = flapLineStarts(motionMs, ends, durs, FLAP_GAP_MS, flapLineStep(n, pageMs));
+        for (l = 0; l < n; l++) {
+          for (var f = 0; f < fresh[l].length; f++) { fresh[l][f].start = starts[l]; fresh[l][f].end = starts[l] + fresh[l][f].flips * FLAP_TEXT_MS; }
+        }
+      }
+      flapArm();
+    }
+    function flapDigit(n) { return n < 0 ? "\u00a0" : String(n); }
+    function flapLeaf(span, cls) { var b = document.createElement("b"); b.className = cls; span.appendChild(b); return b; }
+    // The clock's four drums (drum_aim), with the fold while a digit turns.
+    // spin: every digit goes round from its drum's first flap (load, tap on).
+    function flapClock(s, spin) {
+      for (var i = 0; i < digits.length && i < 4; i++) {
+        var sp = digits[i], key = "clock|0|d" + i, run = flapRuns[key], to = +s.charAt(i);
+        if (!sp.firstChild || sp.firstChild.nodeType !== 3) sp.insertBefore(document.createTextNode(""), sp.firstChild);
+        var node = sp.firstChild;
+        if (run && run.d.to === to && !spin) continue;
+        var shown;
+        if (spin) shown = flapPlace(i)[0];
+        else if (run) shown = drumAt(run.d, Math.floor((motionMs - run.start) / run.ms));
+        else shown = /^[0-9]$/.test(node.nodeValue) ? +node.nodeValue : -1;
+        if (run) { flapEnd(run); delete flapRuns[key]; }
+        var d = drumAim(i, shown, to, spin);
+        if (!d.flips) { if (node.nodeValue !== flapDigit(to)) node.nodeValue = flapDigit(to); continue; }
+        node.nodeValue = flapDigit(to);
+        run = { node: node, span: sp, d: d, to: flapDigit(to), flips: d.flips, ms: FLAP_DIGIT_MS, start: motionMs, group: "clock", line: 0 };
+        run.leaves = [flapLeaf(sp, "flap-top"), flapLeaf(sp, "flap-bottom"), flapLeaf(sp, "flap-leaf flap-up")];
+        flapRuns[key] = run;
+      }
+      flapArm();
+    }
+    function flapTurnDrum(r, el) {
+      var done = Math.floor(el / r.ms);
+      var old = flapDigit(drumAt(r.d, done)), next = flapDigit(drumAt(r.d, done + 1));
+      var fold = flapFold((el % r.ms) * 1000 / r.ms), up = fold.flap === "upper";
+      var top = r.leaves[0], bottom = r.leaves[1], leaf = r.leaves[2];
+      if (top.textContent !== next) top.textContent = next;
+      if (bottom.textContent !== old) bottom.textContent = old;
+      var face = up ? old : next, cls = up ? "flap-leaf flap-up" : "flap-leaf flap-down";
+      if (leaf.textContent !== face) leaf.textContent = face;
+      if (leaf.className !== cls) leaf.className = cls;
+      leaf.style.transform = "scaleY(" + fold.scale.toFixed(3) + ")";
+      leaf.style.filter = ["none", "brightness(.7)", "brightness(.45)"][flapShade(fold.scale, 1)];
+    }
+    // One frame: every running cell shows what it shows after the flips its
+    // motion time allows. A hidden tab or flaps turned off settles everything.
+    function frame() {
+      flapTimer = 0;
+      motionMs += FLAP_FRAME_MS;
+      if (document.hidden || !flapOn) { flapSettle(); return; }
+      var moving = false;
+      for (var k in flapRuns) {
+        var r = flapRuns[k];
+        if (!r.node.isConnected) { delete flapRuns[k]; continue; }
+        if (motionMs < r.start) { moving = true; continue; }
+        var el = motionMs - r.start, done = Math.floor(el / r.ms);
+        if (done >= r.flips) { flapEnd(r); delete flapRuns[k]; continue; }
+        moving = true;
+        if (r.span) flapTurnDrum(r, el);
+        else { r.shown = flapAt(r.plan, done); flapWrite(r, r.shown); }
+      }
+      if (moving) flapArm();
+    }
+    // Load and tap-on: the Pebble's first build, every line rattles in from blank.
+    function flapIn() {
+      flapSettle();
+      flapAimCells(flapCells(null), {}, 0);
+      var s = "";
+      for (var i = 0; i < digits.length && i < 4; i++) s += digits[i].textContent;
+      if (/^[0-9]{4}$/.test(s)) flapClock(s, true);
+    }
+    function flapSync(rattle) {
+      var on = flapActive(flapWant ? "flaps" : null, reduced.matches, phone.matches);
+      if (flapBtn) {
+        flapBtn.hidden = reduced.matches || phone.matches;
+        flapBtn.setAttribute("aria-pressed", flapWant ? "true" : "false");
+      }
+      if (on === flapOn) return;
+      flapOn = on;
+      document.body.classList.toggle("flaps", on);
+      if (!on) flapSettle();
+      else if (rattle) flapIn();
+    }
+    if (flapBtn) flapBtn.addEventListener("click", function () {
+      flapWant = !flapWant;
+      flapSave(flapWant);
+      flapSync(true);
+    });
+    function flapMedia() { flapSync(true); }
+    if (reduced.addEventListener) { reduced.addEventListener("change", flapMedia); phone.addEventListener("change", flapMedia); }
+
     // Paging shows and hides the rows the server rendered; it builds none.
     function show(p, flip) {
+      var before = flip && flapOn ? flapSnapshot(p) : null;
       var start = (p.page - 1) * p.per;
       for (var i = 0; i < p.rows.length; i++) {
         var r = p.rows[i];
         r.hidden = i < start || i >= start + p.per;
         r.classList.remove("flip");
-        if (!r.hidden && flip) {
+        if (!r.hidden && flip && !flapOn) {
           void r.offsetWidth;
           r.style.animationDelay = ((i - start) * 45) + "ms";
           r.classList.add("flip");
         }
       }
       p.pg.textContent = p.pages > 1 ? "page " + p.page + "/" + p.pages : "";
+      if (before) flapAimCells(flapCells(p), before, 1);
     }
     function layout(flip) {
       longest = 1;
@@ -562,7 +855,7 @@
         var box = boxes[b].querySelector(".rows");
         if (!box) continue;
         var head = boxes[b].querySelector("h2[id]");
-        panels.push({ key: head ? head.id : String(b), box: box, pg: boxes[b].querySelector(".pg"), rows: box.querySelectorAll(".row"), page: 1, pages: 1, per: 1 });
+        panels.push({ key: head ? head.id : String(b), head: head, box: box, pg: boxes[b].querySelector(".pg"), rows: box.querySelectorAll(".row"), page: 1, pages: 1, per: 1 });
       }
     }
     collect();
@@ -577,10 +870,15 @@
     function two(n) { return (n < 10 ? "0" : "") + n; }
     function clock() {
       var d = new Date(), s = two(d.getHours()) + two(d.getMinutes());
+      if (flapOn && !document.hidden) { flapClock(s, false); return; }
       for (var i = 0; i < digits.length && i < 4; i++) digits[i].textContent = s.charAt(i);
     }
     clock();
     setInterval(clock, 5000);
+    // Load with flaps active behaves like tapping on; the toggle shows only
+    // where flaps could run (not on the phone, not under reduced motion).
+    flapSync(false);
+    if (flapOn) flapIn();
 
     // FULL. A reload ends a document's fullscreen, and the board still navigates
     // (a row tap, a verb, a version reload), so the board never goes fullscreen on its own: inside the /kiosk shell it

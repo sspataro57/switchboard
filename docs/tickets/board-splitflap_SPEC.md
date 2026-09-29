@@ -543,6 +543,22 @@ The board-specific contracts that stay binding:
 No questions arose that CLAUDE.md, the IK, the code or Salvador's toggle-placement answer do not settle;
 there is no OPEN_QUESTIONS file.
 
+## Implementation notes (deviations recorded at delivery)
+
+- **D9, counts line.** Under `body.flaps` the footer counts span (`footer.ticker > span`) is set in `var(--mono)`,
+  not only `tabular-nums`. Its letters rattle too, and in proportional type every flip changed its width and
+  pushed `#light-legend` sideways (measured CLS 0.0009; 0 after the change). The selector cannot be
+  `[data-live="counts"]`: `TestTasksTemplate_FiveLiveRegions` takes the first `data-live="counts"` in the file
+  as the region, and a CSS selector ahead of the markup would be read as that region.
+- **D8, fold leaves.** The three `b.flap-*` leaves are full-size copies clipped with `clip-path: inset(...)` at
+  `50% ± 1px`, not `50% − 1px` overflow boxes. Same picture, simpler CSS; the leaf's `transform-origin` is the
+  seam. While a digit turns, the span's Text node already holds the new digit, so the 2 px seam strip shows a
+  sliver of it.
+- **D5/D9, waiting lines.** A cell whose line has not started yet shows `flapAt(plan, 0)` (its target length,
+  first flaps) rather than its old text, so from frame 0 it has its final character count.
+- **Idle timer.** `flapArm()` arms a frame only when some run exists; the 5 s clock tick with no digit change
+  arms nothing.
+
 ## Future work
 
 - Honour `prefers-reduced-motion` in the default `rows` flip too (today it always animates).

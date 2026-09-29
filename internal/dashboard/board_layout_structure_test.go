@@ -309,10 +309,15 @@ func TestBoardAdvanced_IteratesBoardKeys(t *testing.T) {
 //     toggle (byte-unchanged, with its {{if not .AutoRefresh}} landmine).
 //  3. {{if .Flash}} and {{with .OrchAlert}} as full-width blocks, then <main>.
 //
-// Every SWT-57 assertion survives: the topbar holds ONLY the filter form and the
-// clear link; the form's controls outside the <details> are exactly the project
-// select and the hidden refresh input; the flash and alert stay full-width
-// blocks; the toggle's text uses {{if not .AutoRefresh}}.
+// Every SWT-57 assertion survives: the topbar holds ONLY the filter form, the
+// clear link and the flap toggle; the form's controls outside the <details> are
+// exactly the project select and the hidden refresh input; the flash and alert
+// stay full-width blocks; the toggle's text uses {{if not .AutoRefresh}}.
+//
+// AMENDED by board-splitflap (SWT-102, docs/tickets/board-splitflap_SPEC.md, "Test
+// amendments" 2): the topbar's contract goes from two items to three, and the test
+// gains the positive assertion that id="flap-toggle" is inside the topbar, after
+// </form> and after id="advanced-clear", and not in the sign header.
 func TestTasksTemplate_HeaderBandsInOrder(t *testing.T) {
 	s := tasksHTML(t)
 	const topOpen = `<div class="topbar">`
@@ -358,6 +363,23 @@ func TestTasksTemplate_HeaderBandsInOrder(t *testing.T) {
 	} else if !(fe < ci) {
 		t.Errorf("the topbar's order is not: filter form, clear link (criterion 19)")
 	}
+	// AMENDED — deliberately — by board-splitflap (SWT-102, docs/tickets/board-splitflap_SPEC.md,
+	// "Test amendments" 2): the topbar's contract grows from two items to three. The flap
+	// toggle sits at the END of the topbar — after the filter form's </form> and after the
+	// clear advanced link — and never in the sign header (D3).
+	if gi := strings.Index(top, `id="flap-toggle"`); gi < 0 {
+		t.Errorf("the topbar does not hold the flap toggle id=\"flap-toggle\" (board-splitflap D3: the third item, " +
+			"beside the Advanced filter marker)")
+	} else {
+		if !(fe < gi) {
+			t.Errorf("the flap toggle comes before the filter form's </form>; the topbar's order is: filter form, clear " +
+				"link, flap toggle (board-splitflap D3)")
+		}
+		if ci >= 0 && !(ci < gi) {
+			t.Errorf("the flap toggle comes before id=\"advanced-clear\"; the topbar's order is: filter form, clear link, " +
+				"flap toggle (board-splitflap D3)")
+		}
+	}
 	for _, m := range []string{`id="auto-refresh-toggle"`, "{{if .AutoRefresh}}", `id="clock"`, `{{.Tally.`} {
 		if strings.Contains(top, m) {
 			t.Errorf("the topbar holds %s; the chrome bar carries the filters only — the sign header carries the "+
@@ -386,6 +408,9 @@ func TestTasksTemplate_HeaderBandsInOrder(t *testing.T) {
 	if ti >= 0 && !strings.Contains(sign[ti:minInt(ti+220, len(sign))], "{{if not .AutoRefresh}}") {
 		t.Errorf("the toggle's text is not written with {{if not .AutoRefresh}} (the SWT-57 landmine: the file keeps " +
 			"exactly ONE {{if .AutoRefresh}}, and it is the indicator's)")
+	}
+	if strings.Contains(sign, `id="flap-toggle"`) {
+		t.Errorf("the sign header holds the flap toggle; it lives on the first line, in the topbar (board-splitflap D3)")
 	}
 	if strings.Contains(sign, "<h1>Board</h1>") {
 		t.Errorf("the sign header still says <h1>Board</h1>; B15's title is <h1>Switchboard <small>{{.ProjectLabel}}</small></h1>")
@@ -583,11 +608,16 @@ func TestTasksTemplate_ScriptContract(t *testing.T) {
 	}
 	// SWT-89: fetch( moved to the required list above (the swap fetches the
 	// board's own server-rendered URL); the rest of the ban is unchanged.
+	// AMENDED — deliberately — by board-splitflap (SWT-102, docs/tickets/board-splitflap_SPEC.md,
+	// "Test amendments" 1): "localStorage" leaves the banned list for the one flap
+	// preference (D2 amends B19's "no localStorage" half; its "no URL key" half stands).
+	// AC 4's check lives in TestBoardFlap_StorageDiscipline. sessionStorage stays banned
+	// and document.cookie joins it.
 	for _, banned := range []string{"XMLHttpRequest", "htmx", "location.search", "location.href", "innerHTML",
-		"localStorage", "sessionStorage", "onchange"} {
+		"sessionStorage", "document.cookie", "onchange"} {
 		if strings.Contains(script, banned) {
 			t.Errorf("the script contains %q. Criterion 27 / B11: paging SHOWS and HIDES server-rendered rows — it "+
-				"never builds one — and the script stores nothing (B19)", banned)
+				"never builds one — and the script stores only the flap preference (board-splitflap D2)", banned)
 		}
 	}
 	// B12: arm() itself refuses when refresh is off. The plain board now renders
