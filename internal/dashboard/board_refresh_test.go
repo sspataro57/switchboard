@@ -346,14 +346,20 @@ func TestTasksTemplate_AutoRefreshToggleIndicatorAndOneScript(t *testing.T) {
 		t.Errorf("the refresh script calls fetch( %d times, want exactly 1 (SWT-89 criterion 20c: one in-place fetch of "+
 			"data-reload)", n)
 	}
+	// AMENDED — deliberately — by board-splitflap (SWT-102, docs/tickets/board-splitflap_SPEC.md,
+	// "Test amendments" 1): "localStorage" leaves the banned list. The script keeps ONE
+	// preference, the flap style under "swb.board.anim" (D2), and AC 4's discipline for it
+	// (every use inside a swallowing try/catch, one key literal, removeItem to turn off) is
+	// written once, in TestBoardFlap_StorageDiscipline. sessionStorage stays banned and
+	// document.cookie joins it.
 	for _, banned := range []string{"XMLHttpRequest", "htmx", "location.search", "location.href", "innerHTML",
-		"localStorage", "sessionStorage", "onchange",
+		"sessionStorage", "document.cookie", "onchange",
 		// SWT-89 criterion 20(b).
 		"outerHTML =", "insertAdjacentHTML", "document.write", "createContextualFragment", "eval(", "new Function",
 		"srcdoc"} {
 		if strings.Contains(script, banned) {
 			t.Errorf("the refresh script contains %q; D15: it builds no URL, parses no HTML string into the live DOM, "+
-				"stores nothing (and the one-onchange count covers the script too)", banned)
+				"stores only the flap preference (board-splitflap D2) (and the one-onchange count covers the script too)", banned)
 		}
 	}
 	// Outside the project select, no inline event handler anywhere.

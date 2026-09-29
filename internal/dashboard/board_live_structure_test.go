@@ -540,8 +540,10 @@ func TestTasksTemplate_FiveLiveRegions(t *testing.T) {
 			}
 		}
 		region := s[start:end]
+		// AMENDED by board-splitflap (SWT-102, "Test amendments" 3): the flap toggle joins
+		// the list — a swap never replaces it (D3). Strengthening only.
 		for _, banned := range []string{"<script", `<form class="filters"`, `id="clock"`, `id="fs"`,
-			`id="auto-refresh-toggle"`, `id="live-down"`, "{{if .Flash}}"} {
+			`id="auto-refresh-toggle"`, `id="live-down"`, "{{if .Flash}}", `id="flap-toggle"`} {
 			if strings.Contains(region, banned) {
 				t.Errorf("the %s region contains %s. Criterion 18 / S6: a swap never replaces the script, the filter form, "+
 					"the clock, FULL, the toggle, the down-note or the flash", n, banned)
@@ -647,12 +649,17 @@ func TestTasksTemplate_LiveScriptContract(t *testing.T) {
 	if !strings.Contains(script, `"text/html"`) && !strings.Contains(script, `'text/html'`) {
 		t.Errorf("the script never names \"text/html\" (criterion 20a: DOMParser's type, and the content-type check)")
 	}
+	// AMENDED — deliberately — by board-splitflap (SWT-102, docs/tickets/board-splitflap_SPEC.md,
+	// "Test amendments" 1): "localStorage" leaves the banned list for the one flap
+	// preference (D2); AC 4's check lives in TestBoardFlap_StorageDiscipline.
+	// sessionStorage stays banned and document.cookie joins it.
 	for _, banned := range []string{"innerHTML", "outerHTML =", "insertAdjacentHTML", "document.write",
 		"createContextualFragment", "eval(", "new Function", "srcdoc", "XMLHttpRequest", "htmx", "location.search",
-		"location.href", "localStorage", "sessionStorage", "onchange"} {
+		"location.href", "sessionStorage", "document.cookie", "onchange"} {
 		if strings.Contains(script, banned) {
 			t.Errorf("the script contains %q. Criterion 20b / S6: the swap is DOMParser + importNode + replaceWith; a "+
-				"string-to-DOM sink would run whatever a rendered title carries", banned)
+				"string-to-DOM sink would run whatever a rendered title carries, and the script stores only the flap "+
+				"preference (board-splitflap D2)", banned)
 		}
 	}
 	if n := strings.Count(script, "fetch("); n != 1 {
