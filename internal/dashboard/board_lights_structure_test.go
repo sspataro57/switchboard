@@ -54,7 +54,7 @@ func defaultPredicate(n string) string {
 	return `(t.status <> 'closed'
 	 OR (COALESCE(t.closed_at, t.updated_at) >= date_trunc('day', now() AT TIME ZONE ` + n + `) AT TIME ZONE ` + n + `
 	     AND NOT EXISTS (SELECT 1 FROM task_dismissals d
-	                      WHERE d.task_id = t.id AND d.reopened_at IS NULL)))`
+	                      WHERE d.task_id = t.id AND d.reopened_at IS NULL AND @demo.project(p))))`
 }
 
 // Criterion 10: one helper, one spelling of local midnight on the DB clock.
@@ -72,7 +72,8 @@ func TestBoardDayStart_OneSpelling(t *testing.T) {
 func TestBoardQuery_DefaultPredicateExactSQL(t *testing.T) {
 	t.Run("no filters", func(t *testing.T) {
 		q, args := boardQuery(httptest.NewRequest("GET", "/tasks", nil))
-		want := boardSelect + ` WHERE ` + defaultPredicate("$1") + ` ORDER BY t.id ASC`
+		// demo-mode (SWT-99): every board read carries @demo.task(t) first.
+		want := boardSelect + ` WHERE @demo.task(t) AND ` + defaultPredicate("$1") + ` ORDER BY t.id ASC`
 		if normSQL(q) != normSQL(want) {
 			t.Errorf("default boardQuery =\n  %s\nwant\n  %s", normSQL(q), normSQL(want))
 		}
@@ -94,7 +95,7 @@ func TestBoardQuery_DefaultPredicateExactSQL(t *testing.T) {
 	for _, st := range []string{"ready", "closed"} {
 		t.Run("status="+st, func(t *testing.T) {
 			q, args := boardQuery(httptest.NewRequest("GET", "/tasks?status="+st, nil))
-			want := boardSelect + ` WHERE t.status = $1 ORDER BY t.id ASC`
+			want := boardSelect + ` WHERE @demo.task(t) AND t.status = $1 ORDER BY t.id ASC`
 			if normSQL(q) != normSQL(want) {
 				t.Errorf("boardQuery(?status=%s) =\n  %s\nwant it byte-unchanged:\n  %s (criterion 11)", st, normSQL(q), normSQL(want))
 			}
@@ -469,13 +470,13 @@ func TestBoardLightFacts_FirstStatementSelectsTheSession(t *testing.T) {
 	if body == "" {
 		t.Fatalf("board.go declares no boardLightFacts")
 	}
-	first := strings.Index(body, "s.pool.Query(")
+	first := strings.Index(body, "s.demoQuery(")
 	if first < 0 {
-		t.Fatalf("boardLightFacts runs no s.pool.Query")
+		t.Fatalf("boardLightFacts runs no s.demoQuery")
 	}
 	stmt := body[first:]
-	if second := strings.Index(stmt[len("s.pool.Query("):], "s.pool.Query("); second >= 0 {
-		stmt = stmt[:len("s.pool.Query(")+second]
+	if second := strings.Index(stmt[len("s.demoQuery("):], "s.demoQuery("); second >= 0 {
+		stmt = stmt[:len("s.demoQuery(")+second]
 	}
 	if !strings.Contains(stmt, "HH24:MI:SS") {
 		t.Fatalf("CONTROL: the first statement does not carry the render time; the scan is not reading statement 1")

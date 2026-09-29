@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,10 @@ type Server struct {
 	// live is the process's board hub (SWT-89); nil answers the stream 503 and
 	// open boards poll in place.
 	live *BoardHub
+	// demoStub is for unit harnesses with NO database only: the demo scope
+	// loads as off and every id counts as visible, so verb and route tests can
+	// run without a pool. Never set in production (NewServer leaves it false).
+	demoStub bool
 }
 
 func NewServer(pool *pgxpool.Pool, ex Exec, auth *Auth) (*Server, error) {
@@ -83,17 +88,20 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("GET /static/{path...}", http.StripPrefix("/static/", http.FileServerFS(staticSub)))
 
-	mux.Handle("GET /", s.auth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// demo-mode: every authenticated route loads the demo scope once per
+	// request (s.demoScoped, demo.go); /healthz, /static and the login routes
+	// above do not.
+	mux.Handle("GET /", s.auth.Require(s.demoScoped(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/tasks", http.StatusFound)
-	})))
+	}))))
 	// SWT-10: full board, task detail, briefs, plan review, exports.
-	mux.Handle("GET /tasks", s.auth.Require(http.HandlerFunc(s.listTasks)))
+	mux.Handle("GET /tasks", s.auth.Require(s.demoScoped(http.HandlerFunc(s.listTasks))))
 	// SWT-89: the board's change stream. The literal wins over {id} (Go 1.22 mux).
-	mux.Handle("GET /tasks/stream", s.auth.Require(http.HandlerFunc(s.boardStream)))
-	mux.Handle("GET /tasks/{id}", s.auth.Require(http.HandlerFunc(s.showTask)))
+	mux.Handle("GET /tasks/stream", s.auth.Require(s.demoScoped(http.HandlerFunc(s.boardStream))))
+	mux.Handle("GET /tasks/{id}", s.auth.Require(s.demoScoped(http.HandlerFunc(s.showTask))))
 	// SWT-67 B21: the full-screen shell around the board (kiosk.go).
-	mux.Handle("GET /kiosk", s.auth.Require(http.HandlerFunc(s.showKiosk)))
-	mux.Handle("GET /briefs", s.auth.Require(http.HandlerFunc(s.listBriefs)))
+	mux.Handle("GET /kiosk", s.auth.Require(s.demoScoped(http.HandlerFunc(s.showKiosk))))
+	mux.Handle("GET /briefs", s.auth.Require(s.demoScoped(http.HandlerFunc(s.listBriefs))))
 	// Ingestion visibility, split across two read-only pages (SWT-29):
 	// /sources answers "how much is stored, per account" (lifetime totals,
 	// channels); /funnel answers "is it moving, and what happened to it" —
@@ -102,31 +110,31 @@ func (s *Server) Handler() http.Handler {
 	// summary. Together they distinguish a quiet board from a dead connector
 	// while triage is still in shadow mode. Both read the raw/normalized
 	// tables; neither executes anything.
-	mux.Handle("GET /sources", s.auth.Require(http.HandlerFunc(s.listSources)))
-	mux.Handle("GET /funnel", s.auth.Require(http.HandlerFunc(s.showFunnel)))
-	mux.Handle("GET /plans", s.auth.Require(http.HandlerFunc(s.listPlans)))
-	mux.Handle("GET /plans/{id}", s.auth.Require(http.HandlerFunc(s.showPlan)))
+	mux.Handle("GET /sources", s.auth.Require(s.demoScoped(http.HandlerFunc(s.listSources))))
+	mux.Handle("GET /funnel", s.auth.Require(s.demoScoped(http.HandlerFunc(s.showFunnel))))
+	mux.Handle("GET /plans", s.auth.Require(s.demoScoped(http.HandlerFunc(s.listPlans))))
+	mux.Handle("GET /plans/{id}", s.auth.Require(s.demoScoped(http.HandlerFunc(s.showPlan))))
 	// SWT-31: the board's first verb. Auth-required like every POST; the
 	// handler (board.go) rebuilds the filter query itself — criterion 17.
-	mux.Handle("POST /tasks/{id}/dismiss", s.auth.Require(http.HandlerFunc(s.dismissTaskAction)))
-	mux.Handle("POST /tasks/{id}/close", s.auth.Require(http.HandlerFunc(s.closeTaskAction)))
-	mux.Handle("POST /tasks/{id}/requeue", s.auth.Require(http.HandlerFunc(s.requeueTaskAction)))
-	mux.Handle("POST /tasks/{id}/attach", s.auth.Require(http.HandlerFunc(s.attachTaskAction)))
-	mux.Handle("POST /plans/{id}/approve", s.auth.Require(s.planAction("approve_plan_import")))
-	mux.Handle("POST /plans/{id}/reject", s.auth.Require(s.planAction("reject_plan_import")))
-	mux.Handle("GET /export/tasks.csv", s.auth.Require(http.HandlerFunc(s.exportCSV)))
-	mux.Handle("GET /export/tasks.json", s.auth.Require(http.HandlerFunc(s.exportJSON)))
-	mux.Handle("GET /deliveries", s.auth.Require(http.HandlerFunc(s.listDeliveries)))
-	mux.Handle("POST /deliveries/{id}/edit", s.auth.Require(http.HandlerFunc(s.actionEdit)))
-	mux.Handle("POST /deliveries/{id}/approve", s.auth.Require(http.HandlerFunc(s.approveAction)))
+	mux.Handle("POST /tasks/{id}/dismiss", s.auth.Require(s.demoScoped(http.HandlerFunc(s.dismissTaskAction))))
+	mux.Handle("POST /tasks/{id}/close", s.auth.Require(s.demoScoped(http.HandlerFunc(s.closeTaskAction))))
+	mux.Handle("POST /tasks/{id}/requeue", s.auth.Require(s.demoScoped(http.HandlerFunc(s.requeueTaskAction))))
+	mux.Handle("POST /tasks/{id}/attach", s.auth.Require(s.demoScoped(http.HandlerFunc(s.attachTaskAction))))
+	mux.Handle("POST /plans/{id}/approve", s.auth.Require(s.demoScoped(s.planAction("approve_plan_import"))))
+	mux.Handle("POST /plans/{id}/reject", s.auth.Require(s.demoScoped(s.planAction("reject_plan_import"))))
+	mux.Handle("GET /export/tasks.csv", s.auth.Require(s.demoScoped(http.HandlerFunc(s.exportCSV))))
+	mux.Handle("GET /export/tasks.json", s.auth.Require(s.demoScoped(http.HandlerFunc(s.exportJSON))))
+	mux.Handle("GET /deliveries", s.auth.Require(s.demoScoped(http.HandlerFunc(s.listDeliveries))))
+	mux.Handle("POST /deliveries/{id}/edit", s.auth.Require(s.demoScoped(http.HandlerFunc(s.actionEdit))))
+	mux.Handle("POST /deliveries/{id}/approve", s.auth.Require(s.demoScoped(http.HandlerFunc(s.approveAction))))
 	// SWT-43: Deny / Redo, one form, the redraft bit chosen by the button.
-	mux.Handle("POST /deliveries/{id}/reject", s.auth.Require(http.HandlerFunc(s.actionReject)))
-	mux.Handle("POST /deliveries/{id}/send", s.auth.Require(s.action("send_delivery")))
-	mux.Handle("POST /deliveries/{id}/mark-sent", s.auth.Require(s.action("mark_delivery_sent")))
+	mux.Handle("POST /deliveries/{id}/reject", s.auth.Require(s.demoScoped(http.HandlerFunc(s.actionReject))))
+	mux.Handle("POST /deliveries/{id}/send", s.auth.Require(s.demoScoped(s.action("send_delivery"))))
+	mux.Handle("POST /deliveries/{id}/mark-sent", s.auth.Require(s.demoScoped(s.action("mark_delivery_sent"))))
 	// Resolves a stuck slack_reply 'sending' row the other way: a human looked in
 	// Slack and the message is NOT there (SWT-12 criterion 12).
-	mux.Handle("POST /deliveries/{id}/mark-failed", s.auth.Require(s.action("mark_delivery_failed")))
-	mux.Handle("POST /flags/sending-frozen", s.auth.Require(http.HandlerFunc(s.actionFreeze)))
+	mux.Handle("POST /deliveries/{id}/mark-failed", s.auth.Require(s.demoScoped(s.action("mark_delivery_failed"))))
+	mux.Handle("POST /flags/sending-frozen", s.auth.Require(s.demoScoped(http.HandlerFunc(s.actionFreeze))))
 	return staticCacheHeaders(mux, staticSub)
 }
 
@@ -216,6 +224,14 @@ const unresolved = "(unresolved)"
 // mail went.
 var sendable = map[string]bool{"drafted": true, "approved": true, "failed": true}
 
+// addressOf is the bare address of a From that may carry a display name.
+func addressOf(from string) string {
+	if a, err := mail.ParseAddress(from); err == nil {
+		return a.Address
+	}
+	return from
+}
+
 // resolveDestination fills d's destination fields (SWT-44 review).
 func (s *Server) resolveDestination(ctx context.Context, d *deliveryRow, fromAcct, threadID *int64) {
 	if d.Channel != "gmail" {
@@ -234,8 +250,8 @@ func (s *Server) resolveDestination(ctx context.Context, d *deliveryRow, fromAcc
 	// On error the route still carries what resolved before the failure, so a
 	// thread with nothing inbound still shows its From and subject.
 	r, _ := tools.ResolveGmailRoute(ctx, s.pool, *fromAcct, *threadID)
-	if r.From != "" {
-		d.From = r.From
+	if r.From != "" && demoScopeFrom(ctx).accountVisible(addressOf(r.From)) {
+		d.From = r.From // demo-mode criterion 20: a hidden account's From stays (unresolved)
 	}
 	if r.To != "" {
 		d.To = r.To
@@ -265,15 +281,18 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	                        AND nm.direction = 'outbound'),
 	             COALESCE(d.send_queued_at::text,''), COALESCE(d.send_queue_job_id,''),
 	             d.send_attempted_at, d.send_settled_at
-	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id`
+	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id
+	     WHERE @demo.delivery(d)`
 	args := []any{}
 	if status != "" {
-		q += ` WHERE d.status = $1`
+		q += ` AND d.status = $1`
 		args = append(args, status)
 	}
+	// The demo filter is in the WHERE, before the LIMIT (criterion 20): hidden
+	// rows can never crowd visible ones off the page.
 	q += ` ORDER BY d.id DESC LIMIT 100`
 
-	rows, err := s.pool.Query(r.Context(), q, args...)
+	rows, err := s.demoQuery(r.Context(), q, args...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -325,8 +344,11 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 // action runs a delivery-id tool through the executor with the session actor.
 func (s *Server) action(tool string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		args := fmt.Sprintf(`{"delivery_id":%s}`, id)
+		id, ok := s.deliveryVisibleOrRefuse(w, r)
+		if !ok {
+			return
+		}
+		args := fmt.Sprintf(`{"delivery_id":%d}`, id)
 		s.execute(w, r, tool, args)
 	})
 }
@@ -343,6 +365,9 @@ func (s *Server) action(tool string) http.Handler {
 func (s *Server) approveAction(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.deliveryVisibleOrRefuse(w, r); !ok {
 		return
 	}
 	h := strings.TrimSpace(r.PostFormValue("content_hash"))
@@ -363,6 +388,9 @@ func (s *Server) approveAction(w http.ResponseWriter, r *http.Request) {
 func (s *Server) actionEdit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.deliveryVisibleOrRefuse(w, r); !ok {
 		return
 	}
 	payload := map[string]any{"delivery_id": jsonNum(r.PathValue("id"))}
@@ -427,6 +455,9 @@ func (s *Server) actionReject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if _, ok := s.deliveryVisibleOrRefuse(w, r); !ok {
+		return
+	}
 	h := strings.TrimSpace(r.PostFormValue("content_hash"))
 	if h == "" {
 		flash := "reject refused: this page did not say which words you reviewed; reload the page and review it again"
@@ -467,6 +498,11 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request, tool, args stri
 // executeTo sets none) — and redirects to /tasks carrying the given
 // query values plus the flash.
 func (s *Server) executeTask(w http.ResponseWriter, r *http.Request, tool, args string, taskID int64, back url.Values) {
+	// demo-mode criterion 17 (D3): a hidden or nonexistent task is refused in
+	// the dashboard, before the executor, so no audit row is written.
+	if !s.taskVisibleOrRefuse(w, r, taskID, back) {
+		return
+	}
 	actor := "dashboard:" + s.auth.User(r)
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
@@ -478,6 +514,48 @@ func (s *Server) executeTask(w http.ResponseWriter, r *http.Request, tool, args 
 	}
 	back.Set("flash", flash)
 	http.Redirect(w, r, "/tasks?"+back.Encode(), http.StatusSeeOther)
+}
+
+// taskVisibleOrRefuse is the task verbs' pre-executor check: true when the
+// task is visible in this request's scope; otherwise it has already answered
+// with the not-found flash on the board the verb would have returned to.
+func (s *Server) taskVisibleOrRefuse(w http.ResponseWriter, r *http.Request, id int64, back url.Values) bool {
+	ok, err := s.visibleTask(r.Context(), demoScopeFrom(r.Context()), id)
+	if err != nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if ok {
+		return true
+	}
+	v := url.Values{}
+	for k, vs := range back {
+		v[k] = vs
+	}
+	v.Set("flash", fmt.Sprintf("task #%d not found", id))
+	http.Redirect(w, r, "/tasks?"+v.Encode(), http.StatusSeeOther)
+	return false
+}
+
+// deliveryVisibleOrRefuse is the delivery verbs' pre-executor check: it parses
+// the {id} (a non-numeric id is a 400) and refuses a hidden or nonexistent
+// delivery with the not-found flash before the executor (criterion 17).
+func (s *Server) deliveryVisibleOrRefuse(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "bad delivery id", http.StatusBadRequest)
+		return 0, false
+	}
+	ok, err := s.visibleDelivery(r.Context(), demoScopeFrom(r.Context()), id)
+	if err != nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return 0, false
+	}
+	if !ok {
+		http.Redirect(w, r, "/deliveries?flash="+template.URLQueryEscaper(fmt.Sprintf("delivery #%d not found", id)), http.StatusSeeOther)
+		return 0, false
+	}
+	return id, true
 }
 
 // executeTo runs a tool through the executor with the session actor and

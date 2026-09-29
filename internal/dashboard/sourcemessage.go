@@ -148,7 +148,7 @@ var resolveSourceSQL = fmt.Sprintf(`
 	       COALESCE(nm.sent_at::text,''), left(COALESCE(nm.body_text,''), $3),
 	       length(COALESCE(nm.body_text,'')), COALESCE(nm.raw_source_item_id, 0)
 	  FROM cand c JOIN normalized_messages nm ON nm.id = c.mid
-	 WHERE c.mid IS NOT NULL
+	 WHERE c.mid IS NOT NULL AND @demo.message(nm)
 	 ORDER BY c.pri
 	 LIMIT 1`, tools.LatestInboundOrder)
 
@@ -168,7 +168,7 @@ const threadSQL = `
 	       left(COALESCE(nm.body_text,''), $3), length(COALESCE(nm.body_text,'')),
 	       count(*) OVER ()
 	  FROM normalized_messages nm
-	 WHERE nm.thread_id = $1 AND nm.id <> $2
+	 WHERE nm.thread_id = $1 AND nm.id <> $2 AND @demo.message(nm)
 	 ORDER BY nm.sent_at ASC NULLS LAST, nm.id ASC
 	 LIMIT $4`
 
@@ -190,7 +190,7 @@ func (s *Server) loadSourceMessage(ctx context.Context, taskID int64, sourceThre
 		storedLen  int
 		m          sourceMessage
 	)
-	err := s.pool.QueryRow(ctx, resolveSourceSQL, taskID, sourceThreadID, sourceBodyCap).
+	err := s.demoQueryRow(ctx, resolveSourceSQL, taskID, sourceThreadID, sourceBodyCap).
 		Scan(&pri, &id, &thread, &m.Channel, &m.Direction, &m.Sender, &m.Subject,
 			&m.SentAt, &m.Body, &storedLen, &rawItemID)
 	if err != nil {
@@ -228,7 +228,7 @@ func (s *Server) loadSourceMessage(ctx context.Context, taskID int64, sourceThre
 // standing with its source message: the conversation is context, and losing it
 // must not cost him the message he came for.
 func (s *Server) loadSourceThread(ctx context.Context, m *sourceMessage, threadID, sourceID int64) {
-	rows, err := s.pool.Query(ctx, threadSQL, threadID, sourceID,
+	rows, err := s.demoQuery(ctx, threadSQL, threadID, sourceID,
 		tools.MailThreadBodyCap, tools.MailThreadMaxMessages)
 	if err != nil {
 		return

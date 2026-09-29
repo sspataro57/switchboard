@@ -12,7 +12,7 @@ import (
 )
 
 func (s *Server) slackWatchRows(ctx context.Context) ([]slackWatchRow, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.demoQuery(ctx, `
 		WITH last_read AS (
 		  SELECT lower(a.account_email) AS account_email, rd.conversation_id, max(r.started_at) AS at
 		    FROM sync_runs r
@@ -28,6 +28,10 @@ func (s *Server) slackWatchRows(ctx context.Context) ([]slackWatchRow, error) {
 		  FROM slack_watch w
 		  LEFT JOIN last_read lr ON lr.account_email = lower(w.workspace_id) || '@slack-web.local'
 		                        AND lr.conversation_id = w.conversation_id
+		  -- demo-mode criterion 23: a watch row shows only when its workspace
+		  -- account is allowlisted (a LEFT JOIN, so demo-off keeps every row).
+		  LEFT JOIN source_accounts wa ON lower(wa.account_email) = lower(w.workspace_id) || '@slack-web.local'
+		 WHERE @demo.account(wa)
 		 ORDER BY w.enabled DESC, w.workspace_id, w.id`, BoardTimeZone)
 	if err != nil {
 		return nil, fmt.Errorf("select slack watch: %w", err)

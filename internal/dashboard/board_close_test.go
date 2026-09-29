@@ -57,7 +57,7 @@ func boardCloseHarness(t *testing.T, ex Exec) (http.Handler, []*http.Cookie) {
 	if err != nil {
 		t.Fatalf("NewAuth: %v", err)
 	}
-	h := (&Server{ex: ex, auth: auth}).Handler()
+	h := (&Server{ex: ex, auth: auth, demoStub: true}).Handler()
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/dev/login?user=salvo", nil))
 	cookies := rec.Result().Cookies()

@@ -168,15 +168,20 @@ type funnelPage struct {
 	Orch       orchestrator.HealthState
 	OrchLoaded bool
 	Generated  string
+	// Demo (demo-mode criterion 24): the capture, classify and promotion
+	// sections and their help text do not render, and the orchestrator shows
+	// its verdict only. Nothing on the page says why.
+	Demo bool
 }
 
 func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	now := time.Now()
 	days := clampDays(r.URL.Query().Get("days"))
-	page := funnelPage{Days: days, Generated: now.Format("2006-01-02 15:04:05")}
+	demo := demoScopeFrom(ctx).On
+	page := funnelPage{Days: days, Generated: now.Format("2006-01-02 15:04:05"), Demo: demo}
 
-	page.Errors = runSections([]funnelSection{
+	sections := []funnelSection{
 		{Name: "orchestrator health", Load: func() error {
 			hctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
@@ -210,7 +215,7 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				calStale[st.Email] = true
 			}
 
-			rows, err := s.pool.Query(ctx, `
+			rows, err := s.demoQuery(ctx, `
 				SELECT a.provider, a.account_email,
 				       COALESCE(p.phase, ''), p.last_ok, COALESCE(p.latest_status, ''), COALESCE(wnd.runs, 0)
 				  FROM source_accounts a
@@ -225,6 +230,7 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				               FROM sync_runs
 				              WHERE started_at >= now() - make_interval(days => $1)
 				              GROUP BY 1,2) wnd ON wnd.source_account_id = a.id AND wnd.phase = p.phase
+				 WHERE @demo.account(a)
 				 ORDER BY a.provider, a.account_email, p.phase NULLS FIRST`, days)
 			if err != nil {
 				return fmt.Errorf("health query: %w", err)
@@ -285,10 +291,10 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				byDay[key] = d
 				return d
 			}
-			rows, err := s.pool.Query(ctx, `
+			rows, err := s.demoQuery(ctx, `
 				SELECT r.ingested_at::date, a.account_email, count(*)
 				  FROM raw_source_items r JOIN source_accounts a ON a.id = r.source_account_id
-				 WHERE r.ingested_at >= now() - make_interval(days => $1)
+				 WHERE r.ingested_at >= now() - make_interval(days => $1) AND @demo.account(a)
 				 GROUP BY 1, 2`, days)
 			if err != nil {
 				return fmt.Errorf("intake raw query: %w", err)
@@ -311,10 +317,10 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 			if err := rows.Err(); err != nil {
 				return fmt.Errorf("iterate intake raw days: %w", err)
 			}
-			msgRows, err := s.pool.Query(ctx, `
-				SELECT created_at::date, count(*)
-				  FROM normalized_messages
-				 WHERE created_at >= now() - make_interval(days => $1)
+			msgRows, err := s.demoQuery(ctx, `
+				SELECT nm.created_at::date, count(*)
+				  FROM normalized_messages nm
+				 WHERE nm.created_at >= now() - make_interval(days => $1) AND @demo.message(nm)
 				 GROUP BY 1`, days)
 			if err != nil {
 				return fmt.Errorf("intake message query: %w", err)
@@ -341,8 +347,8 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 			// ingested something in the window: a connector that went quiet
 			// renders a column of zeros, for the same reason fillDays renders
 			// empty days — absence is the signal (go-reviewer finding 3).
-			acctRows, err := s.pool.Query(ctx,
-				`SELECT DISTINCT account_email FROM source_accounts ORDER BY account_email`)
+			acctRows, err := s.demoQuery(ctx,
+				`SELECT DISTINCT a.account_email FROM source_accounts a WHERE @demo.account(a) ORDER BY a.account_email`)
 			if err != nil {
 				return fmt.Errorf("list intake accounts: %w", err)
 			}
@@ -357,7 +363,11 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 			acctRows.Close()
 			return acctRows.Err()
 		}},
-		{Name: "capture attribution", Load: func() error {
+	}
+	// demo-mode D7: these three read every account (the personal lane
+	// included) in other packages, so they do not run in demo mode at all.
+	if !demo {
+		sections = append(sections, funnelSection{Name: "capture attribution", Load: func() error {
 			// The seams wrap their own errors; runSections adds the section name.
 			trend, err := capture.AttributionTrend(ctx, s.pool, days)
 			if err != nil {
@@ -365,8 +375,7 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 			}
 			page.Capture = trend
 			return nil
-		}},
-		{Name: "classify shadow summary", Load: func() error {
+		}}, funnelSection{Name: "classify shadow summary", Load: func() error {
 			since := time.Duration(days) * 24 * time.Hour
 			for _, lane := range []classify.Lane{classify.LanePersonal, classify.LaneResidue, classify.LaneInquiry, classify.LaneRoute} {
 				sum, err := classify.Summarize(ctx, s.pool, since, lane.WorkerType)
@@ -379,8 +388,7 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			return nil
-		}},
-		{Name: "classify promotion", Load: func() error {
+		}}, funnelSection{Name: "classify promotion", Load: func() error {
 			// SWT-30 criterion 18: one promotion line per lane over the same
 			// ?days= window, read from classify_promotions through the seam that
 			// owns its SQL (promote.CountersByLane — the dashboard restates no
@@ -393,8 +401,9 @@ func (s *Server) showFunnel(w http.ResponseWriter, r *http.Request) {
 			}
 			page.Promotions = counters
 			return nil
-		}},
-	})
+		}})
+	}
+	page.Errors = runSections(sections)
 
 	if err := s.tmpl.ExecuteTemplate(w, "funnel.html", page); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

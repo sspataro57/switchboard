@@ -29,7 +29,12 @@
   {{end}}
 
   <h2>Orchestrator</h2>
-  {{if .OrchLoaded}}
+  {{if and .OrchLoaded .Demo}}
+  <table>
+    <tr><th>verdict</th></tr>
+    <tr><td class="{{if eq .Orch.Verdict "ok"}}ok{{else}}bad{{end}}">{{.Orch.Verdict}}</td></tr>
+  </table>
+  {{else if .OrchLoaded}}
   <table>
     <tr><th>verdict</th><th>backlog</th><th>oldest unprocessed</th><th>cursor</th><th>cursor moved</th><th>head</th></tr>
     <tr>
@@ -68,6 +73,7 @@
     <tr><td colspan="7" class="muted">No source accounts.</td></tr>
     {{end}}
   </table>
+  {{if not .Demo}}
   <p class="muted">
     Last <em>successful</em> sync per account and phase — a connector failing every attempt shows
     <code>never</code>, not its newest failure. <code>calendar</code> rows are judged by the system's own
@@ -78,6 +84,7 @@
     (jira and upworkcrm write none), and upwork's run count is twice its invocations — each run
     writes two rows (ingest + normalize).
   </p>
+  {{end}}
 
   <h2>Intake trend</h2>
   <table>
@@ -99,6 +106,7 @@
     it across years. Days with nothing arriving render as zeros on purpose.
   </p>
 
+  {{if not .Demo}}
   <h2>Capture attribution</h2>
   <table>
     <tr><th>Day</th><th class="num">Matched</th><th class="num">Unmatched</th>
@@ -288,6 +296,7 @@
   <p class="muted">No promotions in the window. Promotion is off until a project has
     <code>classify_promote_after</code> set; only whitelisted kinds (payment_due, deadline)
     auto-create live tasks, everything else parks in the holding lane.</p>
+  {{end}}
   {{end}}
   </div>
 </body>

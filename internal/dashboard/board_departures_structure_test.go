@@ -171,7 +171,7 @@ func TestLightFacts_StateAgeIsDisplayOnly(t *testing.T) {
 
 func TestBoardLightFacts_FirstStatementComputesTheStateAge(t *testing.T) {
 	body, first, second := lightFactsStatements(t)
-	if n := strings.Count(body, "s.pool.Query"); n > 2 {
+	if n := strings.Count(body, "s.demoQuery"); n > 2 {
 		t.Errorf("boardLightFacts issues %d statements, want at most two (criterion 9: D15's cost table is unchanged — "+
 			"no new query, no new statement)", n)
 	}

@@ -51,7 +51,7 @@ var activityFactTokens = []struct {
 
 func TestBoardLightFacts_FirstStatementReadsTheActivityFacts(t *testing.T) {
 	body, first, second := lightFactsStatements(t)
-	if n := strings.Count(body, "s.pool.Query"); n > 2 {
+	if n := strings.Count(body, "s.demoQuery"); n > 2 {
 		t.Errorf("boardLightFacts issues %d statements, want at most two (criterion 28: still at most two)", n)
 	}
 	for _, tok := range activityFactTokens {

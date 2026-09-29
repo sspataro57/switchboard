@@ -344,7 +344,7 @@ func TestBoardServer_CloseRouteIsRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read server.go: %v", err)
 	}
-	route := regexp.MustCompile(`mux\.Handle\("POST /tasks/\{id\}/close",\s*s\.auth\.Require\(\s*http\.HandlerFunc\(\s*s\.closeTaskAction\s*\)\s*\)\s*\)`)
+	route := regexp.MustCompile(`mux\.Handle\("POST /tasks/\{id\}/close",\s*s\.auth\.Require\(\s*s\.demoScoped\(\s*http\.HandlerFunc\(\s*s\.closeTaskAction\s*\)\s*\)\s*\)\s*\)`)
 	if !route.MatchString(string(raw)) {
 		t.Errorf(`server.go registers no mux.Handle("POST /tasks/{id}/close", s.auth.Require(http.HandlerFunc(s.closeTaskAction))). ` +
 			`Criterion 5: the Done route lives on the auth-required mux beside POST /tasks/{id}/dismiss`)
