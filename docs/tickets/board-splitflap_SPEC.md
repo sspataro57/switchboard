@@ -559,6 +559,20 @@ there is no OPEN_QUESTIONS file.
 - **Idle timer.** `flapArm()` arms a frame only when some run exists; the 5 s clock tick with no digit change
   arms nothing.
 
+### Retune after first live use (swb 986, 2026-09-29, Salvador)
+
+Supersedes D4's heading row, D5/D6's per-panel groups, the D9 "waiting lines" note above and D10's timing
+constants:
+- **Line by line, not garbage first.** A line keeps its old text (or, coming up from blank, its own text)
+  until its turn; only then does it rattle. Nothing on the board scrambles ahead of its line.
+- **Rows aligned across panels.** The tally and every panel's rows share one sequence ("board"): row k of
+  in flight, departures, holding… starts together. Page turns aim every turning panel in one pass in
+  `turn()`; `show()` no longer aims.
+- **About 4x faster.** `FLAP_TEXT_MS` 90 → 22, `FLAP_GAP_MS` 120 → 30, `FLAP_FRAME_MS` 33 → 16 (so each flip
+  still gets a frame). `flapLineStep` subtracts `FLAP_MAX × FLAP_TEXT_MS`. Measured: ~340 ms per line.
+  The clock keeps 150 ms per digit flip.
+- **Panel headings never flap.** They are fixed, as on a real board; their count just updates.
+
 ## Future work
 
 - Honour `prefers-reduced-motion` in the default `rows` flip too (today it always animates).

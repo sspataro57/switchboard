@@ -3635,6 +3635,9 @@ see `docs/runbooks/demo-mode.md`.
 - **Landmines.** A CSS selector `[data-live="counts"]` breaks `TestTasksTemplate_FiveLiveRegions` (it finds
   the first occurrence). Comments in the script may not say "localStorage" outside a try (the discipline test
   scans text). Motion runs on `motionMs += FLAP_FRAME_MS`, never a wall clock; `new Date(` stays exactly once.
+- **swb 986 retune:** lines keep their old text until their turn; row k of every panel turns together
+  (one "board" sequence, page turns aimed in one pass in `turn()`); text flip 22 ms, gap 30, frame 16;
+  panel headings never flap.
 - **Diffing is by slot** (panel h2 id, visible index): a page turn or swap aims each slot from what it showed,
   a same-target re-aim keeps the running plan. A long panel's load rattle is step-capped to finish by
   `pageMs − 1500`, so on a 40-row panel it runs ~7.5 s: wait that long before asserting "only X changed".
