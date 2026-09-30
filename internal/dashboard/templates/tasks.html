@@ -151,7 +151,6 @@
                    letter-spacing: inherit; text-transform: inherit; padding: 0 .35rem; cursor: pointer; }
     .flap-toggle:hover { color: var(--white); }
     .flap-toggle[aria-pressed="true"] { color: var(--amber); border-color: var(--amber); }
-    body.flaps h2 { font-variant-numeric: tabular-nums; }
     /* a flapping counts line in proportional type would push the legend along every flip */
     body.flaps footer.ticker > span { font-family: var(--mono); letter-spacing: 0; }
     body.flaps .clock span { position: relative; overflow: hidden;
@@ -364,7 +363,7 @@
     // script only moves server-rendered nodes. While the stream is down it polls
     // in place; a new page version or an expired session reloads once.
     // flap: pure begin
-    var FLAP_TEXT_MS = 90, FLAP_DIGIT_MS = 150, FLAP_FRAME_MS = 33, FLAP_GAP_MS = 120,
+    var FLAP_TEXT_MS = 22, FLAP_DIGIT_MS = 150, FLAP_FRAME_MS = 16, FLAP_GAP_MS = 30,
         FLAP_MIN = 6, FLAP_MAX = 16, FLAP_CELLS = 32;
     var FLAP_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", FLAP_LOWER = "abcdefghijklmnopqrstuvwxyz", FLAP_DIGITS = "0123456789";
     function flapActive(pref, reduced, phone) { return pref === "flaps" && !reduced && !phone; }
@@ -420,7 +419,7 @@
       if (part < 500) return { flap: "upper", scale: Math.cos(Math.PI / 2 * part / 500) };
       return { flap: "lower", scale: Math.cos(Math.PI / 2 * (1000 - part) / 500) };
     }
-    function flapLineStep(n, pageMs) { return n > 1 ? Math.floor((pageMs - 1500 - 16 * 90) / (n - 1)) : Infinity; }
+    function flapLineStep(n, pageMs) { return n > 1 ? Math.floor((pageMs - 1500 - FLAP_MAX * FLAP_TEXT_MS) / (n - 1)) : Infinity; }
     function flapLineStarts(base, ends, durs, gap, step) {
       var starts = [], end = [];
       for (var k = 0; k < durs.length; k++) {
@@ -601,7 +600,9 @@
     // drum (the pure rules above); a slot is (panel, visible index), so a page
     // turn or a swap aims each slot from what it showed. Runs are keyed by slot
     // and cell, and the frame loop runs only while something turns, on a motion
-    // clock that advances FLAP_FRAME_MS per frame.
+    // clock that advances FLAP_FRAME_MS per frame. swb 986: the tally and every
+    // panel's rows share one sequence, so row k of each panel turns together, a
+    // line keeps its old text until its turn comes, and headings never flap.
     var FLAP_KEY = "swb.board.anim", motionMs = 0, flapTimer = 0, flapRuns = {};
     var flapBtn = document.getElementById("flap-toggle");
     var reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -612,34 +613,36 @@
     var flapWant = flapPref() === "flaps"; // kept for the page even when storage refuses
     var flapOn = flapActive(flapWant ? "flaps" : null, reduced.matches, phone.matches);
     document.body.classList.toggle("flaps", flapOn);
-    // The cells of the board, or of one panel's rows: {key, group, line, node}.
+    // The cells of the board, or of some panels' rows: {key, owner, group, line,
+    // node}. owner is what the cell belongs to (a panel, the tally); group is the
+    // sequence it turns in: "board" for the tally and rows, where line k is row k
+    // of every panel. Panel headings are fixed, as on a real board: never cells.
     function flapCells(only) {
       var out = [];
-      function add(g, line, cls, node) {
-        if (node && node.nodeType === 3) out.push({ key: g + "|" + line + "|" + cls, group: g, line: line, node: node });
+      function add(owner, g, line, cls, node) {
+        if (node && node.nodeType === 3) out.push({ key: owner + "|" + line + "|" + cls, owner: owner, group: g, line: line, node: node });
       }
       function first(el, sel) { var e = el.querySelector(sel); return e && e.firstChild; }
       if (!only) {
         var bs = document.querySelectorAll(".tally b");
-        for (var i = 0; i < bs.length; i++) add("tally", 0, "t" + i, bs[i].firstChild);
+        for (var i = 0; i < bs.length; i++) add("tally", "board", 0, "t" + i, bs[i].firstChild);
         var counts = document.querySelector('[data-live="counts"]');
-        if (counts) add("counts", 0, "c", counts.firstChild);
+        if (counts) add("counts", "counts", 0, "c", counts.firstChild);
       }
       for (var p = 0; p < panels.length; p++) {
         var pn = panels[p];
-        if (only && pn !== only) continue;
-        if (!only && pn.head) add(pn.key, 0, "h", pn.head.firstChild);
+        if (only && only.indexOf(pn) < 0) continue;
         for (var r = 0, slot = 0; r < pn.rows.length; r++) {
           if (pn.rows[r].hidden) continue;
           var a = pn.rows[r].querySelector("a.r"), line = 1 + slot++;
           if (!a) continue;
           var rem = a.querySelector(".rem");
-          add(pn.key, line, "time", first(a, ".time"));
-          add(pn.key, line, "id", first(a, ".id"));
-          add(pn.key, line, "title", first(a, ".title"));
-          add(pn.key, line, "chip", first(a, ".chip"));
-          add(pn.key, line, "rem", rem && rem.lastChild);
-          add(pn.key, line, "el", first(a, ".el"));
+          add(pn.key, "board", line, "time", first(a, ".time"));
+          add(pn.key, "board", line, "id", first(a, ".id"));
+          add(pn.key, "board", line, "title", first(a, ".title"));
+          add(pn.key, "board", line, "chip", first(a, ".chip"));
+          add(pn.key, "board", line, "rem", rem && rem.lastChild);
+          add(pn.key, "board", line, "el", first(a, ".el"));
         }
       }
       return out;
@@ -671,16 +674,19 @@
     // Aims cells at their current text from the strings in `from` (a missing
     // slot comes up from blank). A run already heading for the same text keeps
     // its plan and start (prv_turn's early return) and moves to the new node.
-    // Runs of an aimed group at line >= fromLine that no cell claims settle.
+    // Runs of an aimed owner at line >= fromLine that no cell claims settle.
+    // Until its line's start a cell shows what it showed (or, from blank, its
+    // own text); the rattle begins only when its line's turn comes.
     function flapAimCells(cells, from, fromLine) {
-      var groups = {}, claimed = {};
+      var groups = {}, claimed = {}, owners = {};
       for (var i = 0; i < cells.length; i++) {
         (groups[cells[i].group] = groups[cells[i].group] || []).push(cells[i]);
         claimed[cells[i].key] = true;
+        owners[cells[i].owner] = true;
       }
       for (var k in flapRuns) {
         var old = flapRuns[k];
-        if (old.group in groups && old.line >= fromLine && !claimed[k]) { flapEnd(old); delete flapRuns[k]; }
+        if (old.owner in owners && old.line >= fromLine && !claimed[k]) { flapEnd(old); delete flapRuns[k]; }
       }
       for (var g in groups) {
         var cs = groups[g], n = 0, durs = [], ends = [], fresh = [];
@@ -697,8 +703,8 @@
           if (shown === to) continue;
           var plan = flapAim(shown, to), flips = flapFlips(plan);
           if (!flips) continue;
-          run = { node: cell.node, to: to, plan: plan, flips: flips, ms: FLAP_TEXT_MS, start: 0, end: 0, group: g, line: cell.line, last: to };
-          run.shown = flapAt(plan, 0);
+          run = { node: cell.node, to: to, plan: plan, flips: flips, ms: FLAP_TEXT_MS, start: 0, end: 0, owner: cell.owner, group: g, line: cell.line, last: to };
+          run.shown = shown === "" ? to : shown;
           flapWrite(run, run.shown);
           flapRuns[cell.key] = run;
           fresh[cell.line].push(run);
@@ -733,7 +739,7 @@
         var d = drumAim(i, shown, to, spin);
         if (!d.flips) { if (node.nodeValue !== flapDigit(to)) node.nodeValue = flapDigit(to); continue; }
         node.nodeValue = flapDigit(to);
-        run = { node: node, span: sp, d: d, to: flapDigit(to), flips: d.flips, ms: FLAP_DIGIT_MS, start: motionMs, group: "clock", line: 0 };
+        run = { node: node, span: sp, d: d, to: flapDigit(to), flips: d.flips, ms: FLAP_DIGIT_MS, start: motionMs, owner: "clock", group: "clock", line: 0 };
         run.leaves = [flapLeaf(sp, "flap-top"), flapLeaf(sp, "flap-bottom"), flapLeaf(sp, "flap-leaf flap-up")];
         flapRuns[key] = run;
       }
@@ -762,7 +768,7 @@
       for (var k in flapRuns) {
         var r = flapRuns[k];
         if (!r.node.isConnected) { delete flapRuns[k]; continue; }
-        if (motionMs < r.start) { moving = true; continue; }
+        if (motionMs < r.start) { flapWrite(r, r.shown); moving = true; continue; }
         var el = motionMs - r.start, done = Math.floor(el / r.ms);
         if (done >= r.flips) { flapEnd(r); delete flapRuns[k]; continue; }
         moving = true;
@@ -801,7 +807,6 @@
 
     // Paging shows and hides the rows the server rendered; it builds none.
     function show(p, flip) {
-      var before = flip && flapOn ? flapSnapshot(p) : null;
       var start = (p.page - 1) * p.per;
       for (var i = 0; i < p.rows.length; i++) {
         var r = p.rows[i];
@@ -814,7 +819,6 @@
         }
       }
       p.pg.textContent = p.pages > 1 ? "page " + p.page + "/" + p.pages : "";
-      if (before) flapAimCells(flapCells(p), before, 1);
     }
     function layout(flip) {
       longest = 1;
@@ -833,12 +837,17 @@
       if (document.hidden || document.querySelector("details[open]")) return;
       ticks++;
       var home = ticks >= longest; // the longest panel is back on its first page
+      // flaps: every turning panel is aimed in one pass, slot i of the new page
+      // from slot i of the old, so their rows share one line sequence.
+      var before = flapOn ? flapSnapshot(null) : null, turned = [];
       for (var i = 0; i < panels.length; i++) {
         var p = panels[i];
         if (p.pages < 2) continue;
         p.page = home ? 1 : (p.page % p.pages) + 1;
         show(p, true);
+        turned.push(p);
       }
+      if (before && turned.length) flapAimCells(flapCells(turned), before, 1);
       if (home) ticks = 0;
     }
     // A finished flip leaves its class behind, and a row with an animation in
@@ -855,7 +864,7 @@
         var box = boxes[b].querySelector(".rows");
         if (!box) continue;
         var head = boxes[b].querySelector("h2[id]");
-        panels.push({ key: head ? head.id : String(b), head: head, box: box, pg: boxes[b].querySelector(".pg"), rows: box.querySelectorAll(".row"), page: 1, pages: 1, per: 1 });
+        panels.push({ key: head ? head.id : String(b), box: box, pg: boxes[b].querySelector(".pg"), rows: box.querySelectorAll(".row"), page: 1, pages: 1, per: 1 });
       }
     }
     collect();
