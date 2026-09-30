@@ -572,6 +572,8 @@ constants:
   still gets a frame). `flapLineStep` subtracts `FLAP_MAX × FLAP_TEXT_MS`. Measured: ~340 ms per line.
   The clock keeps 150 ms per digit flip.
 - **Panel headings never flap.** They are fixed, as on a real board; their count just updates.
+- **swb 989: twice as fast again.** `FLAP_TEXT_MS` 22 → 11, `FLAP_GAP_MS` 30 → 15; the frame stays 16 ms, so
+  a frame may advance two flips (drum letters skip, which at this speed does not read). ~170 ms a line.
 
 ## Future work
 

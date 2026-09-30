@@ -363,7 +363,7 @@
     // script only moves server-rendered nodes. While the stream is down it polls
     // in place; a new page version or an expired session reloads once.
     // flap: pure begin
-    var FLAP_TEXT_MS = 22, FLAP_DIGIT_MS = 150, FLAP_FRAME_MS = 16, FLAP_GAP_MS = 30,
+    var FLAP_TEXT_MS = 11, FLAP_DIGIT_MS = 150, FLAP_FRAME_MS = 16, FLAP_GAP_MS = 15,
         FLAP_MIN = 6, FLAP_MAX = 16, FLAP_CELLS = 32;
     var FLAP_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", FLAP_LOWER = "abcdefghijklmnopqrstuvwxyz", FLAP_DIGITS = "0123456789";
     function flapActive(pref, reduced, phone) { return pref === "flaps" && !reduced && !phone; }
