@@ -1,7 +1,7 @@
 {
-  "_about": "board-splitflap (SWT-102) D10: the goldens for the board's pure flap block. reel and drums are ~/projects/personal/pebble/tests/host/test_reel.c transcribed verbatim (src names the C test function); board marks the board's own additions (SPEC AC 8). The exhaustive sweeps of test_every_change_rattles and test_drums are generated in board_flap_test.go. Every check is made in Go; testdata/flap/harness.js only evaluates calls. The timing constants (TEXT 22, FRAME 16, GAP 30) were retuned by swb 986: about a quarter of the first cut's time per line.",
+  "_about": "board-splitflap (SWT-102) D10: the goldens for the board's pure flap block. reel and drums are ~/projects/personal/pebble/tests/host/test_reel.c transcribed verbatim (src names the C test function); board marks the board's own additions (SPEC AC 8). The exhaustive sweeps of test_every_change_rattles and test_drums are generated in board_flap_test.go. Every check is made in Go; testdata/flap/harness.js only evaluates calls. The timing constants (TEXT 11, FRAME 16, GAP 15) were retuned by swb 986 (a quarter of the first cut's time per line) and swb 989 (half again).",
   "consts": {
-    "FLAP_TEXT_MS": 22, "FLAP_DIGIT_MS": 150, "FLAP_FRAME_MS": 16, "FLAP_GAP_MS": 30,
+    "FLAP_TEXT_MS": 11, "FLAP_DIGIT_MS": 150, "FLAP_FRAME_MS": 16, "FLAP_GAP_MS": 15,
     "FLAP_MIN": 6, "FLAP_MAX": 16, "FLAP_CELLS": 32
   },
   "active": [
@@ -125,8 +125,8 @@
   ],
   "step": [
     {"n": 1, "pageMs": 9000, "want": "Infinity"},
-    {"n": 5, "pageMs": 9000, "want": 1787},
-    {"n": 15, "pageMs": 9000, "want": 510}
+    {"n": 5, "pageMs": 9000, "want": 1831},
+    {"n": 15, "pageMs": 9000, "want": 523}
   ],
   "starts": [
     {"base": 0, "ends": [0, 0, 0, 0], "durs": [900, 540, 0, 1440], "gap": 120, "step": 1515, "want": [0, 1020, 1680, 1680]},
