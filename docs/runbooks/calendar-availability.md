@@ -182,7 +182,12 @@ rather than how often, because at two polls a day each credit should land when
 someone might actually call `propose_slots`; a 03:00 local poll refreshes
 nothing anyone will use.
 
-**Open consequence, deliberately NOT yet resolved**: `AVAIL_MAX_SYNC_AGE` is
+**Resolved 2026-10-01 (swb 1084):** Salvador chose **24h** ("24 hours"): the default is now 24h and the
+dashboard's `150m` pin is removed, so `propose_slots` answers at any hour from a copy up to a day old
+(and `book_calendar_block` uses the same window). The working-hours zone defaults to America/New_York
+(he is in Miami). History of the question:
+
+**Open consequence, as it stood**: `AVAIL_MAX_SYNC_AGE` is
 still `150m`, which is far tighter than a 12-hour polling gap — so once credits
 return, availability will REFUSE nearly all day. The value must move with the
 cadence or the integration is up but mute. The tradeoff is Salvador's to make:

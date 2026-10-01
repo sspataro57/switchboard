@@ -2360,6 +2360,9 @@ pipedream.com/settings/billing BEFORE debugging the workflow, and note the
 cap's effect persists for the rest of the calendar month (2026-09-08 → Oct 1
 here: 507 consecutive failed runs).
 
+**Resolved 2026-10-01 (swb 1084):** default `AVAIL_MAX_SYNC_AGE` is now 24h (Salvador's choice), the
+150m pin goes, and `AVAIL_TZ` defaults to America/New_York. What follows is the history.
+
 Standing consequence: `AVAIL_MAX_SYNC_AGE=150m` is far tighter than the polling
 gap this budget forces, so availability will refuse nearly all day even once
 credits return — the freshness gate and the cadence have to be decided

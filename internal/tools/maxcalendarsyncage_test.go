@@ -29,14 +29,18 @@ import (
 	"github.com/sspataro57/switchboard/internal/tools"
 )
 
-func TestMaxCalendarSyncAge_DefaultsToOneHour(t *testing.T) {
+// AMENDED 2026-10-01 (swb 1084): the default moved from 1h to 24h. The
+// calendar is read twice a day (connector-gcal at 11 and 17 UTC, the Pipedream
+// credit budget), and Salvador chose a 24h freshness window so propose_slots
+// answers at any hour ("24 hours"), accepting a copy up to a day old.
+func TestMaxCalendarSyncAge_DefaultsToADay(t *testing.T) {
 	t.Setenv("AVAIL_MAX_SYNC_AGE", "")
 	got, err := tools.MaxCalendarSyncAge()
 	if err != nil {
 		t.Fatalf("MaxCalendarSyncAge() with the env unset: %v", err)
 	}
-	if got != time.Hour {
-		t.Errorf("MaxCalendarSyncAge() = %v, want 1h — four missed */15 polls before the service goes quiet", got)
+	if got != 24*time.Hour {
+		t.Errorf("MaxCalendarSyncAge() = %v, want 24h — the calendar is read twice a day (swb 1084)", got)
 	}
 }
 

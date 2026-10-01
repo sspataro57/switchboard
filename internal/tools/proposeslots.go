@@ -121,8 +121,9 @@ func proposeSlots(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 }
 
 // availabilityConfig reads the working-hours env (defaults: Mon-Fri 09-18,
-// America/New_York: Salvador works from Miami; the first cut said Europe/Rome) and AVAIL_MAX_SYNC_AGE (Go duration, default 1h — four missed
-// */15 polls before the service goes quiet). The pure functions never read env —
+// America/New_York: Salvador works from Miami; the first cut said Europe/Rome)
+// and AVAIL_MAX_SYNC_AGE (Go duration, default 24h: the calendar is read twice a
+// day). The pure functions never read env —
 // only this wiring does (SWT-24 criterion 11), and an unparseable value is an
 // ERROR returned to the caller, never a silent fallback: a typo must not widen
 // a safety window.
@@ -173,10 +174,11 @@ func availabilityConfig() (availability.Config, time.Duration, error) {
 // with the behaviour and error strings unchanged — an unparseable or
 // non-positive value is an ERROR returned to the caller, never a silent
 // fallback: a typo must not widen a safety window (and on the page, must not
-// turn a refusing calendar green). Default 1h — four missed */15 polls before
-// the service goes quiet.
+// turn a refusing calendar green). Default 24h (swb 1084, Salvador 2026-10-01):
+// the calendar is read twice a day to fit the Pipedream credit budget, and he
+// chose answers at any hour over a copy no older than one poll gap.
 func MaxCalendarSyncAge() (time.Duration, error) {
-	maxSyncAge := time.Hour
+	maxSyncAge := 24 * time.Hour
 	if v := os.Getenv("AVAIL_MAX_SYNC_AGE"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {

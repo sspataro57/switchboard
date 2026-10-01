@@ -737,18 +737,19 @@ func TestCalendarBook_Integration_RefusesOnAStaleCalendarSync(t *testing.T) {
 	start, end := calBookBlock(11)
 	deliveryID := f.draftCalendar(t, ctx, calBookWorker, start, end)
 
-	// Age the account's only successful calendar sync past the 1h default.
+	// Age the account's only successful calendar sync past the 24h default
+	// (AMENDED swb 1084: was 90 minutes past a 1h default).
 	// RELATIVE to now(): a literal timestamp would age out on its own and the
 	// case would pass whether or not the guard exists.
 	if _, err := f.pool.Exec(ctx,
 		`DELETE FROM sync_runs WHERE source_account_id=$1`, f.accountID); err != nil {
 		t.Fatalf("clear sync runs: %v", err)
 	}
-	f.calendarRun(t, ctx, f.accountID, "ok", 90*time.Minute)
+	f.calendarRun(t, ctx, f.accountID, "ok", 25*time.Hour)
 
 	_, err := f.book(ctx, calBookWorker, deliveryID)
 	if err == nil {
-		t.Fatal("book_calendar_block booked against a calendar whose last successful sync is 90 minutes old. " +
+		t.Fatal("book_calendar_block booked against a calendar whose last successful sync is 25 hours old. " +
 			"A stale sync means the busy set may not know about a meeting that already exists; refusing is " +
 			"the same fail-closed rule propose_slots applies, at the last possible moment")
 	}
