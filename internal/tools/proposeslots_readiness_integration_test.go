@@ -224,25 +224,27 @@ func TestProposeSlotsReadiness_Integration_MaxSyncAgeEnv(t *testing.T) {
 	f.freshenForeignCalendars(t, ctx)
 
 	id, email := f.account(t, ctx, "maxage")
-	f.calendarRun(t, ctx, id, "ok", 90*time.Minute) // older than the 1h default, younger than 4h
+	// AMENDED swb 1084: the default moved 1h -> 24h, so the fixture ages 25h and
+	// the widened case uses 48h (was 90m against 1h and 4h).
+	f.calendarRun(t, ctx, id, "ok", 25*time.Hour) // older than the 24h default, younger than 48h
 
 	const actor = "opsctl:itest-swt24-slots"
 	args := []byte(`{"duration_minutes":30}`)
 
-	// Default (env unset): 90 minutes is stale, so this refuses.
+	// Default (env unset): 25 hours is stale, so this refuses.
 	t.Setenv("AVAIL_MAX_SYNC_AGE", "")
 	os.Unsetenv("AVAIL_MAX_SYNC_AGE")
 	if _, err := f.ex.Execute(ctx, executor.Call{Tool: "propose_slots", Actor: actor, Args: args}); err == nil {
-		t.Fatalf("propose_slots answered with a 90-minute-old calendar sync and AVAIL_MAX_SYNC_AGE unset; "+
-			"the default is 1h (%s)", email)
+		t.Fatalf("propose_slots answered with a 25-hour-old calendar sync and AVAIL_MAX_SYNC_AGE unset; "+
+			"the default is 24h (%s)", email)
 	}
 
 	// Explicitly widened: the same fixture now answers. Without this the case
 	// above would pass against an implementation that refuses unconditionally.
-	t.Setenv("AVAIL_MAX_SYNC_AGE", "4h")
+	t.Setenv("AVAIL_MAX_SYNC_AGE", "48h")
 	res, err := f.ex.Execute(ctx, executor.Call{Tool: "propose_slots", Actor: actor, Args: args})
 	if err != nil {
-		t.Fatalf("propose_slots refused with AVAIL_MAX_SYNC_AGE=4h and a 90-minute-old sync: %v", err)
+		t.Fatalf("propose_slots refused with AVAIL_MAX_SYNC_AGE=48h and a 25-hour-old sync: %v", err)
 	}
 	var out struct {
 		Slots []map[string]string `json:"slots"`

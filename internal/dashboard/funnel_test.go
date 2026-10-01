@@ -527,8 +527,9 @@ func TestFunnelUsesTheSharedCalendarSeams(t *testing.T) {
 func TestMaxCalendarSyncAgeIsReachableAndFailsLoud(t *testing.T) {
 	t.Setenv("AVAIL_MAX_SYNC_AGE", "")
 	d, err := tools.MaxCalendarSyncAge()
-	if err != nil || d != time.Hour {
-		t.Fatalf("tools.MaxCalendarSyncAge() with the env unset = (%v, %v), want (1h, nil)", d, err)
+	// AMENDED swb 1084: the default is 24h (the calendar is read twice a day).
+	if err != nil || d != 24*time.Hour {
+		t.Fatalf("tools.MaxCalendarSyncAge() with the env unset = (%v, %v), want (24h, nil)", d, err)
 	}
 	t.Setenv("AVAIL_MAX_SYNC_AGE", "not-a-duration")
 	if _, err := tools.MaxCalendarSyncAge(); err == nil {
