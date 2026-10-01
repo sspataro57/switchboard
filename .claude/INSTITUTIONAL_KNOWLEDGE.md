@@ -1821,7 +1821,7 @@ go-ahead. See "Slack replies on the auto tier (SWT-77)".
   deduped (per-account, invariant 1); normalize-time skip, losers stamped.
 - Direction rule: outbound iff From ∈ any provider='google' account email.
 - Availability: `propose_slots` executor tool (opsctl call), env
-  `AVAIL_TZ` (default Europe/Rome) / `AVAIL_WORK_START|END|DAYS`.
+  `AVAIL_TZ` (default America/New_York since 2026-10-01; was Europe/Rome — Salvador is in Miami) / `AVAIL_WORK_START|END|DAYS`.
 - Step 8 re-consent: extend `google.ReadonlyScopes` with send/write scopes and
   re-run google-auth add per account.
 

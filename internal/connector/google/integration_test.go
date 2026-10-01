@@ -340,7 +340,7 @@ func TestGoogle_Integration_EndToEnd(t *testing.T) {
 	if len(out.Slots) == 0 {
 		t.Errorf("propose_slots returned no slots in a window with free time")
 	}
-	// The two busy events (09:00-09:30, 11:00-11:30 Rome) must be dodged.
+	// The two busy events (09:00-09:30, 11:00-11:30 New York) must be dodged.
 	for _, s := range out.Slots {
 		st, err1 := time.Parse(time.RFC3339, s.Start)
 		en, err2 := time.Parse(time.RFC3339, s.End)
@@ -411,15 +411,15 @@ func TestGoogle_Integration_EndToEnd(t *testing.T) {
 	}
 }
 
-// nextBusyWeekday returns a weekday a few days ahead of now in Europe/Rome (the
+// nextBusyWeekday returns a weekday a few days ahead of now in America/New_York (the
 // availability service's default AVAIL_TZ), used to place this fixture's
 // calendar events and propose_slots window inside the synced horizon (SWT-24
 // criterion 7) instead of on a frozen date that ages out of it.
 func nextBusyWeekday(t *testing.T) time.Time {
 	t.Helper()
-	loc, err := time.LoadLocation("Europe/Rome")
+	loc, err := time.LoadLocation("America/New_York")
 	if err != nil {
-		t.Fatalf("load Europe/Rome: %v", err)
+		t.Fatalf("load America/New_York: %v", err)
 	}
 	day := time.Now().In(loc).AddDate(0, 0, 3)
 	for day.Weekday() == time.Saturday || day.Weekday() == time.Sunday {
