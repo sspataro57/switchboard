@@ -121,7 +121,7 @@ func proposeSlots(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 }
 
 // availabilityConfig reads the working-hours env (defaults: Mon-Fri 09-18,
-// Europe/Rome) and AVAIL_MAX_SYNC_AGE (Go duration, default 1h — four missed
+// America/New_York: Salvador works from Miami; the first cut said Europe/Rome) and AVAIL_MAX_SYNC_AGE (Go duration, default 1h — four missed
 // */15 polls before the service goes quiet). The pure functions never read env —
 // only this wiring does (SWT-24 criterion 11), and an unparseable value is an
 // ERROR returned to the caller, never a silent fallback: a typo must not widen
@@ -132,7 +132,7 @@ func availabilityConfig() (availability.Config, time.Duration, error) {
 
 	tz := os.Getenv("AVAIL_TZ")
 	if tz == "" {
-		tz = "Europe/Rome"
+		tz = "America/New_York"
 	}
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
