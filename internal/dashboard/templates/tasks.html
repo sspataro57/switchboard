@@ -626,7 +626,7 @@
       if (!only) {
         var bs = document.querySelectorAll(".tally b");
         for (var i = 0; i < bs.length; i++) add("tally", "board", 0, "t" + i, bs[i].firstChild);
-        var counts = document.querySelector('[data-live="counts"]');
+        var counts = document.querySelector("[data-live=counts]"); // unquoted, so the rendered page names that region exactly once
         if (counts) add("counts", "counts", 0, "c", counts.firstChild);
       }
       for (var p = 0; p < panels.length; p++) {
