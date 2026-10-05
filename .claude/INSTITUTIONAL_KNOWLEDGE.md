@@ -3544,6 +3544,12 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
   undeclared all enters the hub"). Foundry work enters through the hub console, which routes it on;
   never add a `.claude/swb-project` to foundry-new-build or foundry-new-build-infra.
   `~/.claude/swb-hook.py projects` prints what the current directory declares.
+- **Every console's checkout needs a declaration (swb 1260, SWT-104, 2026-10-05).** The `saka`
+  window ran a live session in `~/projects/clients/saka` (not a git repo), which declared nothing.
+  push.json had no `saka` window either, so `swb-push status` showed `queues=[]` and every task from
+  Mario emailed "no console" (#1247, #1254, #1259 that day). Declared `saka` there. When a new
+  client window appears, check `swb-push status` for `queues=[]` on a window that has a project.
+  impact and gonoble show `queues=[]` too, but neither has a project row.
 - **Two review fixes in `swbpush` (swb 758).**
   - `awaitingMail`: a first sight of a (window, slug) key records silently only the tasks that the
     `_no_console` memory already settled. A task that Unattended returned while the batched mail was
