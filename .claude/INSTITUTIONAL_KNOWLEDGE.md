@@ -3550,6 +3550,26 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
   Mario emailed "no console" (#1247, #1254, #1259 that day). Declared `saka` there. When a new
   client window appears, check `swb-push status` for `queues=[]` on a window that has a project.
   impact and gonoble show `queues=[]` too, but neither has a project row.
+- **`llamasite-sec`: the Avviato Slack workspace no longer defaults to collaboratory (swb 1438,
+  SWT-105, 2026-10-08).** Project 14 is the LlamaSite security review
+  (`~/projects/avviato/llamasite-sec`, window `llama-sec`, `ai_locality` local_only, inquiry lane
+  armed, `notifier_senders` {Jira}). Its comms are "Avviato people who are not Jose or Katie",
+  Esteban above all, and rules cannot negate, so the default flipped and collaboratory keeps named
+  conversations:
+  - Rule 88 `source_slack_workspace T0360B84U` → llamasite-sec at priority 2, above collaboratory's
+    catch-all rule 9 (1).
+  - Rules 84-87 `thread_key_prefix slack:T0360B84U:<id>` → collaboratory at priority 5: Jose's DM
+    `DSAV4HJ2F`, the Jose/Katie/asunda45 group DM `G01NZCU4V5E`, Kristin Medlin's DM `D01JJLUAKRU`,
+    the Jira app's DM `D01EJRX6P45`. **A new collaboratory conversation in that workspace needs its
+    own priority-5 rule**, or it lands in llamasite-sec.
+  - Mail: rule 89 `sender jose.g@avviato.com` → collaboratory and rule 90 `sender @avviato.com` →
+    llamasite-sec, both gmail + comm_task at priority 91. The order they were added in is the
+    design: at 91 the id tie-break gives rule 75 (ticket keys), then 89, then 90. Rule 83 (90) is
+    now shadowed.
+  - `person` rules would say this directly, but `normalized_threads.participants` is filled only
+    for Upwork, so they match nothing on Slack or mail.
+  - Routing is by sender, not subject, so Esteban's unrelated DMs land there too. The checkout's
+    `CLAUDE.local.md` tells the console which tasks are its own. Not in the demo-mode project list.
 - **Two review fixes in `swbpush` (swb 758).**
   - `awaitingMail`: a first sight of a (window, slug) key records silently only the tasks that the
     `_no_console` memory already settled. A task that Unattended returned while the batched mail was
