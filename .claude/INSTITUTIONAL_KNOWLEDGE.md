@@ -3570,6 +3570,20 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
     for Upwork, so they match nothing on Slack or mail.
   - Routing is by sender, not subject, so Esteban's unrelated DMs land there too. The checkout's
     `CLAUDE.local.md` tells the console which tasks are its own. Not in the demo-mode project list.
+- **A customer's mail must not depend on the classifier: give the sender a keyed comm rule (swb
+  1488, SWT-106, 2026-10-08).** Rochester mail matched no rule, so route attributed it and the
+  inquiry lane decided: Cherith Reynolds-Clark's 8 Oct reply carried two requirements, was read as
+  `ask_kind: fyi`, and never reached the board. Same miss as Bryan Albert (rule 80) and Jose (rule
+  83). Rule 91 `sender rochester.edu` → collaboratory, gmail + comm_task, priority 90 now takes
+  every Rochester address (`UR.Rochester.edu` too: sender match folds case). When he says a mail
+  never landed, look at `capture_decisions` for `unmatched` + `route`, then at the `ask_kind` in
+  `ai_extractions`.
+  - **Backfilling one already-decided mail**, since a live decision is never re-decided and
+    `direct-backfill` only takes DMs and always_task mail: `create_task` in the project (title
+    `<From> — <subject>`, body with the `message_id:` line), `link_external_ref` system `gmail` with
+    the thread key (later replies then file onto it as comms), `task_mark_activity` with the message
+    id (that is what puts it in INCOMING as NEW EMAIL). All three through `opsctl call`. Done for
+    message 1068806 → task 1489.
 - **Two review fixes in `swbpush` (swb 758).**
   - `awaitingMail`: a first sight of a (window, slug) key records silently only the tasks that the
     `_no_console` memory already settled. A task that Unattended returned while the batched mail was
