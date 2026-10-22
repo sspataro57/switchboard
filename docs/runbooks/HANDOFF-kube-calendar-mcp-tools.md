@@ -1,7 +1,7 @@
 # Handoff to the kube session: calendar for every session, swb-first bookings (SWT-109, swb 2348)
 
-Image: `192.168.50.20:5000/switchboard:0.7.70`, built from `main` after the calendar-mcp-tools merge (the
-digest is in the switchboard session's report). Spec: `docs/tickets/calendar-mcp-tools_SPEC.md`; runbook:
+Image: `192.168.50.20:5000/switchboard:0.7.70` (`sha256:0a1b8b49115e03d9a94fc1672bf573ccc71249c95fca9189bc616d19f0d5ea51`), built from
+`main` at `672f3d3`. Spec: `docs/tickets/calendar-mcp-tools_SPEC.md`; runbook:
 `calendar-availability.md`, "Reservations"; IK: "Calendar for every session".
 
 ## 1. Migration 0049 FIRST
