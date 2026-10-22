@@ -58,11 +58,11 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		// gains nothing).
 		// slack-auto-tier (SWT-77) criterion 17: send_slack_reply joins BOTH
 		// profiles — full 30 → 31, user 18 → 19. Read: 3, unchanged.
-		{ProfileFull, 31},
+		{ProfileFull, 36}, // SWT-109: +5 calendar tools
 		{ProfileRead, 3},
 		// SWT-56 (signal-session-name) criterion 34: task_context joins the user
 		// profile, pinned read-only — user 14 → 15; full unchanged (it lists it).
-		{ProfileUser, 19},
+		{ProfileUser, 24}, // SWT-109: +5 calendar tools
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()

@@ -46,6 +46,7 @@ package tools_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -146,6 +147,16 @@ func (f *fakeCalendarBooker) CreateEvent(ctx context.Context, req google.CreateE
 		Created:       true,
 		Event:         raw,
 	}, nil
+}
+
+// SWT-109: the SWT-28 suite never batches; these exist so the fake satisfies
+// the widened CalendarBooker. The reservation suites use their own counting fake.
+func (f *fakeCalendarBooker) CreateEvents(ctx context.Context, req google.CreateEventsRequest) (google.CreateEventsResponse, error) {
+	return google.CreateEventsResponse{}, fmt.Errorf("fakeCalendarBooker: CreateEvents not expected in the SWT-28 suite")
+}
+
+func (f *fakeCalendarBooker) DeleteEvents(ctx context.Context, req google.DeleteEventsRequest) (google.DeleteEventsResponse, error) {
+	return google.DeleteEventsResponse{}, fmt.Errorf("fakeCalendarBooker: DeleteEvents not expected in the SWT-28 suite")
 }
 
 // ---- fixture ------------------------------------------------------------------

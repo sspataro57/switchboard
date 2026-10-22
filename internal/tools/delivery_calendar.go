@@ -38,6 +38,10 @@ import (
 // handlers (invariant 3).
 type CalendarBooker interface {
 	CreateEvent(ctx context.Context, req google.CreateEventRequest) (google.CreateEventResponse, error)
+	// SWT-109: the push stage's batched create and delete. Only
+	// calendar_push.go calls them.
+	CreateEvents(ctx context.Context, req google.CreateEventsRequest) (google.CreateEventsResponse, error)
+	DeleteEvents(ctx context.Context, req google.DeleteEventsRequest) (google.DeleteEventsResponse, error)
 }
 
 var calendarBooker CalendarBooker
@@ -215,6 +219,8 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 			MaxSyncAge:    maxSyncAge,
 			HorizonPast:   google.CalendarWindowPast,
 			HorizonFuture: google.CalendarWindowFuture,
+			// SWT-109: never collide with this row itself.
+			ExcludeDeliveryIDs: []int64{deliveryID},
 		})
 		if err != nil {
 			return err // VERBATIM: it must read exactly like a propose_slots refusal
@@ -237,13 +243,23 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 		var txFromAcct *int64
 		var writeEnabled *bool
 		var accountEmail string
+		var swbReservation bool
 		if err := tx.QueryRow(ctx,
 			`SELECT d.status, d.sent_external_id, d.approval_source, d.from_account_id,
-			        a.calendar_write_enabled, COALESCE(a.account_email,'')
+			        a.calendar_write_enabled, COALESCE(a.account_email,''),
+			        d.push_next_attempt_at IS NOT NULL OR d.release_requested_at IS NOT NULL OR d.hold_for_delivery_id IS NOT NULL
 			   FROM deliveries d LEFT JOIN source_accounts a ON a.id = d.from_account_id
 			  WHERE d.id=$1 FOR UPDATE OF d`, deliveryID).
-			Scan(&txStatus, &txExtID, &txApprovalSource, &txFromAcct, &writeEnabled, &accountEmail); err != nil {
+			Scan(&txStatus, &txExtID, &txApprovalSource, &txFromAcct, &writeEnabled, &accountEmail, &swbReservation); err != nil {
 			return fmt.Errorf("lock delivery %d: %w", deliveryID, err)
+		}
+		if swbReservation {
+			// SWT-109 (codex review): a swb-first reservation is pushed ONLY by
+			// the calendar_push stage, which re-checks its release state, its
+			// project's calendar and the month's budget. This path checks none
+			// of them.
+			return fmt.Errorf("delivery %d is a switchboard reservation (book_time or an offer hold); the "+
+				"calendar_push stage pushes it — cancel it with cancel_reservation, never send it by hand", deliveryID)
 		}
 		if txExtID != nil {
 			return fmt.Errorf("delivery %d already carries sent_external_id; never resend (invariant 4)", deliveryID)
@@ -267,6 +283,14 @@ func sendCalendarBlock(ctx context.Context, pool *pgxpool.Pool, deliveryID int64
 				"per-account consent an unattended booking has)", accountEmail)
 		}
 		accountID = *txFromAcct
+		// SWT-109: every Google write invocation is counted toward the month's
+		// credit budget, in THIS transaction (codex review 3): if counting
+		// fails, nothing is reserved and nothing is sent. This path predates
+		// the budget, so it counts (2: create_event may POST twice) but is
+		// never refused by it.
+		if _, _, err := admitCalendarWrite(ctx, tx, 0, 2, false); err != nil {
+			return err
+		}
 		eventID = google.CalendarEventID(deliveryID, time.Now().UnixNano())
 		extID = google.CalendarExternalID(eventID)
 		if _, err := tx.Exec(ctx,

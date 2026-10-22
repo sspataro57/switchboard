@@ -141,7 +141,13 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 // workspace, and the WHEN rule in its description and in Instructions.
 // NINETEEN in all.
 var wantUserProfileTools = []string{
+	// SWT-109 (calendar-mcp-tools): book_time, calendar_list_events,
+	// cancel_reservation, propose_slots and release_offer_holds — the live
+	// calendar and swb-first booking. None is send-shaped; book_time is pinned
+	// to human tasks.
+	"book_time", "calendar_list_events", "cancel_reservation",
 	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
+	"propose_slots", "release_offer_holds",
 	"send_slack_reply",
 	"task_append_log", "task_attach", "task_close", "task_context", "task_dismiss",
 	"task_get_next", "task_list", "task_mark_delivered", "task_match", "task_requeue", "task_set_priority",
@@ -407,8 +413,8 @@ func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 	// SWT-52 criterion 24: the control checked fourteen tools; SWT-56 criterion
 	// 34: fifteen (task_context); SWT-72 criterion 23: sixteen (task_requeue);
 	// SWT-77 criterion 17: nineteen (send_slack_reply).
-	if len(wantUserProfileTools) != 19 {
-		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 19 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach; SWT-77 adds send_slack_reply)",
+	if len(wantUserProfileTools) != 24 {
+		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 24 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach; SWT-77 adds send_slack_reply; SWT-109 adds five calendar tools)",
 			len(wantUserProfileTools))
 	}
 	if !sendSeen {

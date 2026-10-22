@@ -46,11 +46,11 @@ func findTool(ts []mcpserver.Tool, name string) *mcpserver.Tool {
 func TestSendSlackReply_ListedInBothProfilesAsOneEntry(t *testing.T) {
 	full := mcpserver.New(&fakeExec{}, testWorkerID).ListTools()
 	user := mcpserver.NewWithProfile(&fakeExec{}, "manual:salvo", mcpserver.ProfileUser).ListTools()
-	if len(full) != 31 {
-		t.Errorf("the full profile lists %d tools, want 31 (30 → 31 with send_slack_reply, criterion 17)", len(full))
+	if len(full) != 36 {
+		t.Errorf("the full profile lists %d tools, want 36 (30 → 31 with send_slack_reply, criterion 17; 31 → 36 with SWT-109's calendar tools)", len(full))
 	}
-	if len(user) != 19 {
-		t.Errorf("the user profile lists %d tools, want 19 (18 → 19 with send_slack_reply, criterion 17)", len(user))
+	if len(user) != 24 {
+		t.Errorf("the user profile lists %d tools, want 24 (18 → 19 with send_slack_reply, criterion 17; 19 → 24 with SWT-109's calendar tools)", len(user))
 	}
 	f, u := findTool(full, "send_slack_reply"), findTool(user, "send_slack_reply")
 	if f == nil || u == nil {

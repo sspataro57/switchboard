@@ -75,6 +75,17 @@ A stage's downstream wake is published by a wrapper around its pass, `pipeline.P
 - A publish failure is logged and the pass's own result goes back to the loop unchanged: the sweep covers the lost wake.
 - This is where the gate's `gated` wake comes from.
 
+## The calendar_push stage (SWT-109)
+
+`calendar_push` writes swb-first calendar reservations to Google and deletes released ones
+(`docs/runbooks/calendar-availability.md`, "Reservations"). It is sweep-only: no event wakes it and it
+publishes none. Each pass runs `push_calendar_reservations` and then `apply_hold_releases` through the
+executor as `pipeline:calendar_push`, each only when its inbox is non-empty, and always reports
+`processed` 0 (rows waiting on a gate must not spin the loop). It is the only stage that arms a booker
+(`tools.SetCalendarBooker`), and only when listed; it needs `PIPEDREAM_CALENDAR_URL` +
+`PIPEDREAM_CALENDAR_TOKEN_FILE` (secret `switchboard-pipedream`) and refuses to start without them.
+Optional env: `OFFER_HOLD_TTL` (default 72h), `CALENDAR_WRITE_MONTHLY_BUDGET` (default 35).
+
 ## The inquiry stages (SWT-40 Part C)
 
 The Part C go-live value is `PIPELINE_STAGES=gate,inquiry,inquiry_promote`.

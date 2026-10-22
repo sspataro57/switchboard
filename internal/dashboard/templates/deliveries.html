@@ -83,6 +83,13 @@
         {{end}}
         </div>
         {{if .StartsAt}}<div class="muted">when: {{.StartsAt}} → {{.EndsAt}}</div>{{end}}
+        {{/* SWT-109: an offer's windows (held once it is sent), and a
+             reservation's swb-only facts. Google only ever sees Busy/Hold. */}}
+        {{if .OfferedWindows}}<div class="muted">offers: {{.OfferedWindows}}</div>{{end}}
+        {{if .ReservationLabel}}<div class="muted">booking: {{.ReservationLabel}}</div>{{end}}
+        {{if .HoldFor}}<div class="muted">hold for offer #{{.HoldFor}}</div>{{end}}
+        {{if .PendingReason}}<div class="muted">not on Google yet: {{.PendingReason}}</div>{{end}}
+        {{if .ReleaseReason}}<div class="muted">{{if .Released}}released{{else}}release pending{{end}} ({{.ReleaseReason}})</div>{{end}}
         {{/* SWT-44: where the send would go, before approval. Gmail's comes from
              tools.ResolveGmailRoute, the send path's own resolution. */}}
         <div class="dl-to">{{if eq .Channel "gmail"}}{{if .From}}<div>From: {{.From}}</div><div>To: {{.To}}</div><div class="muted">Thread: {{.ThreadSubject}}</div>{{end}}{{if .Cc}}<div>Cc: {{.CcText}}</div>{{end}}{{else}}{{.TargetRef}}{{end}}</div>

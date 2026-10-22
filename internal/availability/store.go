@@ -20,6 +20,10 @@ type Request struct {
 	MaxSyncAge             time.Duration
 	HorizonPast            time.Duration
 	HorizonFuture          time.Duration
+	// ExcludeDeliveryIDs drops these reservations from the busy set (SWT-109
+	// criterion 9): the push stage's pre-flight checks a batch against
+	// everything EXCEPT the batch's own rows, which are reservations already.
+	ExcludeDeliveryIDs []int64
 }
 
 // LoadBusy is the ONE database-backed entry point to free/busy (SWT-24
@@ -36,9 +40,33 @@ type Request struct {
 // account with zero events is answered, not refused: the discriminator is the
 // freshness of the SYNC, never the count of events (criterion 6).
 func LoadBusy(ctx context.Context, pool *pgxpool.Pool, req Request) ([]Interval, error) {
+	if err := checkReady(ctx, pool, req); err != nil {
+		return nil, err
+	}
+
+	events, err := loadEvents(ctx, pool, req.WindowStart, req.WindowEnd)
+	if err != nil {
+		return nil, err
+	}
+	reserved, err := loadReservationRows(ctx, pool, req.WindowStart, req.WindowEnd, req.ExcludeDeliveryIDs)
+	if err != nil {
+		return nil, err
+	}
+	busy := Busy(events)
+	for _, r := range reserved {
+		busy = append(busy, Interval{Start: r.Start, End: r.End})
+	}
+	return Merge(busy), nil
+}
+
+// checkReady is the readiness half LoadBusy and LoadAgenda SHARE (SWT-109
+// criterion 2): the horizon, the empty scope and every in-scope account's last
+// successful sync. Both callers run it before their first read of
+// normalized_events; callsites_test.go pins the order.
+func checkReady(ctx context.Context, pool *pgxpool.Pool, req Request) error {
 	if req.WindowStart.Before(req.Now.Add(-req.HorizonPast)) ||
 		req.WindowEnd.After(req.Now.Add(req.HorizonFuture)) {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"calendar not ready: window %s..%s is not fully inside the synced horizon [now-%s, now+%s]; "+
 				"nothing was ever fetched for that span, so an empty busy set there means \"we never looked\"",
 			req.WindowStart.Format(time.RFC3339), req.WindowEnd.Format(time.RFC3339),
@@ -47,59 +75,89 @@ func LoadBusy(ctx context.Context, pool *pgxpool.Pool, req Request) ([]Interval,
 
 	states, err := CalendarSyncStates(ctx, pool)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(states) == 0 {
-		return nil, &NotReadyError{MaxAge: req.MaxSyncAge}
+		return &NotReadyError{MaxAge: req.MaxSyncAge}
 	}
 	if offenders := NotReady(states, req.Now, req.MaxSyncAge); len(offenders) > 0 {
-		return nil, &NotReadyError{Accounts: offenders, MaxAge: req.MaxSyncAge}
+		return &NotReadyError{Accounts: offenders, MaxAge: req.MaxSyncAge}
 	}
-
-	events, err := loadEvents(ctx, pool, req.WindowStart, req.WindowEnd)
-	if err != nil {
-		return nil, err
-	}
-	reserved, err := loadReservations(ctx, pool, req.WindowStart, req.WindowEnd)
-	if err != nil {
-		return nil, err
-	}
-	return Merge(append(Busy(events), reserved...)), nil
+	return nil
 }
 
-// loadReservations treats an UNCONFIRMED calendar booking as busy (SWT-28,
-// codex finding 2026-09-07): between reserving its event id and the first
-// poll that OBSERVES the created event, a booked block may exist on the
-// calendar while nothing in normalized_events says so — a stale snapshot can
-// even supersede the send-time record. The delivery row itself is therefore
-// the reservation: sending (mid-flight), sent (live, awaiting observation)
-// and failed-with-id (the send MAY have landed — over-busy, the direction
-// that cannot double-book) all hold their interval until confirmed_at, when
-// the observed event takes over. Confirmed rows drop out so a block deleted
-// by hand frees its slot at the next poll, exactly as before.
-func loadReservations(ctx context.Context, pool *pgxpool.Pool, windowStart, windowEnd time.Time) ([]Interval, error) {
-	rows, err := pool.Query(ctx,
-		`SELECT d.starts_at, d.ends_at
+// Reservation is one live switchboard reservation: a channel='calendar'
+// deliveries row that holds its interval (SWT-28 for pushed rows, SWT-109 for
+// swb-first ones).
+type Reservation struct {
+	DeliveryID, TaskID int64
+	Start, End         time.Time
+	Account            string // the target calendar's account email
+	Status             string
+	Label              string
+	ExternalID         string // sent_external_id, "" before a push
+	PendingReason      string
+	Verified           bool
+	HoldFor            int64 // the offer delivery a hold belongs to; 0 for a booking
+	HoldExpiresAt      *time.Time
+	Kept               bool
+}
+
+// reservationSelect is the busy set (SWT-109 criterion 9; SWT-28 before it).
+// A row reserves its interval when it is not released and not a terminal
+// conflict, and EITHER it is a swb-first reservation booked in switchboard and
+// not on its way out (approved with push_next_attempt_at set — only book_time
+// and offer holds set it; an SWT-28 draft approved by book_calendar_block is
+// not a reservation until its own send reserves it — no release requested) OR it may be on Google and is not yet
+// observed there (sending/sent/failed with an id, unconfirmed). A pushed row
+// whose release is requested stays busy until the delete lands — over-busy is
+// the direction that cannot double-book. Confirmed rows drop out: the observed
+// event takes over, so a block deleted by hand frees its slot at the next poll.
+const reservationSelect = `SELECT d.id, d.task_id, d.starts_at, d.ends_at, a.account_email, d.status,
+		        COALESCE(d.reservation_label,''), COALESCE(d.sent_external_id,''),
+		        COALESCE(d.push_pending_reason,''), COALESCE(d.booking_verified, true),
+		        COALESCE(d.hold_for_delivery_id, 0), d.hold_expires_at, d.hold_kept_at IS NOT NULL
 		   FROM deliveries d
 		   JOIN source_accounts a ON a.id = d.from_account_id
 		  WHERE d.channel = 'calendar'
-		    AND d.sent_external_id IS NOT NULL
-		    AND d.confirmed_at IS NULL
-		    AND d.status IN ('sending','sent','failed')
+		    AND d.released_at IS NULL
+		    AND d.push_pending_reason IS DISTINCT FROM 'conflict'
+		    AND ((d.status = 'approved' AND d.push_next_attempt_at IS NOT NULL AND d.release_requested_at IS NULL)
+		      OR (d.status IN ('sending','sent','failed') AND d.sent_external_id IS NOT NULL
+		          AND d.confirmed_at IS NULL))
 		    AND a.provider = 'google' AND a.calendar_in_availability
-		    AND d.ends_at > $1 AND d.starts_at < $2`,
-		windowStart, windowEnd)
+		    AND d.ends_at > $1 AND d.starts_at < $2
+		    AND NOT (d.id = ANY($3::bigint[]))
+		  ORDER BY d.starts_at, d.id`
+
+// LoadReservations returns switchboard's own live reservations in the window
+// WITHOUT touching normalized_events (SWT-109 criterion 9). It is not a
+// free/busy answer — Google events are missing from it — so its callers are
+// the ones that must still decide when the calendar copy is stale: book_time
+// checks it alone on NotReadyError and marks the booking unverified, and the
+// push re-verifies with the full LoadBusy before any write.
+func LoadReservations(ctx context.Context, pool *pgxpool.Pool, windowStart, windowEnd time.Time) ([]Reservation, error) {
+	return loadReservationRows(ctx, pool, windowStart, windowEnd, nil)
+}
+
+func loadReservationRows(ctx context.Context, pool *pgxpool.Pool, windowStart, windowEnd time.Time, exclude []int64) ([]Reservation, error) {
+	if exclude == nil {
+		exclude = []int64{}
+	}
+	rows, err := pool.Query(ctx, reservationSelect, windowStart, windowEnd, exclude)
 	if err != nil {
 		return nil, fmt.Errorf("select calendar reservations: %w", err)
 	}
 	defer rows.Close()
-	var out []Interval
+	var out []Reservation
 	for rows.Next() {
-		var iv Interval
-		if err := rows.Scan(&iv.Start, &iv.End); err != nil {
+		var r Reservation
+		if err := rows.Scan(&r.DeliveryID, &r.TaskID, &r.Start, &r.End, &r.Account, &r.Status,
+			&r.Label, &r.ExternalID, &r.PendingReason, &r.Verified,
+			&r.HoldFor, &r.HoldExpiresAt, &r.Kept); err != nil {
 			return nil, fmt.Errorf("scan calendar reservation: %w", err)
 		}
-		out = append(out, iv)
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }
@@ -177,6 +235,116 @@ func loadEvents(ctx context.Context, pool *pgxpool.Pool, windowStart, windowEnd 
 		var e Event
 		if err := rows.Scan(&e.Start, &e.End, &e.Status, &e.Transparency, &e.InAvailability); err != nil {
 			return nil, fmt.Errorf("scan busy event: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// AgendaEvent is one Google event for the read-only agenda (SWT-109).
+type AgendaEvent struct {
+	Title        string
+	Start, End   time.Time
+	AllDay       bool
+	Account      string
+	Transparency string
+	ExternalID   string // raw_source_items.external_id; matches a pushed reservation's sent_external_id
+}
+
+// AgendaAccount is one in-scope calendar with its freshness and write gate.
+type AgendaAccount struct {
+	AccountState
+	WriteEnabled bool
+}
+
+// Agenda is LoadAgenda's answer: every in-scope account, the Google events in
+// the window (cancelled and superseded excluded), and switchboard's live
+// reservations. Rendering (time zone, merging a reservation into its observed
+// event, the 300 cap) is the caller's.
+type Agenda struct {
+	Accounts     []AgendaAccount
+	Events       []AgendaEvent
+	Reservations []Reservation
+}
+
+// AgendaEventLimit bounds one read: one more than the rendered cap, so the
+// caller can say "truncated" honestly.
+const AgendaEventLimit = 301
+
+// LoadAgenda is the agenda read (SWT-109 criterion 2). It runs the SAME
+// readiness check as LoadBusy, shared rather than copied, before its first
+// read of normalized_events: a stale or empty calendar refuses with LoadBusy's
+// exact error and returns no events. There is no override.
+func LoadAgenda(ctx context.Context, pool *pgxpool.Pool, req Request) (Agenda, error) {
+	if err := checkReady(ctx, pool, req); err != nil {
+		return Agenda{}, err
+	}
+	var ag Agenda
+
+	states, err := CalendarSyncStates(ctx, pool)
+	if err != nil {
+		return Agenda{}, err
+	}
+	write := map[int64]bool{}
+	rows, err := pool.Query(ctx,
+		`SELECT id, calendar_write_enabled FROM source_accounts
+		  WHERE provider = 'google' AND calendar_in_availability`)
+	if err != nil {
+		return Agenda{}, fmt.Errorf("select calendar write gates: %w", err)
+	}
+	for rows.Next() {
+		var id int64
+		var w bool
+		if err := rows.Scan(&id, &w); err != nil {
+			rows.Close()
+			return Agenda{}, fmt.Errorf("scan calendar write gate: %w", err)
+		}
+		write[id] = w
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return Agenda{}, err
+	}
+	for _, s := range states {
+		ag.Accounts = append(ag.Accounts, AgendaAccount{AccountState: s, WriteEnabled: write[s.AccountID]})
+	}
+
+	if ag.Events, err = loadAgendaEvents(ctx, pool, req.WindowStart, req.WindowEnd); err != nil {
+		return Agenda{}, err
+	}
+	if ag.Reservations, err = loadReservationRows(ctx, pool, req.WindowStart, req.WindowEnd, req.ExcludeDeliveryIDs); err != nil {
+		return Agenda{}, err
+	}
+	return ag, nil
+}
+
+// loadAgendaEvents is the agenda's normalized_events read. Unexported for the
+// reason loadEvents is: it performs no readiness check, so LoadAgenda is its
+// only caller (callsites_test.go pins that the check runs first).
+func loadAgendaEvents(ctx context.Context, pool *pgxpool.Pool, windowStart, windowEnd time.Time) ([]AgendaEvent, error) {
+	rows, err := pool.Query(ctx,
+		`SELECT COALESCE(e.title,''), e.starts_at, e.ends_at, e.all_day, a.account_email,
+		        COALESCE(e.transparency,'opaque'), r.external_id
+		   FROM normalized_events e
+		   JOIN raw_source_items r ON r.id = e.raw_source_item_id
+		   JOIN source_accounts a ON a.id = r.source_account_id
+		  WHERE a.provider = 'google' AND a.calendar_in_availability
+		    AND r.superseded_at IS NULL
+		    AND COALESCE(e.status,'') <> 'cancelled'
+		    AND e.starts_at IS NOT NULL AND e.ends_at IS NOT NULL
+		    AND e.ends_at > $1 AND e.starts_at < $2
+		  ORDER BY e.starts_at, e.id
+		  LIMIT $3`,
+		windowStart, windowEnd, AgendaEventLimit)
+	if err != nil {
+		return nil, fmt.Errorf("select agenda events: %w", err)
+	}
+	defer rows.Close()
+	var out []AgendaEvent
+	for rows.Next() {
+		var e AgendaEvent
+		if err := rows.Scan(&e.Title, &e.Start, &e.End, &e.AllDay, &e.Account, &e.Transparency, &e.ExternalID); err != nil {
+			return nil, fmt.Errorf("scan agenda event: %w", err)
 		}
 		out = append(out, e)
 	}

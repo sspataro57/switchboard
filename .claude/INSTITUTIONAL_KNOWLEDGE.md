@@ -3685,3 +3685,46 @@ see `docs/runbooks/demo-mode.md`.
   a same-target re-aim keeps the running plan. A long panel's load rattle is step-capped to finish by
   `pageMs − 1500`, so on a 40-row panel it runs ~7.5 s: wait that long before asserting "only X changed".
 
+
+## Calendar for every session: reads, swb-first bookings, offer holds (SWT-109, calendar-mcp-tools)
+
+- **Why.** 2026-10-21 a hub session offered Grady Tue 14:00–16:00 from the calendar skill's 2026-08-03
+  `.ics` snapshot, over a live 15:00 standup. Sessions outside this repo had no live calendar read: the
+  user-scope MCP had no calendar tool. Now both profiles list `calendar_list_events`, `propose_slots`,
+  `book_time`, `cancel_reservation`, `release_offer_holds`; `skills/calendar/SKILL.md` (installed by
+  `make install-skill`) retires the `.ics` script with no fallback.
+- **A reservation is a `deliveries` row, channel `calendar`.** `book_time` writes it `approved` with
+  `push_next_attempt_at` set; the pipelined `calendar_push` stage pushes it (`sent`), a poll confirms it.
+  Owner: "book times and swb to keep them saved somewhere until they can sync".
+- **LANDMINE: the busy set's approved branch requires `push_next_attempt_at IS NOT NULL`.** First cut
+  counted every `approved` calendar row as busy, and `book_calendar_block` (SWT-28) approves its draft and
+  THEN pre-flights — so every legacy booking conflicted with itself (six SWT-28 integration tests red).
+  Only `book_time` and offer holds set the column; legacy rows reserve only once sending. The legacy
+  pre-flight also passes `ExcludeDeliveryIDs: [self]`.
+- **Which calendar is the task's project, never the caller** (Q1): `projects.calendar_account_id`, else the
+  one `source_accounts.calendar_default` row (partial unique index). 0049 maps collaboratory, a-millon,
+  reengine, llamasite-sec → google salvador@handsonconnect.org; default google sspataro@gmail.com. NOT a
+  mailbox/domain rule: the handsonconnect mailbox carries Foundry mail. The push recomputes the target
+  before every write (`target_mismatch` otherwise) and never falls back. Google sees only `Busy`/`Hold` +
+  `Reserved.`; labels stay in switchboard.
+- **Same-id retry amends SWT-28's "never reopened"** for stage rows only (`push_next_attempt_at` set): a
+  failed row keeps its id and is retried with it only after an ok calendar poll that STARTED after the
+  attempt and no raw row for the id. Legacy `book_calendar_block` failures keep the old rule.
+- **Test fixtures must borrow `calendar_default`** (it is a singleton in the shared :5433 db): unset the
+  existing one, restore in cleanup — see `reservations_integration_test.go`.
+- **`internal/availability` is sealed** (`pipedream_isolation_test.go` diffs against main): new code went
+  into `store.go`, never a new file there.
+- **Instructions lines may not put a non-swb phrase in double quotes** (queue_tools_test pairing loop);
+  the calendar lines are plain prose so they fire in any conversation, which is the point.
+- **`calendar_push` passes report processed 0** — rows waiting on a gate (not write-enabled, budget out)
+  stay in the inbox, and a "full" pass would make the stage loop re-run and re-audit them at once.
+- **Pre-existing red, not this ticket:** `TestPipelinedInquiry_Integration_CapturedWakeClassifiesThenSweepPromotesAfterGrace`
+  fails identically on `main` (checked 2026-10-22 in a main worktree against :5433).
+- **Workflow side:** the `switchboard-calendar` Pipedream workflow needs `create_events` and
+  `delete_events` branches (contract in `docs/runbooks/calendar-availability.md`, "Reservations"). A single
+  due row still uses the existing `create_event`, so pushing works before the edit; deletes and multi-row
+  batches need it.
+- **Codex review fixes (2026-10-22):** offer holds are reserved under the allocation lock BEFORE SMTP and
+  released on a definite failure; Google write credits are counted in `ops_flags.calendar_write_invocations`
+  before every invocation (stamps on mutable rows undercounted retries); the push claims rows `FOR UPDATE`
+  with the full inbox predicate; `sending` rows past the 15m lease are recovered with the same id or deleted.

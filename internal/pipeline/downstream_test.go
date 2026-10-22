@@ -51,6 +51,13 @@ func TestDownstream_EveryStageEmitsItsEDThreeEvent(t *testing.T) {
 		pipeline.StageInquiryPromote: pipeline.EventPromoted,
 	}
 	for _, s := range pipeline.Stages() {
+		if s == pipeline.StageCalendarPush {
+			// SWT-109: sweep-only, publishes nothing (TestCalendarPushIsSweepOnly).
+			if e, ok := pipeline.Downstream(s); ok {
+				t.Errorf("Downstream(calendar_push) = %q; it must publish no event", e)
+			}
+			continue
+		}
 		got, ok := pipeline.Downstream(s)
 		w, known := want[s]
 		if !known {
@@ -98,6 +105,9 @@ func TestDownstream_FeedsTheSubscribersTable(t *testing.T) {
 
 func TestPublishAfterPass_PublishesOneNonRetainedWakeWhenRowsMoved(t *testing.T) {
 	for _, s := range pipeline.Stages() {
+		if _, ok := pipeline.Downstream(s); !ok {
+			continue // SWT-109: calendar_push publishes nothing (TestCalendarPushIsSweepOnly)
+		}
 		fp := &fakePublisher{}
 		pass := pipeline.PublishAfterPass(s, fp, func(context.Context) (int, error) { return 3, nil })
 		n, err := pass(context.Background())
@@ -211,5 +221,21 @@ func TestStageLoopCore_NeverPublishesAWake(t *testing.T) {
 			t.Errorf("stage.go line %d publishes a wake inside the loop core: %s — the downstream publish is the "+
 				"PassFunc wrapper's job (PublishAfterPass), applied by cmd/pipelined", i+1, strings.TrimSpace(line))
 		}
+	}
+}
+
+// SWT-109 criterion 18: calendar_push runs on the sweep only — no event wakes
+// it — and a pass publishes nothing.
+func TestCalendarPushIsSweepOnly(t *testing.T) {
+	if up := pipeline.Upstream(pipeline.StageCalendarPush); len(up) != 0 {
+		t.Errorf("Upstream(calendar_push) = %v, want none", up)
+	}
+	fp := &fakePublisher{}
+	pass := pipeline.PublishAfterPass(pipeline.StageCalendarPush, fp, func(context.Context) (int, error) { return 3, nil })
+	if _, err := pass(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(fp.calls) != 0 {
+		t.Errorf("calendar_push published %d wakes, want 0", len(fp.calls))
 	}
 }

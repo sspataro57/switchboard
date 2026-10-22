@@ -27,4 +27,5 @@ integration: db-up
 # whatever branch is checked out to every session). Re-run after any merge that
 # touches skills/swb-status/. Same line as docs/runbooks/ops-mcp-user-scope.md.
 install-skill:
+	install -D -m 0644 skills/calendar/SKILL.md ~/.claude/skills/calendar/SKILL.md
 	install -D -m 0644 skills/swb-status/SKILL.md ~/.claude/skills/swb-status/SKILL.md

@@ -289,3 +289,92 @@ Neither is right in the abstract; it depends on whether client meetings live
 in the blocked calendar. The code behaves correctly under both.
 
 > Decision record: *(none yet — consent not attempted as of 2026-08-31)*
+
+## Reservations: book_time, offer holds and the calendar_push stage (SWT-109)
+
+Salvador, 2026-10-21: "I would like to be able to book times and swb to keep
+them saved somewhere until they can sync to the actual calendar." A
+reservation is a `deliveries` row with `channel='calendar'`. Booked in
+switchboard = `approved` (with `push_next_attempt_at` set), pushed to Google =
+`sent`, observed by a read poll = `confirmed_at`. From the moment it is saved it
+is in the busy set (`availability.loadReservationRows`), so `propose_slots`,
+`calendar_list_events` and every booking check avoid it.
+
+**Verbs** (both MCP profiles): `calendar_list_events`, `propose_slots`,
+`book_time {task_id, start, end, label}`, `cancel_reservation {delivery_id}`,
+`release_offer_holds {delivery_id, keep_start?, reason?}`, and
+`offered_windows` on gmail `draft_delivery` / `update_delivery`. The stage's
+verbs `push_calendar_reservations` / `apply_hold_releases` are off MCP,
+sendShaped and freezeGated (the kill switch stops pushes and deletes; booking
+keeps working).
+
+**Which calendar** (Q1, owner 2026-10-21): the task's project decides, never
+the caller. `projects.calendar_account_id` maps a project to a calendar;
+unmapped projects use the single `source_accounts.calendar_default` row.
+Migration 0049 maps collaboratory, a-millon, reengine and llamasite-sec to the
+google `salvador@handsonconnect.org` account and sets the default to the google
+`sspataro@gmail.com`. Verify after the migration:
+
+```sql
+SELECT slug, calendar_account_id FROM projects ORDER BY slug;   -- exactly those four set
+SELECT id, account_email FROM source_accounts WHERE calendar_default;  -- one row, sspataro@gmail.com
+```
+
+Report any missing slug to Salvador; never guess. A new Avviato project is one
+UPDATE: `UPDATE projects SET calendar_account_id=<hoc google id> WHERE slug='<new>';`
+
+**No fallback.** A booking for a calendar that is not `calendar_write_enabled`
+waits as `push_pending_reason='account_not_write_enabled'`, busy in switchboard,
+and is never re-pointed. Turning on handsonconnect writes is Salvador's call:
+connect that account's write grant in the Pipedream workflow, then
+`UPDATE source_accounts SET calendar_write_enabled=true WHERE provider='google' AND account_email='salvador@handsonconnect.org';`
+— waiting bookings go out within about 30 minutes (rows waiting on a gate are
+re-checked every 30 minutes, not every sweep, to keep audit rows down).
+
+**What Google sees**: summary `Busy` (a booking) or `Hold` (an offer hold) and
+the description `Reserved.`, always. The session's label stays in
+`deliveries.reservation_label` (dashboard and agenda only). The push re-derives
+the target before every write and holds any mismatch as `target_mismatch`
+(never sent).
+
+**Pending reasons** (`deliveries.push_pending_reason`):
+
+| reason | meaning | clears when |
+|---|---|---|
+| `account_not_write_enabled` | target calendar not write-enabled | the column is flipped |
+| `target_mismatch` | row's calendar ≠ its task's project's calendar | fix the mapping or the row |
+| `credit_budget` | `CALENDAR_WRITE_MONTHLY_BUDGET` (default 35) write invocations used this UTC month | the month turns, or raise the budget |
+| `credit_cap` | Pipedream answered `HTTP 400 "Error in workflow"` (credits spent) | backoff retry after the cap lifts |
+| `calendar_stale` | the read poll is older than `AVAIL_MAX_SYNC_AGE` | the next good poll |
+| `transport_error` | the call failed; the id is KEPT | retried with the SAME id once a poll that started after the attempt shows it never landed |
+| `conflict` | TERMINAL: the slot was taken while it waited | never (out of the busy set; logged on the task) |
+
+**Offer holds.** A gmail offer with `offered_windows` is checked strictly at
+draft and again just before send (stale or busy refuses, the row stays
+approved). Once SENT, one `Hold` reservation per window is created
+(`hold_for_delivery_id`), expiring `OFFER_HOLD_TTL` (default 72h) after
+`sent_at`. `release_offer_holds keep_start` keeps the picked hold (a plain
+booking, no expiry) and releases the rest; orchestrator rule R12 releases
+expired ones. If the at-send insert ever fails, the stage repairs missing holds
+on its next sweep.
+
+**The stage** (`PIPELINE_STAGES` += `calendar_push`, `cmd/pipelined`): every
+5 min, one `create_event` (one row) or `create_events` (several) for all due
+rows, and one `delete_events` for all released rows — a pass with nothing due
+calls nothing. It needs `PIPEDREAM_CALENDAR_URL` and the token file, and it is
+fatal at start without them. Credits: a booking ≈ 1, an offer ≈ 2.
+
+**The workflow side** (`switchboard-calendar`, needs two more `action`
+branches; same Bearer check, `sendUpdates=none`, never attendees):
+
+- `create_events`: request `{schema_version:1, action:"create_events",
+  events:[{calendar_id, event_id, start, end, summary, description}]}`. For
+  each entry run the existing `create_event` logic (`events.insert` with the
+  client id; 409 → `events.get` + `created:false`). Answer
+  `{schema_version:1, action:"create_events", results:[{calendar_id, event_id,
+  status:"ok"|"error", created, event | error}]}`, one result per requested id.
+- `delete_events`: request `{schema_version:1, action:"delete_events",
+  events:[{calendar_id, event_id}]}`. REFUSE any `event_id` not matching
+  `^sb[0-9a-v]+t[0-9a-v]+$` (only switchboard-minted ids). `events.delete`;
+  404/410 → `gone`. Answer `{schema_version:1, action:"delete_events",
+  results:[{calendar_id, event_id, status:"deleted"|"gone"|"error", error?}]}`.

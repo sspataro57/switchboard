@@ -52,6 +52,9 @@ type Facts struct {
 	ActiveClaimWorkerID string
 	Dependents          []DependentTask
 	ExpiredClaims       []ExpiredClaim
+	// ExpiredHoldOffers (SWT-109 R12) are gmail offers owning a live calendar
+	// hold whose hold_expires_at has passed, not kept, not release-requested.
+	ExpiredHoldOffers []int64
 	BriefExists         bool
 	BriefCounts         []ProjectCounts
 	// CIFailureStreak is the count of consecutive ci_failed events since the
@@ -128,7 +131,7 @@ func Evaluate(ev Event, f Facts, cfg Config) []Action {
 		}
 		return nil
 	case EventTick:
-		return append(ruleClaimExpiry(f), ruleMorningBrief(ev, f, cfg)...)
+		return append(append(ruleClaimExpiry(f), ruleHoldExpiry(f)...), ruleMorningBrief(ev, f, cfg)...)
 	default:
 		return nil
 	}
@@ -355,6 +358,22 @@ func ruleClaimExpiry(f Facts) []Action {
 			"task_id":   c.TaskID,
 			"worker_id": c.WorkerID,
 			"reason":    SweepReason,
+		}})
+	}
+	return actions
+}
+
+// R12 — offer-hold expiry (SWT-109 criterion 26): an offer whose holds were
+// never picked within OFFER_HOLD_TTL gets them released, reason expired. A
+// DB-only action through the executor; the Google delete is the calendar_push
+// stage's. No record_orchestration: release_offer_holds is idempotent and the
+// facts query stops listing an offer once its holds are release-requested.
+func ruleHoldExpiry(f Facts) []Action {
+	var actions []Action
+	for _, offerID := range f.ExpiredHoldOffers {
+		actions = append(actions, Action{Kind: ActionExecute, Tool: "release_offer_holds", Args: map[string]any{
+			"delivery_id": offerID,
+			"reason":      "expired",
 		}})
 	}
 	return actions

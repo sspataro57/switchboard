@@ -104,8 +104,12 @@ func TestMigration0033_TaskWorkingStateShape(t *testing.T) {
 		// AMENDED — not deleted — by demo-mode (SWT-99): 0048 adds tasks.demo_hidden,
 		// the per-task demo override (written only by psql), named by
 		// docs/tickets/demo-mode_SPEC.md criterion 28.
-		if v > 33 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 40 && v != 41 && v != 42 && v != 43 && v != 44 && v != 45 && v != 46 && v != 47 && v != 48 {
-			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 40: comms-inbox, 41: slack-watch-sweep, 42: slack-send-queue, 43: slack-channel-mentions, 44: board-streaming, 45: always-task, 46: sources-slow, 47: job-agent refs, 48: demo-mode)", e.Name())
+		// AMENDED — not deleted — by calendar-mcp-tools (SWT-109): 0049 adds the
+		// reservation columns on deliveries, projects.calendar_account_id and
+		// source_accounts.calendar_default, guarded by internal/tools
+		// TestMigration0049_* (reservations_integration_test.go).
+		if v > 33 && v != 49 && v != 34 && v != 35 && v != 36 && v != 37 && v != 38 && v != 39 && v != 40 && v != 41 && v != 42 && v != 43 && v != 44 && v != 45 && v != 46 && v != 47 && v != 48 {
+			t.Errorf("migrations/%s exists: criterion 17 — 0033 is the only migration this ticket adds and none above it exists except a number another ticket owns (34: chat-on-closed-task, 35: treetop-pr-review-tasks, 36: signal-session-name, 37: microsoft-oauth-mail, 38: gmail-delivery-cc, 39: activity-resurfaces, 40: comms-inbox, 41: slack-watch-sweep, 42: slack-send-queue, 43: slack-channel-mentions, 44: board-streaming, 45: always-task, 46: sources-slow, 47: job-agent refs, 48: demo-mode, 49: calendar-mcp-tools)", e.Name())
 		}
 	}
 	if len(n33) != 1 || n33[0] != "0033_task_working_state.sql" {

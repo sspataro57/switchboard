@@ -295,10 +295,16 @@ other user skills (`notify-idle`, `calendar`):
 
 ```bash
 cd ~/projects/personal/switchboard && git switch main
+install -D -m 0644 skills/calendar/SKILL.md ~/.claude/skills/calendar/SKILL.md
 install -D -m 0644 skills/swb-status/SKILL.md ~/.claude/skills/swb-status/SKILL.md
 ```
 
-`make install-skill` runs the same `install` line. Then open a NEW session. Never symlink it into
+`make install-skill` runs the same `install` lines. Since SWT-109 (calendar-mcp-tools) the
+`calendar` skill's source is `skills/calendar/SKILL.md` too: it points every session at
+`calendar_list_events`, `propose_slots`, `book_time`, `cancel_reservation` and
+`release_offer_holds` and retires the old `.ics` agenda script (no fallback). Re-install it the
+same way after any merge that touches `skills/calendar/`, together with
+`go install ./cmd/ops-mcp-user` (the tools live in that binary). Then open a NEW session. Never symlink it into
 a checkout: a symlink would serve whatever branch is checked out to every session (the
 "built binary, never `go run`" rule above). Re-install rule: re-run it on `main` after any merge
 that touches `skills/swb-status/`.

@@ -101,7 +101,11 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// conversation"): post a Slack message in one call — draft, auto-approve,
 	// send. No pin: the handler fixes the channel and there is nothing to
 	// narrow. The brakes are policy's (send_enabled, hourly limit, kill switch).
-	"send_slack_reply")
+	"send_slack_reply",
+	// SWT-109 (calendar-mcp-tools, Salvador 2026-10-21): the live calendar and
+	// swb-first booking for every session. book_time is pinned to human tasks
+	// below; the rest need no pin (no account argument exists to narrow).
+	"calendar_list_events", "propose_slots", "book_time", "cancel_reservation", "release_offer_holds")
 
 // userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
 // by OVERWRITE, after injectWorkerID. require_assignee_type:"human" makes the
@@ -134,6 +138,7 @@ var userProfilePins = map[string]map[string]string{
 	"draft_delivery":  {"require_channel": "gmail", "require_thread_in_task_project": "true"},
 	"update_delivery": {"require_own_draft": "true", "require_channel": "gmail"},
 	"task_context":    {"worker_id": "", "require_read_only": "true"},
+	"book_time":       {"require_assignee_type": "human"},
 }
 
 // Server adapts MCP tool calls onto the executor for one worker identity.

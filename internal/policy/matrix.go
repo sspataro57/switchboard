@@ -47,7 +47,11 @@ var sendShaped = map[string]bool{"send_delivery": true, "mark_delivery_sent": tr
 	// book_calendar_block: the hourly limit and the channel branch are its
 	// brakes. Never add it to mcpHumanOnly: Check routes those to the static
 	// allow-list and the loader would never run (D7).
-	"send_slack_reply": true}
+	"send_slack_reply": true,
+	// SWT-109: the calendar_push stage's Google writes (create and delete).
+	// sendShaped so the calendar branch's rate limit applies; channel pinned
+	// to calendar by the loader's toolChannel.
+	"push_calendar_reservations": true, "apply_hold_releases": true}
 
 // freezeGated is the subset the kill switch can actually prevent: an actual
 // send. The switch is for switchboard — it governs what switchboard itself puts
@@ -68,7 +72,10 @@ var freezeGated = map[string]bool{"send_delivery": true,
 	"book_calendar_block": true,
 	// send_slack_reply actually sends (SWT-77), with no human gate: the kill
 	// switch is the only thing that halts a session that has decided to post.
-	"send_slack_reply": true}
+	"send_slack_reply": true,
+	// SWT-109: unattended Google writes; the kill switch stops pushes and
+	// deletes (booking itself is DB-only and keeps working).
+	"push_calendar_reservations": true, "apply_hold_releases": true}
 
 // humanOnly tools require a human actor prefix.
 var humanOnly = map[string]bool{

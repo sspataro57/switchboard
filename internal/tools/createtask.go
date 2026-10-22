@@ -74,6 +74,19 @@ func Register(reg *executor.Registry, pool *pgxpool.Pool) {
 		{"task_reopen", validateReopen, reopenTask},
 		{"record_orchestration", validateRecordOrchestration, recordOrchestration},
 		{"propose_slots", validateProposeSlots, proposeSlots},
+		// SWT-109: the read-only agenda, fail-closed like propose_slots. Both
+		// MCP profiles. See calendar_events.go.
+		{"calendar_list_events", validateCalendarListEvents, calendarListEvents},
+		// SWT-109: swb-first reservations. book_time / cancel_reservation /
+		// release_offer_holds are DB-only and MCP-listed on both profiles;
+		// push_calendar_reservations / apply_hold_releases are the
+		// calendar_push stage's sendShaped verbs, off both MCP profiles. See
+		// reservations.go and calendar_push.go.
+		{"book_time", validateBookTime, bookTime},
+		{"cancel_reservation", validateCancelReservation, cancelReservation},
+		{"release_offer_holds", validateReleaseOfferHolds, releaseOfferHolds},
+		{"push_calendar_reservations", validatePushLimit, pushCalendarReservations},
+		{"apply_hold_releases", validatePushLimit, applyHoldReleases},
 		{"draft_delivery", validateDraftDelivery, draftDelivery},
 		{"update_delivery", validateUpdateDelivery, updateDelivery},
 		{"approve_delivery", validateApproveDelivery, approveDelivery},

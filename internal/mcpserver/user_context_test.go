@@ -110,11 +110,11 @@ func TestTaskContext_OneEntryBothProfiles(t *testing.T) {
 	}
 	full := mcpserver.New(&fakeExec{}, testWorkerID).ListTools()
 	user := mcpserver.NewWithProfile(&fakeExec{}, "manual:salvo", mcpserver.ProfileUser).ListTools()
-	if len(full) != 31 {
-		t.Errorf("the full profile lists %d tools, want 31 (27 → 28 with SWT-72's task_requeue; 28 → 30 with SWT-74's task_match + task_attach; 30 → 31 with SWT-77's send_slack_reply)", len(full))
+	if len(full) != 36 {
+		t.Errorf("the full profile lists %d tools, want 36 (27 → 28 with SWT-72's task_requeue; 28 → 30 with SWT-74's task_match + task_attach; 30 → 31 with SWT-77's send_slack_reply; 31 → 36 with SWT-109's five calendar tools)", len(full))
 	}
-	if len(user) != 19 {
-		t.Errorf("the user profile lists %d tools, want 19 (14 → 15 criterion 27; 15 → 16 with SWT-72's task_requeue; 16 → 18 with SWT-74's task_match + task_attach; 18 → 19 with SWT-77's send_slack_reply)", len(user))
+	if len(user) != 24 {
+		t.Errorf("the user profile lists %d tools, want 24 (14 → 15 criterion 27; 15 → 16 with SWT-72's task_requeue; 16 → 18 with SWT-74's task_match + task_attach; 18 → 19 with SWT-77's send_slack_reply; 19 → 24 with SWT-109's five calendar tools)", len(user))
 	}
 	f, u := find(full), find(user)
 	if f == nil || u == nil {
