@@ -152,3 +152,44 @@ func mentionsOutsideComments(src, needle string) bool {
 	}
 	return false
 }
+
+// SWT-109 criterion 2: LoadAgenda is the second door to normalized_events, and
+// it must pass through the SAME readiness check LoadBusy does — shared, not
+// copied — before it reaches a query. A source scan, like the two above: the
+// thing being pinned is an order of calls in one function body.
+func TestLoadAgendaAndLoadBusyCheckReadinessFirst(t *testing.T) {
+	b, err := os.ReadFile("store.go")
+	if err != nil {
+		t.Fatalf("read store.go: %v", err)
+	}
+	src := string(b)
+	for fn, firstRead := range map[string]string{
+		"func LoadAgenda(": "loadAgendaEvents(",
+		"func LoadBusy(":   "loadEvents(",
+	} {
+		start := strings.Index(src, fn)
+		if start < 0 {
+			t.Fatalf("store.go has no %s", fn)
+		}
+		body := src[start:]
+		if end := strings.Index(body[1:], "\nfunc "); end >= 0 {
+			body = body[:end+1]
+		}
+		check := strings.Index(body, "checkReady(")
+		read := strings.Index(body, firstRead)
+		if check < 0 {
+			t.Errorf("%s does not call checkReady; the readiness rule must be the shared function, not a copy", fn)
+			continue
+		}
+		if read < 0 {
+			t.Errorf("%s no longer calls %s; the scan has stopped matching", fn, firstRead)
+			continue
+		}
+		if read < check {
+			t.Errorf("%s reaches %s before checkReady: a stale calendar would answer with an empty week", fn, firstRead)
+		}
+	}
+	if strings.Count(src, "req.HorizonPast)) ||") != 1 {
+		t.Errorf("the horizon check is spelled more than once in store.go; it must live only in checkReady")
+	}
+}

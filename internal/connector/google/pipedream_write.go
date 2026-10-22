@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -205,4 +206,234 @@ func verifyCreateEventEcho(req CreateEventRequest, resp CreateEventResponse) err
 		return fmt.Errorf("pipedream create_event echo: the returned event carries attendees; an own block has none")
 	}
 	return nil
+}
+
+// ---- SWT-109: batched writes (create_events, delete_events) ----
+//
+// The push stage carries every due reservation in ONE invocation, because a
+// Pipedream invocation is one credit whatever it carries. Same endpoint, same
+// token, same discipline as CreateEvent: classified errors (no endpoint, no
+// token), exactly one retry on a transport failure only, and every ok entry
+// verified before success.
+
+// CalendarEventSpec is one entry of a create_events request. No attendees
+// field, ever (an own block has none).
+type CalendarEventSpec struct {
+	CalendarID  string `json:"calendar_id"`
+	EventID     string `json:"event_id"`
+	Start       string `json:"start"`
+	End         string `json:"end"`
+	Summary     string `json:"summary"`
+	Description string `json:"description"`
+}
+
+// CreateEventsRequest is the batched write envelope.
+type CreateEventsRequest struct {
+	SchemaVersion int                 `json:"schema_version"`
+	Action        string              `json:"action"` // "create_events"
+	Events        []CalendarEventSpec `json:"events"`
+}
+
+// CreateEventsResult is one entry of the answer.
+type CreateEventsResult struct {
+	CalendarID string          `json:"calendar_id"`
+	EventID    string          `json:"event_id"`
+	Status     string          `json:"status"` // "ok" | "error"
+	Created    bool            `json:"created"`
+	Event      json.RawMessage `json:"event"`
+	Error      string          `json:"error"`
+}
+
+// CreateEventsResponse is the workflow's answer to create_events.
+type CreateEventsResponse struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Action        string               `json:"action"`
+	Results       []CreateEventsResult `json:"results"`
+}
+
+// CalendarDeleteSpec is one entry of a delete_events request.
+type CalendarDeleteSpec struct {
+	CalendarID string `json:"calendar_id"`
+	EventID    string `json:"event_id"`
+}
+
+// DeleteEventsRequest is the batched delete envelope.
+type DeleteEventsRequest struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Action        string               `json:"action"` // "delete_events"
+	Events        []CalendarDeleteSpec `json:"events"`
+}
+
+// DeleteEventsResult is one entry: deleted, gone (404/410 — already absent),
+// or error.
+type DeleteEventsResult struct {
+	CalendarID string `json:"calendar_id"`
+	EventID    string `json:"event_id"`
+	Status     string `json:"status"`
+	Error      string `json:"error"`
+}
+
+// DeleteEventsResponse is the workflow's answer to delete_events.
+type DeleteEventsResponse struct {
+	SchemaVersion int                  `json:"schema_version"`
+	Action        string               `json:"action"`
+	Results       []DeleteEventsResult `json:"results"`
+}
+
+// ownEventID is the shape of an id switchboard minted (CalendarEventID):
+// "sb" + base32hex delivery id + "t" + base32hex nonce. delete_events refuses
+// anything else BEFORE the network call — this client can only ever delete an
+// event switchboard itself created. The workflow repeats the check.
+var ownEventID = regexp.MustCompile(`^sb[0-9a-v]+t[0-9a-v]+$`)
+
+// IsOwnCalendarEventID reports whether id has the shape of an id switchboard
+// minted.
+func IsOwnCalendarEventID(id string) bool { return ownEventID.MatchString(id) }
+
+// postJSON is the batch calls' POST: exactly ONE attempt, a classified error
+// otherwise, the body size-capped and read whole. No implicit retry (codex
+// review): a request the workflow ran whose answer was lost would be billed
+// twice while switchboard counted once. The stage retries through its own
+// budget admission instead.
+func (c *PipedreamCalendarClient) postJSON(ctx context.Context, action string, body []byte) ([]byte, error) {
+	resp, err := c.postOnce(ctx, body)
+	if err != nil {
+		reason := "transport failure"
+		if ctx.Err() != nil {
+			reason = "cancelled or timed out"
+		}
+		return nil, fmt.Errorf(
+			"pipedream calendar workflow unreachable (%s; endpoint withheld — check PIPEDREAM_CALENDAR_URL and the network)", reason)
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read pipedream %s response: body read failed", action)
+	}
+	if resp.StatusCode != http.StatusOK {
+		snippet := strings.TrimSpace(string(out))
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("pipedream calendar workflow: HTTP %d: %s", resp.StatusCode, snippet)
+	}
+	if int64(len(out)) >= c.maxBytes {
+		return nil, fmt.Errorf("pipedream %s response at or over %d bytes; refusing a possibly truncated answer", action, c.maxBytes)
+	}
+	return out, nil
+}
+
+// CreateEvents creates several own blocks in one invocation. Each ok entry
+// passes the same echo verification as CreateEvent, and every requested id
+// must appear exactly once in the answer.
+func (c *PipedreamCalendarClient) CreateEvents(ctx context.Context, req CreateEventsRequest) (CreateEventsResponse, error) {
+	if len(req.Events) == 0 {
+		return CreateEventsResponse{}, fmt.Errorf("pipedream create_events: no events")
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return CreateEventsResponse{}, fmt.Errorf("marshal pipedream create_events request: %w", err)
+	}
+	out, err := c.postJSON(ctx, "create_events", body)
+	if err != nil {
+		return CreateEventsResponse{}, err
+	}
+	var decoded CreateEventsResponse
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		return CreateEventsResponse{}, fmt.Errorf("parse pipedream create_events response: not the envelope")
+	}
+	if err := VerifyCreateEventsEcho(req, decoded); err != nil {
+		return CreateEventsResponse{}, err
+	}
+	return decoded, nil
+}
+
+// VerifyCreateEventsEcho checks the envelope and every entry. An entry with
+// status "error" is a per-entry failure the caller records; anything that
+// breaks the envelope (wrong action, a missing or duplicated id, an ok entry
+// whose echo does not verify) fails the whole call.
+func VerifyCreateEventsEcho(req CreateEventsRequest, resp CreateEventsResponse) error {
+	if resp.SchemaVersion != PipedreamCalendarSchemaVersion {
+		return fmt.Errorf("pipedream create_events echo: schema_version %d, want %d", resp.SchemaVersion, PipedreamCalendarSchemaVersion)
+	}
+	if resp.Action != "create_events" {
+		return fmt.Errorf("pipedream create_events echo: action %q, want \"create_events\"", resp.Action)
+	}
+	want := map[string]CalendarEventSpec{}
+	for _, e := range req.Events {
+		want[e.EventID] = e
+	}
+	seen := map[string]bool{}
+	for _, r := range resp.Results {
+		spec, ok := want[r.EventID]
+		if !ok {
+			return fmt.Errorf("pipedream create_events echo: result for event id %q that was not requested", r.EventID)
+		}
+		if seen[r.EventID] {
+			return fmt.Errorf("pipedream create_events echo: event id %q answered twice", r.EventID)
+		}
+		seen[r.EventID] = true
+		if r.Status != "ok" {
+			continue
+		}
+		single := CreateEventRequest{SchemaVersion: PipedreamCalendarSchemaVersion, Action: "create_event",
+			CalendarID: spec.CalendarID, EventID: spec.EventID, Start: spec.Start, End: spec.End,
+			Summary: spec.Summary, Description: spec.Description}
+		if err := verifyCreateEventEcho(single, CreateEventResponse{SchemaVersion: resp.SchemaVersion,
+			Action: "create_event", CalendarID: r.CalendarID, Status: "ok", Created: r.Created, Event: r.Event}); err != nil {
+			return err
+		}
+	}
+	if len(seen) != len(want) {
+		return fmt.Errorf("pipedream create_events echo: %d of %d requested events answered", len(seen), len(want))
+	}
+	return nil
+}
+
+// DeleteEvents deletes own blocks in one invocation. Every id is shape-checked
+// BEFORE the network call; a foreign id refuses the whole call.
+func (c *PipedreamCalendarClient) DeleteEvents(ctx context.Context, req DeleteEventsRequest) (DeleteEventsResponse, error) {
+	if len(req.Events) == 0 {
+		return DeleteEventsResponse{}, fmt.Errorf("pipedream delete_events: no events")
+	}
+	for _, e := range req.Events {
+		if !IsOwnCalendarEventID(e.EventID) {
+			return DeleteEventsResponse{}, fmt.Errorf("pipedream delete_events: refusing event id %q: not an id switchboard minted", e.EventID)
+		}
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return DeleteEventsResponse{}, fmt.Errorf("marshal pipedream delete_events request: %w", err)
+	}
+	out, err := c.postJSON(ctx, "delete_events", body)
+	if err != nil {
+		return DeleteEventsResponse{}, err
+	}
+	var decoded DeleteEventsResponse
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		return DeleteEventsResponse{}, fmt.Errorf("parse pipedream delete_events response: not the envelope")
+	}
+	if decoded.SchemaVersion != PipedreamCalendarSchemaVersion || decoded.Action != "delete_events" {
+		return DeleteEventsResponse{}, fmt.Errorf("pipedream delete_events echo: schema_version %d action %q", decoded.SchemaVersion, decoded.Action)
+	}
+	want := map[string]bool{}
+	for _, e := range req.Events {
+		want[e.EventID] = true
+	}
+	seen := map[string]bool{}
+	for _, r := range decoded.Results {
+		if !want[r.EventID] || seen[r.EventID] {
+			return DeleteEventsResponse{}, fmt.Errorf("pipedream delete_events echo: unexpected or repeated event id %q", r.EventID)
+		}
+		seen[r.EventID] = true
+		switch r.Status {
+		case "deleted", "gone", "error":
+		default:
+			return DeleteEventsResponse{}, fmt.Errorf("pipedream delete_events echo: status %q for %q", r.Status, r.EventID)
+		}
+	}
+	if len(seen) != len(want) {
+		return DeleteEventsResponse{}, fmt.Errorf("pipedream delete_events echo: %d of %d requested events answered", len(seen), len(want))
+	}
+	return decoded, nil
 }

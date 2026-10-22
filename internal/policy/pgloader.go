@@ -16,7 +16,10 @@ type pgSnapshotLoader struct {
 
 // toolChannel pins the snapshot channel for send-shaped verbs that insert
 // their own delivery row, so there is no delivery_id to resolve it from.
-var toolChannel = map[string]string{"send_slack_reply": "slack_reply"}
+var toolChannel = map[string]string{"send_slack_reply": "slack_reply",
+	// SWT-109: the calendar_push stage's two verbs act on many rows, not one
+	// delivery_id, so their channel is pinned by name.
+	"push_calendar_reservations": "calendar", "apply_hold_releases": "calendar"}
 
 func NewPGSnapshotLoader(pool *pgxpool.Pool) SnapshotLoader {
 	return &pgSnapshotLoader{pool: pool}

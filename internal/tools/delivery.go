@@ -208,6 +208,12 @@ type draftDeliveryArgs struct {
 	// insert. Same pattern as RequireChannel: only narrows, hidden from every
 	// schema; the full profile and the drafts worker send none.
 	RequireThreadInTaskProject string `json:"require_thread_in_task_project,omitempty"`
+	// OfferedWindows (SWT-109 criterion 13) are the meeting windows a gmail
+	// offer proposes: 1-3, each at most 4h, non-overlapping, checked STRICTLY
+	// against the live calendar now and again before send. Once the email is
+	// SENT, switchboard holds each window on Salvador's calendar
+	// (ensureHoldRows); a draft reserves nothing.
+	OfferedWindows []offerWindowArg `json:"offered_windows,omitempty"`
 }
 
 func validateDraftDelivery(args []byte) error {
@@ -236,6 +242,14 @@ func validateDraftDelivery(args []byte) error {
 	}
 	if a.ExpectTaskStatus != "" && !slices.Contains(taskStatuses, a.ExpectTaskStatus) {
 		return fmt.Errorf("expect_task_status %q is not a task status", a.ExpectTaskStatus)
+	}
+	if len(a.OfferedWindows) > 0 {
+		if a.Channel != "gmail" {
+			return fmt.Errorf("offered_windows is refused on a %s delivery: only a gmail offer can hold windows", a.Channel)
+		}
+		if _, err := normalizeOfferWindows(a.OfferedWindows); err != nil {
+			return err
+		}
 	}
 	switch a.Channel {
 	case "gmail", "upwork_chat", "jira_comment", "slack_reply", "calendar":
@@ -377,6 +391,21 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 	var targetClientRef *string
 	var startsAt, endsAt *time.Time
 	cc := []string{} // never nil: deliveries.cc is NOT NULL, and a nil slice encodes as SQL NULL
+	// SWT-109 criterion 13: offered windows are checked STRICTLY now (a stale
+	// calendar refuses) and stored sorted in UTC; nil leaves the column NULL.
+	var offeredWindows []byte
+	if len(a.OfferedWindows) > 0 {
+		windows, err := normalizeOfferWindows(a.OfferedWindows)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkOfferWindowsFree(ctx, pool, windows, nil); err != nil {
+			return nil, err
+		}
+		if offeredWindows, err = json.Marshal(windows); err != nil {
+			return nil, fmt.Errorf("encode offered_windows: %w", err)
+		}
+	}
 	if a.Channel == "calendar" {
 		// SWT-28 criteria 11-12: the account is resolved SERVER-SIDE from
 		// target_ref (never caller-chosen), matched case-insensitively, and
@@ -661,13 +690,13 @@ func draftDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO deliveries (task_id, channel, target_ref, body, subject, status,
 			                         from_account_id, thread_id, target_client_ref, created_by,
-			                         starts_at, ends_at, cc)
-			 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9, $10, $11, $12)
+			                         starts_at, ends_at, cc, offered_windows)
+			 VALUES ($1, $2, NULLIF($3,''), $4, NULLIF($5,''), 'drafted', $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
 			 RETURNING id`,
 			a.TaskID, a.Channel, a.TargetRef,
 			google.ScrubAIAttribution(a.Body), google.ScrubAIAttribution(a.Subject),
 			fromAccountID, a.ThreadID, targetClientRef, executor.ActorFrom(ctx),
-			startsAt, endsAt, cc).Scan(&deliveryID); err != nil {
+			startsAt, endsAt, cc, nullableJSON(offeredWindows)).Scan(&deliveryID); err != nil {
 			return fmt.Errorf("insert delivery: %w", err)
 		}
 		return nil
@@ -944,6 +973,10 @@ type updateDeliveryArgs struct {
 	// upwork_chat or calendar draft that this repo's full-profile session
 	// wrote. Checked under the row lock, in updateDelivery.
 	RequireChannel string `json:"require_channel,omitempty"`
+	// OfferedWindows (SWT-109 criterion 13): absent = unchanged, [] = clear,
+	// [...] = replace, checked strictly against the live calendar. gmail
+	// drafts only.
+	OfferedWindows *[]offerWindowArg `json:"offered_windows,omitempty"`
 }
 
 func validateUpdateDelivery(args []byte) error {
@@ -954,8 +987,13 @@ func validateUpdateDelivery(args []byte) error {
 	if a.DeliveryID == 0 {
 		return errors.New("missing delivery_id")
 	}
-	if a.Subject == nil && a.Body == nil && a.Cc == nil {
-		return errors.New("nothing to update (subject, body or cc required)")
+	if a.Subject == nil && a.Body == nil && a.Cc == nil && a.OfferedWindows == nil {
+		return errors.New("nothing to update (subject, body, cc or offered_windows required)")
+	}
+	if a.OfferedWindows != nil && len(*a.OfferedWindows) > 0 {
+		if _, err := normalizeOfferWindows(*a.OfferedWindows); err != nil {
+			return err
+		}
 	}
 	if a.Cc != nil {
 		if _, err := NormalizeCc(*a.Cc); err != nil {
@@ -999,6 +1037,19 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 			return nil, err
 		}
 	}
+	var offeredWindows []byte
+	if a.OfferedWindows != nil && len(*a.OfferedWindows) > 0 {
+		windows, err := normalizeOfferWindows(*a.OfferedWindows)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkOfferWindowsFree(ctx, pool, windows, nil); err != nil {
+			return nil, err
+		}
+		if offeredWindows, err = json.Marshal(windows); err != nil {
+			return nil, fmt.Errorf("encode offered_windows: %w", err)
+		}
+	}
 	// One transaction, the delivery row locked: the drafted and ownership checks
 	// and the write see the same row, so neither an approve nor a re-draft can
 	// slip between them.
@@ -1025,6 +1076,9 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 		// an edit re-opens, on a row one click from approval, exactly the hole
 		// the draft-time fill closes. Channel-scoped on purpose: the channels
 		// whose send paths never read subject keep their old freedom.
+		if a.OfferedWindows != nil && channel != "gmail" {
+			return fmt.Errorf("delivery %d is a %s delivery: only a gmail offer can hold windows", a.DeliveryID, channel)
+		}
 		if channel == "gmail" && a.Subject != nil && strings.TrimSpace(subject) == "" {
 			return fmt.Errorf("delivery %d is a gmail reply: its subject cannot be cleared (omit subject to keep "+
 				"the current one, or pass the words you want)", a.DeliveryID)
@@ -1068,9 +1122,11 @@ func updateDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 			   subject = CASE WHEN $2 THEN NULLIF($3,'') ELSE subject END,
 			   body    = CASE WHEN $4 THEN $5 ELSE body END,
 			   cc      = CASE WHEN $6 THEN $7::text[] ELSE cc END,
+			   offered_windows = CASE WHEN $8 THEN $9::jsonb ELSE offered_windows END,
 			   updated_at = now()
 			 WHERE id=$1`,
-			a.DeliveryID, a.Subject != nil, subject, a.Body != nil, body, a.Cc != nil, cc); err != nil {
+			a.DeliveryID, a.Subject != nil, subject, a.Body != nil, body, a.Cc != nil, cc,
+			a.OfferedWindows != nil, nullableJSON(offeredWindows)); err != nil {
 			return fmt.Errorf("update delivery %d: %w", a.DeliveryID, err)
 		}
 		return nil
@@ -1452,6 +1508,28 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		gThread   string
 		msgID     string
 	)
+	// SWT-109 criterion 15: an offer's windows are re-checked STRICTLY before
+	// anything is reserved — a window that became busy, or a calendar copy
+	// gone stale, refuses and the row stays approved with no Message-ID. Only
+	// an approved, unsent row is checked: a send that already left (SWT-71's
+	// recovered path) is never stranded by it.
+	var pendingWindows []byte
+	if err := pool.QueryRow(ctx,
+		`SELECT offered_windows FROM deliveries WHERE id=$1 AND status='approved' AND sent_external_id IS NULL`,
+		a.DeliveryID).Scan(&pendingWindows); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("load offered windows of delivery %d: %w", a.DeliveryID, err)
+	}
+	if len(pendingWindows) > 0 {
+		// Check AND reserve under the calendar allocation lock, before SMTP
+		// (codex review): a window checked free but held only after the send
+		// could be booked by anyone in between. The holds are live from here;
+		// a definite send failure below releases them, an ambiguous one keeps
+		// them until they expire.
+		if err := reserveOfferWindows(ctx, pool, a.DeliveryID, pendingWindows); err != nil {
+			return nil, fmt.Errorf("delivery %d not sent: %w", a.DeliveryID, err)
+		}
+	}
+	reservedHolds := len(pendingWindows) > 0
 	err := inTx(ctx, pool, func(tx pgx.Tx) error {
 		var status string
 		var extID *string
@@ -1575,11 +1653,15 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 		return nil
 	})
 	if err != nil {
+		if reservedHolds {
+			releaseUnsentOfferHolds(ctx, pool, a.DeliveryID) // nothing left: phase 1 refused
+		}
 		return nil, err
 	}
 
 	if recovered {
 		// Finished from its confirmation, event included, inside the transaction.
+		ensureHoldsAfterSend(ctx, pool, a.DeliveryID)
 		return marshalResult(map[string]any{"delivery_id": a.DeliveryID, "status": "sent",
 			"sent_external_id": msgID, "recovered": true})
 	}
@@ -1587,6 +1669,9 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 	// Phase 2: the network call, then finalize sent | failed.
 	raw, err := google.BuildOutboundMIME(msg)
 	if err != nil {
+		if reservedHolds {
+			releaseUnsentOfferHolds(ctx, pool, a.DeliveryID)
+		}
 		_, _ = pool.Exec(ctx, `UPDATE deliveries SET status='failed', error=$2, updated_at=now()
 			 WHERE id=$1 AND status='sending'`, a.DeliveryID, err.Error())
 		return nil, fmt.Errorf("build outbound message: %w", err)
@@ -1611,6 +1696,10 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 				        sent_external_id = CASE WHEN confirmed_at IS NULL THEN NULL ELSE sent_external_id END
 				  WHERE id=$1 AND status='sending'`,
 				a.DeliveryID, err.Error())
+			if reservedHolds {
+				// After the row is failed with its id cleared: definitely not sent.
+				releaseUnsentOfferHolds(ctx, pool, a.DeliveryID)
+			}
 		} else {
 			// Ambiguous transport error: the send MAY have gone through —
 			// keep the id; never risk a double send (invariant 4).
@@ -1628,6 +1717,9 @@ func sendDelivery(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 	if err != nil {
 		return nil, fmt.Errorf("finalize sent: %w", err)
 	}
+	// SWT-109 criterion 16: an offer's windows become holds once it is sent
+	// (idempotent: whichever path finished the send, one set).
+	ensureHoldsAfterSend(ctx, pool, a.DeliveryID)
 	if tag.RowsAffected() == 0 {
 		// Already finished from its confirmation while this call was in flight
 		// (SWT-71): that path wrote the row and its event. One event per send.

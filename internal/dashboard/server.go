@@ -185,6 +185,15 @@ type deliveryRow struct {
 	SentAt      string
 	ConfirmedAt string
 	Error       string
+	// SWT-109 criterion 14: a gmail offer's windows, and a calendar
+	// reservation's switchboard-only facts (label, kind, why it is not on
+	// Google yet, released).
+	OfferedWindows   string
+	ReservationLabel string
+	HoldFor          int64
+	PendingReason    string
+	ReleaseReason    string
+	Released         bool
 	// StartsAt/EndsAt are the booked interval, calendar rows only (SWT-28).
 	// Under the auto tier the dashboard is the review surface: a human
 	// checking what was booked must see WHEN.
@@ -289,7 +298,10 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	                      WHERE nm.channel = 'gmail' AND nm.external_message_id = d.sent_external_id
 	                        AND nm.direction = 'outbound'),
 	             COALESCE(d.send_queued_at::text,''), COALESCE(d.send_queue_job_id,''),
-	             d.send_attempted_at, d.send_settled_at
+	             d.send_attempted_at, d.send_settled_at,
+	             COALESCE(d.offered_windows::text,''), COALESCE(d.reservation_label,''),
+	             COALESCE(d.hold_for_delivery_id,0), COALESCE(d.push_pending_reason,''),
+	             COALESCE(d.release_reason,''), d.released_at IS NOT NULL
 	      FROM deliveries d LEFT JOIN tasks t ON t.id = d.task_id
 	     WHERE @demo.delivery(d)`
 	args := []any{}
@@ -319,7 +331,9 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 			&d.Subject, &d.Body, &d.CreatedBy, &d.SentAt, &d.ConfirmedAt, &d.Error,
 			&d.StartsAt, &d.EndsAt, &ref.fromAcct, &ref.threadID, &d.TargetRef,
 			&d.RejectionNote, &d.RedraftRequested, &d.Cc, &d.SentCopyIngested,
-			&d.QueuedAt, &d.QueueJobID, &attemptedAt, &settledAt); err != nil {
+			&d.QueuedAt, &d.QueueJobID, &attemptedAt, &settledAt,
+			&d.OfferedWindows, &d.ReservationLabel, &d.HoldFor, &d.PendingReason,
+			&d.ReleaseReason, &d.Released); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

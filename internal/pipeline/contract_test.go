@@ -142,6 +142,9 @@ func TestStageVocabulary(t *testing.T) {
 		pipeline.StageRouteApply:     "route_apply",
 		pipeline.StageInquiry:        "inquiry",
 		pipeline.StageInquiryPromote: "inquiry_promote",
+		// AMENDED by calendar-mcp-tools (SWT-109): a sixth, sweep-only stage
+		// that consumes no event — the reservation push to Google.
+		pipeline.StageCalendarPush: "calendar_push",
 	}
 	for s, want := range pairs {
 		if string(s) != want {
@@ -149,7 +152,7 @@ func TestStageVocabulary(t *testing.T) {
 		}
 	}
 	got := stageStrings(pipeline.Stages())
-	want := []string{"gate", "inquiry", "inquiry_promote", "route", "route_apply"}
+	want := []string{"calendar_push", "gate", "inquiry", "inquiry_promote", "route", "route_apply"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Stages() = %v, want exactly %v", got, want)
 	}

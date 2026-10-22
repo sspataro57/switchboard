@@ -47,11 +47,15 @@ const (
 	StageRouteApply     Stage = "route_apply"
 	StageInquiry        Stage = "inquiry"
 	StageInquiryPromote Stage = "inquiry_promote"
+	// StageCalendarPush (SWT-109) writes swb-first calendar reservations to
+	// Google and deletes released ones. Sweep only: no upstream event wakes
+	// it, and it publishes none (a reservation is not a funnel message).
+	StageCalendarPush Stage = "calendar_push"
 )
 
 // Stages is every consumer the graph knows.
 func Stages() []Stage {
-	return []Stage{StageGate, StageRoute, StageRouteApply, StageInquiry, StageInquiryPromote}
+	return []Stage{StageGate, StageRoute, StageRouteApply, StageInquiry, StageInquiryPromote, StageCalendarPush}
 }
 
 // Topic is ops/pipeline/{event}: QoS 1, NEVER retained (a retained wake-up

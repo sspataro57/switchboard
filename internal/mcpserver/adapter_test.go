@@ -106,6 +106,8 @@ var wantAgentTools = []string{
 	// SWT-44: MCP-listed so a session can fix the words it drafted. Still
 	// policy.humanOnly, so a worker console is refused; the user profile lists it.
 	"update_delivery",
+	// SWT-109: the live calendar and swb-first booking, both profiles.
+	"calendar_list_events", "propose_slots", "book_time", "cancel_reservation", "release_offer_holds",
 	"link_external_ref",  // agent-facing since SWT-9: workers link their PRs/issues
 	"mark_delivery_sent", // agent-facing since SWT-12 (Q1): resolve a 'sending' Slack row
 	// SWT-11 (criterion 16): read-only, served from normalized_messages rather

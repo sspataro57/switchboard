@@ -393,6 +393,7 @@ func (s *PGSink) ConfirmObservedCalendarDeliveries(ctx context.Context, accountI
 	rows, err := s.pool.Query(ctx,
 		`UPDATE deliveries SET confirmed_at=now(), updated_at=now()
 		  WHERE channel='calendar' AND confirmed_at IS NULL
+		    AND released_at IS NULL -- SWT-109: a released reservation is free, never confirmed
 		    AND from_account_id=$1 AND sent_external_id = ANY($2)
 		 RETURNING id, task_id, sent_external_id`, accountID, present)
 	if err != nil {
@@ -438,6 +439,7 @@ func (s *PGSink) confirmCalendarDelivery(ctx context.Context, rawItemID int64, e
 	err := s.pool.QueryRow(ctx,
 		`UPDATE deliveries SET confirmed_at=now(), updated_at=now()
 		  WHERE channel='calendar' AND sent_external_id=$1 AND confirmed_at IS NULL
+		    AND released_at IS NULL -- SWT-109: a released reservation is free, never confirmed
 		    AND from_account_id = (SELECT source_account_id FROM raw_source_items WHERE id=$2)
 		 RETURNING id, task_id`, externalID, rawItemID).Scan(&deliveryID, &taskID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -614,6 +616,7 @@ func (s *PGSink) SupersedeAbsentCalendar(ctx context.Context, accountID int64, k
 		                     WHERE d.channel = 'calendar'
 		                       AND d.from_account_id = $1
 		                       AND d.confirmed_at IS NULL
+		                       AND d.released_at IS NULL -- SWT-109: released means free
 		                       AND d.sent_external_id = raw_source_items.external_id)
 		    AND `+startsAt+` IS NOT NULL
 		    AND (`+startsAt+`)::timestamptz >= $3

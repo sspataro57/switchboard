@@ -63,14 +63,14 @@ var agentTools = []Tool{
 	{
 		Name:        "draft_delivery",
 		Description: "Draft an outbound client communication as a delivery row (drafted; goes through approval before any send). THE only route for client-visible words. For channel \"calendar\" (an own calendar block): target_ref is the account email, subject becomes the event summary, body the description, and start/end MUST come from propose_slots.",
-		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat","jira_comment","slack_reply","calendar"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat, jira_comment, slack_reply, and calendar; Slack uses the exact conversation or thread URL, calendar the account email"},"start":{"type":"string","description":"RFC3339; calendar only — block start, from propose_slots"},"end":{"type":"string","description":"RFC3339; calendar only — block end, at most 12h after start"},"cc":{"type":"array","items":{"type":"string"},"description":"gmail only: carbon-copy recipients, one email address per entry, at most 10. Any plain address is accepted (one that needs a quoted local part is refused); a display name is dropped (only the address is kept), duplicates are removed, and an address equal to the message's From or To is refused. Salvador sees the Cc on the dashboard before he approves. Omit for no Cc."}},"required":["task_id","channel","body"]}`),
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"channel":{"type":"string","enum":["gmail","upwork_chat","jira_comment","slack_reply","calendar"]},"body":{"type":"string"},"subject":{"type":"string"},"thread_id":{"type":"integer","description":"required for gmail; From is resolved from the thread, never chosen"},"target_ref":{"type":"string","description":"required for upwork_chat, jira_comment, slack_reply, and calendar; Slack uses the exact conversation or thread URL, calendar the account email"},"start":{"type":"string","description":"RFC3339; calendar only — block start, from propose_slots"},"end":{"type":"string","description":"RFC3339; calendar only — block end, at most 12h after start"},"cc":{"type":"array","items":{"type":"string"},"description":"gmail only: carbon-copy recipients, one email address per entry, at most 10. Any plain address is accepted (one that needs a quoted local part is refused); a display name is dropped (only the address is kept), duplicates are removed, and an address equal to the message's From or To is refused. Salvador sees the Cc on the dashboard before he approves. Omit for no Cc."},"offered_windows":{"type":"array","maxItems":3,"items":{"type":"object","properties":{"start":{"type":"string"},"end":{"type":"string"}},"required":["start","end"]},"description":"gmail only (SWT-109): the meeting windows this email offers, RFC3339, 1-3, each at most 4h, from propose_slots. Checked against the live calendar now and again before send; once the email is SENT each window is held on Salvador's calendar until the recipient picks (release_offer_holds) or 72h pass."}},"required":["task_id","channel","body"]}`),
 	},
 	{
 		// SWT-44: fix the words of a reply you drafted, before Salvador approves it.
 		// humanOnly in policy: listed for interactive sessions; a worker is refused.
 		Name:        "update_delivery",
 		Description: "Edit the subject, body and/or cc of a DRAFTED delivery (only while its status is drafted) before Salvador approves it. At least one of subject, body or cc is required; a body, when given, must not be empty. An empty subject clears it on channels that do not send one — but NOT on gmail, where a reply must carry a subject and the edit is refused. From the user-scope install, only gmail drafts an interactive session created (never the drafts worker's or the dashboard's). Approving and sending happen on the dashboard, never from a session. Human-only: a worker console is refused.",
-		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"},"subject":{"type":"string"},"body":{"type":"string"},"cc":{"type":"array","items":{"type":"string"},"description":"gmail only: REPLACES the draft's carbon-copy list (one address per entry, at most 10; a display name is dropped). [] CLEARS the list; omit cc to leave it unchanged."}},"required":["delivery_id"]}`),
+		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"},"subject":{"type":"string"},"body":{"type":"string"},"cc":{"type":"array","items":{"type":"string"},"description":"gmail only: REPLACES the draft's carbon-copy list (one address per entry, at most 10; a display name is dropped). [] CLEARS the list; omit cc to leave it unchanged."},"offered_windows":{"type":"array","maxItems":3,"items":{"type":"object","properties":{"start":{"type":"string"},"end":{"type":"string"}},"required":["start","end"]},"description":"gmail only (SWT-109): REPLACES the meeting windows this draft offers ([] clears them; omit to leave unchanged), RFC3339, 1-3, each at most 4h, from propose_slots. Checked against the live calendar now and again before send; once the email is SENT each window is held on Salvador's calendar until the recipient picks (release_offer_holds) or 72h pass."}},"required":["delivery_id"]}`),
 	},
 	{
 		Name:        "link_external_ref",
@@ -271,6 +271,47 @@ var agentTools = []Tool{
 			"session's console, never through switchboard. To finish, call task_close, which also clears the state. The same " +
 			"state again only refreshes its time. Human sessions only: a worker console is refused by policy.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"state":{"type":"string","enum":["working","needs_input","clear"],"description":"working, needs_input (waiting on Salvador), or clear"},"session":{"type":"string","maxLength":200,"description":"This session's swb name: the tmux window name, else the last folder of the working directory, exactly as the SessionStart hook states it (Your swb session name is <name>): the name only; required for working and needs_input, optional for clear."}},"required":["task_id","state"]}`),
+	},
+	// SWT-109 (calendar-mcp-tools): Salvador's live calendar for every session.
+	// The two reads fail closed exactly like each other (one shared readiness
+	// check); book_time / cancel_reservation / release_offer_holds are DB-only —
+	// switchboard keeps the reservation and the pipelined calendar_push stage
+	// writes it to Google. None takes an account: the calendar comes from the
+	// task's project.
+	{
+		Name: "calendar_list_events",
+		Description: "Salvador's calendar for a time range: every synced Google event plus switchboard's own reservations (bookings and offer holds), " +
+			"in his time zone (America/New_York), ordered by start. Each reservation says whether it is on Google yet (state pending | pushed | confirmed, " +
+			"with pending_reason when it is waiting). Refuses — never answers from a stale copy — when any calendar's last sync is older than max_sync_age. " +
+			"Default window: today 00:00 for 7 days; at most 31 days. Read-only.",
+		InputSchema: schema(`{"type":"object","properties":{"window_start":{"type":"string","description":"RFC3339, or YYYY-MM-DD (midnight in his time zone)"},"window_end":{"type":"string","description":"RFC3339, or YYYY-MM-DD (midnight in his time zone); exclusive"}}}`),
+	},
+	{
+		Name: "propose_slots",
+		Description: "Free meeting slots on Salvador's calendar (working hours, his time zone, 30-minute aligned), avoiding every Google event AND every " +
+			"switchboard reservation. Use it before offering ANY time to anyone — never another source. Refuses when the calendar copy is stale. Read-only.",
+		InputSchema: schema(`{"type":"object","properties":{"duration_minutes":{"type":"integer","minimum":1},"window_start":{"type":"string","description":"RFC3339; default now"},"window_end":{"type":"string","description":"RFC3339; default 7 days after window_start"},"count":{"type":"integer","description":"default 3"}},"required":["duration_minutes"]}`),
+	},
+	{
+		Name: "book_time",
+		Description: "Book a time on Salvador's calendar for a task. switchboard saves it at once and from then on every free/busy answer treats it as busy; " +
+			"it is pushed to Google in the background, to the calendar the task's project dictates (you cannot choose one). Google sees only \"Busy\" — " +
+			"your label stays in switchboard. Refused when the slot is already busy. Report it as \"saved, not yet on Google\" until " +
+			"calendar_list_events shows it pushed. At most 12 hours.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"start":{"type":"string","description":"RFC3339"},"end":{"type":"string","description":"RFC3339"},"label":{"type":"string","maxLength":120,"description":"what the time is for, a few words; stays in switchboard"}},"required":["task_id","start","end","label"]}`),
+	},
+	{
+		Name: "cancel_reservation",
+		Description: "Cancel a calendar reservation (a book_time booking, or a single offer hold) by its delivery_id. Not yet on Google: released at once. " +
+			"Already on Google: the event is deleted in the background. Idempotent.",
+		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"}},"required":["delivery_id"]}`),
+	},
+	{
+		Name: "release_offer_holds",
+		Description: "When the person you offered times to picks one (or declines), release the holds an offer email placed. delivery_id is the OFFER " +
+			"email's delivery. keep_start (RFC3339, the picked window's start) keeps that hold as a booking with no expiry; every other hold of the offer is " +
+			"released. Without keep_start all holds are released. Unpicked holds also expire on their own after 72 hours. Idempotent.",
+		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer","description":"the offer email's delivery"},"keep_start":{"type":"string","description":"RFC3339 start of the window they picked"},"reason":{"type":"string","enum":["picked_other","not_needed"]}},"required":["delivery_id"]}`),
 	},
 }
 

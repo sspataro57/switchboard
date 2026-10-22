@@ -31,6 +31,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -66,6 +67,7 @@ var stageImpls = map[pipeline.Stage]stageImpl{
 	pipeline.StageRouteApply:     {limit: routeApplyStageLimit, pass: routeApplyPass},         // Part B (route.go)
 	pipeline.StageInquiry:        {limit: inquiryStageLimit, pass: inquiryPass},               // Part C (inquiry.go)
 	pipeline.StageInquiryPromote: {limit: inquiryPromoteStageLimit, pass: inquiryPromotePass}, // Part C (inquiry.go)
+	pipeline.StageCalendarPush:   {limit: calendarPushStageLimit, pass: calendarPushPass},     // SWT-109 (calendarpush.go)
 }
 
 // buildPass is the ONE place a stage's PassFunc is built: the stage's own pass
@@ -153,6 +155,14 @@ func run() error {
 	for _, e := range pipeline.Events() {
 		if err := daemon.Subscribe(pipeline.Topic(e), logWake); err != nil {
 			return finish(fmt.Errorf("subscribe wake log: %w", err))
+		}
+	}
+
+	// SWT-109 criterion 25: the calendar booker is armed ONLY when the
+	// calendar_push stage runs — the single Set* call in this binary.
+	if slices.Contains(stages, pipeline.StageCalendarPush) {
+		if err := armCalendarBooker(); err != nil {
+			return finish(err)
 		}
 	}
 

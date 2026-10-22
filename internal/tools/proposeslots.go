@@ -113,11 +113,11 @@ func proposeSlots(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte,
 	out := make([]map[string]string, 0, len(slots))
 	for _, s := range slots {
 		out = append(out, map[string]string{
-			"start": s.Start.Format(time.RFC3339),
-			"end":   s.End.Format(time.RFC3339),
+			"start": s.Start.In(cfg.Location).Format(time.RFC3339),
+			"end":   s.End.In(cfg.Location).Format(time.RFC3339),
 		})
 	}
-	return marshalResult(map[string]any{"slots": out})
+	return marshalResult(map[string]any{"slots": out, "timezone": cfg.Location.String()})
 }
 
 // availabilityConfig reads the working-hours env (defaults: Mon-Fri 09-18,
@@ -137,7 +137,9 @@ func availabilityConfig() (availability.Config, time.Duration, error) {
 	}
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
-		loc = time.UTC
+		// SWT-109 criterion 7: never a silent fallback to UTC. A typo here
+		// would shift every proposed slot by hours and still look valid.
+		return cfg, 0, fmt.Errorf("AVAIL_TZ %q is not a time zone name (want e.g. America/New_York): %w", tz, err)
 	}
 	cfg.Location = loc
 

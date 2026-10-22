@@ -127,6 +127,29 @@ func (e *Engine) loadTickFacts(ctx context.Context, now time.Time) (Facts, error
 		return f, fmt.Errorf("iterate expired claims: %w", err)
 	}
 
+	// SWT-109 R12: offers owning a live, unkept, expired hold.
+	rows, err = e.pool.Query(ctx,
+		`SELECT DISTINCT hold_for_delivery_id FROM deliveries
+		  WHERE channel = 'calendar' AND hold_for_delivery_id IS NOT NULL
+		    AND hold_kept_at IS NULL AND release_requested_at IS NULL AND released_at IS NULL
+		    AND hold_expires_at <= now()
+		  ORDER BY 1`)
+	if err != nil {
+		return f, fmt.Errorf("load expired offer holds: %w", err)
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return f, fmt.Errorf("scan expired offer hold: %w", err)
+		}
+		f.ExpiredHoldOffers = append(f.ExpiredHoldOffers, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return f, fmt.Errorf("iterate expired offer holds: %w", err)
+	}
+
 	if e.cfg.BriefProject != "" {
 		title := "Morning brief " + now.Format("2006-01-02")
 		if err := e.pool.QueryRow(ctx,
