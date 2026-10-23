@@ -19,7 +19,6 @@ import (
 	"github.com/sspataro57/switchboard/internal/connector/google"
 	"github.com/sspataro57/switchboard/internal/executor"
 	"github.com/sspataro57/switchboard/internal/pipeline"
-	"github.com/sspataro57/switchboard/internal/store"
 )
 
 // Watch mode (criterion 18): the same one-shot pass, driven by IMAP IDLE instead
@@ -66,6 +65,18 @@ const (
 	// the lock (D4). Not an env knob: a node drain leaves the old pod
 	// terminating while the new one starts, and 15 s bounds the takeover.
 	standbyRetry = 15 * time.Second
+	// idleOpenTimeout bounds the credential resolve idleOnce runs while it holds
+	// the account lock (swb 2452). Decrypting a password waits on the pool; an
+	// unbounded wait there turned a pool shortage into a lock held for good.
+	idleOpenTimeout = 2 * time.Minute
+	// watchPoolMinConns is the watch pool's floor (swb 2452). The process pins
+	// one connection for the singleton lock, and every IDLE cycle pins another
+	// for its account lock and then needs a second to resolve the credential.
+	// pgxpool's default, max(4, NumCPU), is 4 on these nodes: three IDLE cycles
+	// starting together took the last three and waited on each other forever,
+	// holding their account locks, so every calendar sync counted the accounts
+	// busy and the calendar went stale.
+	watchPoolMinConns = 16
 	// backoff bounds. Capped so a long outage still retries promptly once the
 	// server returns, rather than sleeping for an hour.
 	backoffMin = 5 * time.Second
@@ -465,7 +476,11 @@ func idleOnce(ctx context.Context, deps idleDeps, acct google.Account, wake chan
 		_ = deps.Sleep(ctx, backoffMin)
 		return nil
 	}
-	src, err := deps.Open(ctx, acct)
+	// Bounded: the lock is held across this call. The source does not keep
+	// openCtx; the IDLE connect below runs on its own context.
+	openCtx, cancelOpen := context.WithTimeout(ctx, idleOpenTimeout)
+	src, err := deps.Open(openCtx, acct)
+	cancelOpen()
 	// Safe to release here ONLY because this cycle makes exactly one connection:
 	// src.Idle is the single connect, and it consumes the token minted above. A
 	// second connect after this point (say, fetching the new message here rather
@@ -675,6 +690,32 @@ func watchPass(ctx context.Context, pool *pgxpool.Pool, sink *google.PGSink, ex 
 
 // newWatchPool builds the pool watch mode owns (the one-shot path's pool is
 // scoped to a 10-minute context that must not bound a long-lived process).
+// It is sized to at least watchPoolMinConns; see there.
 func newWatchPool(ctx context.Context) (*pgxpool.Pool, error) {
-	return store.NewPool(ctx)
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return nil, fmt.Errorf("DATABASE_URL is not set")
+	}
+	pcfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("create pgx pool: %w", err)
+	}
+	pcfg.MaxConns = watchPoolMaxConns(pcfg.MaxConns)
+	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
+	if err != nil {
+		return nil, fmt.Errorf("create pgx pool: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+	return pool, nil
+}
+
+// watchPoolMaxConns raises a pool size below the floor and keeps a larger one.
+func watchPoolMaxConns(configured int32) int32 {
+	if configured < watchPoolMinConns {
+		return watchPoolMinConns
+	}
+	return configured
 }

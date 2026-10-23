@@ -303,3 +303,58 @@ func TestIdleOnce_ReleasesTheLockWhenTheMintFails(t *testing.T) {
 			"from a healthy skip", locks, releases, order)
 	}
 }
+
+// swb 2452: the credential resolve runs under the account lock and waits on the
+// pool. Unbounded, a pool shortage held three account locks for good and the
+// calendar sync counted those accounts busy until the pod restarted.
+func TestIdleOnce_CredentialResolveIsBoundedAndReleasesTheLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sink := newMWFakeSink()
+	var deadline time.Time
+	var hasDeadline bool
+	open := func(octx context.Context, _ google.Account) (idleConn, error) {
+		sink.note("open")
+		deadline, hasDeadline = octx.Deadline()
+		return nil, context.DeadlineExceeded // what a pool wait returns when the bound fires
+	}
+
+	start := time.Now()
+	err := idleOnce(ctx, idleDeps{Sink: sink, Open: open, Sleep: (&mwClock{}).Sleep, IdleRefresh: time.Hour},
+		mwAccount(3, "sspataro@gmail.com"), make(chan string, 1))
+	if err == nil {
+		t.Error("a timed-out credential resolve was swallowed; watchAccount needs it to back off")
+	}
+	if !hasDeadline {
+		t.Fatal("Open got a context with no deadline: a pool wait under the account lock can last forever")
+	}
+	if d := deadline.Sub(start); d > idleOpenTimeout+time.Second {
+		t.Errorf("Open's deadline is %s away, want at most idleOpenTimeout (%s)", d, idleOpenTimeout)
+	}
+	locks, releases := 0, 0
+	for _, e := range sink.lockOrder() {
+		switch e {
+		case "lock":
+			locks++
+		case "release":
+			releases++
+		}
+	}
+	if locks != 1 || releases != 1 {
+		t.Errorf("lock taken %d, released %d; a timed-out resolve must release the account lock", locks, releases)
+	}
+}
+
+func TestWatchPoolMaxConns_Floor(t *testing.T) {
+	for configured, want := range map[int32]int32{4: watchPoolMinConns, 0: watchPoolMinConns, 40: 40} {
+		if got := watchPoolMaxConns(configured); got != want {
+			t.Errorf("watchPoolMaxConns(%d) = %d, want %d", configured, got, want)
+		}
+	}
+	// One pinned singleton connection, plus two per IDLE cycle (lock + resolve)
+	// for the four mailboxes, plus a pass's lock and its queries.
+	if need := int32(1 + 2*4 + 2); watchPoolMinConns < need {
+		t.Errorf("watchPoolMinConns = %d, below the %d connections four mailboxes can hold at once", watchPoolMinConns, need)
+	}
+}
