@@ -3728,3 +3728,11 @@ see `docs/runbooks/demo-mode.md`.
   released on a definite failure; Google write credits are counted in `ops_flags.calendar_write_invocations`
   before every invocation (stamps on mutable rows undercounted retries); the push claims rows `FOR UPDATE`
   with the full inbox predicate; `sending` rows past the 15m lease are recovered with the same id or deleted.
+- **Live 2026-10-23:** 0.7.70 everywhere; the Pipedream `switchboard-calendar` workflow is v18 with
+  `create_events`/`delete_events` (an unknown `action` falls through to the read poll, so a new branch must be
+  deployed BEFORE switchboard calls it). Verified live: single push + delete, a 2-row batch push + delete.
+  Only connector-gcal and pipelined carry the Pipedream credential; the dashboard and ops-mcp never did, so the
+  SWT-28 `book_calendar_block` path is refused there ("no calendar booking adapter wired") — swb-first booking
+  does not need it. A booking whose time has passed is released WITHOUT a delete (by design), so a test block
+  in the past stays on Google. `~/.bashrc` exports a stale `AVAIL_MAX_SYNC_AGE=150m`: unset it before running
+  opsctl calendar reads against prod (prod uses the 24h default).
