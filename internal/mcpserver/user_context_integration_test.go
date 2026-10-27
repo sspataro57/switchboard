@@ -49,6 +49,7 @@ const (
 	ucWorker      = "manual:itest-mcp-ctx"
 	ucActor       = "mcp:" + ucWorker
 	ucCapture     = "capture:itest-mcp-ctx"
+	ucThreadKey   = "gmail:itest-mcp-ctx:thread"
 )
 
 func ucPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
@@ -85,6 +86,7 @@ func ucCleanup(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 		`DELETE FROM tasks WHERE project_id IN ` + projs,
 		`DELETE FROM decisions WHERE project_id IN ` + projs,
 		`DELETE FROM projects WHERE slug IN ('` + ucSlug + `','` + ucPrivateSlug + `')`,
+		`DELETE FROM normalized_threads WHERE thread_key = '` + ucThreadKey + `'`,
 	} {
 		if _, err := pool.Exec(ctx, q); err != nil {
 			t.Fatalf("cleanup %q: %v", q, err)
@@ -315,5 +317,41 @@ func TestUserContext_Integration_LocalOnlyProjectIsReadInFull(t *testing.T) {
 	}
 	if w, ok := d.Task["withheld"]; ok {
 		t.Errorf("task.withheld = %v is present; variant (b) was not chosen", w)
+	}
+}
+
+// swb #2657: a captured mail task in a local_only project withholds its mail
+// from the mail tools, so task_context is where a session learns the thread
+// id draft_delivery needs. The column is the subject, so it is read through
+// the real SELECT; a task with no source thread says null, not 0.
+func TestUserContext_Integration_SourceThreadID(t *testing.T) {
+	ctx := context.Background()
+	pool := ucPool(t, ctx)
+	ex := udExecutor(pool)
+	p := ucProject(t, ctx, pool, ucPrivateSlug, "local_only")
+	user := mcpserver.NewWithProfile(ex, ucWorker, mcpserver.ProfileUser)
+
+	var thread, withThread, without int64
+	if err := pool.QueryRow(ctx, `INSERT INTO normalized_threads (thread_key, subject) VALUES ($1,'itest') RETURNING id`,
+		ucThreadKey).Scan(&thread); err != nil {
+		t.Fatalf("seed thread: %v", err)
+	}
+	for _, c := range []struct {
+		dst    *int64
+		thread any
+	}{{&withThread, thread}, {&without, nil}} {
+		if err := pool.QueryRow(ctx, `INSERT INTO tasks (project_id, title, status, assignee_type, source_thread_id)
+			VALUES ($1,'itest ctx thread','ready','human',$2) RETURNING id`, p, c.thread).Scan(c.dst); err != nil {
+			t.Fatalf("seed task: %v", err)
+		}
+	}
+
+	d, raw := ucContext(t, ctx, user, withThread)
+	if got, ok := d.Task["source_thread_id"].(float64); !ok || int64(got) != thread {
+		t.Errorf("task.source_thread_id = %v, want %d. Document: %s", d.Task["source_thread_id"], thread, raw)
+	}
+	d, raw = ucContext(t, ctx, user, without)
+	if v, ok := d.Task["source_thread_id"]; !ok || v != nil {
+		t.Errorf("task.source_thread_id = %v (present %v), want null. Document: %s", v, ok, raw)
 	}
 }

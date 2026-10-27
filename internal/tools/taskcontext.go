@@ -59,6 +59,7 @@ func taskContext(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, 
 		pRepoPath                              *string
 		pExecution, pDelivery                  string
 		workState, workStateAt, workSession    string
+		sourceThreadID                         *int64
 	)
 	// SWT-56 S13: the session marker rides along; its name only while a state is
 	// set (S4 read gating), so an old binary's dangling name is invisible.
@@ -67,13 +68,14 @@ func taskContext(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, 
 		        t.worker_type, t.status, t.autonomy, t.priority,
 		        p.name, p.slug, COALESCE(p.client, ''), p.repo_path, p.execution, p.delivery,
 		        COALESCE(t.working_state, ''), COALESCE(t.working_state_at::text, ''),
-		        COALESCE(CASE WHEN t.working_state IS NOT NULL THEN t.working_session END, '')
+		        COALESCE(CASE WHEN t.working_state IS NOT NULL THEN t.working_session END, ''),
+		        t.source_thread_id
 		 FROM tasks t JOIN projects p ON p.id = t.project_id
 		 WHERE t.id = $1`, a.TaskID).Scan(
 		&projectID, &subproject, &parentID, &title, &body, &assigneeType,
 		&workerType, &status, &autonomy, &priority,
 		&pName, &pSlug, &pClient, &pRepoPath, &pExecution, &pDelivery,
-		&workState, &workStateAt, &workSession)
+		&workState, &workStateAt, &workSession, &sourceThreadID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("task %d not found", a.TaskID)
 	}
@@ -119,6 +121,10 @@ func taskContext(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, 
 		"worker_type": deref(workerType), "autonomy": deref(autonomy),
 		"priority": priority, "parent_id": parentID,
 		"working_state": workState, "working_state_at": workStateAt, "working_session": workSession,
+		// swb #2657: the thread a captured mail task came from, so a session can
+		// pass it to draft_delivery even when the mail itself is withheld as
+		// private (a local_only project). An id, never mail text; null if none.
+		"source_thread_id": sourceThreadID,
 	}
 	doc["project"] = map[string]any{
 		"name": pName, "slug": pSlug, "client": pClient,
