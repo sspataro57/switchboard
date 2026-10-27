@@ -3747,9 +3747,18 @@ see `docs/runbooks/demo-mode.md`.
   account id in AWS's own wording ("AWS Account: …791838204691", or an SNS topic ARN). Never use a bare
   ARN or the bare id: asunda45's collaboratory Slack messages paste ECR and IAM ARNs in that account.
 - Rules 124-129 (the eks project decision has the list). CloudWatch alarm rules sit at 97, above rule
-  75 (`(WEB|API|OPS)-n`, 91), because alarm descriptions cite OPS-n. **Rule 75 has already misfiled a
-  Foundry alarm:** message 1537766, `foundry-dev-cms-mirror-sync-failed` ("OPS-41" in its
-  description), was logged onto collaboratory task 1403 as a comm.
+  75 (`(WEB|API|OPS)-n`, 91), because alarm descriptions cite OPS-n.
+- **Rule 75 misfiled every Foundry alarm (swb 2645, fixed 2026-10-27).** It read the OPS-n in Foundry
+  alarm descriptions as Treetop Jira keys. Fifteen alarms (Oct 1-25) went to collaboratory, and six
+  tasks there held jira refs OPS-32/41/44/46/47/50. `(system, external_key)` is globally unique, so a
+  real Treetop OPS ticket with one of those numbers would have been filed onto a Foundry alarm task.
+  The fix: rules 130 (ALARM/INSUFFICIENT_DATA, keyed by alarm name) and 131 (OK, no task) send
+  `AWS Account: 063899248967` alarms to foundry at priority 97. Tasks 1095/1398/1403/1496/1511/1737
+  were moved to foundry. Their jira refs were deleted, and gmail alarm-name refs were added: #1737
+  holds evidence-dlq-not-empty and #1398 holds none. Salvador: Collaboratory mail arrives at
+  handsonconnect and Foundry mail never does, so Foundry SNS mail is only in the gmail/developer
+  mailboxes. Their other Foundry SNS mail (MIGRATION FAMILY, Cognito, Aurora setting changes) still
+  decides `unmatched`. That is unchanged.
 - `OK:` alarm mail is attribution-only (rule 128), so creating an alarm (INSUFFICIENT_DATA→OK) opens no
   task and a late OK never reopens a closed alarm task.
 - The first SNS subscription confirmations got a `live unmatched` decision before the rules existed.
