@@ -3766,6 +3766,12 @@ see `docs/runbooks/demo-mode.md`.
   task and the same threshold next month resurfaces it. The first alert ($37.50, msg 1620554) was
   routed `attributed` by the route model (no task) before the rule existed; backfilled by hand as #2662.
   It goes to collaboratory, not eks: eks is AWS ops only.
+- **handsonconnect (account 1009) mail is Collab or Avviato/LlamaSite, nothing else (Salvador,
+  2026-10-27).** Its route candidates are collaboratory (default) + reengine (the Avviato LHH project).
+  The route model (ollama qwen3:8b) still put Treetop mail in reengine, so swb 2664 added keyless
+  collaboratory rules at priority 6, below rule 75 so keyed tickets/branches still win: 133
+  (`\A\[CircleCI\] … treetopllc / `) and 134 (sender `jira@treetopllc.jira.com`, for keys rule 75
+  doesn't cover, e.g. SK-362). Past reengine route rows were left as they are (attribution only).
 - `OK:` alarm mail is attribution-only (rule 128), so creating an alarm (INSUFFICIENT_DATA→OK) opens no
   task and a late OK never reopens a closed alarm task.
 - The first SNS subscription confirmations got a `live unmatched` decision before the rules existed.
