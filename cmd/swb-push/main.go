@@ -346,6 +346,8 @@ type hookState struct {
 	TurnAt *float64 `json:"turn_at"`
 	// Projects: the slugs the session's repo declares in .claude/swb-project.
 	Projects []string `json:"projects"`
+	// Own: the task ids the session created, logged to or signalled (swb 2644).
+	Own []int64 `json:"own"`
 }
 
 // liveSessions is the newest session file for each live tmux pane.
@@ -380,12 +382,16 @@ func liveSessions() []swbpush.Session {
 			continue
 		}
 		at := time.Unix(0, int64(*st.TurnAt*1e9))
+		own := map[int64]bool{}
+		for _, id := range st.Own {
+			own[id] = true
+		}
 		if cur, ok := best[*st.Pane]; ok && !at.After(cur.TurnAt) {
 			continue
 		}
 		best[*st.Pane] = swbpush.Session{SID: strings.TrimSuffix(filepath.Base(fn), ".json"), Pane: *st.Pane,
 			Window: st.Window, Turn: st.Turn, TurnAt: at, LiveWindow: p.win, LiveCmd: p.cmd,
-			Projects: st.Projects}
+			Projects: st.Projects, Own: own}
 	}
 	list := make([]swbpush.Session, 0, len(best))
 	for _, s := range best {
@@ -503,7 +509,7 @@ func status(ctx context.Context, pool *pgxpool.Pool) {
 			}
 			var fresh []int64
 			for _, t := range tasks {
-				if at, ok := m[t.ID]; t.Slug == slug && t.Session != s.LiveWindow && (!ok || t.At.After(at)) {
+				if at, ok := m[t.ID]; t.Slug == slug && t.Session != s.LiveWindow && !s.Own[t.ID] && (!ok || t.At.After(at)) {
 					fresh = append(fresh, t.ID)
 				}
 			}

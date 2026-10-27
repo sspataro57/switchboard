@@ -3755,3 +3755,14 @@ see `docs/runbooks/demo-mode.md`.
 - The first SNS subscription confirmations got a `live unmatched` decision before the rules existed.
   They were backfilled by hand as task 2640, linked with the gmail key `AWS Notification - Subscription
   Confirmation` (rule 129's key) so that later confirmations fold onto that task.
+- **A session's own tasks never nudge it (swb 2644, 2026-10-27).** The eks console was nudged about #2643:
+  it had created the task, logged to it, and left it waiting on Salvador with no light. Audit actors can't
+  tell sessions apart: every interactive session is `mcp:manual:salvo`. So the hook's `note_own()` records,
+  in the session file's `own` (capped at 300), every task the session creates (`create_task` /
+  `create_child_task`, id taken from the response) or logs to or signals. `Plan` settles those silently,
+  the same as a task the session has lit, even when activity moves them later. `inherit_own()` carries
+  the list over at SessionStart from the same pane's newest earlier file, so `/clear` keeps it. `main()` now
+  takes an flock on `<sid>.json.lock`, because parallel tool calls fire parallel hooks and one save dropped
+  the other's id. The hook is not in git: back it up before editing it. A NameError in it is swallowed by
+  the outer `except`, and every session then silently loses its light, so run `py_compile` and check
+  `hook.log` after an edit.

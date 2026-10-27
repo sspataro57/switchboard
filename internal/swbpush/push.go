@@ -59,6 +59,11 @@ type Session struct {
 	// Projects is what the session's repo declares in .claude/swb-project
 	// (the hook reads it), so a renamed window keeps its queues (swb 758).
 	Projects []string
+	// Own is every task this session created, logged to or signalled (the hook
+	// records them from its ops tool calls). Never news to it (swb 2644: the eks
+	// console was nudged about #2643, which it made itself and left waiting on
+	// Salvador without a light).
+	Own map[int64]bool
 }
 
 // QueuesOf is the project slugs a session watches: its repo's declaration
@@ -127,7 +132,8 @@ func (seen Seen) Apply(s Seen) {
 
 // Plan decides this pass's nudges and updates seen for everything that needs
 // no nudge: a queue seen for the first time (only what arrives after counts),
-// the session's own tasks (so releasing one later is not news), and tasks that
+// the session's own tasks (lit by it, or in Own: so releasing one later is not
+// news), and tasks that
 // left play (pruned). What a nudge would settle is returned in Nudge.Settle;
 // the caller applies it only after the nudge was submitted, so a missed chance
 // is retried next pass.
@@ -173,7 +179,7 @@ func Plan(cfg Config, sessions []Session, tasks []Task, seen Seen, now time.Time
 				live[t.ID] = true
 				prev, known := seen[key][t.ID]
 				switch {
-				case t.Session == s.LiveWindow:
+				case t.Session == s.LiveWindow || s.Own[t.ID]:
 					seen[key][t.ID] = t.At
 				case first && !awaitingMail(seen, t):
 					seen[key][t.ID] = t.At

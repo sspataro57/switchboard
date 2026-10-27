@@ -394,3 +394,29 @@ func TestUnattended_ConsoleCreatedTasksNeverMail(t *testing.T) {
 		t.Errorf("a console-created task in a watched project did not nudge: %+v", n)
 	}
 }
+
+// swb 2644: the eks console created #2643, logged to it, and left it waiting on
+// Salvador without a light, and was told it was new in its own queue. The hook
+// records every task a session creates, logs to or signals (Session.Own); those
+// never nudge that session, not even when activity moves them later.
+func TestPlan_TasksTheSessionTouchedNeverNudgeIt(t *testing.T) {
+	s := sess("collab", "busy", 0)
+	s.Own = map[int64]bool{2: true}
+	seen := primed(Task{1, "collaboratory", "", t0.Add(-time.Hour), "", false})
+	tasks := []Task{{1, "collaboratory", "", t0.Add(-time.Hour), "", true}, {2, "collaboratory", "", t0.Add(-time.Minute), "", true}}
+	if n := Plan(cfg(), []Session{s}, tasks, seen, t0, always); len(n) != 0 {
+		t.Fatalf("the session's own task nudged it: %+v", n)
+	}
+	if !seen[Key("collab", "collaboratory")][2].Equal(t0.Add(-time.Minute)) {
+		t.Errorf("own task not settled: %v", seen)
+	}
+	tasks[1].At = t0.Add(time.Minute) // activity on it later
+	if n := Plan(cfg(), []Session{s}, tasks, seen, t0.Add(time.Hour), always); len(n) != 0 {
+		t.Errorf("activity on the session's own task nudged it: %+v", n)
+	}
+	// Another session's task in the same queue is still news.
+	tasks = append(tasks, Task{3, "collaboratory", "", t0.Add(time.Hour), "", true})
+	if n := Plan(cfg(), []Session{s}, tasks, seen, t0.Add(2*time.Hour), always); len(n) != 1 {
+		t.Errorf("a task another session created did not nudge: %+v", n)
+	}
+}
