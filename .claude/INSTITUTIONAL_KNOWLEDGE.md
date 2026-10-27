@@ -3736,3 +3736,22 @@ see `docs/runbooks/demo-mode.md`.
   does not need it. A booking whose time has passed is released WITHOUT a delete (by design), so a test block
   in the past stays on Google. `~/.bashrc` exports a stale `AVAIL_MAX_SYNC_AGE=150m`: unset it before running
   opsctl calendar reads against prod (prod uses the 24h default).
+
+## `eks` project: AWS alert mail for account 791838204691 (swb 2638, 2026-10-27)
+
+- Project 48 `eks` (repo `~/GolandProjects/collab-eks`, window `eks`, local_only, calendar 1009). Created by
+  a psql INSERT: `opsctl` has no verb for creating a project. The console is linked by `.claude/swb-project`,
+  which is in that checkout's `.git/info/exclude`, and by `push.json` `windows.eks`.
+- **Foundry's AWS mail comes from the same SNS sender** (`no-reply@sns.amazonaws.com`, to the gmail and
+  developer@ mailboxes). A rule can't scope by mailbox, so the eks rules are body_regex rules on the
+  account id in AWS's own wording ("AWS Account: …791838204691", or an SNS topic ARN). Never use a bare
+  ARN or the bare id: asunda45's collaboratory Slack messages paste ECR and IAM ARNs in that account.
+- Rules 124-129 (the eks project decision has the list). CloudWatch alarm rules sit at 97, above rule
+  75 (`(WEB|API|OPS)-n`, 91), because alarm descriptions cite OPS-n. **Rule 75 has already misfiled a
+  Foundry alarm:** message 1537766, `foundry-dev-cms-mirror-sync-failed` ("OPS-41" in its
+  description), was logged onto collaboratory task 1403 as a comm.
+- `OK:` alarm mail is attribution-only (rule 128), so creating an alarm (INSUFFICIENT_DATA→OK) opens no
+  task and a late OK never reopens a closed alarm task.
+- The first SNS subscription confirmations got a `live unmatched` decision before the rules existed.
+  They were backfilled by hand as task 2640, linked with the gmail key `AWS Notification - Subscription
+  Confirmation` (rule 129's key) so that later confirmations fold onto that task.
