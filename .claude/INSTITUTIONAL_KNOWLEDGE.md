@@ -3759,6 +3759,13 @@ see `docs/runbooks/demo-mode.md`.
   handsonconnect and Foundry mail never does, so Foundry SNS mail is only in the gmail/developer
   mailboxes. Their other Foundry SNS mail (MIGRATION FAMILY, Cognito, Aurora setting changes) still
   decides `unmatched`. That is unchanged.
+- **OpenAI spend alerts for Collab → collaboratory (swb 2661, 2026-10-27).** Rule 132 (body_regex, 97,
+  gmail) matches `API spend this month for … (proj_5VGcu8sFu6x54zn1Yn6vmpAY) has reached` — the
+  Collaboratory OpenAI project id, so another org's spend mail can't match. The key is
+  `<project> (proj_…) has reached your configured spend alert of $N`, so each threshold is its own
+  task and the same threshold next month resurfaces it. The first alert ($37.50, msg 1620554) was
+  routed `attributed` by the route model (no task) before the rule existed; backfilled by hand as #2662.
+  It goes to collaboratory, not eks: eks is AWS ops only.
 - `OK:` alarm mail is attribution-only (rule 128), so creating an alarm (INSUFFICIENT_DATA→OK) opens no
   task and a late OK never reopens a closed alarm task.
 - The first SNS subscription confirmations got a `live unmatched` decision before the rules existed.
