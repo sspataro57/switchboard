@@ -3772,6 +3772,18 @@ see `docs/runbooks/demo-mode.md`.
   collaboratory rules at priority 6, below rule 75 so keyed tickets/branches still win: 133
   (`\A\[CircleCI\] … treetopllc / `) and 134 (sender `jira@treetopllc.jira.com`, for keys rule 75
   doesn't cover, e.g. SK-362). Past reengine route rows were left as they are (attribution only).
+- **AWS mail lands in the client's MAIN project; that project's session routes it on (Salvador,
+  2026-10-28, swb 2709).** Rules 124-129 (handsonconnect AWS/collab-alerts, built for eks on 10-27)
+  were moved to collaboratory, with mail tasks #2640/#2708; #2643 (the eks console's own) stays in eks.
+  eks remains a project for collab Claude to route into, but no capture rule points at it.
+  Residual: collaboratory's inquiry lane is ARMED, so a re-fired alarm or budget alert on a CLOSED
+  task resurfaces into the inquiry model instead of reopening (eks was unarmed and reopened).
+- **Foundry AWS mail (aws-ops@/aws-nonprod@/aws-billing@foundryunderwriting.com, forwarded into the
+  gmail and developer@ mailboxes) → foundry tasks (swb 2709).** Beside alarm rules 130/131: 135 SNS
+  security audit (key = event title, e.g. `MIGRATION FAMILY INVOKED (…)`), 136 RDS (key `SourceId: …`),
+  137 subscription confirmations (key = topic ARN; the subject key belongs to #2640), 138 any other mail
+  naming 063899248967 or 353452028105 (billing) — `[AWS Account: N]` or `account N` — key = subject.
+  Backfilled #2710-#2712. Foundry is unarmed, so re-fires reopen closed tasks into INCOMING.
 - `OK:` alarm mail is attribution-only (rule 128), so creating an alarm (INSUFFICIENT_DATA→OK) opens no
   task and a late OK never reopens a closed alarm task.
 - The first SNS subscription confirmations got a `live unmatched` decision before the rules existed.
