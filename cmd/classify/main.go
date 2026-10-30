@@ -368,6 +368,15 @@ func runCmd(argv []string) error {
 		return err
 	}
 	if !ok {
+		// swb 2907: pipelined holds this lock on every sweep, so classify-personal
+		// losing it every so often is routine, not a Failed Job. Its pass has no
+		// --since, so the next tick picks up everything this one skipped. Every
+		// other lane keeps the error: residue's daily --since 72h can drop messages
+		// after three misses, and a hand backfill that lost the lock did nothing.
+		if lane.Name == classify.LanePersonal.Name {
+			fmt.Println("classify: another run holds the advisory lock; skipping this run")
+			return nil
+		}
 		return fmt.Errorf("another classify run holds the advisory lock; exiting")
 	}
 	defer release()

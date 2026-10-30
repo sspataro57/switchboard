@@ -257,7 +257,7 @@ Evals are exempt: they are bounded by the label file.
 
 Cadence during the shadow period: twice daily with `--since 24h` (overlap is
 free — the extraction `NOT EXISTS` dedups). **The advisory lock `0x5157_0022`
-is shared by all three lanes**, and `run` treats losing it as an error, so never
+is shared by all three lanes**, and `run` treats losing it as an error (the personal lane logs and exits 0), so never
 schedule two lanes in the same minute: chain them in one command
 (`classify run --lane personal && classify run --lane inquiry --since 24h`) or
 stagger them by more than the longest pass. The CronJob is a kube-repo handoff.

@@ -797,8 +797,8 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   447 messages on its gmail threads (30 days to 2026-09-10) — replies do not land
   on the same thread. A gmail `open` means little until that changes.
 - The advisory lock `0x5157_0022` is SHARED by all three lanes and
-  `classify run` exits 1 when it loses it: never schedule two lanes in the same
-  minute — chain them in one command or stagger them.
+  `classify run` exits 1 when it loses it, except on the personal lane, which logs
+  and exits 0 (swb 2907): never schedule two lanes in the same minute — chain them in one command or stagger them.
 - `classify eval` refuses to print a ratio below `classify.EvalResultThreshold`
   (120) SCORED labels, on EVERY lane — counts plus `EvalIndicativeMarker`,
   enforced inside `Eval` (a caller-set flag was bypassable). The measured
@@ -1302,8 +1302,10 @@ diff-review phrasing. Every reviewed diff gets checked against each:
 - **`--max-age` is dry-run-only**, refused on a live pass by the CLI and by `promote.Run`: the 72h fence is what
   keeps historical asks off the board.
 - **Lock collisions with the CronJobs are expected.** pipelined takes `0x5157_0022` and `0x5157_0021` every
-  5 min and on every wake, so the `classify run` CronJobs (exit 1 on losing `0x5157_0022`) and the
-  classify-promote CronJob (fails on losing `0x5157_0021`) occasionally fail a run; the next tick recovers.
+  5 min and on every wake. classify-personal logs "skipping this run" and exits 0 on losing `0x5157_0022`
+  (swb 2907): it has no `--since`, so the next tick picks up everything. classify-residue (exit 1) and
+  classify-promote (fails on losing `0x5157_0021`) still fail the run on purpose: residue's `--since 72h` daily
+  run can drop messages after three misses, and promote's lost lock must not look like an empty inbox.
 - **Run the V6.4.2 hand backfill (`classify run --lane inquiry --since 336h`) BEFORE enabling the `inquiry`
   stage**, or the two fight for `0x5157_0022` and the backfill exits 1 part-way.
 - **Stuck claims** (`classify_promotions.task_id` NULL, the criterion-12 crash artifact) are reported by
