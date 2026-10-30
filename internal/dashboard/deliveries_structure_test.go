@@ -328,3 +328,97 @@ func TestRejectAction_RefusesAPostWithoutTheHash(t *testing.T) {
 		})
 	}
 }
+
+// ---- swb 2898: a row's verb lands back on that row --------------------------
+//
+// Approve, Send, Save edit, Deny and the rest answer with a 303, so the browser
+// reloads /deliveries; without a fragment it lands at the top and Salvador
+// scrolls back down to the row, whose next button (Send) is what he came for.
+//
+// MUTATIONS THAT MUST TURN THESE RED:
+//   - route a row verb through plain /deliveries again → RowVerbsLandOnTheirRow;
+//   - put the fragment before the query → the same test: it would end up in the
+//     flash and the browser would not scroll;
+//   - rename the row's id → RowIDMatchesTheFragment;
+//   - drop the sticky flash → FlashStaysInView: a refusal renders above the row
+//     he landed on and he would never see it.
+
+func TestDeliveries_RowVerbsLandOnTheirRow(t *testing.T) {
+	auth, err := NewAuth(context.Background(), "", "", "", "")
+	if err != nil {
+		t.Fatalf("NewAuth: %v", err)
+	}
+	hash := url.Values{"content_hash": {"abc"}}
+	for _, tc := range []struct {
+		name string
+		path string
+		form url.Values
+		run  func(*Server, http.ResponseWriter, *http.Request)
+	}{
+		{"approve", "/deliveries/7/approve", hash, (*Server).approveAction},
+		{"edit", "/deliveries/7/edit", url.Values{"body": {"words"}}, (*Server).actionEdit},
+		{"reject", "/deliveries/7/reject", hash, (*Server).actionReject},
+		{"send", "/deliveries/7/send", nil, func(s *Server, w http.ResponseWriter, r *http.Request) {
+			s.action("send_delivery").ServeHTTP(w, r)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{ex: &captureExec{}, auth: auth, demoStub: true}
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.SetPathValue("id", "7")
+			rec := httptest.NewRecorder()
+			tc.run(s, rec, req)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+			}
+			loc, err := url.Parse(rec.Header().Get("Location"))
+			if err != nil {
+				t.Fatalf("Location %q: %v", rec.Header().Get("Location"), err)
+			}
+			if loc.Path != "/deliveries" || loc.Fragment != "d7" {
+				t.Errorf("redirect = %q, want /deliveries...#d7 so the page comes back on the row", loc)
+			}
+			if !strings.HasSuffix(loc.Query().Get("flash"), " ok") {
+				t.Errorf("flash = %q, want the tool's ok: the fragment must not end up inside it", loc.Query().Get("flash"))
+			}
+		})
+	}
+}
+
+// Freeze is not about a row: it stays at the top, beside its own banner.
+func TestDeliveries_FreezeStaysAtTheTop(t *testing.T) {
+	auth, err := NewAuth(context.Background(), "", "", "", "")
+	if err != nil {
+		t.Fatalf("NewAuth: %v", err)
+	}
+	s := &Server{ex: &captureExec{}, auth: auth, demoStub: true}
+	req := httptest.NewRequest(http.MethodPost, "/flags/sending-frozen", strings.NewReader("frozen=true"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	s.actionFreeze(rec, req)
+	if got, want := rec.Header().Get("Location"), "/deliveries?flash=set_sending_frozen+ok"; got != want {
+		t.Errorf("freeze redirect = %q, want %q: no fragment", got, want)
+	}
+}
+
+func TestDeliveriesTemplate_RowIDMatchesTheFragment(t *testing.T) {
+	raw, err := templateFS.ReadFile("templates/deliveries.html")
+	if err != nil {
+		t.Fatalf("read embedded deliveries.html: %v", err)
+	}
+	if !strings.Contains(string(raw), `<tr id="d{{.ID}}">`) {
+		t.Error(`deliveries.html has no <tr id="d{{.ID}}">; a row verb's #d<id> redirect would have nothing to land on`)
+	}
+}
+
+func TestDeliveriesTemplate_FlashStaysInView(t *testing.T) {
+	raw, err := templateFS.ReadFile("templates/deliveries.html")
+	if err != nil {
+		t.Fatalf("read embedded deliveries.html: %v", err)
+	}
+	if !regexp.MustCompile(`\.flash\s*\{[^}]*position:\s*sticky`).Match(raw) {
+		t.Error("deliveries.html's .flash is not sticky; after a row verb the page sits on the row, and a refusal " +
+			"flash at the top of the page would be out of sight")
+	}
+}

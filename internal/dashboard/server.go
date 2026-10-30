@@ -372,7 +372,7 @@ func (s *Server) action(tool string) http.Handler {
 			return
 		}
 		args := fmt.Sprintf(`{"delivery_id":%d}`, id)
-		s.execute(w, r, tool, args)
+		s.executeRow(w, r, tool, args)
 	})
 }
 
@@ -405,7 +405,7 @@ func (s *Server) approveAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.execute(w, r, "approve_delivery", string(raw))
+	s.executeRow(w, r, "approve_delivery", string(raw))
 }
 
 func (s *Server) actionEdit(w http.ResponseWriter, r *http.Request) {
@@ -432,7 +432,7 @@ func (s *Server) actionEdit(w http.ResponseWriter, r *http.Request) {
 		payload["cc"] = splitCcInput(r.PostFormValue("cc"))
 	}
 	raw, _ := json.Marshal(payload)
-	s.execute(w, r, "update_delivery", string(raw))
+	s.executeRow(w, r, "update_delivery", string(raw))
 }
 
 // splitCcInput turns the edit form's one text box into cc entries. A proper
@@ -500,7 +500,7 @@ func (s *Server) actionReject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.execute(w, r, "reject_delivery", string(raw))
+	s.executeRow(w, r, "reject_delivery", string(raw))
 }
 
 func (s *Server) actionFreeze(w http.ResponseWriter, r *http.Request) {
@@ -514,6 +514,14 @@ func (s *Server) actionFreeze(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) execute(w http.ResponseWriter, r *http.Request, tool, args string) {
 	s.executeTo(w, r, tool, args, "/deliveries")
+}
+
+// executeRow is execute for a verb on one delivery row (swb 2898): the redirect
+// carries the row's #d<id>, so the reloaded page comes back on the row instead
+// of at the top. Callers have passed deliveryVisibleOrRefuse, so {id} is a number.
+func (s *Server) executeRow(w http.ResponseWriter, r *http.Request, tool, args string) {
+	flash := s.runTool(r, tool, args)
+	http.Redirect(w, r, "/deliveries?flash="+template.URLQueryEscaper(flash)+"#d"+r.PathValue("id"), http.StatusSeeOther)
 }
 
 // executeTask runs a task-scoped tool with executor.Call.TaskID set — the
@@ -584,6 +592,13 @@ func (s *Server) deliveryVisibleOrRefuse(w http.ResponseWriter, r *http.Request)
 // executeTo runs a tool through the executor with the session actor and
 // redirects to the given page with a flash.
 func (s *Server) executeTo(w http.ResponseWriter, r *http.Request, tool, args, back string) {
+	flash := s.runTool(r, tool, args)
+	http.Redirect(w, r, back+"?flash="+template.URLQueryEscaper(flash), http.StatusSeeOther)
+}
+
+// runTool runs a tool through the executor with the session actor and returns
+// the flash that reports it.
+func (s *Server) runTool(r *http.Request, tool, args string) string {
 	actor := "dashboard:" + s.auth.User(r)
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
@@ -595,7 +610,7 @@ func (s *Server) executeTo(w http.ResponseWriter, r *http.Request, tool, args, b
 	} else if tool == "send_delivery" {
 		flash = sendFlash(out.Output, flash)
 	}
-	http.Redirect(w, r, back+"?flash="+template.URLQueryEscaper(flash), http.StatusSeeOther)
+	return flash
 }
 
 // sendFlash reads send_delivery's result: a Slack send the leaf QUEUED (SWT-76)

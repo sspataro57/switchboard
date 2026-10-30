@@ -18,10 +18,14 @@
   table.deliveries pre { margin: .3rem 0; }
   table.deliveries .dl-to { margin-top: .5rem; }
   table.deliveries td.dl-actions form { margin-bottom: .4rem; }
+  /* swb 2898: a row's verb reloads the page on #d<id>, far below the flash, so
+     the flash sticks to the top of the window and the row stops clear of it. */
+  .flash { position: sticky; top: .3rem; z-index: 5; }
+  table.deliveries tr { scroll-margin-top: 4rem; }
   @media (max-width: 900px) {
     table.deliveries, table.deliveries tbody, table.deliveries tr, table.deliveries td { display: block; width: auto; }
     table.deliveries colgroup, table.deliveries tr:first-child { display: none; }
-    table.deliveries tr { margin-bottom: .8rem; }
+    table.deliveries tr { margin-bottom: .8rem; scroll-margin-top: 6rem; }
   }
   </style>
 </head>
