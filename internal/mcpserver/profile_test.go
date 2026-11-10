@@ -140,6 +140,11 @@ var wantReadProfileTools = []string{"project_list", "task_get_next", "task_list"
 // policy matrix (kill switch, hourly limit, channel_mismatch), send_enabled per
 // workspace, and the WHEN rule in its description and in Instructions.
 // NINETEEN in all.
+//
+// mcp-task-reopen (Salvador, 2026-11-10) criterion 1: task_reopen, plain form
+// only — `swb reopen <id>` from any repo's session. No pin (D3, as task_close
+// and task_requeue); mcp_human_only refuses worker shapes and the adapter guard
+// refuses the activity forms for every caller. 24 → 25.
 var wantUserProfileTools = []string{
 	// SWT-109 (calendar-mcp-tools): book_time, calendar_list_events,
 	// cancel_reservation, propose_slots and release_offer_holds — the live
@@ -150,7 +155,7 @@ var wantUserProfileTools = []string{
 	"propose_slots", "release_offer_holds",
 	"send_slack_reply",
 	"task_append_log", "task_attach", "task_close", "task_context", "task_dismiss",
-	"task_get_next", "task_list", "task_mark_delivered", "task_match", "task_requeue", "task_set_priority",
+	"task_get_next", "task_list", "task_mark_delivered", "task_match", "task_reopen", "task_requeue", "task_set_priority",
 	"task_signal", "update_delivery",
 }
 
@@ -344,7 +349,13 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 		// reads below stay forbidden: listing them would put private message bodies
 		// into every repo's session, which O1 did not grant.
 		"mail_search", "mail_read_thread", // reads private mail bodies
-		"task_reopen", // reopens (Future work)
+		// AMENDED — not deleted — by mcp-task-reopen (Salvador, 2026-11-10: "add
+		// ability to claude to reopen taks on swb"): task_reopen LEFT this list
+		// (it was `"task_reopen", // reopens (Future work)`). The user profile now
+		// reopens in the PLAIN form only: the adapter guard rejectReopenActivityArgs
+		// refuses dismissal_id / message_id / revive / notifier_copy for every MCP
+		// caller (criteria 5-6), and TestUserProfile_NoToolReachesTheSendSnapshot
+		// below checks it as mcp:manual:salvo (allow / static-default, F5).
 	} {
 		if listed[name] {
 			t.Errorf("the user profile lists %q. SWT-37 V3/criterion 11, SWT-38 criterion 16: the user-scope "+
@@ -413,8 +424,9 @@ func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 	// SWT-52 criterion 24: the control checked fourteen tools; SWT-56 criterion
 	// 34: fifteen (task_context); SWT-72 criterion 23: sixteen (task_requeue);
 	// SWT-77 criterion 17: nineteen (send_slack_reply).
-	if len(wantUserProfileTools) != 24 {
-		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 24 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach; SWT-77 adds send_slack_reply; SWT-109 adds five calendar tools)",
+	// AMENDED by mcp-task-reopen (2026-11-10) criterion 1: 24 → 25 (task_reopen).
+	if len(wantUserProfileTools) != 25 {
+		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 25 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach; SWT-77 adds send_slack_reply; SWT-109 adds five calendar tools; mcp-task-reopen adds task_reopen)",
 			len(wantUserProfileTools))
 	}
 	if !sendSeen {

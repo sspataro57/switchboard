@@ -19,6 +19,15 @@ package policy
 // denial that reads like a permissions bug. And neither transmits anything, so
 // neither belongs in sendShaped (the loader, the rate limit, the channel
 // branch) or freezeGated (the kill switch).
+//
+// AMENDED — not deleted — by mcp-task-reopen (docs/tickets/mcp-task-reopen_SPEC.md,
+// 2026-11-10) criterion 8: mcpHumanOnly is exactly {task_close,
+// task_mark_delivered, task_reopen}. task_reopen joins for the same reason as
+// the other two: its spine callers (capture's guarded/revive reopens, promote's
+// dismissal reopen, ticketstatus:jira) never arrive over MCP, and it sends
+// nothing, so it is in none of humanOnly / sendShaped / freezeGated /
+// snapshotGated. The old message's "task_reopen is not on MCP at all" stopped
+// being true when the verb was MCP-listed (plain form only).
 
 import (
 	"sort"
@@ -34,9 +43,9 @@ func TestPolicy_MCPHumanOnlyShape(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	if strings.Join(got, ",") != "task_close,task_mark_delivered" {
-		t.Errorf("mcpHumanOnly = %v, want exactly [task_close task_mark_delivered] (V1). task_dismiss "+
-			"stays in humanOnly (V2); task_reopen is not on MCP at all", got)
+	if strings.Join(got, ",") != "task_close,task_mark_delivered,task_reopen" {
+		t.Errorf("mcpHumanOnly = %v, want exactly [task_close task_mark_delivered task_reopen] (V1; "+
+			"mcp-task-reopen criterion 8). task_dismiss stays in humanOnly (V2)", got)
 	}
 
 	for tool := range mcpHumanOnly {
@@ -46,7 +55,10 @@ func TestPolicy_MCPHumanOnlyShape(t *testing.T) {
 		}
 	}
 
-	for _, tool := range []string{"task_close", "task_mark_delivered"} {
+	// mcp-task-reopen criterion 8: task_reopen is in none of the four either —
+	// capture, promote and ticketstatus:jira call it (humanOnly), and it sends
+	// nothing (sendShaped / freezeGated / snapshotGated).
+	for _, tool := range []string{"task_close", "task_mark_delivered", "task_reopen"} {
 		for _, m := range []struct {
 			name string
 			set  map[string]bool

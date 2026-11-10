@@ -905,6 +905,9 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `humanOnly` — the spine calls both verbs. `task_dismiss` stays `humanOnly`
   (its only gate for workers now that it is MCP-listed). "Arrived over MCP"
   has ONE spelling: `policy.ViaMCPActor`, which `executor.ViaMCP` calls.
+  **Since mcp-task-reopen (2026-11-10) the map holds THREE verbs:** `task_reopen`
+  joined (capture, promote and `ticketstatus:jira` reopen in-process and keep
+  `allow / static-default`). See "task_reopen over MCP (mcp-task-reopen)".
 - **Pre-existing, not closed here:** a worker console runs with
   `--dangerously-skip-permissions` and inherits `DATABASE_URL`, so it can shell
   out to opsctl (`opsctl:$USER` counts as human) or psql. Every actor gate is
@@ -2339,7 +2342,9 @@ outrank the reconciler. Reengine's gate is ARMED. The Avviato lookup half
 API token is stored via `jira-auth add --lookup-only` — its refs show as
 `unpolled` in `opsctl ticket-status report`, which is expected, not a bug.
 One-off reconciliation ran 2026-09-09: 14 collaboratory tasks closed.
-`task_reopen` exists now (spine, not humanOnly, off MCP); advisory key low
+`task_reopen` exists now (spine, not humanOnly, off MCP — AMENDED 2026-11-10 by
+mcp-task-reopen: its PLAIN form is now MCP-listed on both profiles, worker consoles
+refused by `mcp_human_only`; see "task_reopen over MCP (mcp-task-reopen)"); advisory key low
 digits 0023. Landmine class confirmed twice this ticket: Jira has a FOURTH
 statusCategory key (`undefined`) — readers must treat unknown keys as
 evidence gaps, never pass them toward a three-value CHECK.
@@ -2451,7 +2456,10 @@ activity (SWT-45)".
   of any tool it can reach, documented or not. So surfacing is its own spine
   tool, `task_mark_surfaced`, off both MCP profiles (not humanOnly: capture
   calls it), and never a `create_task` argument. The same reasoning keeps
-  `task_reopen`, and with it the revive form, off MCP.
+  `task_reopen`, and with it the revive form, off MCP. (AMENDED 2026-11-10 by
+  mcp-task-reopen: the plain form is now MCP-listed; the revive, guarded and
+  notifier_copy arguments stay off it because the ADAPTER refuses them by name,
+  `rejectReopenActivityArgs` — exactly the defence this landmine calls for.)
 - **LANDMINE (F8): a capture rule cannot be edited, and its pattern cannot be
   re-added.** `capture_rules` is UNIQUE `(project_id, criteria_type, pattern)`,
   and no tool changes pattern, key_regex, priority or flags. "Disable and re-add"
@@ -3802,3 +3810,28 @@ see `docs/runbooks/demo-mode.md`.
   the other's id. The hook is not in git: back it up before editing it. A NameError in it is swallowed by
   the outer `except`, and every session then silently loses its light, so run `py_compile` and check
   `hook.log` after an edit.
+
+### task_reopen over MCP (mcp-task-reopen, 2026-11-10)
+
+Salvador, 2026-11-10: "add ability to claude to reopen taks on swb". `task_reopen` is listed on
+BOTH MCP profiles (ops-mcp full and ops-mcp-user), in its PLAIN form only: `task_id`, `reason`,
+optional `status` (enum `tools.OpenStatuses()`, ready when omitted).
+
+- **Two gates.** Policy: `task_reopen` is in `mcpHumanOnly`, so a worker console (`mcp:{client}`,
+  `mcp:{client}.{sub}`, `mcp:worker:*`) is denied `mcp_human_only`, while capture, promote,
+  `ticketstatus:jira`, opsctl and the dashboard keep `allow / static-default`. Adapter:
+  `rejectReopenActivityArgs` refuses a non-zero `dismissal_id`, `message_id`, `revive` or
+  `notifier_copy` for EVERY MCP caller (manual:salvo included) before the executor runs, so no audit
+  row. It decodes into a struct (case-folded keys caught) and FAILS CLOSED on a decode error, unlike
+  `rejectParentID`. Keep its mirror struct in step with `tools.reopenArgs`.
+- **Q1 = (b) (Salvador, 2026-11-10):** the Instructions let a session reopen, unasked, a HUMAN task it
+  closed earlier in the same conversation, then signal `working` again (the close cleared the light
+  and the hook's binding). Every other reopen needs his ask. This is a PROMPT RULE ONLY: nothing in
+  code tells "closed by this session in this conversation" apart from any other `mcp:manual:salvo`
+  close.
+- **Provenance:** `task_dismissals.reopened_by='mcp:manual:salvo'` with a NULL message id is a
+  session's reopen (human, so it also sets `surfaced_at`). Count it with the human reopens.
+- **No pin narrows it to human tasks** (as with `task_close` / `task_requeue`): an injected session can
+  reopen a closed `claude` task into a worker queue. Recorded in the runbook's accepted risk.
+- **Deploy:** sessions see the tool only after `ops-mcp` is rebuilt and `ops-mcp-user` re-installed
+  (this box and .30, see "Second workstation"), in a NEW session.

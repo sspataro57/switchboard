@@ -81,7 +81,13 @@ var mcpVerbsCorpus = []struct {
 
 // The two verbs the new rule covers. task_dismiss is NOT here: it stays in
 // humanOnly (V2) and has its own test below.
-var mcpHumanOnlyVerbs = []string{"task_close", "task_mark_delivered"}
+//
+// AMENDED — not deleted — by mcp-task-reopen (2026-11-10) criterion 9: three
+// verbs. task_reopen joins, so the two tests below deny it mcp_human_only (with
+// the V1 reason string) for mcp:acme, mcp:acme.main, mcp:worker:acme,
+// mcp:mcp:manual:salvo and mcp:, keep allow/static-default through Check for
+// every other row, and fail if the loader ever runs for it.
+var mcpHumanOnlyVerbs = []string{"task_close", "task_mark_delivered", "task_reopen"}
 
 func wantMCPHumanOnlyReason(tool, actor string) string {
 	return fmt.Sprintf("%s over MCP requires a human session identity (mcp:manual:/mcp:dashboard:/mcp:opsctl:); got %q", tool, actor)

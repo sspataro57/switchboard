@@ -112,6 +112,13 @@ var allToolNames = []string{
 	// internal/mcpserver/adapter_test.go's spineTools. It is NOT humanOnly (D7):
 	// the reconciler calls it as ticketstatus:jira, exactly as the orchestrator
 	// calls task_close.
+	//
+	// AMENDED — not deleted — by mcp-task-reopen (2026-11-10): MCP-listed since
+	// then, PLAIN form only, on both profiles (Salvador: "add ability to claude
+	// to reopen taks on swb"). The schemas.go absence above no longer holds and
+	// adapter_test.go lists it in wantAgentTools. Still NOT humanOnly (D7); it is
+	// in policy.mcpHumanOnly (rule mcp_human_only) beside task_close, and the MCP
+	// adapter refuses its activity forms (rejectReopenActivityArgs).
 	"task_reopen",
 	// SWT-35 (task-list-mcp) criterion 1: the two read-only queue tools. Both
 	// are MCP-listed (internal/mcpserver/schemas.go) and neither is humanOnly

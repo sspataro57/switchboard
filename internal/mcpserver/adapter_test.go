@@ -62,6 +62,13 @@ package mcpserver_test
 //
 // activity-resurfaces (SWT-72) criterion 23: task_requeue joins wantAgentTools.
 // EXPECTED RED until schemas.go gains the entry.
+//
+// mcp-task-reopen (docs/tickets/mcp-task-reopen_SPEC.md) criteria 1 and 11:
+// task_reopen MOVES from spineTools to wantAgentTools (plain form only), so the
+// full profile lists 37 tools (serve_test.go pins the literal count), and
+// TestMCPListing_DoesNotMakeTaskVerbsWorkerCallable gains a task_reopen row,
+// rule mcp_human_only. EXPECTED RED until schemas.go gains the entry and
+// internal/policy's mcpHumanOnly gains task_reopen.
 
 import (
 	"context"
@@ -192,6 +199,14 @@ var wantAgentTools = []string{
 	// (sendShaped + freezeGated: kill switch, hourly limit, channel_mismatch),
 	// the per-workspace send_enabled gate and the WHEN rule in the description.
 	"send_slack_reply",
+	// mcp-task-reopen (Salvador, 2026-11-10: "add ability to claude to reopen
+	// taks on swb"), criterion 1: task_reopen MOVED here from spineTools (its
+	// SWT-32 criterion 39 comment stays there, amended). PLAIN form only: the
+	// adapter refuses dismissal_id / message_id / revive / notifier_copy for
+	// every MCP caller (rejectReopenActivityArgs, criteria 5-6, reopen_test.go),
+	// and policy's mcp_human_only refuses worker consoles (criterion 11, the
+	// TestMCPListing_DoesNotMakeTaskVerbsWorkerCallable row below).
+	"task_reopen",
 }
 
 // spine-facing tools must never appear in tools/list nor be callable via MCP.
@@ -245,7 +260,18 @@ var spineTools = []string{
 	// deliberately not in policy.humanOnly (D7: the reconciler calls it as
 	// ticketstatus:jira), which is precisely why its absence from the MCP surface
 	// is asserted rather than assumed.
-	"task_reopen",
+	//
+	// AMENDED — not deleted — by mcp-task-reopen (2026-11-10): task_reopen LEFT
+	// this list and is in wantAgentTools, on Salvador's decision ("add ability
+	// to claude to reopen taks on swb"). The transport allowlist is no longer
+	// its gate. What replaces it, both pinned: policy's mcp_human_only
+	// (mcpHumanOnly gains task_reopen, beside task_close) refuses every worker
+	// console shape while the spine callers (capture, promote, ticketstatus:jira)
+	// keep allow/static-default; and the adapter guard rejectReopenActivityArgs
+	// refuses the guarded, revive and notifier_copy forms for EVERY MCP caller,
+	// so a model can never cite a message id to reopen anything (F7: a schema is
+	// not an argument boundary). The undo-a-dismissal risk this comment named is
+	// recorded as the SPEC's accepted risk (D3).
 	// SWT-43 (delivery-deny) criterion 7, D9: reject_delivery is humanOnly AND off
 	// the MCP surface in every profile. It joins mark_delivery_failed and
 	// prefill_delivery: a delivery verdict on a worker's own words belongs to the
@@ -390,11 +416,20 @@ func TestMCPListing_DoesNotMakeMarkDeliverySentWorkerCallable(t *testing.T) {
 // task_close and task_mark_delivered (V1). If the rule is folded into humanOnly
 // the rule string changes and this fails, and so does the spine
 // (internal/policy criterion 21).
+//
+// AMENDED — not deleted — by mcp-task-reopen (2026-11-10) criterion 11: a
+// fourth row, task_reopen, rule mcp_human_only. The adapter forwards it for
+// acme and acme.main (the plain form passes rejectReopenActivityArgs), and
+// Decide denies it.
 func TestMCPListing_DoesNotMakeTaskVerbsWorkerCallable(t *testing.T) {
 	verbs := []struct{ tool, args, rule string }{
 		{"task_dismiss", `{"task_id":412,"reason_code":"duplicate"}`, "human_only"},
 		{"task_close", `{"task_id":412,"reason":"it's done"}`, "mcp_human_only"},
 		{"task_mark_delivered", `{"task_id":412}`, "mcp_human_only"},
+		// mcp-task-reopen criterion 11: the plain reopen, forwarded (listing
+		// means forwarding) and denied by the transport rule, never human_only:
+		// capture, promote and ticketstatus:jira call it in-process.
+		{"task_reopen", `{"task_id":412,"reason":"more to add"}`, "mcp_human_only"},
 	}
 	for _, workerID := range []string{"acme", "acme.main"} {
 		for _, v := range verbs {

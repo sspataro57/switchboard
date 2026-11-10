@@ -212,3 +212,48 @@ func TestReopen_SharesOneTransitionHelperWithClose(t *testing.T) {
 			"orchestrator's drain sees two shapes", n)
 	}
 }
+
+// ---- mcp-task-reopen criterion 4: the exported copy of openStatuses ------------
+
+// mcp-task-reopen (docs/tickets/mcp-task-reopen_SPEC.md, 2026-11-10) criterion
+// 4, F8: internal/mcpserver pins task_reopen's MCP status enum equal to the set
+// validateReopen accepts, element for element and in order. A test in package
+// mcpserver_test cannot read the unexported openStatuses, so close.go exports a
+// COPY — the tools.DismissReasonCodes() precedent
+// (TestDismissReasonCodes_ReturnsACopyInOrder in dismiss_test.go).
+//
+// IMPOSED SURFACE (SPEC "New exported accessor"):
+//
+//	func OpenStatuses() []string // a COPY of openStatuses, in openStatuses order
+//
+// GREENFIELD NOTE — EXPECTED RED: until close.go declares OpenStatuses,
+// internal/tools's tests compile-FAIL.
+//
+// A COPY, because a caller that overwrote the returned slice would otherwise
+// rewrite what validateReopen accepts — and what closeTransition accepts as a
+// source, since both read the one list.
+func TestOpenStatuses_ReturnsACopyInOrder(t *testing.T) {
+	const want = "holding,ready,blocked,done_locally,delivered"
+	got := OpenStatuses()
+	if strings.Join(got, ",") != want {
+		t.Fatalf("OpenStatuses() = %v, want [%s] in openStatuses order (SWT-32 D6's set)", got, want)
+	}
+	if strings.Join(got, ",") != strings.Join(openStatuses, ",") {
+		t.Fatalf("OpenStatuses() = %v, want exactly openStatuses = %v", got, openStatuses)
+	}
+
+	for i := range got {
+		got[i] = "mutated"
+	}
+	if err := validateReopen([]byte(`{"task_id":7,"reason":"more to add","status":"blocked"}`)); err != nil {
+		t.Errorf("after mutating OpenStatuses()'s result, validateReopen(status=blocked) = %v: the function "+
+			"returned openStatuses itself, not a copy", err)
+	}
+	if err := validateReopen([]byte(`{"task_id":7,"reason":"more to add","status":"mutated"}`)); err == nil {
+		t.Errorf("after mutating OpenStatuses()'s result, validateReopen accepts status \"mutated\": the caller " +
+			"rewrote the validator's allowed set")
+	}
+	if again := OpenStatuses(); strings.Join(again, ",") != want {
+		t.Errorf("a second OpenStatuses() = %v after the first result was mutated, want [%s]", again, want)
+	}
+}

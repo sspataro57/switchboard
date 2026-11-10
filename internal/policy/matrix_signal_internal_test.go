@@ -28,7 +28,10 @@ func TestPolicy_TaskSignalShape(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	if strings.Join(got, ",") != "task_close,task_mark_delivered" {
-		t.Errorf("mcpHumanOnly = %v, want exactly [task_close task_mark_delivered] (criterion 21)", got)
+	// AMENDED — not deleted — by mcp-task-reopen (2026-11-10) criterion 8: the
+	// set gains task_reopen (was exactly [task_close task_mark_delivered]).
+	if strings.Join(got, ",") != "task_close,task_mark_delivered,task_reopen" {
+		t.Errorf("mcpHumanOnly = %v, want exactly [task_close task_mark_delivered task_reopen] (criterion 21; "+
+			"mcp-task-reopen criterion 8)", got)
 	}
 }
