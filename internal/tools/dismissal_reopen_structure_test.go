@@ -3,6 +3,8 @@ package tools_test
 // Structural tests for SWT-36 (docs/tickets/dismiss-reopen-on-activity_SPEC.md)
 // criteria 6 (the partial-index ON CONFLICT is restated everywhere), 7
 // (task_reopen stays off the MCP schemas) and 19 (migration 0026's shape).
+// (Criterion 7's scan is AMENDED — not deleted — by mcp-task-reopen, 2026-11-10:
+// see TestTaskReopen_StaysOffTheMCPSchemas.)
 // ZERO I/O beyond reading this repo's own source. Same shape as
 // dismiss_structure_test.go's TestMigration0022_* guard, whose helper
 // (dsRepoFile) this file reuses.
@@ -213,6 +215,23 @@ func TestDismissals_EveryOnConflictRestatesThePartialPredicate(t *testing.T) {
 // half is also asserted behaviourally in internal/mcpserver/adapter_test.go
 // (SWT-32 criterion 39). This is the source half: a schema entry is the first
 // step of exposing a verb to workers, and it is where the change would be made.
+//
+// AMENDED — not deleted — by mcp-task-reopen (docs/tickets/mcp-task-reopen_SPEC.md,
+// 2026-11-10). Salvador's decision ("add ability to claude to reopen taks on
+// swb") MCP-lists task_reopen in its PLAIN form, so schemas.go now names
+// "task_reopen" and the absence check above is retired. The concern it guarded
+// — a worker resurrecting dismissed work "with a message id it chose itself" —
+// is kept as a source-level F7 check: the task_reopen entry (from its Name: to
+// the line that closes the entry) names none of dismissal_id, message_id,
+// revive, notifier_copy. The schema is NOT the boundary (IK LANDMINE F7: an
+// argument absent from the schema is not absent from the call); the adapter
+// guard rejectReopenActivityArgs is, pinned in internal/mcpserver/reopen_test.go.
+// This scan only keeps the schema from ADVERTISING the activity forms. The
+// function keeps its SWT-36 name so the criterion-7 trail still greps.
+//
+// The entry ends at the first line that is exactly "}," after trimming — NOT
+// at the first "}," in the text, which occurs inside the schema's JSON literal
+// right after "task_id":{"type":"integer"} and would scan almost nothing.
 func TestTaskReopen_StaysOffTheMCPSchemas(t *testing.T) {
 	src := dsRepoFile(t, "internal/mcpserver/schemas.go")
 	// Control: the scan must be looking at the file that lists tools at all.
@@ -220,10 +239,29 @@ func TestTaskReopen_StaysOffTheMCPSchemas(t *testing.T) {
 		t.Fatalf("internal/mcpserver/schemas.go does not mention \"task_append_log\"; this scan is not " +
 			"looking at the tool schema list it claims to check")
 	}
-	if strings.Contains(src, `"task_reopen"`) {
-		t.Errorf("internal/mcpserver/schemas.go names \"task_reopen\". Criterion 7: the verb stays spine-" +
-			"facing — its callers are promote:classify, capture:{connector} and ticketstatus:jira through the " +
-			"executor. A worker that could call it could resurrect work a human dismissed, and now with a " +
-			"message id it chose itself")
+	loc := regexp.MustCompile(`Name:\s*"task_reopen"`).FindStringIndex(src)
+	if loc == nil {
+		t.Fatalf("internal/mcpserver/schemas.go has no `Name: \"task_reopen\"` entry. mcp-task-reopen criterion 1: " +
+			"the plain form is MCP-listed on both profiles")
+	}
+	rest := src[loc[0]:]
+	entry := ""
+	for i, line := range strings.SplitAfter(rest, "\n") {
+		entry += line
+		if i > 0 && strings.TrimSpace(line) == "}," {
+			break
+		}
+	}
+	if !strings.Contains(entry, "InputSchema") {
+		t.Fatalf("the scanned task_reopen entry carries no InputSchema — the entry boundary is wrong, so the scan "+
+			"below proves nothing. Scanned: %q", entry)
+	}
+	for _, forbidden := range []string{"dismissal_id", "message_id", "revive", "notifier_copy"} {
+		if strings.Contains(entry, forbidden) {
+			t.Errorf("schemas.go's task_reopen entry names %q. mcp-task-reopen F7 / criterion 2: MCP serves the "+
+				"PLAIN form only; the guarded, revive and notifier_copy forms carry an inbound message id the "+
+				"handler trusts and stay capture/promote-only. A schema that advertises them invites the call "+
+				"the adapter guard must then refuse", forbidden)
+		}
 	}
 }

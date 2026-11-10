@@ -197,6 +197,21 @@ var agentTools = []Tool{
 			"Human sessions only over MCP: a worker console is refused by policy.",
 		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"reason":{"type":"string"}},"required":["task_id"]}`),
 	},
+	// mcp-task-reopen (Salvador, 2026-11-10: "add ability to claude to reopen
+	// taks on swb"): the PLAIN form of task_reopen only. Worker consoles are
+	// refused by policy (mcp_human_only, beside task_close); the guarded,
+	// revive and notifier_copy arguments are refused for every MCP caller by
+	// the adapter (rejectReopenActivityArgs) because F7 says a schema is not
+	// an argument boundary. The status enum must equal tools.OpenStatuses().
+	{
+		Name: "task_reopen",
+		Description: "Reopen a closed task: it moves back to an open status — ready when status is omitted, or holding, " +
+			"blocked, done_locally or delivered when given. A task that is not closed is an idempotent success " +
+			"(reopened:false, nothing changes). It stamps an open dismissal as reopened, and a human reopen marks the " +
+			"task surfaced so the Jira status sync does not close it again. Nothing is sent. " +
+			"Human sessions only over MCP: a worker console is refused by policy.",
+		InputSchema: schema(`{"type":"object","properties":{"task_id":{"type":"integer"},"reason":{"type":"string","description":"short human reason, recorded on the status change"},"status":{"type":"string","enum":["holding","ready","blocked","done_locally","delivered"],"description":"optional; omitted = ready"}},"required":["task_id","reason"]}`),
+	},
 	// SWT-38 (mcp-task-capture) C5/C6: reorder any task. Listing it removes the
 	// transport allowlist as a refusal for worker consoles, so policy.humanOnly
 	// (rule human_only) is what keeps a worker from choosing its own work. The

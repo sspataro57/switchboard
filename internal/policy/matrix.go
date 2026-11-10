@@ -158,7 +158,13 @@ var humanOnly = map[string]bool{
 // sessions, so this is a transport rule ("this transport's non-human identities
 // may not make these transitions"), not a trust boundary: an actor prefix is a
 // label. Keep this map apart from humanOnly — folding them stalls the spine.
-var mcpHumanOnly = map[string]bool{"task_close": true, "task_mark_delivered": true}
+//
+// mcp-task-reopen (2026-11-10): task_reopen joins for the same reason. Its
+// spine callers (capture's guarded and revive reopens, promote's dismissal
+// reopen, the Jira reconciler as ticketstatus:jira) never arrive over MCP, so
+// they keep the static allow-list; a worker console that could reopen could
+// resurrect its own closed work.
+var mcpHumanOnly = map[string]bool{"task_close": true, "task_mark_delivered": true, "task_reopen": true}
 
 // snapshotGated tools need the loader (channel/rate/freeze state).
 var snapshotGated = sendShaped

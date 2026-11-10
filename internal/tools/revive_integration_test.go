@@ -616,6 +616,10 @@ func TestRevive_OneMessageRevivesATaskAtMostOnce(t *testing.T) {
 // mcp:manual:salvo. It does NOT surface for ticketstatus:jira, capture:google,
 // capture:gate, promote:classify, drafts:gpt or mcp:acme, all enumerated per
 // the IK actor-prefix rule."
+//
+// AMENDED by mcp-task-reopen (2026-11-10): mcp:acme can no longer reach the
+// handler (mcp_human_only), so the quote's mcp:acme is covered by the denial
+// subtest below and worker:acme stands in for it in the surfacing table.
 func TestReopen_AHumanPlainReopenSurfacesAndNoOtherActorDoes(t *testing.T) {
 	ctx := context.Background()
 	s := newRVSuite(t, ctx)
@@ -626,7 +630,12 @@ func TestReopen_AHumanPlainReopenSurfacesAndNoOtherActorDoes(t *testing.T) {
 	}{
 		{"dashboard:x", true}, {"opsctl:x", true}, {"manual:salvo", true}, {"mcp:manual:salvo", true},
 		{"ticketstatus:jira", false}, {"capture:google", false}, {"capture:gate", false},
-		{"promote:classify", false}, {"drafts:gpt", false}, {"mcp:acme", false},
+		// AMENDED — not deleted — by mcp-task-reopen (2026-11-10): mcp:acme WAS
+		// a non-human row here. task_reopen is now in policy.mcpHumanOnly, so a
+		// worker console's call never reaches the handler; that denial is pinned
+		// in the mcp:acme subtest below. worker:acme keeps a non-human,
+		// non-MCP worker shape in the surfacing enumeration.
+		{"promote:classify", false}, {"drafts:gpt", false}, {"worker:acme", false},
 	} {
 		t.Run(tc.actor, func(t *testing.T) {
 			task, _ := s.task(t, ctx, "actor", "closed")
@@ -646,6 +655,21 @@ func TestReopen_AHumanPlainReopenSurfacesAndNoOtherActorDoes(t *testing.T) {
 			}
 		})
 	}
+
+	// mcp-task-reopen: a worker console over MCP is refused (mcp_human_only),
+	// and the refused call neither reopens nor surfaces the task.
+	t.Run("mcp:acme is denied", func(t *testing.T) {
+		task, _ := s.task(t, ctx, "actor", "closed")
+		_, err := s.ex.Execute(ctx, executor.Call{Tool: "task_reopen", Actor: "mcp:acme",
+			Args: []byte(`{"task_id":` + itoa(task) + `,"reason":"itest-revive"}`)})
+		if err == nil || !strings.Contains(err.Error(), "mcp_human_only") {
+			t.Errorf("task_reopen as mcp:acme: err = %v, want a policy denial naming mcp_human_only", err)
+		}
+		r := s.row(t, ctx, task)
+		if r.status != "closed" || r.surfacedAt != nil {
+			t.Errorf("after the denied call: status=%q surfaced_at=%v, want closed / NULL", r.status, r.surfacedAt)
+		}
+	})
 }
 
 // ---- criterion 3: the FK is SET NULL -----------------------------------------

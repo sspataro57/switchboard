@@ -170,7 +170,9 @@ records the last time something other than this pass put the task on the board:
   `task_reopen` restores the status the task held (else `ready`).
 - **A creation by such a rule**, via `task_mark_surfaced`.
 - **A human's plain `task_reopen`, by hand** (message NULL):
-  `opsctl call --tool task_reopen --args '{"task_id":N,"reason":"..."}'`. Before
+  `opsctl call --tool task_reopen --args '{"task_id":N,"reason":"..."}'`, or
+  `swb reopen N` from any session (mcp-task-reopen): `mcp:manual:salvo` is human,
+  so it surfaces too. Before
   SWT-45 the next pass re-closed a hand reopen of a done ticket's task within
   15 minutes; now it sticks. The reconciler's own reopen never surfaces.
 

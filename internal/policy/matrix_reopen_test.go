@@ -29,6 +29,21 @@ package policy_test
 // — "an actor-prefix check is a transport label, not a trust boundary" — so the
 // enumeration below exists to prove that NOTHING here keys on the caller, not to
 // certify a gate.
+//
+// AMENDED — not deleted — by mcp-task-reopen (docs/tickets/mcp-task-reopen_SPEC.md,
+// 2026-11-10) criterion 10. The paragraph above ("the gate that matters is the
+// MCP surface (spineTools)") described SWT-32's world, where task_reopen was off
+// MCP. Salvador's decision of 2026-11-10 lists it on both MCP profiles (plain
+// form only), so spineTools no longer holds it and the gates are now two:
+//   - policy: task_reopen is in mcpHumanOnly, so an MCP non-human (a worker
+//     console, mcp:worker:*) is denied rule mcp_human_only. This is still a
+//     transport rule, not a trust boundary (the IK rule quoted above stands);
+//   - the adapter: rejectReopenActivityArgs refuses the guarded, revive and
+//     notifier_copy forms for every MCP caller (internal/mcpserver).
+// Every NON-MCP caller and every human MCP session keeps allow/static-default
+// byte for byte (F5), which is what the allow half below pins; promote:inquiry
+// joins it (the SWT-40 inquiry promoter reopens dismissals too). It is still
+// NOT human_only, for the reason given above.
 
 import (
 	"context"
@@ -70,6 +85,11 @@ func (l reopenLoader) Load(context.Context, policy.Request) (policy.Snapshot, er
 // one of them is usually the hole". Here the expectation is uniform — all of
 // them allowed — which is what "nothing pretends an actor prefix is a gate"
 // means in practice.
+//
+// AMENDED — not deleted — by mcp-task-reopen (2026-11-10) criterion 10: the
+// expectation is no longer uniform. The list is split into allow (exactly
+// allow/static-default, the spine's audit rows unchanged) and deny
+// (mcp:worker:* → mcp_human_only, now that the verb is MCP-listed).
 func TestDecide_TaskReopen_FallsThroughForEveryActorShape(t *testing.T) {
 	checker := reopenChecker(t)
 	ctx := context.Background()
@@ -79,14 +99,13 @@ func TestDecide_TaskReopen_FallsThroughForEveryActorShape(t *testing.T) {
 		"dashboard:salvo",   //
 		"opsctl:salvo",      // the hand-run reconciliation
 		"manual:salvo",      //
-		"mcp:manual:salvo",  // an interactive session
-		workerMCPActor,      // mcp:worker:avviato
-		"mcp:worker:x",      //
+		"mcp:manual:salvo",  // an interactive session — `swb reopen <id>` since mcp-task-reopen
 		"worker:collab",     // bare worker, no transport prefix
 		botActor,            // drafts:gpt
 		"orchestrator",      // no prefix at all
 		"capture:jira",      // the connector-main pass that creates these tasks
 		"promote:classify",  // the SWT-30 promoter
+		"promote:inquiry",   // mcp-task-reopen criterion 10: the SWT-40 inquiry promoter
 		"ticketstatus:jira", // THIS ticket's pass — the one that must work
 	} {
 		actor := actor
@@ -98,14 +117,38 @@ func TestDecide_TaskReopen_FallsThroughForEveryActorShape(t *testing.T) {
 			if d.Decision != "allow" {
 				t.Errorf("task_reopen by %q = %q (rule %s), want allow. D7: the pass calls this verb as "+
 					"ticketstatus:jira exactly as the orchestrator calls task_close as orchestrator; a "+
-					"human-actor gate here would make the return path impossible, and the gate that "+
-					"matters is the MCP surface (spineTools)", actor, d.Decision, d.Rule)
+					"human-actor gate here would make the return path impossible. mcp-task-reopen: only an "+
+					"MCP NON-human is refused (mcp_human_only)", actor, d.Decision, d.Rule)
 			}
 			if d.Rule == "human_only" {
 				t.Errorf("task_reopen by %q was denied human_only — the verb has been added to "+
 					"policy.humanOnly. task_dismiss is human-only because a dismissal is a human "+
 					"JUDGEMENT recorded as training data; a reopen is a state transition the spine "+
 					"makes on its own", actor)
+			}
+			if d.Decision == "allow" && d.Rule != "static-default" {
+				t.Errorf("task_reopen by %q = allow/%s, want allow/static-default exactly — mcp-task-reopen F5: "+
+					"every caller the new rule does not deny keeps today's decision byte for byte", actor, d.Rule)
+			}
+		})
+	}
+
+	// mcp-task-reopen criterion 10, the deny half: the MCP worker shapes this
+	// list always carried, now refused by the transport rule.
+	for _, actor := range []string{
+		workerMCPActor, // mcp:worker:avviato
+		"mcp:worker:x", //
+	} {
+		actor := actor
+		t.Run(actor, func(t *testing.T) {
+			d, err := checker.Check(ctx, policy.Request{Tool: "task_reopen", Actor: actor})
+			if err != nil {
+				t.Fatalf("Check(task_reopen, %q) errored: %v", actor, err)
+			}
+			if d.Decision != "deny" || d.Rule != "mcp_human_only" {
+				t.Errorf("task_reopen by %q = %s/%s, want deny/mcp_human_only. mcp-task-reopen: the verb is "+
+					"MCP-listed, so a worker console that could reopen could resurrect its own closed work; "+
+					"mcpHumanOnly is what refuses it", actor, d.Decision, d.Rule)
 			}
 		})
 	}

@@ -361,3 +361,118 @@ func TestRunbook_SessionNameAndTaskContext(t *testing.T) {
 		}
 	}
 }
+
+// mcp-task-reopen (docs/tickets/mcp-task-reopen_SPEC.md, 2026-11-10) criterion
+// 14: the runbook's paragraph edits for task_reopen on the user profile. The
+// SWT-35..56 pins above stay as they are: the `task_reopen` token pin is still
+// satisfied (the opsctl route stays as the second recovery), and the stale count
+// pins (`fifteen`, `27`) are left alone on purpose (D5: this ticket edits
+// paragraphs, not the header list; renumbering is Future work).
+//
+// The checks are SECTION-scoped, because "the runbook mentions swb reopen
+// somewhere" would pass with the cannot-do sentence still claiming it cannot
+// reopen. EXPECTED RED until docs/runbooks/ops-mcp-user-scope.md is edited.
+func TestRunbook_TaskReopenOverMCP(t *testing.T) {
+	const rel = "docs/runbooks/ops-mcp-user-scope.md"
+	b, err := os.ReadFile(filepath.Join("..", "..", rel))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	lower := strings.ToLower(string(b))
+
+	// bullet returns the "- **<head>**" bullet of "What the install can and
+	// cannot do", up to the next top-level "- **" bullet or heading.
+	bullet := func(head string) string {
+		i := strings.Index(lower, "- **"+head)
+		if i < 0 {
+			t.Errorf("%s has no `- **%s…**` bullet", rel, head)
+			return ""
+		}
+		rest := lower[i+1:]
+		end := len(rest)
+		for _, stop := range []string{"\n- **", "\n## "} {
+			if j := strings.Index(rest, stop); j >= 0 && j < end {
+				end = j
+			}
+		}
+		return lower[i : i+1+end]
+	}
+	can := bullet("what it can do")
+	cannot := bullet("what it cannot do")
+	workers := bullet("workers are refused by policy")
+
+	if !strings.Contains(can, "reopen") {
+		t.Errorf("%s's \"What it can do\" bullet does not name the reopen (criterion 14). Bullet: %q", rel, can)
+	}
+	if strings.Contains(cannot, "or reopen") {
+		t.Errorf("%s's \"What it cannot do\" sentence still says \"or reopen\" (criterion 14): since mcp-task-reopen "+
+			"the user profile reopens (plain form). Bullet: %q", rel, cannot)
+	}
+	if !regexp.MustCompile(`(?s)mcp_human_only.{0,200}task_reopen|task_reopen.{0,200}mcp_human_only`).MatchString(workers) {
+		t.Errorf("%s's \"Workers are refused by policy\" bullet does not name task_reopen beside task_close / "+
+			"task_mark_delivered under mcp_human_only (criterion 14). Bullet: %q", rel, workers)
+	}
+
+	// The Use section: the trigger and the own-close rule (Q1 = b).
+	use := ""
+	if i := strings.Index(lower, "\n## use"); i >= 0 {
+		use = lower[i:]
+	} else {
+		t.Errorf("%s has no \"## Use\" section", rel)
+	}
+	if !strings.Contains(use, "swb reopen") {
+		t.Errorf("%s's Use section has no `swb reopen` line (criterion 14)", rel)
+	}
+	if !regexp.MustCompile(`(?s)closed.{0,80}(this|the same) conversation`).MatchString(use) {
+		t.Errorf("%s's Use section does not carry the own-close rule: a session may reopen, unasked, a human task "+
+			"it closed earlier in this conversation (criterion 14, Q1 = b)", rel)
+	}
+
+	// Recovery leads with `swb reopen N` from any session; opsctl stays second.
+	rec := ""
+	if i := strings.Index(lower, "\nrecovery:\n"); i >= 0 {
+		rec = lower[i+len("\nrecovery:\n"):]
+		if j := strings.Index(rec, "\n\n"); j >= 0 {
+			rec = rec[:j]
+		}
+	} else {
+		t.Errorf("%s has no \"Recovery:\" list", rel)
+	}
+	first := rec
+	if j := strings.Index(rec[min(1, len(rec)):], "\n- "); j >= 0 {
+		first = rec[:j+1]
+	}
+	if !strings.Contains(first, "swb reopen") {
+		t.Errorf("%s's Recovery list does not LEAD with `swb reopen N` (criterion 14). First item: %q", rel, first)
+	}
+	if !regexp.MustCompile(`(?s)swb reopen.{0,400}opsctl call --tool task_reopen`).MatchString(rec) {
+		t.Errorf("%s's Recovery list lost the `opsctl call --tool task_reopen` route, or it no longer follows "+
+			"`swb reopen` (criterion 14: opsctl stays as the second route). Recovery: %q", rel, rec)
+	}
+
+	// The accepted risk gains the reopen (D3) and records Q1 as a prompt rule.
+	// Scoped to the "## Accepted risk" section (up to the next "## " heading),
+	// not to a distance from "untrusted": the section opens with the untrusted-
+	// text framing and the reopen may be its fourth list item.
+	risk := ""
+	if i := strings.Index(lower, "\n## accepted risk"); i >= 0 {
+		risk = lower[i+1:]
+		if j := strings.Index(risk, "\n## "); j >= 0 {
+			risk = risk[:j]
+		}
+	} else {
+		t.Errorf("%s has no \"## Accepted risk\" section", rel)
+	}
+	for _, want := range []struct{ re, why string }{
+		{`(?s)reopen.{0,40}any closed task`,
+			"D3: untrusted text can make a session reopen any closed task in any project"},
+		{`(?s)reopen.{0,600}claude.{0,200}(claim|console|worker queue)`,
+			"D3: a claude task reopened to ready can then be claimed by a running console"},
+		{`(?s)closed.{0,80}(this|the same) conversation.{0,300}prompt rule`,
+			"Q1's own-close exception is a prompt rule, not a boundary: nothing in code tells a session's own close apart"},
+	} {
+		if !regexp.MustCompile(want.re).MatchString(risk) {
+			t.Errorf("%s's Accepted risk section does not match /%s/ — criterion 14: %s", rel, want.re, want.why)
+		}
+	}
+}

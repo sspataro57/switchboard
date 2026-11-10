@@ -42,7 +42,8 @@ const (
 	// look at the queues, dismiss, close or mark delivered, create HUMAN tasks,
 	// log on human tasks and set priority. It cannot claim, create or log on
 	// worker (claude) tasks — the profile pins below refuse both — approve,
-	// send, book, link, decide, read mail bodies or reopen; since SWT-42 it reads attachments of non-private mail (O1); since SWT-44 it drafts and edits client replies (draft_delivery,
+	// send, book, link, decide or read mail bodies; since mcp-task-reopen
+	// (2026-11-10) it reopens closed tasks (plain form only); since SWT-42 it reads attachments of non-private mail (O1); since SWT-44 it drafts and edits client replies (draft_delivery,
 	// update_delivery), approving and sending staying on the dashboard; since
 	// SWT-52 it signals its human task's session state (task_signal: working,
 	// needs_input, clear) for the board's lights; since SWT-56 it reads one task
@@ -74,6 +75,10 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// SWT-74 D6/D7: `swb match <id>` (read-only) and `swb attach <id> <target>`
 	// (humanOnly keeps worker consoles out, as with task_requeue).
 	"task_match", "task_attach",
+	// mcp-task-reopen (Salvador, 2026-11-10): `swb reopen <id>`, plain form
+	// only (rejectReopenActivityArgs in CallTool); mcp_human_only keeps worker
+	// consoles out, as with task_close. No pin (D3, as task_close/task_requeue).
+	"task_reopen",
 	// SWT-42 O1 (Salvador, 2026-09-12: "yes expose it on the user mcp too"):
 	// attachment reads, gated by the SWT-21 locality rule in the handler. The
 	// finder returns headers and attachment names only; mail bodies
@@ -214,6 +219,11 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 			return nil, err
 		}
 	}
+	if name == "task_reopen" {
+		if err := rejectReopenActivityArgs(args); err != nil {
+			return nil, err
+		}
+	}
 
 	injected, err := injectWorkerID(args, s.workerID)
 	if err != nil {
@@ -265,6 +275,44 @@ func rejectParentID(args json.RawMessage) error {
 		return fmt.Errorf("parent_id is reserved for the spine; use create_child_task")
 	}
 	return nil
+}
+
+// rejectReopenActivityArgs (mcp-task-reopen D1, F7): the guarded, revive and
+// notifier_copy forms of task_reopen belong to capture and promote — they carry
+// an inbound message id the handler trusts — and a model never names one. The
+// struct mirrors tools.reopenArgs's four activity fields (same tags and types),
+// so encoding/json's case-folded matching catches "MESSAGE_ID" too. Unlike
+// rejectParentID it FAILS CLOSED: a value that does not decode (revive:"yes")
+// is refused, never waved through to a handler that might read it differently.
+// Zero values (0, false, null) are the plain form and pass.
+func rejectReopenActivityArgs(args json.RawMessage) error {
+	var a struct {
+		DismissalID  int64 `json:"dismissal_id"`
+		MessageID    int64 `json:"message_id"`
+		Revive       bool  `json:"revive"`
+		NotifierCopy bool  `json:"notifier_copy"`
+	}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &a); err != nil {
+			return fmt.Errorf("task_reopen over MCP takes only task_id, reason and status; "+
+				"refusing arguments that do not decode as the plain form: %w", err)
+		}
+	}
+	var field string
+	switch {
+	case a.DismissalID != 0:
+		field = "dismissal_id"
+	case a.MessageID != 0:
+		field = "message_id"
+	case a.Revive:
+		field = "revive"
+	case a.NotifierCopy:
+		field = "notifier_copy"
+	default:
+		return nil
+	}
+	return fmt.Errorf("task_reopen over MCP takes only task_id, reason and status: %s is refused — "+
+		"the activity forms (dismissal_id, message_id, revive, notifier_copy) are spine-only (capture/promote)", field)
 }
 
 // rejectFoldDuplicateKeys refuses an args object carrying two keys that

@@ -92,8 +92,12 @@ Then open a NEW session.
   (SWT-52): `task_signal` sets `working` or `needs_input` on a `holding`, `ready` or
   `blocked` HUMAN task, or `clear`s it. It changes no status, takes no claim and
   records nothing but the state; a `claude` task is refused for every caller.
+  And it reopens a closed task (mcp-task-reopen, 2026-11-10): `task_reopen` in its plain
+  form only — `task_id`, `reason` and an optional `status` (ready when omitted). The
+  adapter refuses `dismissal_id`, `message_id`, `revive` and `notifier_copy` before the
+  executor runs: those activity forms are capture's and promote's.
 - **What it cannot do.** It cannot claim, create worker (`claude`) tasks, log on
-  worker tasks, approve, send, book, link, decide, read mail bodies or reopen (it drafts, but
+  worker tasks, approve, send, book, link, decide or read mail bodies (it drafts, but
   never approves or sends: SWT-44).
   The binary pins `require_assignee_type:"human"` onto every `create_task` and
   `task_append_log` call (overwriting any value the model passes), so a request
@@ -109,8 +113,9 @@ Then open a NEW session.
   consoles, this repo's `.mcp.json`) also lists the three verbs,
   `task_set_priority` and `task_signal`, 27 tools in all. A worker console (`mcp:{client}`) is
   refused `task_dismiss`, `task_set_priority` and `task_signal` by `human_only` and `task_close` /
-  `task_mark_delivered` by `mcp_human_only`; the orchestrator and the Jira
-  reconciler keep closing and delivering as before. `task_set_priority` refuses
+  `task_mark_delivered` / `task_reopen` by `mcp_human_only`; the orchestrator and the Jira
+  reconciler keep closing and delivering as before, and capture, promote and the reconciler
+  keep reopening (none of them arrives over MCP). `task_set_priority` refuses
   the orchestrator too: no automated caller chooses work. The full profile keeps
   creating `claude` tasks and logging on them — the pin is the user binary's only.
 
@@ -128,7 +133,14 @@ sees `mcp:manual:salvo`, a human. Since SWT-38 it can also tell a session to:
    reach a worker prompt. Damage: misleading notes in Salvador's own lane;
 3. **reorder any task's priority** (`task_set_priority`), worker queues included — a console then takes
    a different ready task next. It only reorders existing work. Damage: urgent
-   work delayed, or old work jumped ahead.
+   work delayed, or old work jumped ahead;
+4. **reopen any closed task** (`task_reopen`, since mcp-task-reopen, 2026-11-10) in any project,
+   a closed `claude` task included — which puts it back in a worker queue (no pin narrows this to
+   human tasks, as with `task_close`; a pin is future work). Damage: finished or dismissed work back
+   on the board or in a console's queue; undone with `task_close` or `task_dismiss`. The Instructions
+   let a session reopen, unasked, a human task it closed earlier in the same conversation (Salvador,
+   2026-11-10). That is a prompt rule, not a boundary: nothing in code tells a task closed by this
+   session in this conversation apart from any other `mcp:manual:salvo` close.
 
 **Since SWT-42 (Salvador, 2026-09-12: "yes expose it on the user mcp too")** the install also
 reads mail attachments — a tool whose whole job is to fetch untrusted text someone else
@@ -191,7 +203,8 @@ Jira-linked task. Every call leaves an audit row with its full args, and every
 priority change a `priority_changed {from,to}` event.
 Recovery:
 
-- a wrong close or dismiss: `opsctl call --tool task_reopen --args '{"task_id":N,"reason":"…"}'`;
+- a wrong close or dismiss: `swb reopen N` from any session (since mcp-task-reopen), or
+  `opsctl call --tool task_reopen --args '{"task_id":N,"reason":"…"}'`;
 - a wrong "delivered": `task_close`, then `task_reopen` with `"status":"done_locally"`;
 - a wrong priority: one `task_set_priority` back to the event's `from`;
 - a planted task: `task_close`, or `task_dismiss` with `not_actionable`;
@@ -368,6 +381,11 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
 - "swb log 412 found the cause" → `task_append_log` on a human task. While working
   on a swb task, the session logs meaningful steps, blockers and decisions; they
   show on the dashboard's task page under "Events".
+- "swb reopen 412" (or "swb reopen 412 blocked") → `task_reopen` with a short reason: a closed
+  task goes back to ready, or to the status you name. A task that is not closed is left alone and
+  the session says so. A session that closed a human task earlier in the same conversation and
+  finds the work unfinished may reopen it without being asked; it says so and signals `working`
+  again. Any other reopen waits for your "swb reopen".
 - "swb done 412" → `task_close` with a one-line outcome as the reason. A session
   that finishes work it logged closes the task the same way and says so. The row
   turns green and stays on the board until midnight America/New_York.

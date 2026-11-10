@@ -33,6 +33,11 @@ type closeArgs struct {
 // second spelling is how the two verbs drift.
 var openStatuses = []string{"holding", "ready", "blocked", "done_locally", "delivered"}
 
+// OpenStatuses returns a COPY of openStatuses (mcp-task-reopen): the MCP
+// task_reopen schema's status enum is pinned against it, and a caller that
+// mutated the returned slice must not change what validateReopen accepts.
+func OpenStatuses() []string { return append([]string(nil), openStatuses...) }
+
 // activeWorkRefusal is close's ONE refusal phrase for work that must not be
 // closed out from under its holder or its live send. The Jira reconciler
 // matches it as a non-fatal skip (ticketstatus.activeWorkRefusal, pinned by its
@@ -199,6 +204,13 @@ func closeTask(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byte, er
 // Revive (SWT-45 J6) is the third form: {task_id, message_id, revive:true,
 // reason}. The handler finds the open dismissal itself and the record decides
 // the target, so dismissal_id and status are refused with it.
+//
+// mcp-task-reopen (2026-11-10): task_reopen is MCP-listed in its PLAIN form
+// only. The MCP adapter (mcpserver.rejectReopenActivityArgs) refuses a
+// non-zero DismissalID, MessageID, Revive or NotifierCopy before the executor
+// runs: those forms carry an inbound message id this handler trusts, and only
+// capture and promote may name one. Keep the adapter's mirror struct in step
+// with these four fields.
 type reopenArgs struct {
 	TaskID      int64  `json:"task_id"`
 	Status      string `json:"status,omitempty"`

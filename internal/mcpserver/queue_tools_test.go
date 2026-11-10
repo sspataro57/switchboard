@@ -225,8 +225,13 @@ func TestInstructions_TeachTheSwbShorthand(t *testing.T) {
 		{`finishing is .{0,3}task_close.{0,60}clears`, "finishing is task_close, which also clears it"},
 		{`only for a human task`, "only for a human task worked in this conversation"},
 		{`answer.{0,100}console.{0,160}never.{0,60}(switchboard|swb)`, "Salvador answers in the session's console, never through switchboard"},
+		// AMENDED — not deleted — by mcp-task-reopen (2026-11-10): the closing
+		// rule has TWO exceptions since mcp-task-reopen (Q1 = b) — signalling the
+		// human task it is working on, and reopening a human task it closed
+		// earlier in this conversation. The regex is unchanged; the second
+		// exception's own pins live in reopen_test.go.
 		{`only when salvador asks.{0,600}without being asked|without being asked.{0,600}only when salvador asks`,
-			"the amended closing rule: the one exception is signalling the human task it is working on"},
+			"the amended closing rule: two exceptions since mcp-task-reopen (signalling the human task it is working on; reopening its own close)"},
 		// SWT-56 (signal-session-name) criterion 22: the task_signal line always
 		// carries the session and says where it comes from (ListAgents). Note for
 		// the implementer: S14's proposed wording puts `This session is <name>` in

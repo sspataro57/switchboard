@@ -73,6 +73,11 @@ one of its tools.
    - When you finish: `task_close` with a one-line outcome ("swb done"). That makes
      the row green and clears the state, so do not also send `clear`. Do not close
      a task you did not signal or that he did not hand you.
+   - If you closed it and, in this same conversation, the work turns out not to be
+     finished: `task_reopen` it with a short reason (no status: it goes back to
+     ready), tell him you reopened it, then `task_signal` `working` again — the close
+     cleared the light and the hook's binding. Only a HUMAN task you closed yourself
+     in this conversation; any other reopen waits for his `swb reopen <id>`.
 
 5. **A refused signal.**
    - A refusal that names `session` is YOUR argument error: fix it (pass the
@@ -102,6 +107,7 @@ one of its tools.
    | `swb start <id>` | `task_signal` with `working`, `session` |
    | `swb stop <id>`  | `task_signal` with `clear`              |
    | `swb done <id>`  | `task_close`                            |
+   | `swb reopen <id> [status]` | `task_reopen` with a short reason — back to ready unless he names a status; then `task_signal` `working` if you keep working on it |
    | `swb match <id>` | `task_match` with `task_id` (or `message_id` / `text`) — proposals only, never a write |
    | `swb attach <id> <target>` | `task_attach` — routes the comm onto the target and closes it; `note` only if he gave one |
    | `swb requeue <id> [level]` | `task_requeue` — back to the queue, reviewed; priority only if he named one ("low" = 0), else omit it |
