@@ -2028,6 +2028,11 @@ Verified 2026-07-11. (The same site also has a `CRM` project — not ours.)
   the FULL SPEC (markdown → Jira wiki markup; PUT via `/rest/api/2/issue/{key}` —
   v2 takes wiki text, v3 needs ADF). Sync at /ticket-start, re-sync whenever the
   SPEC changes, and at /ticket-deliver. Local files remain the working copies.
+- **Site deactivated for inactivity (seen 2026-11-10).** Every REST call returns 503 with an HTML
+  "Atlassian Cloud Notifications - Product Unavailable" page (`suspendedInactivityPage`, a
+  "Reactivate" button), and the jira MCP reports a bare `HTTPError`. It is NOT an outage or an
+  auth failure: only Salvador can reactivate it in the browser. Until then SPECs stay
+  `> Jira: PENDING-SYNC` (mcp-task-reopen and SWT-110's successors) and sync after reactivation.
 - **A description caps at 32,767 characters.** Bit 2026-07-29: the
   slack-send-promotion SPEC reached 37,778 after two review rounds and the v2 PUT
   returned `400 {"errors":{"description":"The entered text is too long..."}}`. The
