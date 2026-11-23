@@ -124,12 +124,12 @@ func TestTaskSignal_ListedInBothProfiles(t *testing.T) {
 	// AMENDED by mcp-task-reopen (2026-11-10) criterion 1: task_reopen joins
 	// both profiles — full 36 → 37, user 24 → 25 (a count pin the SPEC's file
 	// list missed; same values as serve_test.go).
-	if len(full) != 37 {
-		t.Errorf("the full profile lists %d tools, want 37 (31 → 36 SWT-109 calendar tools; 26 → 27 criterion 23; 27 → 28 with SWT-72's task_requeue; 28 → 30 with SWT-74's task_match + task_attach; 30 → 31 with SWT-77's send_slack_reply; 36 → 37 mcp-task-reopen's task_reopen)", len(full))
+	if len(full) != 38 {
+		t.Errorf("the full profile lists %d tools, want 38 (31 → 36 SWT-109 calendar tools; 26 → 27 criterion 23; 27 → 28 with SWT-72's task_requeue; 28 → 30 with SWT-74's task_match + task_attach; 30 → 31 with SWT-77's send_slack_reply; 36 → 37 mcp-task-reopen's task_reopen; 37 → 38 mcp-reject-delivery's reject_delivery)", len(full))
 	}
 	// SWT-56 criterion 27: task_context makes the user profile fifteen.
-	if len(user) != 25 {
-		t.Errorf("the user profile lists %d tools, want 25 (19 → 24 SWT-109 calendar tools; 14 → 15 SWT-56 criterion 27; 15 → 16 with SWT-72's task_requeue; 16 → 18 with SWT-74's task_match + task_attach; 18 → 19 with SWT-77's send_slack_reply; 24 → 25 mcp-task-reopen's task_reopen)", len(user))
+	if len(user) != 26 {
+		t.Errorf("the user profile lists %d tools, want 26 (19 → 24 SWT-109 calendar tools; 14 → 15 SWT-56 criterion 27; 15 → 16 with SWT-72's task_requeue; 16 → 18 with SWT-74's task_match + task_attach; 18 → 19 with SWT-77's send_slack_reply; 24 → 25 mcp-task-reopen's task_reopen; 25 → 26 mcp-reject-delivery's reject_delivery)", len(user))
 	}
 	find := func(ts []mcpserver.Tool) *mcpserver.Tool {
 		for i := range ts {

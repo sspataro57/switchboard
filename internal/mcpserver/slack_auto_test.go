@@ -49,11 +49,11 @@ func TestSendSlackReply_ListedInBothProfilesAsOneEntry(t *testing.T) {
 	// AMENDED by mcp-task-reopen (2026-11-10) criterion 1: task_reopen joins
 	// both profiles — full 36 → 37, user 24 → 25 (a count pin the SPEC's file
 	// list missed; same values as serve_test.go).
-	if len(full) != 37 {
-		t.Errorf("the full profile lists %d tools, want 37 (30 → 31 with send_slack_reply, criterion 17; 31 → 36 with SWT-109's calendar tools; 36 → 37 with mcp-task-reopen's task_reopen)", len(full))
+	if len(full) != 38 {
+		t.Errorf("the full profile lists %d tools, want 38 (30 → 31 with send_slack_reply, criterion 17; 31 → 36 with SWT-109's calendar tools; 36 → 37 with mcp-task-reopen's task_reopen; 37 → 38 mcp-reject-delivery's reject_delivery)", len(full))
 	}
-	if len(user) != 25 {
-		t.Errorf("the user profile lists %d tools, want 25 (18 → 19 with send_slack_reply, criterion 17; 19 → 24 with SWT-109's calendar tools; 24 → 25 with mcp-task-reopen's task_reopen)", len(user))
+	if len(user) != 26 {
+		t.Errorf("the user profile lists %d tools, want 26 (18 → 19 with send_slack_reply, criterion 17; 19 → 24 with SWT-109's calendar tools; 24 → 25 with mcp-task-reopen's task_reopen; 25 → 26 mcp-reject-delivery's reject_delivery)", len(user))
 	}
 	f, u := findTool(full, "send_slack_reply"), findTool(user, "send_slack_reply")
 	if f == nil || u == nil {

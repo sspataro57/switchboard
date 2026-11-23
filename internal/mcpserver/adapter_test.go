@@ -65,7 +65,7 @@ package mcpserver_test
 //
 // mcp-task-reopen (docs/tickets/mcp-task-reopen_SPEC.md) criteria 1 and 11:
 // task_reopen MOVES from spineTools to wantAgentTools (plain form only), so the
-// full profile lists 37 tools (serve_test.go pins the literal count), and
+// full profile lists 38 tools (serve_test.go pins the literal count), and
 // TestMCPListing_DoesNotMakeTaskVerbsWorkerCallable gains a task_reopen row,
 // rule mcp_human_only. EXPECTED RED until schemas.go gains the entry and
 // internal/policy's mcpHumanOnly gains task_reopen.
@@ -126,6 +126,9 @@ var wantAgentTools = []string{
 	// what stands between an autonomous worker and a send.
 	"approve_delivery",
 	"send_delivery",
+	// mcp-reject-delivery: the negative verdict beside approve/send, discard
+	// form only. Still policy.humanOnly.
+	"reject_delivery",
 	// SWT-28 criterion 25: the calendar auto tier's verb, agent-facing where
 	// send_delivery is not — a worker books its own focus time with no human
 	// in the loop. The matrix (channel_mismatch, kill switch, rate limit) and
@@ -280,7 +283,13 @@ var spineTools = []string{
 	// (schemas.go), so an interactive ops session can approve but not reject
 	// (SPEC Future work, "MCP symmetry"). The profile loops in profile_test.go
 	// then prove the read and user profiles refuse it too.
-	"reject_delivery",
+	//
+	// AMENDED — not deleted — by mcp-reject-delivery (swb 4565, Salvador
+	// 2026-11-22: "we need to allow claude to discharge stale comms on swb"):
+	// reject_delivery LEFT this list and is in wantAgentTools, closing the
+	// "MCP symmetry" Future work. policy.humanOnly (unchanged) refuses every
+	// worker shape; the adapter guard rejectRedraftArgs refuses redraft for
+	// every MCP caller, so Redo stays a dashboard click (reject_mcp_test.go).
 }
 
 func TestDraftDeliverySchema_IncludesSlackReply(t *testing.T) {

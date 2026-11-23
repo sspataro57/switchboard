@@ -66,8 +66,8 @@ func TestTaskReopen_ListedOnFullAndUserProfiles(t *testing.T) {
 		listed  bool
 		count   int
 	}{
-		{"full", mcpserver.ProfileFull, true, 37},
-		{"user", mcpserver.ProfileUser, true, 25},
+		{"full", mcpserver.ProfileFull, true, 38}, // +reject_delivery (mcp-reject-delivery)
+		{"user", mcpserver.ProfileUser, true, 26}, // +reject_delivery (mcp-reject-delivery)
 		{"read", mcpserver.ProfileRead, false, 3},
 	} {
 		got := byProfile[c.profile]

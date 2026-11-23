@@ -1744,8 +1744,12 @@ go-ahead. See "Slack replies on the auto tier (SWT-77)".
   `google.Scopes` (now includes gmail.send) + manual
   `UPDATE source_accounts SET send_enabled=true` per allowed account.
 - **`rejected` is a terminal delivery status (SWT-43, delivery-deny).** Written
-  ONLY by `reject_delivery {delivery_id, note?, redraft?}` (humanOnly, off MCP;
-  dashboard Deny/Redo). It means "switchboard did not and will not send this
+  ONLY by `reject_delivery {delivery_id, note?, redraft?}` (humanOnly; dashboard
+  Deny/Redo, opsctl, and since mcp-reject-delivery (swb 4565, 2026-11-22) both MCP
+  profiles in the DISCARD form only: the adapter's `rejectRedraftArgs` refuses
+  `redraft` for every MCP caller, so Redo stays a dashboard click and the drafts
+  loop bound below still holds. Sessions use it to drop superseded drafts:
+  `swb drop <delivery id>`). It means "switchboard did not and will not send this
   row". The rejectable set is `drafted`, `approved`, and `failed` with no sent
   id and no confirmation — **EXCEPT `jira_comment`**: `sendJiraComment` writes
   failed+NULL for every error, the comment may have landed, and the jira
@@ -1787,8 +1791,11 @@ go-ahead. See "Slack replies on the auto tier (SWT-77)".
   `<<<BEGIN/END HIS REASON>>>`, and any marker copy inside them is broken up
   (`neutraliseMarkers`). They are framed as his feedback to address, not
   instructions. `SystemPrompt` is byte-unchanged. There is deliberately no
-  authorization beyond humanOnly: the note is his own text, typed behind
-  Keycloak.
+  authorization beyond humanOnly. Since mcp-reject-delivery (2026-11-22) the note
+  is NOT always his text: an MCP session's discard stores one, and a dashboard Redo
+  with an empty reason keeps it (`COALESCE($2, rejection_note)`). Accepted (that
+  SPEC's D6): the rejected body beside it is already session-written, both are
+  quoted data, and the Redo button shows the stored reason first.
 - **Silent wait (Future work, beside D7's residual).** A Redo stays "redraft
   requested" with nothing drafting it, and nothing logged, whenever ANOTHER
   non-rejected delivery exists on the same parent task. Examples: a session

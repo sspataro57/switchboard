@@ -60,11 +60,11 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		// profiles — full 30 → 31, user 18 → 19. Read: 3, unchanged.
 		// mcp-task-reopen (2026-11-10) criterion 1: task_reopen joins BOTH
 		// profiles — full 36 → 37, user 24 → 25. Read: 3, unchanged.
-		{ProfileFull, 37}, // SWT-109: +5 calendar tools; mcp-task-reopen: +task_reopen
+		{ProfileFull, 38}, // SWT-109: +5 calendar tools; mcp-task-reopen: +task_reopen; mcp-reject-delivery: +reject_delivery
 		{ProfileRead, 3},
 		// SWT-56 (signal-session-name) criterion 34: task_context joins the user
 		// profile, pinned read-only — user 14 → 15; full unchanged (it lists it).
-		{ProfileUser, 25}, // SWT-109: +5 calendar tools; mcp-task-reopen: +task_reopen
+		{ProfileUser, 26}, // SWT-109: +5 calendar tools; mcp-task-reopen: +task_reopen; mcp-reject-delivery: +reject_delivery
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()

@@ -471,8 +471,9 @@ func splitCcInput(v string) []string {
 //
 // The note reaches the drafts worker's prompt (quoted as data, see
 // drafts.renderUser). It needs no authorization beyond reject_delivery's
-// humanOnly: this route sits behind Keycloak OIDC, and the note is Salvador's
-// own text.
+// humanOnly: this route sits behind Keycloak OIDC, and the note typed here is
+// Salvador's own text. (A Redo with an empty reason keeps a note an MCP session
+// stored on a discard; see drafts.renderUser and mcp-reject-delivery D6.)
 func (s *Server) actionReject(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
