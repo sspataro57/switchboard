@@ -4,8 +4,13 @@
 // Salvador: "just new stuff on the q, claude would figure out" and "if the
 // session is idle can start working if not queue behind current work". So a
 // nudge carries no details, only which queue changed; the session reads the
-// queue and starts. An idle session gets it typed into its input box; a busy
-// one gets it from ~/.claude/swb-hook.py when its current turn ends.
+// queue and starts. An idle session gets it typed into its input box. Since
+// swb 4639 (Salvador, 2026-11-23: "make it send the messages no matter if the
+// console is bussy. It would just queue and pickup at the end") a busy one is
+// typed into too, when its input box is on screen and empty: Claude Code
+// queues the line behind the running turn. A busy session whose box holds his
+// own text, or shows a dialog, gets it from ~/.claude/swb-hook.py when its
+// current turn ends instead.
 //
 // Everything here is pure, a function of values the command reads (the hook's
 // session files, tmux captures, one read-only SELECT). cmd/swb-push does the I/O.
@@ -99,15 +104,77 @@ type Seen map[string]map[int64]time.Time
 
 // Nudge is one line for a session, and what it settles once delivered.
 //
-// An IDLE session gets it typed into its input box (Typed). A BUSY session is
-// never typed into: a keystroke could land on a permission dialog or a menu
-// opening mid-turn. Its nudge goes to a file that ~/.claude/swb-hook.py hands
-// to Claude when the turn ends (a Stop-hook continuation), which is exactly
-// "queue behind current work".
+// It is typed into the input box (Typed) when the box was on screen and empty:
+// an IDLE session, or since swb 4639 a BUSY one, where Claude Code queues the
+// submitted line behind the running turn. A keystroke could still land on a
+// permission dialog or a menu that opens mid-turn, so cmd/swb-push re-reads the
+// screen just before typing (TypeStep). A busy session whose box is not free
+// gets the nudge in a file that ~/.claude/swb-hook.py hands to Claude when the
+// turn ends (a Stop-hook continuation).
 type Nudge struct {
 	SID, Pane, Window, Text string
 	Typed                   bool
+	Busy                    bool // the session was mid-turn when planned
 	Settle                  Seen
+}
+
+// TypeAction is what cmd/swb-push does with a Typed nudge right before typing.
+type TypeAction int
+
+const (
+	TypeIt   TypeAction = iota // the box is still empty: type it (merged with any waiting hook file)
+	ToHook                     // busy: add it to the hook file instead
+	TryLater                   // idle and the box is no longer free: next pass, nothing settled
+)
+
+// TypeStep re-decides a Typed nudge on a screen read just before the keystrokes
+// (swb 4639 review). boxEmpty is that fresh read; hookWaiting says an
+// undelivered nudge file exists for the session.
+//
+// A BUSY session with a waiting file gets the file (merged), so it never hears
+// the same change twice (a typed line queued AND a Stop continuation at one
+// turn end). An IDLE session is typed into even with a file waiting: only the
+// Stop hook reads that file, a turn ended by Esc never runs Stop, so the file
+// can outlive the turn, and an idle session has no turn end coming. The caller
+// merges the file's queues into the typed line and deletes it once Enter lands.
+func TypeStep(busy, boxEmpty, hookWaiting bool) TypeAction {
+	switch {
+	case busy && hookWaiting:
+		return ToHook
+	case boxEmpty:
+		return TypeIt
+	case busy:
+		return ToHook
+	default:
+		return TryLater
+	}
+}
+
+// PendingAction is what to do with a typed-but-unsubmitted nudge on a later pass.
+type PendingAction int
+
+const (
+	PendingWait   PendingAction = iota // no box (a dialog), or a prompt/gone session
+	PendingSubmit                      // the box holds exactly the line: press Enter
+	PendingSeen                        // the box is empty: he submitted or cleared it
+	PendingDrop                        // the box holds other text: forget the nudge
+)
+
+// PendingStep decides a pending nudge from the session's turn and the screen:
+// box (the input box is on screen), holds (it holds exactly the nudge line) and
+// text (what it holds). Enter goes to an idle or, since swb 4639, a busy
+// session; never to one on a prompt.
+func PendingStep(turn string, box, holds bool, text string) PendingAction {
+	switch {
+	case !box || (turn != "idle" && turn != "busy"):
+		return PendingWait
+	case holds:
+		return PendingSubmit
+	case text == "":
+		return PendingSeen
+	default:
+		return PendingDrop
+	}
 }
 
 // Key is Seen's key: one per (window, project).
@@ -144,10 +211,12 @@ func (seen Seen) Apply(s Seen) {
 //     name, and it is the window's ONLY live session (two Claude panes in one
 //     window would both be told to start on the same work);
 //   - the pane runs claude;
-//   - it is busy (the nudge goes to the hook, never typed), or idle for at
-//     least MinIdleS (a moment for him to start typing after a turn ends) with
-//     composerEmpty(pane): the input box on screen and empty; never on a
-//     permission prompt.
+//   - it is busy, or idle for at least MinIdleS (a moment for him to start
+//     typing after a turn ends); never on a permission prompt.
+//
+// It is typed (Typed) when composerEmpty(pane): the input box on screen and
+// empty. An idle session without that waits for a later pass; a busy one gets
+// the hook nudge instead (swb 4639: busy is typed into, Claude Code queues it).
 func Plan(cfg Config, sessions []Session, tasks []Task, seen Seen, now time.Time,
 	composerEmpty func(pane string) bool) []Nudge {
 	cfg = cfg.Defaults()
@@ -207,6 +276,7 @@ func Plan(cfg Config, sessions []Session, tasks []Task, seen Seen, now time.Time
 		typed := false
 		switch s.Turn {
 		case "busy":
+			typed = composerEmpty(s.Pane) // else the hook delivers it at turn end
 		case "idle":
 			if now.Sub(s.TurnAt) < time.Duration(cfg.MinIdleS)*time.Second || !composerEmpty(s.Pane) {
 				continue
@@ -216,7 +286,8 @@ func Plan(cfg Config, sessions []Session, tasks []Task, seen Seen, now time.Time
 			continue
 		}
 		sort.Strings(changed)
-		out = append(out, Nudge{SID: s.SID, Pane: s.Pane, Window: s.LiveWindow, Text: Text(changed), Typed: typed, Settle: settle})
+		out = append(out, Nudge{SID: s.SID, Pane: s.Pane, Window: s.LiveWindow, Text: Text(changed), Typed: typed,
+			Busy: s.Turn == "busy", Settle: settle})
 	}
 	return out
 }

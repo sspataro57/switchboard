@@ -54,8 +54,8 @@ func TestPlan_NewTaskNudgesIdleAndBusy_AndSettlesOnlyOnApply(t *testing.T) {
 		if len(n) != 1 || n[0].Pane != "%collab" || !strings.Contains(n[0].Text, "collaboratory queue") {
 			t.Fatalf("%s: nudges %+v, want one for collaboratory", turn, n)
 		}
-		if n[0].Typed != (turn == "idle") {
-			t.Errorf("%s: Typed=%v; only an idle session is typed into, a busy one goes to the hook", turn, n[0].Typed)
+		if !n[0].Typed {
+			t.Errorf("%s: Typed=false with an empty input box; since swb 4639 idle and busy are both typed into", turn)
 		}
 		if _, ok := seen[Key("collab", "collaboratory")][2]; ok {
 			t.Errorf("%s: Plan settled the new task itself; only Apply after submitting may", turn)
@@ -111,11 +111,16 @@ func TestPlan_Gates(t *testing.T) {
 	}
 }
 
-func TestPlan_BusySessionIgnoresTheComposer(t *testing.T) {
-	n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, []Task{{2, "collaboratory", "", t0.Add(-time.Minute), "", false}}, primed(), t0,
-		func(string) bool { t.Fatal("a busy session's screen was read"); return false })
-	if len(n) != 1 || n[0].Typed {
-		t.Fatalf("busy: %+v, want one hook nudge", n)
+// swb 4639: a busy session is typed into when its box is empty (Claude Code
+// queues the line), and falls back to the hook when the box holds his text or
+// a dialog is up. It is never skipped: the nudge goes one way or the other.
+func TestPlan_BusySessionTypedOnlyIntoAnEmptyComposer(t *testing.T) {
+	tasks := []Task{{2, "collaboratory", "", t0.Add(-time.Minute), "", false}}
+	for _, empty := range []bool{true, false} {
+		n := Plan(cfg(), []Session{sess("collab", "busy", 0)}, tasks, primed(), t0, func(string) bool { return empty })
+		if len(n) != 1 || n[0].Typed != empty {
+			t.Fatalf("busy, composer empty=%v: %+v, want one nudge with Typed=%v", empty, n, empty)
+		}
 	}
 }
 
@@ -418,5 +423,56 @@ func TestPlan_TasksTheSessionTouchedNeverNudgeIt(t *testing.T) {
 	tasks = append(tasks, Task{3, "collaboratory", "", t0.Add(time.Hour), "", true})
 	if n := Plan(cfg(), []Session{s}, tasks, seen, t0.Add(2*time.Hour), always); len(n) != 1 {
 		t.Errorf("a task another session created did not nudge: %+v", n)
+	}
+}
+
+// swb 4639 review: the screen is re-read right before typing.
+func TestTypeStep(t *testing.T) {
+	for _, c := range []struct {
+		busy, empty, hook bool
+		want              TypeAction
+	}{
+		{false, true, false, TypeIt},
+		{true, true, false, TypeIt},
+		{true, false, false, ToHook},    // a dialog opened or he started typing mid-turn
+		{false, false, false, TryLater}, // idle: never to the hook (no turn end is coming)
+		{true, true, true, ToHook},      // busy and a file waits: merge, never deliver twice
+		{false, true, true, TypeIt},     // idle with a leftover file (Esc skips Stop): type it, merged
+		{false, false, true, TryLater},  // idle, box not free: next pass, file kept
+	} {
+		if got := TypeStep(c.busy, c.empty, c.hook); got != c.want {
+			t.Errorf("TypeStep(busy=%v, empty=%v, hook=%v) = %v, want %v", c.busy, c.empty, c.hook, got, c.want)
+		}
+	}
+}
+
+func TestPendingStep(t *testing.T) {
+	for _, c := range []struct {
+		turn       string
+		box, holds bool
+		text       string
+		want       PendingAction
+	}{
+		{"idle", true, true, "x", PendingSubmit},
+		{"busy", true, true, "x", PendingSubmit}, // swb 4639: Claude Code queues it
+		{"prompt", true, true, "x", PendingWait},
+		{"gone", true, true, "x", PendingWait},
+		{"busy", false, false, "", PendingWait}, // a dialog hides the box
+		{"idle", true, false, "", PendingSeen},
+		{"busy", true, false, "his text", PendingDrop},
+	} {
+		if got := PendingStep(c.turn, c.box, c.holds, c.text); got != c.want {
+			t.Errorf("PendingStep(%s, box=%v, holds=%v, %q) = %v, want %v", c.turn, c.box, c.holds, c.text, got, c.want)
+		}
+	}
+}
+
+func TestPlan_MarksBusy(t *testing.T) {
+	tasks := []Task{{2, "collaboratory", "", t0.Add(-time.Minute), "", false}}
+	for _, turn := range []string{"idle", "busy"} {
+		n := Plan(cfg(), []Session{sess("collab", turn, time.Hour)}, tasks, primed(), t0, always)
+		if len(n) != 1 || n[0].Busy != (turn == "busy") {
+			t.Errorf("%s: %+v, want Busy=%v", turn, n, turn == "busy")
+		}
 	}
 }
