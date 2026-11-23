@@ -96,6 +96,11 @@ Then open a NEW session.
   form only — `task_id`, `reason` and an optional `status` (ready when omitted). The
   adapter refuses `dismissal_id`, `message_id`, `revive` and `notifier_copy` before the
   executor runs: those activity forms are capture's and promote's.
+  And it drops a stale delivery (mcp-reject-delivery, swb 4565, 2026-11-22): `reject_delivery`
+  in its discard form only — `delivery_id` and an optional `note`. A drafted, approved or
+  never-sent failed row becomes `rejected` (terminal; it can never be sent). The adapter refuses
+  `redraft` before the executor runs: asking the drafts worker for a new draft stays a dashboard
+  Redo. The handler refuses `sending`/`sent` rows and a failed `jira_comment`.
 - **What it cannot do.** It cannot claim, create worker (`claude`) tasks, log on
   worker tasks, approve, send, book, link, decide or read mail bodies (it drafts, but
   never approves or sends: SWT-44).
@@ -141,6 +146,12 @@ sees `mcp:manual:salvo`, a human. Since SWT-38 it can also tell a session to:
    let a session reopen, unasked, a human task it closed earlier in the same conversation (Salvador,
    2026-11-10). That is a prompt rule, not a boundary: nothing in code tells a task closed by this
    session in this conversation apart from any other `mcp:manual:salvo` close.
+5. **drop any unsent delivery** (`reject_delivery`, since mcp-reject-delivery, 2026-11-22) in any
+   project, approved rows included. It never sends anything and cannot touch a `sending` or `sent`
+   row. Damage: a reply Salvador meant to send is gone and has to be drafted again (there is no
+   un-reject). The Instructions let a session drop, unasked, a delivery it drafted earlier in the
+   same conversation once a newer draft replaces it or its words went out another way; that is a
+   prompt rule, not a boundary.
 
 **Since SWT-42 (Salvador, 2026-09-12: "yes expose it on the user mcp too")** the install also
 reads mail attachments — a tool whose whole job is to fetch untrusted text someone else
@@ -208,8 +219,8 @@ Recovery:
 - a wrong "delivered": `task_close`, then `task_reopen` with `"status":"done_locally"`;
 - a wrong priority: one `task_set_priority` back to the event's `from`;
 - a planted task: `task_close`, or `task_dismiss` with `not_actionable`;
-- a planted draft: until SWT-43's Deny ships there is no verb that discards one — edit it on
-  the dashboard, or leave it unapproved; a draft never sends without an approval;
+- a planted draft: Deny it on the dashboard (SWT-43's Deny), or `swb drop N` from any session
+  (since mcp-reject-delivery); a draft never sends without an approval;
 - once SWT-36 (`dismiss-reopen-on-activity`) ships, a dismissed task also reopens
   by itself on the next inbound message routed to it (by a classify promotion or a
   capture rule).
@@ -345,7 +356,7 @@ and every other repo gets the installed `ops-mcp-user`. `.mcp.json` is unchanged
    loads `.mcp.json`'s (verified 2026-09-10).
 4. From the other repo, `project_list` and `task_list(project=<slug>)` answer.
 5. `psql -h 192.168.50.49 -U ops -d ops -c "SELECT actor, tool, status FROM
-   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered','create_task','task_append_log','task_set_priority','task_signal','draft_delivery','update_delivery')
+   audit_events WHERE tool IN ('task_list','project_list','task_dismiss','task_close','task_mark_delivered','create_task','task_append_log','task_set_priority','task_signal','draft_delivery','update_delivery','task_reopen','reject_delivery')
    ORDER BY id DESC LIMIT 5"` shows those calls with actor `mcp:manual:salvo`.
 
 ## Use

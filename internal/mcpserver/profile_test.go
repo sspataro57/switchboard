@@ -152,7 +152,9 @@ var wantUserProfileTools = []string{
 	// to human tasks.
 	"book_time", "calendar_list_events", "cancel_reservation",
 	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
-	"propose_slots", "release_offer_holds",
+	// mcp-reject-delivery (swb 4565, 2026-11-22): reject_delivery, discard form
+	// only (rejectRedraftArgs). humanOnly refuses worker shapes. 25 → 26.
+	"propose_slots", "reject_delivery", "release_offer_holds",
 	"send_slack_reply",
 	"task_append_log", "task_attach", "task_close", "task_context", "task_dismiss",
 	"task_get_next", "task_list", "task_mark_delivered", "task_match", "task_reopen", "task_requeue", "task_set_priority",
@@ -425,8 +427,9 @@ func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 	// 34: fifteen (task_context); SWT-72 criterion 23: sixteen (task_requeue);
 	// SWT-77 criterion 17: nineteen (send_slack_reply).
 	// AMENDED by mcp-task-reopen (2026-11-10) criterion 1: 24 → 25 (task_reopen).
-	if len(wantUserProfileTools) != 25 {
-		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 25 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach; SWT-77 adds send_slack_reply; SWT-109 adds five calendar tools; mcp-task-reopen adds task_reopen)",
+	// AMENDED by mcp-reject-delivery (2026-11-22): 25 → 26 (reject_delivery).
+	if len(wantUserProfileTools) != 26 {
+		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 26 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach; SWT-77 adds send_slack_reply; SWT-109 adds five calendar tools; mcp-task-reopen adds task_reopen; mcp-reject-delivery adds reject_delivery)",
 			len(wantUserProfileTools))
 	}
 	if !sendSeen {

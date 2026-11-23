@@ -110,7 +110,12 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	// SWT-109 (calendar-mcp-tools, Salvador 2026-10-21): the live calendar and
 	// swb-first booking for every session. book_time is pinned to human tasks
 	// below; the rest need no pin (no account argument exists to narrow).
-	"calendar_list_events", "propose_slots", "book_time", "cancel_reservation", "release_offer_holds")
+	"calendar_list_events", "propose_slots", "book_time", "cancel_reservation", "release_offer_holds",
+	// mcp-reject-delivery (swb 4565, Salvador 2026-11-22): drop a stale drafted
+	// or approved delivery, discard form only (rejectRedraftArgs in CallTool).
+	// No pin: the handler refuses sending/sent rows for every caller, and
+	// humanOnly keeps worker consoles out. Approve and send stay off this profile.
+	"reject_delivery")
 
 // userProfilePins (SWT-38 C4) are args the user profile force-sets on a call,
 // by OVERWRITE, after injectWorkerID. require_assignee_type:"human" makes the
@@ -224,6 +229,11 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 			return nil, err
 		}
 	}
+	if name == "reject_delivery" {
+		if err := rejectRedraftArgs(args); err != nil {
+			return nil, err
+		}
+	}
 
 	injected, err := injectWorkerID(args, s.workerID)
 	if err != nil {
@@ -313,6 +323,29 @@ func rejectReopenActivityArgs(args json.RawMessage) error {
 	}
 	return fmt.Errorf("task_reopen over MCP takes only task_id, reason and status: %s is refused — "+
 		"the activity forms (dismissal_id, message_id, revive, notifier_copy) are spine-only (capture/promote)", field)
+}
+
+// rejectRedraftArgs keeps reject_delivery to its DISCARD form over MCP
+// (mcp-reject-delivery D3). redraft=true would wake the drafts worker on the
+// task; that Redo stays a human click on the dashboard (SWT-43's loop bound).
+// The schema omits redraft, but a schema is not an argument boundary (F7), so
+// it is refused here for every MCP caller, and args that do not decode as the
+// discard form are refused rather than guessed at.
+func rejectRedraftArgs(args json.RawMessage) error {
+	var a struct {
+		Redraft bool `json:"redraft"`
+	}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &a); err != nil {
+			return fmt.Errorf("reject_delivery over MCP takes only delivery_id and note; "+
+				"refusing arguments that do not decode as the discard form: %w", err)
+		}
+	}
+	if a.Redraft {
+		return fmt.Errorf("reject_delivery over MCP only discards: redraft is refused. " +
+			"Asking the drafts worker for a new draft (Redo) is done on the dashboard")
+	}
+	return nil
 }
 
 // rejectFoldDuplicateKeys refuses an args object carrying two keys that

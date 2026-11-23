@@ -1316,7 +1316,9 @@ func validateRejectDelivery(args []byte) error {
 // It moves an unsent row to the terminal status 'rejected' and records the
 // verdict as labelled data (an approvals row plus a delivery_rejected event).
 // With redraft it also stamps redraft_requested_at, the one thing that makes
-// that row stop blocking the drafts worker. It is humanOnly and off MCP (D9).
+// that row stop blocking the drafts worker. It is humanOnly. SWT-43 D9 kept it
+// off MCP; since mcp-reject-delivery (swb 4565) both MCP profiles list it in the
+// discard form only (the adapter refuses redraft), so Redo stays a dashboard click.
 //
 // Lock order is task → delivery, through lockDeliveryTask. Unlike approve and
 // send it does NOT refuse a closed task: cleaning up a stale draft is exactly

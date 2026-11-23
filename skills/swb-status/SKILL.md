@@ -78,6 +78,10 @@ one of its tools.
      ready), tell him you reopened it, then `task_signal` `working` again — the close
      cleared the light and the hook's binding. Only a HUMAN task you closed yourself
      in this conversation; any other reopen waits for his `swb reopen <id>`.
+   - If you drafted a delivery in this conversation and a newer draft replaces it,
+     or its words went out another way: `reject_delivery` it with a short note
+     (for example "superseded by 491") and tell him which one you dropped. It sends
+     nothing and cannot be undone. Any other drop waits for his `swb drop <id>`.
 
 5. **A refused signal.**
    - A refusal that names `session` is YOUR argument error: fix it (pass the
@@ -108,6 +112,7 @@ one of its tools.
    | `swb stop <id>`  | `task_signal` with `clear`              |
    | `swb done <id>`  | `task_close`                            |
    | `swb reopen <id> [status]` | `task_reopen` with a short reason — back to ready unless he names a status; then `task_signal` `working` if you keep working on it |
+   | `swb drop <delivery id>` | `reject_delivery` with `delivery_id` and a short `note` — the delivery can never be sent; refused if it is sending or sent |
    | `swb match <id>` | `task_match` with `task_id` (or `message_id` / `text`) — proposals only, never a write |
    | `swb attach <id> <target>` | `task_attach` — routes the comm onto the target and closes it; `note` only if he gave one |
    | `swb requeue <id> [level]` | `task_requeue` — back to the queue, reviewed; priority only if he named one ("low" = 0), else omit it |

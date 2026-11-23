@@ -165,6 +165,19 @@ var agentTools = []Tool{
 		Description: "Send an APPROVED delivery to the client-visible surface. (On a gmail delivery stuck in `sending` whose own copy has re-entered the mailbox sync, it FINISHES the record instead and sends nothing: the result says recovered.) HUMAN IDENTITIES ONLY — an autonomous worker identity is denied by policy. There is no compose-and-send: draft, approve and send are three separate calls.",
 		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"}},"required":["delivery_id"]}`),
 	},
+	// mcp-reject-delivery (swb 4565, Salvador 2026-11-22: "we need to allow
+	// claude to discharge stale comms on swb"): amends SWT-43 D9. DISCARD form
+	// only — the adapter guard rejectRedraftArgs refuses redraft for every MCP
+	// caller (Redo stays a dashboard click). policy.humanOnly keeps worker
+	// consoles out. Both profiles.
+	{
+		Name: "reject_delivery",
+		Description: "Drop a stale delivery so it can never be sent: a drafted or approved row (or a failed one that never went out) moves to the terminal status rejected. " +
+			"Use it for a draft replaced by a newer one, or whose words went out another way. It sends nothing and cannot be undone; a new draft is the way back. " +
+			"Refused for a delivery that is sending or sent, and for a jira_comment whose send failed (it may have landed). A closed task is fine. Dropping an already dropped delivery is a no-op. " +
+			"note is a short reason (for example: superseded by 491). Human sessions only: a worker console is refused by policy.",
+		InputSchema: schema(`{"type":"object","properties":{"delivery_id":{"type":"integer"},"note":{"type":"string","description":"short reason, recorded on the delivery"}},"required":["delivery_id"]}`),
+	},
 	{
 		Name:        "record_decision",
 		Description: "Record a project-scoped decision; it is injected into every future task context for the project.",

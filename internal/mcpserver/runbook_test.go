@@ -216,7 +216,9 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{`its own drafts`, "fix 2: update_delivery edits only drafts its actor created, gmail only"},
 		{`(?s)dashboard shows.{0,80}from.{0,40}to.{0,80}before`, "fix 4: the dashboard shows From and To before approval"},
 		{`(?s)planted draft.{0,400}(dashboard|unapproved)`, "Recovery: a planted draft is edited on the dashboard or left unapproved"},
-		{`(?s)swt-43.{0,200}deny`, "…until SWT-43's Deny ships"},
+		// AMENDED by mcp-reject-delivery: Deny shipped; the recovery names it and swb drop.
+		{`(?s)swt-43.{0,200}deny`, "a planted draft: SWT-43's Deny"},
+		{`(?s)planted draft.{0,200}swb drop`, "a planted draft: swb drop from any session (mcp-reject-delivery)"},
 		{`(?s)untrusted.{0,600}draft`, "Accepted risk: drafting from sessions that read untrusted content"},
 		{`tool in \([^)]*'draft_delivery'[^)]*'update_delivery'`, "the verify step's audit query lists both new tools"},
 		// SWT-44 second review round.

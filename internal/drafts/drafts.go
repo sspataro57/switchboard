@@ -384,9 +384,13 @@ func renderUser(dt DeliverTask) string {
 		// neutralised, so it can steer the words but cannot rewrite the rules:
 		// SystemPrompt (the no-attribution rules, invariant 6) is untouched, and
 		// draft_delivery scrubs attribution from whatever comes back. Only
-		// reject_delivery writes the note; it is humanOnly and off MCP (D9), and
-		// its one UI is the dashboard, behind Keycloak OIDC. No authorization
-		// beyond humanOnly is added, on purpose: the note is his own text.
+		// reject_delivery writes the note; it is humanOnly. Since
+		// mcp-reject-delivery an interactive MCP session can write it too (a
+		// discard, never a Redo), and a later dashboard Redo with an empty reason
+		// keeps the stored note, so the note is not always his own text. Accepted
+		// (mcp-reject-delivery SPEC, D6): the rejected BODY beside it is already
+		// session-written text, both are quoted as data, and the dashboard shows
+		// the stored reason before the Redo click.
 		reason := dt.RejectionNote
 		if reason == "" {
 			reason = "(no reason given)"
