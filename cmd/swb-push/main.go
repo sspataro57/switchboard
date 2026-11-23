@@ -8,11 +8,13 @@
 // panes, screen captures), and one SELECT per pass in a READ ONLY transaction.
 // It calls no tool and writes nothing to the ops database.
 //
-// A BUSY session is never typed into. Its nudge is written to
-// ~/.claude/swb/nudges/<session_id>.txt, and swb-hook.py's Stop hook hands it
-// to Claude as a continuation when the turn ends ("queue behind current work").
+// A BUSY session is typed into too since swb 4639, when its input box is on
+// screen and empty: Claude Code queues a line submitted mid-turn and takes it up
+// when the turn ends. When the box holds his text or a dialog is up, the nudge
+// is written to ~/.claude/swb/nudges/<session_id>.txt instead, and swb-hook.py's
+// Stop hook hands it to Claude as a continuation when the turn ends.
 //
-// An IDLE session gets the line typed, in two steps, and the second is
+// A typed session (idle or busy) gets the line in two steps, and the second is
 // verified: type, re-read the screen, press Enter only if the input box holds
 // exactly that line. If anything changed in between (he started typing, a
 // dialog), nothing is submitted; the line waits as "pending" and is submitted
@@ -70,6 +72,7 @@ const tmuxTimeout = 5 * time.Second
 type pending struct {
 	text   string
 	settle swbpush.Seen
+	hook   absorbedHook // the leftover hook file this line absorbed; removed once it lands
 }
 
 func main() {
@@ -149,18 +152,40 @@ func pass(ctx context.Context, pool *pgxpool.Pool, cfg swbpush.Config, waiting m
 	now := time.Now()
 	finishPending(sessions, seen, waiting)
 	notWaiting := func(pane string) bool {
-		_, busy := waiting[pane]
-		return !busy && composerEmpty(pane)
+		_, held := waiting[pane] // a typed nudge still unsubmitted there
+		return !held && composerEmpty(pane)
+	}
+	toHook := func(n swbpush.Nudge, why string) {
+		if err := leaveForHook(n.SID, n.Text); err != nil {
+			log.Printf("nudge %s (%s): %v", n.Window, n.Pane, err)
+			return
+		}
+		seen.Apply(n.Settle)
+		log.Printf("queued for %s (%s, %s; the hook delivers at turn end): %s", n.Window, n.Pane, why, n.Text)
 	}
 	for _, n := range swbpush.Plan(cfg, sessions, tasks, seen, now, notWaiting) {
 		if !n.Typed {
-			if err := leaveForHook(n.SID, n.Text); err != nil {
-				log.Printf("nudge %s (%s): %v", n.Window, n.Pane, err)
-				continue
-			}
-			seen.Apply(n.Settle)
-			log.Printf("queued for %s (%s, busy; the hook delivers at turn end): %s", n.Window, n.Pane, n.Text)
+			toHook(n, "busy, input box not free")
 			continue
+		}
+		// swb 4639 review: Plan read every screen before any typing, so re-read
+		// this one right before the keystrokes; a dialog or his typing may have
+		// arrived since.
+		switch swbpush.TypeStep(n.Busy, composerEmpty(n.Pane), hookWaiting(n.SID)) {
+		case swbpush.ToHook:
+			toHook(n, "busy, a hook nudge already waits")
+			continue
+		case swbpush.TryLater:
+			continue // idle and the box changed: next pass decides again
+		}
+		var absorbed absorbedHook
+		if !n.Busy {
+			// An idle session's leftover hook file (a turn ended by Esc never runs
+			// Stop) rides along on the typed line, and is removed once it lands.
+			if old, err := os.ReadFile(filepath.Join(nudgeDir, n.SID+".txt")); err == nil && len(old) > 0 {
+				n.Text = mergeText(string(old), n.Text)
+				absorbed = absorbedHook{n.SID, string(old)}
+			}
 		}
 		if err := tmux("send-keys", "-t", n.Pane, "-l", n.Text); err != nil {
 			log.Printf("nudge %s (%s): type failed: %v", n.Window, n.Pane, err)
@@ -169,10 +194,11 @@ func pass(ctx context.Context, pool *pgxpool.Pool, cfg swbpush.Config, waiting m
 		time.Sleep(150 * time.Millisecond)
 		if submitIfHeld(n.Pane, n.Text) {
 			seen.Apply(n.Settle)
+			dropHook(absorbed)
 			log.Printf("nudged %s (%s): %s", n.Window, n.Pane, n.Text)
 			continue
 		}
-		waiting[n.Pane] = pending{n.Text, n.Settle}
+		waiting[n.Pane] = pending{n.Text, n.Settle, absorbed}
 		log.Printf("nudge %s (%s) typed but NOT submitted: the input box changed before Enter; pending", n.Window, n.Pane)
 	}
 	// Unattended AFTER Plan: Plan's first-sight check (awaitingMail) reads the
@@ -223,24 +249,51 @@ func finishPending(sessions []swbpush.Session, seen swbpush.Seen, waiting map[st
 			continue
 		}
 		text, box := swbpush.Composer(capture)
-		switch {
-		case !box || t != "idle":
-			// a dialog is up, or the session is busy (Enter only ever goes to an
-			// idle session): wait
-		case swbpush.ComposerHolds(capture, p.text):
+		switch swbpush.PendingStep(t, box, swbpush.ComposerHolds(capture, p.text), text) {
+		case swbpush.PendingWait:
+			// a dialog is up, or the session is on a prompt: wait
+		case swbpush.PendingSubmit:
 			if submitIfHeld(pane, p.text) {
 				seen.Apply(p.settle)
+				dropHook(p.hook)
 				delete(waiting, pane)
 				log.Printf("pending nudge submitted in %s", pane)
 			}
-		case text == "":
+		case swbpush.PendingSeen:
 			seen.Apply(p.settle) // he submitted or cleared it: either way, seen
+			dropHook(p.hook)
 			delete(waiting, pane)
 		default:
 			delete(waiting, pane)
 			log.Printf("pending nudge in %s dropped: the box holds other text now", pane)
 		}
 	}
+}
+
+// absorbedHook is a leftover hook file folded into a typed line: whose, and
+// exactly what it held then.
+type absorbedHook struct{ sid, text string }
+
+// dropHook removes the hook file a typed line absorbed, but only while it still
+// holds exactly what was absorbed: a nudge merged into it since (the session
+// turned busy while our line sat unsubmitted) must survive (swb 4639 review).
+func dropHook(a absorbedHook) {
+	if a.sid == "" {
+		return
+	}
+	p := filepath.Join(nudgeDir, a.sid+".txt")
+	if now, err := os.ReadFile(p); err != nil || string(now) != a.text {
+		return
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		log.Printf("remove absorbed hook nudge %s: %v", a.sid, err)
+	}
+}
+
+// hookWaiting reports an undelivered hook nudge for the session.
+func hookWaiting(sid string) bool {
+	fi, err := os.Stat(filepath.Join(nudgeDir, sid+".txt"))
+	return err == nil && fi.Size() > 0
 }
 
 // leaveForHook writes a busy session's nudge where swb-hook.py's Stop hook

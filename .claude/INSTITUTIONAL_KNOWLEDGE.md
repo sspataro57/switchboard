@@ -3534,9 +3534,18 @@ It is not deployed to k8s. After changing it, run `go install ./cmd/swb-push && 
   `pane`, `window`, `turn` (busy|idle|prompt|gone) and `turn_at` (float epoch) into
   `~/.claude/swb/sessions/<sid>.json`. If you rename one of those fields, swb-push goes quiet.
 - **Delivery:** an IDLE session gets the line typed, and Enter is sent only after a re-capture
-  shows the input box holding exactly that line. A BUSY session is never typed into:
-  the nudge goes to `~/.claude/swb/nudges/<sid>.txt`, and the hook's Stop handler turns it into a
-  continuation (`decision: block`). A session showing a permission prompt gets nothing.
+  shows the input box holding exactly that line. **Since swb 4639 (2026-11-23) a BUSY session is
+  typed into the same way** when its input box is on screen and empty (Salvador: "make it send the
+  messages no matter if the console is bussy. It would just queue and pickup at the end"); Claude
+  Code queues a line submitted mid-turn. Only when a busy session's box holds his text, or a dialog
+  (AskUserQuestion) hides the box, does the nudge go to `~/.claude/swb/nudges/<sid>.txt` for the
+  hook's Stop handler to turn into a continuation (`decision: block`). The screen is re-read right
+  before the keystrokes (`swbpush.TypeStep`): a dialog or his typing that arrived since the plan sends
+  a busy nudge to the file (an idle one waits a pass). A BUSY session with a hook file already waiting
+  gets the merged file, never a typed line too (no double delivery). An IDLE one is typed into even
+  then, with the file's queues merged into the line and the file removed once Enter lands: a turn
+  ended by Esc never runs Stop, so a file can outlive its turn. A session showing a
+  permission prompt gets nothing.
 - **Config:** `~/.claude/swb/push.json` maps tmux window → project slugs, and is re-read every pass.
   `push-state.json` holds per-task memory; delete it to start fresh (the first pass records
   everything and nudges nothing). The log is `push.log`, and `swb-push status` shows the live view.
