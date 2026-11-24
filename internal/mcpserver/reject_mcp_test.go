@@ -29,7 +29,7 @@ import (
 
 const rejectName = "reject_delivery"
 
-// Acceptance 1: full 38, user 26, read 3; listed on full and user with the
+// Acceptance 1: full 38, user 27 (user-mail-read: +mail_read_thread), read 3; listed on full and user with the
 // same entry byte for byte.
 func TestRejectDelivery_ListedOnFullAndUserProfiles(t *testing.T) {
 	byProfile := map[mcpserver.Profile]map[string]mcpserver.Tool{}
@@ -43,7 +43,7 @@ func TestRejectDelivery_ListedOnFullAndUserProfiles(t *testing.T) {
 		count   int
 	}{
 		{"full", mcpserver.ProfileFull, true, 38},
-		{"user", mcpserver.ProfileUser, true, 26},
+		{"user", mcpserver.ProfileUser, true, 27}, // +mail_read_thread (user-mail-read)
 		{"read", mcpserver.ProfileRead, false, 3},
 	} {
 		got := byProfile[c.profile]

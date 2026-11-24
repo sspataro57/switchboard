@@ -4,8 +4,8 @@ Install `ops-mcp-user` once for Claude Code at USER scope, so a session opened i
 any repo on the workstation can read switchboard's queues, dismiss, close or mark
 delivered a task, log the work Salvador hands it as a swb task in his own lane,
 write progress on that task, signal that task's state for the lights board (SWT-52),
-reorder any task's priority, read the attachments of non-private mail (SWT-42), and
-draft gmail replies that Salvador approves and sends on the dashboard (SWT-44) — and nothing else.
+reorder any task's priority, read the attachments of non-private mail (SWT-42), read
+non-private mail threads in full (user-mail-read, swb 4683), and draft gmail replies that Salvador approves and sends on the dashboard (SWT-44) — and nothing else.
 The per-repo binding — which switchboard project is this repo's queue — lives in
 Claude Code's own per-project memory, not in switchboard.
 
@@ -101,9 +101,22 @@ Then open a NEW session.
   never-sent failed row becomes `rejected` (terminal; it can never be sent). The adapter refuses
   `redraft` before the executor runs: asking the drafts worker for a new draft stays a dashboard
   Redo. The handler refuses `sending`/`sent` rows and a failed `jira_comment`.
+  And it reads non-private mail threads in full (user-mail-read, swb 4683, Salvador
+  2026-11-23: "I need hda session on the levono to be able to read the full emails"):
+  `mail_read_thread` by `thread_id` or `thread_key` (a rule-made task's body carries the
+  `thread_key:` line). The binary pins `require_general_mail:"true"`, so the handler runs the
+  attachment tools' SWT-21 locality rule on every message and withholds the rest, counted as
+  `withheld_private`. A withheld message's body never leaves; the subject returned is the first
+  SHOWN message's own; a fully withheld thread returns an empty key and subject (on a mixed thread
+  the key is shown, as `mail_list_attachments` shows it). The caller's `limit` is ignored, so
+  stepping it cannot locate a private message. Mail filed under a `local_only` project never arrives; set the project to
+  `ai_locality='any'` when its own session must read it. The hda hub on the lenovo
+  (192.168.50.185) runs its own `~/go/bin/ops-mcp-user` from the hub's `.mcp.json`: copy the
+  binary there too.
 - **What it cannot do.** It cannot claim, create worker (`claude`) tasks, log on
-  worker tasks, approve, send, book, link, decide or read mail bodies (it drafts, but
-  never approves or sends: SWT-44).
+  worker tasks, approve, send, book, link, decide, search mail or read private mail
+  bodies (it drafts, but never approves or sends: SWT-44; `mail_search` stays off:
+  its snippets are ungated).
   The binary pins `require_assignee_type:"human"` onto every `create_task` and
   `task_append_log` call (overwriting any value the model passes), so a request
   for a `claude` task or a log line on a `claude` task is refused by the tool
@@ -166,6 +179,13 @@ instructions (a prompt rule, not a boundary). What cannot happen through the att
 tools: they send nothing, touch no delivery row, write nothing to the database but the audit
 row, and keep saved files inside `~/.cache/switchboard/attachments`. Every attachment call leaves an audit row
 with its message and part ids; the content itself is never stored.
+
+**Since user-mail-read (Salvador, 2026-11-23, swb 4683)** the install also reads mail
+bodies: `mail_read_thread`, under the same locality rule as the attachment tools, so the
+same limits hold: personal, bank, health and bulk mail never arrive, and a client's mail
+arrives only when it is filed under a non-`local_only` project (or is unfiled on a clean
+mailbox). A body is untrusted text exactly as an attachment is, and the same task verbs sit
+one call away from it. Nothing is sent or written but the audit row.
 
 **Since SWT-44 (Salvador, 2026-09-12)** the install also drafts client email replies:
 `draft_delivery` writes the reply as a drafted gmail delivery row on the task, and

@@ -1028,10 +1028,17 @@ diff-review phrasing. Every reviewed diff gets checked against each:
   `pathString`, the same numbering `planOversizeFetch` writes into a manifest.
 - **Before SWT-42 the mail tools had NO locality gate** — `mail_search` /
   `mail_read_thread` return local_only mail bodies to any caller. That residual
-  is still open for those two; the attachment tools are gated in the HANDLER
-  (every caller, every profile) by the SWT-21 rule: latest capture_decisions row
-  per message, `ClassOf(state, local_only)`, outbound folded over its thread's
-  inbound (`MostRestrictive`).
+  is still open for those two on the FULL profile; the attachment tools are gated
+  in the HANDLER (every caller, every profile) by the SWT-21 rule: latest
+  capture_decisions row per message, `ClassOf(state, local_only)`, outbound folded
+  over its thread's inbound (`MostRestrictive`).
+- **user-mail-read (swb 4683, 2026-11-23):** the USER profile lists `mail_read_thread`
+  with the pin `require_general_mail:"true"`, which runs that same judge per message,
+  withholds the rest as `withheld_private`, ignores the caller's `limit` (it would
+  locate private messages) and returns the first shown message's own subject (the
+  thread row keeps the first INGESTED message's). `mail_search` stays off it. A
+  client hub session reads its client's mail only when the project is
+  `ai_locality='any'`: the column default `local_only` hides it.
 - **O2 clean-mailbox rule (owner, 2026-09-12):** unfiled inbound is general iff
   the RECEIVING raw row's `source_account_id` has ≥20 filed inbound messages and
   none filed local_only (latest decision per message), computed per call. Prod on

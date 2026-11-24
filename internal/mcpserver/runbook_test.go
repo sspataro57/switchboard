@@ -235,7 +235,12 @@ func TestRunbook_DocumentsUserScopeInstall(t *testing.T) {
 		{`(?s)find the attachment sana sent.{0,400}mail_list_attachments.{0,300}(sender|subject).{0,400}mail_read_attachment`,
 			"usage: 'find the attachment Sana sent about the Activities Integration' → mail_list_attachments by sender/subject, then mail_read_attachment"},
 		{`reads attachments of non-private mail only`, "the can-do paragraph gains the attachment reads, and says which mail"},
-		{`read mail bodies`, "'What it cannot do' still says it cannot read mail bodies: mail_search / mail_read_thread stay full-profile only"},
+		// AMENDED by user-mail-read (swb 4683): mail_read_thread joined the user
+		// profile behind the require_general_mail pin, so the line now says it
+		// cannot read PRIVATE bodies, and cannot search mail.
+		{`(?s)search mail or read private mail\s+bodies`, "'What it cannot do' says it cannot search mail or read private mail bodies: mail_search stays full-profile only, mail_read_thread is gated"},
+		{`(?s)mail_read_thread.{0,300}require_general_mail:"true".{0,300}withheld_private`, "user-mail-read: the pin and the withheld count are named"},
+		{`(?s)since user-mail-read.{0,400}same locality rule`, "user-mail-read: the accepted-risk paragraph ties body reads to the attachment tools' rule"},
 		{`(?s)attachment.{0,400}(untrusted|stranger|someone else)|(untrusted|stranger|someone else).{0,400}attachment`,
 			"the attachment ACCEPTED RISK names untrusted content: a tool whose whole job is fetching outside text"},
 		{`(?s)attachment.{0,400}(dismiss|close|mark(ed)? delivered).{0,600}creat.{0,600}(reorder|priorit)`,

@@ -52,8 +52,8 @@ func TestSendSlackReply_ListedInBothProfilesAsOneEntry(t *testing.T) {
 	if len(full) != 38 {
 		t.Errorf("the full profile lists %d tools, want 38 (30 → 31 with send_slack_reply, criterion 17; 31 → 36 with SWT-109's calendar tools; 36 → 37 with mcp-task-reopen's task_reopen; 37 → 38 mcp-reject-delivery's reject_delivery)", len(full))
 	}
-	if len(user) != 26 {
-		t.Errorf("the user profile lists %d tools, want 26 (18 → 19 with send_slack_reply, criterion 17; 19 → 24 with SWT-109's calendar tools; 24 → 25 with mcp-task-reopen's task_reopen; 25 → 26 mcp-reject-delivery's reject_delivery)", len(user))
+	if len(user) != 27 {
+		t.Errorf("the user profile lists %d tools, want 27 (18 → 19 with send_slack_reply, criterion 17; 19 → 24 with SWT-109's calendar tools; 24 → 25 with mcp-task-reopen's task_reopen; 25 → 26 mcp-reject-delivery's reject_delivery; 26 → 27 user-mail-read's mail_read_thread)", len(user))
 	}
 	f, u := findTool(full, "send_slack_reply"), findTool(user, "send_slack_reply")
 	if f == nil || u == nil {

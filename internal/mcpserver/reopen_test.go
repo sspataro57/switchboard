@@ -67,7 +67,7 @@ func TestTaskReopen_ListedOnFullAndUserProfiles(t *testing.T) {
 		count   int
 	}{
 		{"full", mcpserver.ProfileFull, true, 38}, // +reject_delivery (mcp-reject-delivery)
-		{"user", mcpserver.ProfileUser, true, 26}, // +reject_delivery (mcp-reject-delivery)
+		{"user", mcpserver.ProfileUser, true, 27}, // +reject_delivery (mcp-reject-delivery); +mail_read_thread (user-mail-read)
 		{"read", mcpserver.ProfileRead, false, 3},
 	} {
 		got := byProfile[c.profile]
