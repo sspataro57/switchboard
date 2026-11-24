@@ -64,7 +64,7 @@ func TestServe_InitializeCarriesInstructionsAndProfileTools(t *testing.T) {
 		{ProfileRead, 3},
 		// SWT-56 (signal-session-name) criterion 34: task_context joins the user
 		// profile, pinned read-only — user 14 → 15; full unchanged (it lists it).
-		{ProfileUser, 26}, // SWT-109: +5 calendar tools; mcp-task-reopen: +task_reopen; mcp-reject-delivery: +reject_delivery
+		{ProfileUser, 27}, // SWT-109: +5 calendar tools; mcp-task-reopen: +task_reopen; mcp-reject-delivery: +reject_delivery; user-mail-read: +mail_read_thread
 	} {
 		t.Run(string(tc.profile), func(t *testing.T) {
 			ctx := context.Background()

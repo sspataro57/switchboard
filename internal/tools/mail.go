@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sspataro57/switchboard/internal/provider"
 )
 
 // Read-only mail tools (SWT-11, criterion 16).
@@ -157,6 +159,13 @@ type mailReadThreadArgs struct {
 	ThreadID  int64  `json:"thread_id,omitempty"`
 	ThreadKey string `json:"thread_key,omitempty"`
 	Limit     int    `json:"limit,omitempty"`
+	// RequireGeneralMail is the user profile's pin (user-mail-read, swb 4683):
+	// "true" withholds every message the SWT-21 locality rule does not judge
+	// general — the same mailClassJudge the attachment tools use — and counts
+	// it as withheld_private. Omitted (the full profile, the drafts worker, the
+	// dashboard) reads as before. A model never chooses it: the adapter
+	// overwrites the key on the user profile.
+	RequireGeneralMail string `json:"require_general_mail,omitempty"`
 }
 
 func validateMailReadThread(args []byte) error {
@@ -169,6 +178,9 @@ func validateMailReadThread(args []byte) error {
 	}
 	if a.Limit < 0 {
 		return fmt.Errorf("limit %d is negative", a.Limit)
+	}
+	if a.RequireGeneralMail != "" && a.RequireGeneralMail != "true" {
+		return fmt.Errorf("require_general_mail %q: must be \"true\" or omitted", a.RequireGeneralMail)
 	}
 	return nil
 }
@@ -186,8 +198,12 @@ func mailReadThread(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, fmt.Errorf("parse args: %w", err)
 	}
+	gated := a.RequireGeneralMail == "true"
 	limit := a.Limit
-	if limit <= 0 || limit > MailThreadMaxMessages {
+	// Gated, the caller's limit is ignored (the attachment tools' thread form
+	// takes none): the SQL LIMIT runs before the judge, so stepping limit up
+	// while watching withheld_private would locate each private message.
+	if gated || limit <= 0 || limit > MailThreadMaxMessages {
 		limit = MailThreadMaxMessages
 	}
 
@@ -195,10 +211,12 @@ func mailReadThread(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 	// because the opening of a conversation carries the ask; a tail would show
 	// the replies without what they answer.
 	rows, err := pool.Query(ctx, `
-		SELECT COALESCE(t.thread_key,''), COALESCE(t.subject,''),
+		SELECT m.id, r.source_account_id, m.thread_id,
+		       COALESCE(t.thread_key,''), COALESCE(t.subject,''), COALESCE(m.subject,''),
 		       COALESCE(m.external_message_id,''), COALESCE(m.sender,''), COALESCE(m.sent_at::text,''), m.direction,
 		       left(COALESCE(m.body_text,''), $3)
 		  FROM normalized_messages m
+		  JOIN raw_source_items r ON r.id = m.raw_source_item_id
 		  LEFT JOIN normalized_threads t ON t.id = m.thread_id
 		 WHERE m.channel = 'gmail'
 		   AND (($1::bigint IS NOT NULL AND m.thread_id = $1) OR ($1 IS NULL AND t.thread_key = $2))
@@ -208,25 +226,73 @@ func mailReadThread(ctx context.Context, pool *pgxpool.Pool, args []byte) ([]byt
 	if err != nil {
 		return nil, fmt.Errorf("read mail thread: %w", err)
 	}
-	defer rows.Close()
-
-	threadKey, subject := "", ""
-	messages := make([]mailThreadMessage, 0, limit)
+	type threadRow struct {
+		msg                mailThreadMessage
+		id, account        int64
+		threadID           *int64
+		threadKey, subject string
+		ownSubject         string
+	}
+	var all []threadRow
 	for rows.Next() {
-		var m mailThreadMessage
-		var k, s string
-		if err := rows.Scan(&k, &s, &m.MessageID, &m.Sender, &m.SentAt, &m.Direction, &m.BodyText); err != nil {
+		var r threadRow
+		if err := rows.Scan(&r.id, &r.account, &r.threadID, &r.threadKey, &r.subject, &r.ownSubject,
+			&r.msg.MessageID, &r.msg.Sender, &r.msg.SentAt, &r.msg.Direction, &r.msg.BodyText); err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("scan thread message: %w", err)
 		}
-		threadKey, subject = k, s
-		messages = append(messages, m)
+		all = append(all, r)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate thread messages: %w", err)
 	}
-	return marshalResult(map[string]any{
-		"thread_key": threadKey, "subject": subject, "messages": messages,
-	})
+
+	if a.RequireGeneralMail != "" && !gated {
+		// The validator refuses this; refuse here too so a skipped validator
+		// fails closed rather than ungated.
+		return nil, fmt.Errorf("require_general_mail %q: must be \"true\" or omitted", a.RequireGeneralMail)
+	}
+	var judge *mailClassJudge
+	if gated {
+		judge = newMailClassJudge(ctx, pool)
+	}
+	threadKey, subject := "", ""
+	withheld := 0
+	messages := make([]mailThreadMessage, 0, len(all))
+	for _, r := range all {
+		if gated {
+			// Fail closed: a judge error refuses the whole read rather than
+			// show a message whose class is unknown.
+			c, _, err := judge.class(mailAttachMsg{id: r.id, account: r.account, threadID: r.threadID, direction: r.msg.Direction})
+			if err != nil {
+				return nil, fmt.Errorf("judge mail locality: %w", err)
+			}
+			if c != provider.ClassGeneral {
+				// A withheld message's body never leaves. The thread subject is
+				// the FIRST ingested message's (the sink keeps it), which may be
+				// a withheld one, so gated reads return the first SHOWN
+				// message's own subject instead. A fully withheld thread returns
+				// an empty key and subject; on a mixed thread the key is shown,
+				// as mail_list_attachments shows it for the general messages.
+				withheld++
+				continue
+			}
+			if subject == "" {
+				subject = r.ownSubject
+			}
+			threadKey = r.threadKey
+			messages = append(messages, r.msg)
+			continue
+		}
+		threadKey, subject = r.threadKey, r.subject
+		messages = append(messages, r.msg)
+	}
+	out := map[string]any{"thread_key": threadKey, "subject": subject, "messages": messages}
+	if gated {
+		out["withheld_private"] = withheld
+	}
+	return marshalResult(out)
 }
 
 // nullableID renders 0 as SQL NULL so the query can branch on which identifier

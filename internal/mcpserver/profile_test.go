@@ -151,7 +151,7 @@ var wantUserProfileTools = []string{
 	// calendar and swb-first booking. None is send-shaped; book_time is pinned
 	// to human tasks.
 	"book_time", "calendar_list_events", "cancel_reservation",
-	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "project_list",
+	"create_task", "draft_delivery", "mail_list_attachments", "mail_read_attachment", "mail_read_thread", "project_list",
 	// mcp-reject-delivery (swb 4565, 2026-11-22): reject_delivery, discard form
 	// only (rejectRedraftArgs). humanOnly refuses worker shapes. 25 → 26.
 	"propose_slots", "reject_delivery", "release_offer_holds",
@@ -330,7 +330,7 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 		// worker_id forced "" and require_read_only "true", enforced in the handler)
 		// replaces the exclusion; the claimed → in_progress flip it guarded against is
 		// proven unreachable from this profile by criterion 30
-		// (user_context_integration_test.go). The mail BODY reads below stay forbidden.
+		// (user_context_integration_test.go). mail_search (snippets) below stays forbidden.
 		"request_feedback", "mark_done_local",
 		"record_decision", // decides
 		// AMENDED — not deleted — by SWT-44 (Salvador, 2026-09-12): draft_delivery
@@ -348,9 +348,17 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 		// mail_read_attachment were added to the user profile. They carry the SWT-21
 		// locality gate (only mail filed under a non-local_only project, or O2's
 		// unfiled mail on a clean mailbox) and the finder returns no bodies. The BODY
-		// reads below stay forbidden: listing them would put private message bodies
-		// into every repo's session, which O1 did not grant.
-		"mail_search", "mail_read_thread", // reads private mail bodies
+		// reads stayed forbidden then: listing them ungated would put private
+		// message bodies into every repo's session, which O1 did not grant.
+		// AMENDED — not deleted — by user-mail-read (Salvador, 2026-11-23, swb
+		// 4683: "I need hda session on the levono to be able to read the full
+		// emails"): mail_read_thread LEFT this list. The user profile reads
+		// thread bodies only through the require_general_mail pin, which runs
+		// the same SWT-21 locality judge as the attachment tools and withholds
+		// the rest (pin: user_mail_read_test.go; withholding:
+		// internal/tools/mail_read_gate_integration_test.go). mail_search stays: its snippets
+		// are ungated.
+		"mail_search", // reads private mail snippets, ungated
 		// AMENDED — not deleted — by mcp-task-reopen (Salvador, 2026-11-10: "add
 		// ability to claude to reopen taks on swb"): task_reopen LEFT this list
 		// (it was `"task_reopen", // reopens (Future work)`). The user profile now
@@ -362,7 +370,7 @@ func TestUserProfile_NamesNoWriteSurface(t *testing.T) {
 		if listed[name] {
 			t.Errorf("the user profile lists %q. SWT-37 V3/criterion 11, SWT-38 criterion 16: the user-scope "+
 				"install sits in every repo's session and reads untrusted content; it may dismiss, close, mark "+
-				"delivered, create human tasks, log on them, set priority, read non-private attachments and "+
+				"delivered, create human tasks, log on them, set priority, read non-private attachments and threads and "+
 				"draft gmail replies (SWT-44), and nothing else", name)
 		}
 	}
@@ -428,8 +436,8 @@ func TestUserProfile_NoToolReachesTheSendSnapshot(t *testing.T) {
 	// SWT-77 criterion 17: nineteen (send_slack_reply).
 	// AMENDED by mcp-task-reopen (2026-11-10) criterion 1: 24 → 25 (task_reopen).
 	// AMENDED by mcp-reject-delivery (2026-11-22): 25 → 26 (reject_delivery).
-	if len(wantUserProfileTools) != 26 {
-		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 26 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach; SWT-77 adds send_slack_reply; SWT-109 adds five calendar tools; mcp-task-reopen adds task_reopen; mcp-reject-delivery adds reject_delivery)",
+	if len(wantUserProfileTools) != 27 {
+		t.Fatalf("POSITIVE CONTROL FAILED: wantUserProfileTools lists %d tools, want 27 (SWT-72 criterion 23; SWT-74 adds task_match + task_attach; SWT-77 adds send_slack_reply; SWT-109 adds five calendar tools; mcp-task-reopen adds task_reopen; mcp-reject-delivery adds reject_delivery; user-mail-read adds mail_read_thread)",
 			len(wantUserProfileTools))
 	}
 	if !sendSeen {

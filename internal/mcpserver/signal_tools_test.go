@@ -128,8 +128,8 @@ func TestTaskSignal_ListedInBothProfiles(t *testing.T) {
 		t.Errorf("the full profile lists %d tools, want 38 (31 → 36 SWT-109 calendar tools; 26 → 27 criterion 23; 27 → 28 with SWT-72's task_requeue; 28 → 30 with SWT-74's task_match + task_attach; 30 → 31 with SWT-77's send_slack_reply; 36 → 37 mcp-task-reopen's task_reopen; 37 → 38 mcp-reject-delivery's reject_delivery)", len(full))
 	}
 	// SWT-56 criterion 27: task_context makes the user profile fifteen.
-	if len(user) != 26 {
-		t.Errorf("the user profile lists %d tools, want 26 (19 → 24 SWT-109 calendar tools; 14 → 15 SWT-56 criterion 27; 15 → 16 with SWT-72's task_requeue; 16 → 18 with SWT-74's task_match + task_attach; 18 → 19 with SWT-77's send_slack_reply; 24 → 25 mcp-task-reopen's task_reopen; 25 → 26 mcp-reject-delivery's reject_delivery)", len(user))
+	if len(user) != 27 {
+		t.Errorf("the user profile lists %d tools, want 27 (19 → 24 SWT-109 calendar tools; 14 → 15 SWT-56 criterion 27; 15 → 16 with SWT-72's task_requeue; 16 → 18 with SWT-74's task_match + task_attach; 18 → 19 with SWT-77's send_slack_reply; 24 → 25 mcp-task-reopen's task_reopen; 25 → 26 mcp-reject-delivery's reject_delivery; 26 → 27 user-mail-read's mail_read_thread)", len(user))
 	}
 	find := func(ts []mcpserver.Tool) *mcpserver.Tool {
 		for i := range ts {

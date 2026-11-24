@@ -42,7 +42,9 @@ const (
 	// look at the queues, dismiss, close or mark delivered, create HUMAN tasks,
 	// log on human tasks and set priority. It cannot claim, create or log on
 	// worker (claude) tasks — the profile pins below refuse both — approve,
-	// send, book, link, decide or read mail bodies; since mcp-task-reopen
+	// send, book, link, decide, search mail or read private mail bodies;
+	// since user-mail-read (swb 4683) it reads non-private threads
+	// (mail_read_thread behind the require_general_mail pin); since mcp-task-reopen
 	// (2026-11-10) it reopens closed tasks (plain form only); since SWT-42 it reads attachments of non-private mail (O1); since SWT-44 it drafts and edits client replies (draft_delivery,
 	// update_delivery), approving and sending staying on the dashboard; since
 	// SWT-52 it signals its human task's session state (task_signal: working,
@@ -81,9 +83,13 @@ var userProfileTools = append(append([]string(nil), readProfileTools...),
 	"task_reopen",
 	// SWT-42 O1 (Salvador, 2026-09-12: "yes expose it on the user mcp too"):
 	// attachment reads, gated by the SWT-21 locality rule in the handler. The
-	// finder returns headers and attachment names only; mail bodies
-	// (mail_search, mail_read_thread) stay off this profile.
+	// finder returns headers and attachment names only.
 	"mail_list_attachments", "mail_read_attachment",
+	// user-mail-read (Salvador, 2026-11-23, swb 4683: a client hub session must
+	// read the full emails it answers): mail_read_thread, gated by the same
+	// locality rule through the require_general_mail pin below. mail_search
+	// stays off this profile (its snippets are ungated).
+	"mail_read_thread",
 	// SWT-44 (Salvador, 2026-09-12): write and fix a client EMAIL reply as a
 	// drafted delivery row — gmail only, on a thread filed under the task's
 	// project, and edits only gmail drafts created by the caller's actor
@@ -148,7 +154,9 @@ var userProfilePins = map[string]map[string]string{
 	"draft_delivery":  {"require_channel": "gmail", "require_thread_in_task_project": "true"},
 	"update_delivery": {"require_own_draft": "true", "require_channel": "gmail"},
 	"task_context":    {"worker_id": "", "require_read_only": "true"},
-	"book_time":       {"require_assignee_type": "human"},
+	// user-mail-read: withhold mail the SWT-21 rule does not judge general.
+	"mail_read_thread": {"require_general_mail": "true"},
+	"book_time":        {"require_assignee_type": "human"},
 }
 
 // Server adapts MCP tool calls onto the executor for one worker identity.

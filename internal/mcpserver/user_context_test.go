@@ -116,8 +116,8 @@ func TestTaskContext_OneEntryBothProfiles(t *testing.T) {
 	if len(full) != 38 {
 		t.Errorf("the full profile lists %d tools, want 38 (27 → 28 with SWT-72's task_requeue; 28 → 30 with SWT-74's task_match + task_attach; 30 → 31 with SWT-77's send_slack_reply; 31 → 36 with SWT-109's five calendar tools; 36 → 37 with mcp-task-reopen's task_reopen; 37 → 38 mcp-reject-delivery's reject_delivery)", len(full))
 	}
-	if len(user) != 26 {
-		t.Errorf("the user profile lists %d tools, want 26 (14 → 15 criterion 27; 15 → 16 with SWT-72's task_requeue; 16 → 18 with SWT-74's task_match + task_attach; 18 → 19 with SWT-77's send_slack_reply; 19 → 24 with SWT-109's five calendar tools; 24 → 25 with mcp-task-reopen's task_reopen; 25 → 26 mcp-reject-delivery's reject_delivery)", len(user))
+	if len(user) != 27 {
+		t.Errorf("the user profile lists %d tools, want 27 (14 → 15 criterion 27; 15 → 16 with SWT-72's task_requeue; 16 → 18 with SWT-74's task_match + task_attach; 18 → 19 with SWT-77's send_slack_reply; 19 → 24 with SWT-109's five calendar tools; 24 → 25 with mcp-task-reopen's task_reopen; 25 → 26 mcp-reject-delivery's reject_delivery; 26 → 27 user-mail-read's mail_read_thread)", len(user))
 	}
 	f, u := find(full), find(user)
 	if f == nil || u == nil {
